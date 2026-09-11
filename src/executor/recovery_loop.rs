@@ -158,6 +158,142 @@ pub fn target_met(usage: &FsUsage, target: &FreeTarget) -> bool {
     }
 }
 
+/// Parses a `--target` CLI value into a [`FreeTarget`].
+///
+/// Format (deliberately minimal — see the PR's "Known limitations"):
+/// - A trailing `%` is a [`FreeTarget::Percentage`], e.g. `"20%"`. Must
+///   parse as a number in `0.0..=100.0`.
+/// - Otherwise the value is a [`FreeTarget::AbsoluteBytes`]. An optional
+///   case-insensitive `KB`/`MB`/`GB`/`TB` suffix uses binary (1024-based)
+///   multipliers (`"5GB"` == `5 * 1024^3` bytes, matching the ticket's
+///   `5GB`/`5368709120` example pair); a bare trailing `B` means "no
+///   multiplier"; no suffix at all is also read as a raw byte count
+///   (e.g. `"5368709120"`).
+/// - No support for fractional shorthand combinations, negative values,
+///   or any unit beyond TB.
+pub fn parse_free_target(input: &str) -> Result<FreeTarget, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("empty --target value".to_string());
+    }
+
+    if let Some(pct) = trimmed.strip_suffix('%') {
+        let value: f64 = pct
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid percentage in --target value: {input}"))?;
+        if !(0.0..=100.0).contains(&value) {
+            return Err(format!("--target percentage out of range 0-100: {input}"));
+        }
+        return Ok(FreeTarget::Percentage(value));
+    }
+
+    let upper = trimmed.to_ascii_uppercase();
+    let (numeric_part, multiplier): (&str, u64) = if let Some(p) = upper.strip_suffix("TB") {
+        (p, 1024u64.pow(4))
+    } else if let Some(p) = upper.strip_suffix("GB") {
+        (p, 1024u64.pow(3))
+    } else if let Some(p) = upper.strip_suffix("MB") {
+        (p, 1024u64.pow(2))
+    } else if let Some(p) = upper.strip_suffix("KB") {
+        (p, 1024)
+    } else if let Some(p) = upper.strip_suffix('B') {
+        (p, 1)
+    } else {
+        (upper.as_str(), 1)
+    };
+
+    let value: f64 = numeric_part
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid byte amount in --target value: {input}"))?;
+    if value < 0.0 {
+        return Err(format!(
+            "--target byte amount must not be negative: {input}"
+        ));
+    }
+
+    Ok(FreeTarget::AbsoluteBytes(
+        (value * multiplier as f64) as u64,
+    ))
+}
+
+#[cfg(test)]
+mod parse_free_target_tests {
+    use super::*;
+
+    #[test]
+    fn parses_percentage_form() {
+        assert_eq!(parse_free_target("20%"), Ok(FreeTarget::Percentage(20.0)));
+    }
+
+    #[test]
+    fn parses_percentage_with_fraction() {
+        assert_eq!(parse_free_target("12.5%"), Ok(FreeTarget::Percentage(12.5)));
+    }
+
+    #[test]
+    fn rejects_percentage_out_of_range() {
+        assert!(parse_free_target("150%").is_err());
+    }
+
+    #[test]
+    fn parses_raw_byte_count_with_no_suffix() {
+        assert_eq!(
+            parse_free_target("5368709120"),
+            Ok(FreeTarget::AbsoluteBytes(5_368_709_120))
+        );
+    }
+
+    #[test]
+    fn parses_gb_suffix_as_binary_gigabytes() {
+        assert_eq!(
+            parse_free_target("5GB"),
+            Ok(FreeTarget::AbsoluteBytes(5 * 1024 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn parses_lowercase_suffix() {
+        assert_eq!(
+            parse_free_target("5gb"),
+            Ok(FreeTarget::AbsoluteBytes(5 * 1024 * 1024 * 1024))
+        );
+    }
+
+    #[test]
+    fn parses_kb_and_mb_and_tb_suffixes() {
+        assert_eq!(
+            parse_free_target("1KB"),
+            Ok(FreeTarget::AbsoluteBytes(1024))
+        );
+        assert_eq!(
+            parse_free_target("1MB"),
+            Ok(FreeTarget::AbsoluteBytes(1024 * 1024))
+        );
+        assert_eq!(
+            parse_free_target("1TB"),
+            Ok(FreeTarget::AbsoluteBytes(1024u64.pow(4)))
+        );
+    }
+
+    #[test]
+    fn rejects_negative_byte_amount() {
+        assert!(parse_free_target("-5GB").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_input() {
+        assert!(parse_free_target("").is_err());
+        assert!(parse_free_target("   ").is_err());
+    }
+
+    #[test]
+    fn rejects_garbage_input() {
+        assert!(parse_free_target("not-a-target").is_err());
+    }
+}
+
 #[cfg(test)]
 mod types_tests {
     use super::*;
