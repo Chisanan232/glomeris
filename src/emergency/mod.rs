@@ -89,9 +89,102 @@ impl std::fmt::Display for EmergencyReport {
     }
 }
 
+/// Frees the tool's own disposable state — today, the best-effort
+/// pressure-history file [`crate::monitor::persistence::FilePersistence`]
+/// appends to (see `main.rs`'s `daemon_run` for the real, production
+/// path). This runs FIRST, unconditionally, and is never gated on
+/// [`crate::policy::classify`]: it is not a developer resource under
+/// policy's purview, it is this tool's own append-only log, and deleting
+/// it is safe by construction — the worst outcome is losing pressure
+/// history, never a build artifact or a developer's data.
+///
+/// A missing file is not an error — this function silently does nothing
+/// rather than fabricating work, exactly as this ticket asks: "if no such
+/// self-owned disposable state exists/it's already minimal, just move
+/// on, don't fabricate work."
+fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            report.push_error(format!(
+                "failed to stat self-owned disposable state {}: {e}",
+                path.display()
+            ));
+            return;
+        }
+    };
+
+    let size = metadata.len();
+    report.actions_attempted += 1;
+    match fs::remove_file(path) {
+        Ok(()) => {
+            report.actions_succeeded += 1;
+            report.total_bytes_freed += size;
+        }
+        Err(e) => report.push_error(format!(
+            "failed to remove self-owned disposable state {}: {e}",
+            path.display()
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    /// Matches the executor/policy test suites' own helper shape — a
+    /// fresh, per-test temp directory, never the developer's real home
+    /// directory (see this repo's `CLAUDE.md` testing tooling policy).
+    fn make_temp_dir(prefix: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock is after the epoch")
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-emergency-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn free_self_owned_disposable_state_removes_existing_file_and_reports_bytes() {
+        let dir = make_temp_dir("self-state-present");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 128]).unwrap();
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report);
+
+        assert!(!history.exists());
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 1);
+        assert_eq!(report.total_bytes_freed, 128);
+        assert!(report.errors.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn free_self_owned_disposable_state_missing_file_does_not_fabricate_work() {
+        let dir = make_temp_dir("self-state-missing");
+        let history = dir.join("does-not-exist.tsv");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report);
+
+        assert_eq!(report, EmergencyReport::default());
+
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn default_report_has_no_errors_and_is_all_zero() {
