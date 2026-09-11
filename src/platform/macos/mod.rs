@@ -3,6 +3,7 @@
 //! `nix`, `osascript`, or `launchctl` directly — always go through the
 //! `crate::monitor` traits these types implement.
 
+pub mod launchd;
 pub mod statfs;
 
 pub use statfs::MacosFsStat;
