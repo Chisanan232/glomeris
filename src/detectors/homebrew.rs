@@ -4,6 +4,19 @@
 //! interpolation) to find Homebrew's cache directory rather than
 //! hardcoding a path — the location can be overridden by `HOMEBREW_CACHE`
 //! and differs between Intel/Apple Silicon default prefixes.
+//!
+//! `reclaimable_bytes` (HORO-992): rather than parsing `brew cleanup -n`'s
+//! dry-run output (its exact wording/format is not a stable contract
+//! across Homebrew versions, so parsing it reliably is real ongoing
+//! maintenance risk), this detector reuses the same [`shallow_logical_bytes`]
+//! estimate it already computes for `logical_bytes` against `brew --cache`'s
+//! path. The cache directory holds only downloaded bottles/sources that
+//! Homebrew fully owns and can re-download on demand, so
+//! `reclaimable_bytes == logical_bytes` is an honest equivalence of
+//! meaning here. Because the underlying probe is shallow/non-recursive
+//! (see [`shallow_logical_bytes`]) and the cache directory does have
+//! nested subdirectories (e.g. `Cask/`), both figures are an honest
+//! *lower bound* on the real cache size, not a precise one.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -67,11 +80,13 @@ impl Detector for HomebrewDetector {
             ResourceKind::HomebrewCache,
             ResourceLocator::Path(canonical.clone()),
         );
+        let logical_bytes = shallow_logical_bytes(&canonical);
         let evidence = discovery_evidence(
             resource,
             self.id(),
             &canonical,
-            shallow_logical_bytes(&canonical),
+            logical_bytes.clone(),
+            logical_bytes,
             probe_mtime(&canonical),
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
