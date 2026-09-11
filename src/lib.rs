@@ -8,4 +8,5 @@ pub mod detectors;
 pub mod evidence;
 pub mod monitor;
 pub mod platform;
+pub mod policy;
 pub mod scanner;
