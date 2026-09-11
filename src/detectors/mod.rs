@@ -8,6 +8,7 @@
 
 mod cargo;
 mod homebrew;
+mod node;
 mod xcode;
 
 use std::fs;
