@@ -12,4 +12,5 @@ pub mod executor;
 pub mod monitor;
 pub mod platform;
 pub mod policy;
+pub mod reporting;
 pub mod scanner;
