@@ -162,3 +162,52 @@ pub(crate) fn discovery_evidence(
         sources: Vec::new(),
     }
 }
+
+/// Plain compile-time list of the built-in detectors — deliberately NOT a
+/// plugin/inventory registration system. Five detectors don't earn that
+/// complexity.
+pub struct DetectorRegistry {
+    detectors: Vec<Box<dyn Detector>>,
+}
+
+impl DetectorRegistry {
+    /// Registers all five built-in detectors (xcode, homebrew, cargo,
+    /// node, docker).
+    pub fn builtin() -> Self {
+        Self {
+            detectors: vec![
+                Box::new(xcode::XcodeDetector),
+                Box::new(homebrew::HomebrewDetector),
+                Box::new(cargo::CargoDetector),
+                Box::new(node::NodeDetector),
+                Box::new(docker::DockerDetector),
+            ],
+        }
+    }
+
+    pub fn discover_all(&self, ctx: &DiscoveryContext) -> Vec<(DetectorId, DetectorStatus)> {
+        self.detectors
+            .iter()
+            .map(|detector| (detector.id(), detector.discover(ctx)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtin_registry_registers_all_five_detectors() {
+        let registry = DetectorRegistry::builtin();
+        assert_eq!(registry.detectors.len(), 5);
+    }
+
+    #[test]
+    fn discover_all_returns_one_status_per_detector() {
+        let registry = DetectorRegistry::builtin();
+        let ctx = DiscoveryContext::new("/nonexistent-home-for-test");
+        let results = registry.discover_all(&ctx);
+        assert_eq!(results.len(), 5);
+    }
+}
