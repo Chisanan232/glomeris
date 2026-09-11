@@ -6,5 +6,7 @@
 //! computation plus the filesystem walk itself.
 
 pub mod candidate;
+pub mod topk;
 
 pub use candidate::{CandidateKind, EntryStatus, ScanCandidate};
+pub use topk::TopKCandidates;
