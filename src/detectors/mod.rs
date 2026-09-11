@@ -7,6 +7,7 @@
 //! normal, expected state, never an error.
 
 mod cargo;
+mod docker;
 mod homebrew;
 mod node;
 mod xcode;
