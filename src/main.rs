@@ -72,8 +72,10 @@ fn home_dir() -> PathBuf {
 /// `detect`/`explain`/`clean` subcommand uses: real detectors, the real
 /// `DefaultEvidenceCollector`, and the default policy config, evaluated at
 /// the current wall-clock time.
-fn discover_and_classify_now(
-) -> Vec<(glomeris::evidence::Evidence, glomeris::policy::PolicyDecision)> {
+fn discover_and_classify_now() -> Vec<(
+    glomeris::evidence::Evidence,
+    glomeris::policy::PolicyDecision,
+)> {
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::policy::PolicyConfig;
@@ -315,6 +317,8 @@ fn run_free_command(args: &[String]) {
 }
 
 fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryReport) {
+    use glomeris::reporting::human_bytes;
+
     println!("stop reason:            {:?}", report.stop_reason);
     println!("iterations run:         {}", report.iterations_run);
     println!("actions executed:       {}", report.actions_executed);
@@ -322,12 +326,26 @@ fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryRep
         "actions declined/skipped: {}",
         report.actions_declined_or_skipped
     );
-    println!("bytes freed:            {}", report.total_bytes_freed);
+    // `total_bytes_freed` is a MEASURED total (see
+    // `RecoveryReport::total_bytes_freed`'s own doc comment: "Sum of
+    // ACTUAL (not expected) reclaimed bytes"), never an estimate — labeled
+    // explicitly as such so this never reads as the same kind of number as
+    // a detector's `reclaimable_bytes` estimate.
     println!(
-        "free before:            {} bytes",
+        "bytes freed (measured): {} ({} bytes)",
+        human_bytes(report.total_bytes_freed),
+        report.total_bytes_freed
+    );
+    println!(
+        "free before:            {} ({} bytes)",
+        human_bytes(report.started_free_bytes),
         report.started_free_bytes
     );
-    println!("free after:             {} bytes", report.final_free_bytes);
+    println!(
+        "free after:             {} ({} bytes)",
+        human_bytes(report.final_free_bytes),
+        report.final_free_bytes
+    );
 }
 
 fn run_daemon_command(subcommand: Option<&str>) {
