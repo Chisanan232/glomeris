@@ -713,6 +713,263 @@ pub fn run(
     }
 }
 
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+    use crate::detectors::DiscoveryContext;
+    use crate::evidence::correlate::CorrelationResult;
+    use crate::evidence::model::GitState;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-recovery-loop-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// A fixed disk-usage reading, injected via [`FsStat`] — never touches
+    /// the real filesystem.
+    struct FixedFsStat(FsUsage);
+
+    impl FsStat for FixedFsStat {
+        fn stat(&self, _path: &Path) -> std::io::Result<FsUsage> {
+            Ok(self.0)
+        }
+    }
+
+    /// Always errors — used to prove the `StopReason::Error` path.
+    struct FailingFsStat;
+
+    impl FsStat for FailingFsStat {
+        fn stat(&self, _path: &Path) -> std::io::Result<FsUsage> {
+            Err(std::io::Error::other("simulated disk measurement failure"))
+        }
+    }
+
+    /// A fixed `SystemTime` for every call — sufficient here because
+    /// every candidate's `Evidence::collected_at` is re-stamped to this
+    /// same instant immediately before `classify` runs, so the staleness
+    /// check never sees an age greater than zero regardless of how many
+    /// iterations occur.
+    struct FixedWallClock(SystemTime);
+
+    impl WallClock for FixedWallClock {
+        fn now(&self) -> SystemTime {
+            self.0
+        }
+    }
+
+    /// A collector that always reports clean, complete correlation.
+    struct CleanCollector;
+
+    impl EvidenceCollector for CleanCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
+    fn base_config() -> RecoveryConfig {
+        RecoveryConfig {
+            target: FreeTarget::AbsoluteBytes(999_999_999),
+            max_iterations: 50,
+            max_actions: 50,
+            max_duration: Duration::from_secs(60),
+            auto_approve_ask: false,
+        }
+    }
+
+    fn empty_discovery_ctx() -> DiscoveryContext {
+        // A nonexistent home dir and no known project roots: every
+        // built-in detector reports ToolAbsent, so there are never any
+        // candidates to find — deliberately real (but trivially fast and
+        // touching nothing but a `canonicalize()`/`read_dir` miss)
+        // detector I/O, per the ticket's "reuse DetectorRegistry::builtin()
+        // as-is" instruction.
+        DiscoveryContext::new(PathBuf::from("/nonexistent-glomeris-test-home"))
+    }
+
+    #[test]
+    fn stops_with_target_reached_before_scanning_when_already_met() {
+        let usage = FsUsage::new(1_000, 990); // 99% free
+        let config = RecoveryConfig {
+            target: FreeTarget::Percentage(90.0),
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let report = run(
+            &config,
+            &FixedFsStat(usage),
+            &CleanCollector,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+        );
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+        assert_eq!(report.iterations_run, 0);
+        assert_eq!(report.actions_executed, 0);
+        assert_eq!(report.started_free_bytes, 990);
+        assert_eq!(report.final_free_bytes, 990);
+    }
+
+    #[test]
+    fn stops_with_safe_exhausted_when_no_candidates_exist() {
+        let usage = FsUsage::new(1_000_000_000, 100); // far from any target
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let report = run(
+            &config,
+            &FixedFsStat(usage),
+            &CleanCollector,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+        );
+
+        assert_eq!(report.stop_reason, StopReason::SafeExhausted);
+        assert_eq!(report.iterations_run, 0);
+        assert_eq!(report.actions_executed, 0);
+    }
+
+    #[test]
+    fn stops_with_budget_exceeded_when_max_iterations_is_zero() {
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = RecoveryConfig {
+            max_iterations: 0,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let report = run(
+            &config,
+            &FixedFsStat(usage),
+            &CleanCollector,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+        );
+
+        assert_eq!(report.stop_reason, StopReason::BudgetExceeded);
+        assert_eq!(report.iterations_run, 0);
+    }
+
+    #[test]
+    fn stops_with_error_when_initial_measurement_fails() {
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let report = run(
+            &config,
+            &FailingFsStat,
+            &CleanCollector,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+        );
+
+        match report.stop_reason {
+            StopReason::Error(_) => {}
+            other => panic!("expected StopReason::Error, got {other:?}"),
+        }
+    }
+
+    /// Real (disposable, temp-fixture) `node_modules` directories with no
+    /// files inside: `CargoDetector`/`NodeDetector` discover them for
+    /// real via `DetectorRegistry::builtin()`, and — because no detector
+    /// in this codebase ever populates `reclaimable_bytes` (see
+    /// `executor::tests`' own note on this same limitation) — every real
+    /// candidate classifies as `Ask{EvidenceIncomplete}`, never
+    /// `AutoSafe`. `auto_approve_ask: true` is required here for that
+    /// reason. Each directory being empty means `NodeCleanNodeModules`'s
+    /// real deletion measures `actual_reclaimed_bytes == Observed(0)` —
+    /// "succeeded but freed nothing measurable" — twice in a row, which
+    /// is exactly what the no-progress guard exists to catch.
+    #[test]
+    fn stops_with_no_progress_after_two_zero_byte_successful_deletions() {
+        let root_a = make_temp_dir("no-progress-a");
+        let root_b = make_temp_dir("no-progress-b");
+        fs::create_dir_all(root_a.join("node_modules")).unwrap();
+        fs::create_dir_all(root_b.join("node_modules")).unwrap();
+
+        let usage = FsUsage::new(1_000_000_000, 100); // never meets target
+        let config = RecoveryConfig {
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let ctx = DiscoveryContext::new(PathBuf::from("/nonexistent-glomeris-test-home"))
+            .with_known_project_roots(vec![root_a.clone(), root_b.clone()]);
+
+        let report = run(
+            &config,
+            &FixedFsStat(usage),
+            &CleanCollector,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+        );
+
+        assert_eq!(report.stop_reason, StopReason::NoProgress);
+        assert_eq!(report.iterations_run, 2);
+        assert_eq!(report.actions_executed, 2);
+        assert_eq!(report.total_bytes_freed, 0);
+        assert!(!root_a.join("node_modules").exists());
+        assert!(!root_b.join("node_modules").exists());
+
+        fs::remove_dir_all(&root_a).ok();
+        fs::remove_dir_all(&root_b).ok();
+    }
+}
+
 /// Parses a `--target` CLI value into a [`FreeTarget`].
 ///
 /// Format (deliberately minimal — see the PR's "Known limitations"):
