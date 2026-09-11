@@ -8,12 +8,16 @@
 //! destructive action. If this were batch-only, that ticket would have
 //! to reimplement correlation instead of reusing it.
 
+mod open_files;
+mod timeout;
+
 use std::time::Duration;
 
 use super::model::ResourceId;
 use super::probe::ProbeOutcome;
 
 pub use super::model::{GitState, ProcessRef};
+pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 
 /// Time budget for one [`EvidenceCollector::collect`] call. Applied *per*
 /// underlying subprocess call (e.g. each of the up-to-four lsof/git/pgrep
