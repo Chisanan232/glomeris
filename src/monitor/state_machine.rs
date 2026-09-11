@@ -81,3 +81,92 @@ impl PressureStateMachine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use PressureState::*;
+
+    #[test]
+    fn single_sample_at_new_state_does_not_transition_by_default_confirm_2() {
+        let mut m = PressureStateMachine::new(Healthy, 2);
+        assert_eq!(m.observe(Warn), None);
+        assert_eq!(m.current(), Healthy);
+    }
+
+    #[test]
+    fn two_consecutive_samples_confirm_transition() {
+        let mut m = PressureStateMachine::new(Healthy, 2);
+        assert_eq!(m.observe(Warn), None);
+        assert_eq!(
+            m.observe(Warn),
+            Some(Transition {
+                from: Healthy,
+                to: Warn
+            })
+        );
+        assert_eq!(m.current(), Warn);
+    }
+
+    #[test]
+    fn transition_is_emitted_exactly_once() {
+        let mut m = PressureStateMachine::new(Healthy, 1);
+        assert_eq!(
+            m.observe(Warn),
+            Some(Transition {
+                from: Healthy,
+                to: Warn
+            })
+        );
+        // Staying at Warn never re-emits.
+        assert_eq!(m.observe(Warn), None);
+        assert_eq!(m.observe(Warn), None);
+    }
+
+    #[test]
+    fn flapping_at_boundary_does_not_spam_transitions() {
+        let mut m = PressureStateMachine::new(Healthy, 3);
+        // Oscillates between Healthy and Warn without ever holding Warn for
+        // 3 consecutive samples: never confirms.
+        for _ in 0..10 {
+            assert_eq!(m.observe(Warn), None);
+            assert_eq!(m.observe(Healthy), None);
+        }
+        assert_eq!(m.current(), Healthy);
+    }
+
+    #[test]
+    fn candidate_resets_when_a_different_candidate_appears() {
+        let mut m = PressureStateMachine::new(Healthy, 2);
+        assert_eq!(m.observe(Warn), None);
+        // A different candidate interrupts the run — count restarts.
+        assert_eq!(m.observe(Pressured), None);
+        assert_eq!(
+            m.observe(Pressured),
+            Some(Transition {
+                from: Healthy,
+                to: Pressured
+            })
+        );
+    }
+
+    #[test]
+    fn confirm_after_zero_is_clamped_to_one() {
+        let mut m = PressureStateMachine::new(Healthy, 0);
+        assert_eq!(
+            m.observe(Critical),
+            Some(Transition {
+                from: Healthy,
+                to: Critical
+            })
+        );
+    }
+
+    #[test]
+    fn escalation_then_recovery_round_trip() {
+        let mut m = PressureStateMachine::new(Healthy, 1);
+        assert_eq!(m.observe(Emergency).unwrap().to, Emergency);
+        assert_eq!(m.observe(Warn).unwrap().to, Warn);
+        assert_eq!(m.observe(Healthy).unwrap().to, Healthy);
+    }
+}
