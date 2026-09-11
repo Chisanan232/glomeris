@@ -89,7 +89,7 @@ impl TopKCandidates {
     /// descending logical size.
     pub fn into_sorted_vec(self) -> Vec<ScanCandidate> {
         let mut v: Vec<ScanCandidate> = self.heap.into_iter().map(|e| e.0).collect();
-        v.sort_by(|a, b| b.logical_size_bytes.cmp(&a.logical_size_bytes));
+        v.sort_by_key(|c| std::cmp::Reverse(c.logical_size_bytes));
         v
     }
 }
