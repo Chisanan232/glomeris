@@ -1038,11 +1038,11 @@ mod run_tests {
     /// Two real, disposable temp `node_modules` directories with no files
     /// inside, reported by a [`FakeDetector`] (never `DetectorRegistry::
     /// builtin()`'s real detectors — see that struct's doc comment for
-    /// why). Because no detector in this codebase ever populates
-    /// `reclaimable_bytes` (see `executor::tests`' own note on this same
-    /// limitation), a real candidate built the way a detector would
-    /// classifies as `Ask{EvidenceIncomplete}`, never `AutoSafe`, so
-    /// `auto_approve_ask: true` is required here. Each directory being
+    /// why). This fixture deliberately leaves `reclaimable_bytes`
+    /// `Unavailable(NotAttempted)` (unlike a real detector as of
+    /// HORO-992) so the resulting evidence classifies as
+    /// `Ask{EvidenceIncomplete}`, never `AutoSafe`, which is what
+    /// `auto_approve_ask: true` exists to exercise here. Each directory being
     /// empty means `NodeCleanNodeModules`'s real deletion measures
     /// `actual_reclaimed_bytes == Observed(0)` — "succeeded but freed
     /// nothing measurable" — twice in a row, exactly what the no-progress
