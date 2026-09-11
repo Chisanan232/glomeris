@@ -8,6 +8,7 @@ fn main() {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("detect") => run_detect_command(),
+        Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
@@ -22,8 +23,57 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: glomeris <daemon <install|uninstall|status|run>|scan|detect|free --target <N%|NB>>"
+        "usage: glomeris <daemon <install|uninstall|status|run>|scan|detect|emergency|free --target <N%|NB>>"
     );
+}
+
+/// `glomeris emergency` — the degraded-path recovery command (HORO-953).
+/// Never touches network or an LLM provider; see
+/// `glomeris::emergency`'s module docs for the full contract.
+#[cfg(target_os = "macos")]
+fn run_emergency_command() {
+    use glomeris::actions::ActionRegistry;
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::emergency::run_emergency;
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::monitor::FilePersistence;
+    use glomeris::platform::macos::MacosFsStat;
+    use std::time::Duration;
+
+    let home_dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    // Same history path `daemon_run` uses — emergency mode's own history
+    // record is this tool's self-owned disposable state (see the
+    // `emergency` module docs' step 1).
+    let self_state_path = home_dir.join("Library/Application Support/Glomeris/history.tsv");
+
+    let ctx = DiscoveryContext::new(home_dir);
+    let registry = DetectorRegistry::builtin();
+    let actions = ActionRegistry::builtin();
+    let collector = DefaultEvidenceCollector::default();
+    let fs_stat = MacosFsStat;
+    let persistence = FilePersistence::new(&self_state_path);
+
+    let report = run_emergency(
+        &fs_stat,
+        &collector,
+        &registry,
+        &actions,
+        &persistence,
+        &ctx,
+        &self_state_path,
+        20,
+        Duration::from_secs(30),
+    );
+
+    print!("{report}");
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_emergency_command() {
+    eprintln!("glomeris emergency: only supported on macOS");
+    std::process::exit(1);
 }
 
 fn run_detect_command() {
