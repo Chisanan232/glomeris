@@ -136,6 +136,43 @@ pub enum LlmError {
     InvalidResponse(String),
 }
 
+/// Finds the first plausible JSON object span in `text` and attempts to
+/// parse it as an [`LlmPlan`]. Handles two shapes defensively: a
+/// ```` ```json ... ``` ```` (or bare ` ``` `) fenced block, and a raw
+/// `{ ... }` object possibly preceded/followed by prose. Never
+/// partial-parses — either a well-formed [`LlmPlan`] comes out, or
+/// nothing does.
+fn extract_plan(text: &str) -> Result<LlmPlan, LlmError> {
+    let candidate = extract_fenced_block(text).unwrap_or(text);
+    let json_span = extract_json_object_span(candidate).unwrap_or(candidate);
+
+    serde_json::from_str::<LlmPlan>(json_span)
+        .map_err(|e| LlmError::InvalidResponse(format!("could not parse LLM plan JSON: {e}")))
+}
+
+/// Returns the contents of the first fenced code block (```` ``` ```` or
+/// ```` ```json ````) in `text`, if any.
+fn extract_fenced_block(text: &str) -> Option<&str> {
+    let fence_start = text.find("```")?;
+    let after_first_fence = &text[fence_start + 3..];
+    // Skip an optional language tag (e.g. "json") up to the first newline.
+    let body_start = after_first_fence.find('\n').map(|i| i + 1).unwrap_or(0);
+    let body = &after_first_fence[body_start..];
+    let fence_end = body.find("```")?;
+    Some(&body[..fence_end])
+}
+
+/// Returns the span from the first `{` to the last `}` in `text`, if
+/// both are present and correctly ordered.
+fn extract_json_object_span(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    Some(&text[start..=end])
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -225,5 +262,41 @@ mod tests {
                 "LlmError Debug output must never contain the API key"
             );
         }
+    }
+
+    #[test]
+    fn unfenced_json_object_parses() {
+        let text =
+            r#"{"items": [{"resource_id": "a", "action_id": "b", "priority": 1, "reason": null}]}"#;
+        let plan = extract_plan(text).unwrap();
+        assert_eq!(plan.items.len(), 1);
+    }
+
+    #[test]
+    fn fenced_json_block_parses() {
+        let text =
+            "Here is the plan:\n```json\n{\"items\": []}\n```\nLet me know if you need more.";
+        let plan = extract_plan(text).unwrap();
+        assert_eq!(plan.items.len(), 0);
+    }
+
+    #[test]
+    fn bare_fenced_block_without_language_tag_parses() {
+        let text = "```\n{\"items\": []}\n```";
+        let plan = extract_plan(text).unwrap();
+        assert_eq!(plan.items.len(), 0);
+    }
+
+    #[test]
+    fn leading_and_trailing_prose_around_bare_object_parses() {
+        let text = "Sure, here's my plan: {\"items\": []} — hope that helps!";
+        let plan = extract_plan(text).unwrap();
+        assert_eq!(plan.items.len(), 0);
+    }
+
+    #[test]
+    fn malformed_json_yields_invalid_response_error() {
+        let err = extract_plan("this is not json at all").unwrap_err();
+        assert!(matches!(err, LlmError::InvalidResponse(_)));
     }
 }
