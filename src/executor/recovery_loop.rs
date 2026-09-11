@@ -824,7 +824,15 @@ mod run_tests {
             detector: DetectorId("fake_test_detector"),
             logical_bytes: ProbeOutcome::Observed(0),
             physical_bytes: None,
-            reclaimable_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            // Post-HORO-994: `reclaimable_bytes == logical_bytes` is what a
+            // real detector reports (see `detectors::discovery_evidence`'s
+            // HORO-992 equivalence) AND what `executor::build_fresh_evidence`
+            // now reproduces on revalidation — so a `NotAttempted` here
+            // would be an artificial fixture mismatch that trips
+            // `PolicyClassDowngraded` at execute-time instead of letting
+            // the real (genuinely zero-byte) deletion run, which is this
+            // test's actual purpose (see its own doc comment above).
+            reclaimable_bytes: ProbeOutcome::Observed(0),
             last_modified: ProbeOutcome::Observed(SystemTime::now()),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: ResourceKind::NodeModules.regenerability(),
@@ -1038,12 +1046,14 @@ mod run_tests {
     /// Two real, disposable temp `node_modules` directories with no files
     /// inside, reported by a [`FakeDetector`] (never `DetectorRegistry::
     /// builtin()`'s real detectors — see that struct's doc comment for
-    /// why). This fixture deliberately leaves `reclaimable_bytes`
-    /// `Unavailable(NotAttempted)` (unlike a real detector as of
-    /// HORO-992) so the resulting evidence classifies as
-    /// `Ask{EvidenceIncomplete}`, never `AutoSafe`, which is what
-    /// `auto_approve_ask: true` exists to exercise here. Each directory being
-    /// empty means `NodeCleanNodeModules`'s real deletion measures
+    /// why). `reclaimable_bytes` matches `logical_bytes` here (post-HORO-994
+    /// this is also what `executor::build_fresh_evidence` reproduces on
+    /// revalidation, so plan-time and execute-time classification agree —
+    /// see `empty_node_modules_evidence`), so the resulting evidence
+    /// classifies as `AutoSafe` and is executed directly; `auto_approve_ask:
+    /// true` in this test's config is inert for this fixture, kept only to
+    /// match this suite's other `base_config()` overrides. Each directory
+    /// being empty means `NodeCleanNodeModules`'s real deletion measures
     /// `actual_reclaimed_bytes == Observed(0)` — "succeeded but freed
     /// nothing measurable" — twice in a row, exactly what the no-progress
     /// guard exists to catch.
