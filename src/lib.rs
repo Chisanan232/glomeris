@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod detectors;
+pub mod emergency;
 pub mod evidence;
 pub mod executor;
 pub mod monitor;
