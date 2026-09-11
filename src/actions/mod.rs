@@ -10,11 +10,13 @@
 //! decides the actual steps.
 
 mod cargo;
+mod homebrew;
 mod node;
 
 use std::path::PathBuf;
 
 pub use cargo::CargoCleanTargetDir;
+pub use homebrew::HomebrewCleanupCache;
 pub use node::NodeCleanNodeModules;
 
 // Reuse the exact `ActionId` type `evidence::model` already defines for
@@ -132,7 +134,11 @@ impl ActionRegistry {
     /// Registers all built-in actions.
     pub fn builtin() -> Self {
         Self {
-            actions: vec![Box::new(CargoCleanTargetDir), Box::new(NodeCleanNodeModules)],
+            actions: vec![
+                Box::new(CargoCleanTargetDir),
+                Box::new(NodeCleanNodeModules),
+                Box::new(HomebrewCleanupCache),
+            ],
         }
     }
 
@@ -176,5 +182,17 @@ mod tests {
     fn get_finds_node_action_by_id() {
         let registry = ActionRegistry::builtin();
         assert!(registry.get("node.clean.node_modules").is_some());
+    }
+
+    #[test]
+    fn get_finds_homebrew_action_by_id() {
+        let registry = ActionRegistry::builtin();
+        assert!(registry.get("homebrew.cleanup.cache").is_some());
+    }
+
+    #[test]
+    fn builtin_registry_registers_three_actions() {
+        let registry = ActionRegistry::builtin();
+        assert_eq!(registry.actions.len(), 3);
     }
 }
