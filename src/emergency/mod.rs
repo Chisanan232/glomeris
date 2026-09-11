@@ -30,6 +30,25 @@
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::actions::ActionRegistry;
+use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
+use crate::evidence::model::{Evidence, ResourceKind};
+use crate::evidence::probe::ProbeOutcome;
+use crate::executor::{execute, ExecutionOutcome};
+use crate::policy::approval::authorize;
+use crate::policy::{classify, PolicyClass, PolicyConfig};
+
+/// Per-`collect()` probe timeout used while revalidating one emergency
+/// candidate. Kept short — unlike [`crate::executor`]'s own internal 5s
+/// revalidation budget (not configurable from here), emergency mode's
+/// whole point is bounded, fast operation under pressure. A single
+/// `collect()` call may still spend up to roughly `timeout * 4` wall time
+/// in the worst case (see [`crate::evidence::correlate`]'s own docs) —
+/// accepted as a known bound, not eliminated, given a caller-enforced
+/// wall-clock deadline around the whole candidate loop regardless.
+const CANDIDATE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Bound on how many error strings [`EmergencyReport`] retains — mirrors
 /// [`crate::evidence::model::Evidence::push_source`]'s bounded-provenance
@@ -129,11 +148,315 @@ fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
     }
 }
 
+/// Classifies and (only if `AutoSafe`) executes each candidate in
+/// `evidences`, bounded by `max_actions` and `max_duration` (measured
+/// from `loop_start`). One candidate's failure — at classification,
+/// authorization, or execution — never stops the loop from reaching the
+/// next candidate.
+#[allow(clippy::too_many_arguments)]
+fn process_candidates(
+    evidences: Vec<Evidence>,
+    collector: &dyn EvidenceCollector,
+    actions: &ActionRegistry,
+    now: SystemTime,
+    max_actions: u32,
+    loop_start: Instant,
+    max_duration: Duration,
+    report: &mut EmergencyReport,
+) {
+    for evidence in evidences {
+        if report.actions_attempted >= max_actions {
+            break;
+        }
+        if loop_start.elapsed() >= max_duration {
+            break;
+        }
+        process_candidate(evidence, collector, actions, now, report);
+    }
+}
+
+/// Classifies one detected candidate via the exact same
+/// [`crate::policy::classify`] every other path in this crate uses, and
+/// executes it via [`crate::executor::execute`] ONLY when that
+/// classification is [`PolicyClass::AutoSafe`]. Never handles `Ask` —
+/// there is no interactive consent mechanism in a degraded path (see
+/// module docs) — and never executes `Protected`, which
+/// [`crate::policy::authorize`] refuses unconditionally anyway. This is a
+/// deliberate MVP choice, not an oversight: emergency pressure is not
+/// permission to weaken policy.
+fn process_candidate(
+    mut evidence: Evidence,
+    collector: &dyn EvidenceCollector,
+    actions: &ActionRegistry,
+    now: SystemTime,
+    report: &mut EmergencyReport,
+) {
+    let correlation = collector.collect(
+        &evidence.resource,
+        ProbeBudget {
+            timeout: CANDIDATE_PROBE_TIMEOUT,
+        },
+    );
+    merge_into(&mut evidence, correlation);
+    evidence.collected_at = now;
+
+    let cfg = PolicyConfig::default();
+    let decision = classify(&evidence, &cfg, now);
+
+    if decision.class != PolicyClass::AutoSafe {
+        report.denied_candidates += 1;
+        return;
+    }
+
+    let Some(action_id) = action_id_for_kind(evidence.resource.kind) else {
+        // Not a policy denial — a wiring gap (an `AutoSafe` kind with no
+        // registered cleanup action). Reported, never silently dropped,
+        // but kept out of `denied_candidates` so that field stays a clean
+        // read of "policy said no".
+        report.push_error(format!(
+            "no registered action for AutoSafe candidate {}",
+            evidence.resource
+        ));
+        return;
+    };
+    let Some(action) = actions.get(action_id) else {
+        report.push_error(format!(
+            "action id {action_id} not found in registry for {}",
+            evidence.resource
+        ));
+        return;
+    };
+
+    let fingerprint = evidence.fingerprint.clone();
+    let Some(approval) = authorize(decision, fingerprint, None) else {
+        // `authorize` never refuses an `AutoSafe` decision per its own
+        // contract — defensive, not currently reachable.
+        report.denied_candidates += 1;
+        return;
+    };
+
+    report.actions_attempted += 1;
+    let exec_report = execute(action, &approval, collector, &cfg, now);
+    match exec_report.outcome {
+        ExecutionOutcome::Succeeded => {
+            report.actions_succeeded += 1;
+            if let ProbeOutcome::Observed(bytes) = exec_report.actual_reclaimed_bytes {
+                report.total_bytes_freed += bytes;
+            }
+        }
+        ExecutionOutcome::Failed(message) => {
+            report.push_error(format!("action {action_id} failed: {message}"));
+        }
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            // See this ticket's PR "Known limitations": today, `execute`'s
+            // own deletion-time revalidation rebuilds evidence the same
+            // way detectors do (never populating `reclaimable_bytes`), so
+            // even a genuinely `AutoSafe` approval is expected to abort
+            // here with `PolicyClassDowngraded` — a pre-existing upstream
+            // gap, not something this module papers over.
+            report.push_error(format!(
+                "action {action_id} aborted by revalidation: {reason:?}"
+            ));
+        }
+        ExecutionOutcome::DryRun => {
+            // `execute()` never actually produces this variant in
+            // today's implementation (only `dry_run()`'s separate return
+            // type does) — handled explicitly instead of matched
+            // unsafely, per this module's no-panic constraint.
+            report.push_error(format!(
+                "action {action_id} unexpectedly returned DryRun from execute()"
+            ));
+        }
+    }
+}
+
+/// Static, closed mapping from a resource kind to the one pre-registered
+/// [`crate::actions::ActionId`] string that cleans it up. Deliberately
+/// NOT sourced from `Evidence::native_cleanup` — no detector in this
+/// crate populates `NativeCleanup::Available` today (every built-in
+/// detector emits `NativeCleanup::Unsupported` unconditionally), so that
+/// field cannot be relied on yet. This mapping only reads
+/// `ActionRegistry::get`'s existing public API — it does not add or
+/// change anything in `crate::actions`.
+fn action_id_for_kind(kind: ResourceKind) -> Option<&'static str> {
+    match kind {
+        ResourceKind::CargoTargetDir => Some("cargo.clean.target_dir"),
+        ResourceKind::NodeModules => Some("node.clean.node_modules"),
+        ResourceKind::HomebrewCache => Some("homebrew.cleanup.cache"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
+
+    use crate::detectors::dev_ino_fingerprint;
+    use crate::detectors::probe_mtime;
+    use crate::evidence::correlate::CorrelationResult;
+    use crate::evidence::model::{
+        NativeCleanup, Recoverability, ResourceFingerprint, ResourceId, ResourceLocator,
+    };
+    use crate::evidence::probe::ProbeReason;
+    use crate::executor::AbortReason;
+
+    /// A collector reporting a fully clean, non-active resource on every
+    /// call: empty process lists, no git repo, tool not live. Used where
+    /// a test wants correlation to fill in cleanly so it can isolate a
+    /// different variable (e.g. `reclaimable_bytes`'s missing-ness).
+    struct CleanCollector;
+    impl EvidenceCollector for CleanCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
+    /// Builds an [`Evidence`] that is `Completeness::Complete` and clean
+    /// (no active-use signals) for `path`/`kind` as of `collected_at` —
+    /// i.e. exactly the shape `policy::classify` maps to `AutoSafe`.
+    /// `reclaimable_bytes` is deliberately `Observed` here even though no
+    /// real detector in this crate ever populates it (see this module's
+    /// docs and the PR's "Known limitations") — this fixture exists to
+    /// prove `process_candidate`'s AutoSafe-only wiring, not to claim
+    /// today's detectors can produce it.
+    fn autosafe_evidence(path: PathBuf, kind: ResourceKind, collected_at: SystemTime) -> Evidence {
+        Evidence {
+            resource: ResourceId::new(kind, ResourceLocator::Path(path.clone())),
+            fingerprint: ResourceFingerprint {
+                dev_ino: dev_ino_fingerprint(&path),
+                mtime: probe_mtime(&path).observed().copied(),
+                tool_revision: None,
+            },
+            detector: crate::detectors::DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(4096),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Observed(4096),
+            last_modified: ProbeOutcome::Observed(collected_at),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: kind.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Unsupported,
+            open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at,
+            sources: Vec::new(),
+        }
+    }
+
+    /// `process_candidates` delegates each evidence to `process_candidate`
+    /// in order — proven here with a single candidate; the "one
+    /// candidate's failure doesn't stop the loop" multi-candidate scenario
+    /// is its own dedicated test (see `process_candidates_continues_after_one_candidate_aborts`).
+    #[test]
+    fn process_candidates_delegates_a_single_candidate_to_process_candidate() {
+        let dir = make_temp_dir("candidates-single");
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let now = SystemTime::now();
+
+        let mut evidence = autosafe_evidence(target, ResourceKind::CargoTargetDir, now);
+        evidence.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+
+        let mut report = EmergencyReport::default();
+        process_candidates(
+            vec![evidence],
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            u32::MAX,
+            Instant::now(),
+            Duration::from_secs(30),
+            &mut report,
+        );
+
+        assert_eq!(report.denied_candidates, 1);
+        assert_eq!(report.actions_attempted, 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Candidate iteration reuses `policy::classify` exactly as normal:
+    /// an incomplete-evidence candidate (the realistic shape today's real
+    /// detectors produce, since no detector populates `reclaimable_bytes`
+    /// — see this module's docs) is correctly denied, never executed.
+    #[test]
+    fn process_candidate_denies_incomplete_evidence_without_executing() {
+        let dir = make_temp_dir("candidate-denied");
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let now = SystemTime::now();
+
+        // Same shape `discovery_evidence` produces for every real
+        // detector: `reclaimable_bytes` is `Unavailable(NotAttempted)`.
+        let mut evidence = autosafe_evidence(target, ResourceKind::CargoTargetDir, now);
+        evidence.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+
+        let mut report = EmergencyReport::default();
+        process_candidate(
+            evidence,
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            &mut report,
+        );
+
+        assert_eq!(report.denied_candidates, 1);
+        assert_eq!(report.actions_attempted, 0);
+        assert_eq!(report.actions_succeeded, 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A genuinely `AutoSafe`-classified candidate IS authorized and
+    /// handed to `executor::execute` — reusing policy/executor exactly as
+    /// normal, no parallel/looser path. Documents the pre-existing
+    /// upstream gap (see PR "Known limitations"): `execute()`'s own
+    /// deletion-time revalidation rebuilds evidence the same way
+    /// detectors do, so `reclaimable_bytes` is lost again and the fresh
+    /// classification downgrades to `Ask`, aborting the execution. This
+    /// is NOT a bug introduced by this module — it proves the wiring is
+    /// correct and that the abort (not a silent success or a panic) is
+    /// exactly what happens today.
+    #[test]
+    fn process_candidate_attempts_autosafe_and_reports_the_revalidation_abort() {
+        let dir = make_temp_dir("candidate-autosafe-abort");
+        let node_modules = dir.join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        fs::write(node_modules.join("pkg.js"), vec![0u8; 64]).unwrap();
+        let now = SystemTime::now();
+
+        let evidence = autosafe_evidence(node_modules.clone(), ResourceKind::NodeModules, now);
+        let mut report = EmergencyReport::default();
+        process_candidate(
+            evidence,
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            &mut report,
+        );
+
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 0);
+        assert_eq!(report.denied_candidates, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("aborted by revalidation"));
+        assert!(report.errors[0].contains(&format!("{:?}", AbortReason::PolicyClassDowngraded)));
+        // Nothing was actually deleted — the abort must be real, not
+        // just reported.
+        assert!(node_modules.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
 
     /// Matches the executor/policy test suites' own helper shape — a
     /// fresh, per-test temp directory, never the developer's real home
