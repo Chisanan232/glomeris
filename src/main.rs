@@ -9,6 +9,7 @@ fn main() {
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(&args[1..]),
+        Some("explain") => run_explain_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -199,6 +200,31 @@ fn run_detect_command(args: &[String]) {
         print_json_or_exit(&report);
     } else {
         glomeris::cli::print_detect_report(&report);
+    }
+}
+
+/// `glomeris explain <resource_id_or_path>` — full evidence-and-policy
+/// picture for exactly one resource (HORO-955).
+fn run_explain_command(args: &[String]) {
+    let (positionals, flags) = split_flags(args, &["--json"]);
+
+    let Some(query) = positionals.first() else {
+        eprintln!("glomeris explain: a resource id or path argument is required");
+        print_usage();
+        std::process::exit(2);
+    };
+
+    let candidates = discover_and_classify_now();
+    let Some((ev, decision)) = glomeris::cli::find_candidate(query, &candidates) else {
+        eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
+        std::process::exit(1);
+    };
+
+    let report = glomeris::cli::build_explain_report(ev, decision);
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_explain_report(&report);
     }
 }
 
