@@ -439,6 +439,260 @@ mod select_candidate_tests {
     }
 }
 
+fn build_report(
+    stop_reason: StopReason,
+    iterations_run: u32,
+    actions_executed: u32,
+    actions_declined_or_skipped: u32,
+    total_bytes_freed: u64,
+    started_free_bytes: u64,
+    final_free_bytes: u64,
+) -> RecoveryReport {
+    RecoveryReport {
+        stop_reason,
+        iterations_run,
+        actions_executed,
+        actions_declined_or_skipped,
+        total_bytes_freed,
+        started_free_bytes,
+        final_free_bytes,
+    }
+}
+
+/// Runs one bounded closed-loop recovery pass against `target_mount`,
+/// stopping for exactly one of the [`StopReason`]s. See the module docs
+/// for the safety invariant this never bypasses, and the ticket's loop
+/// steps 1-12 for the per-iteration shape this implements.
+///
+/// Every I/O-touching dependency is injected so this function itself is
+/// fully unit-testable with fakes: `fs_stat` (disk measurement),
+/// `collector` (correlation refresh, reused by `execute`'s own
+/// revalidation), `clock` (the `max_duration` budget check), and
+/// `wall_clock` (the `SystemTime` `classify`/`authorize` need).
+/// `action_registry` and `discovery_ctx` are plain data, not I/O seams,
+/// but are still parameters rather than constructed internally so a
+/// caller controls exactly what's registered/discoverable.
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    config: &RecoveryConfig,
+    fs_stat: &dyn FsStat,
+    collector: &dyn EvidenceCollector,
+    action_registry: &ActionRegistry,
+    clock: &dyn Clock,
+    wall_clock: &dyn WallClock,
+    policy_cfg: &PolicyConfig,
+    target_mount: &Path,
+    discovery_ctx: &DiscoveryContext,
+) -> RecoveryReport {
+    let start_instant = clock.now();
+
+    let started_usage = match fs_stat.stat(target_mount) {
+        Ok(usage) => usage,
+        Err(e) => {
+            return build_report(
+                StopReason::Error(format!("initial disk measurement failed: {e}")),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+    };
+    let started_free_bytes = started_usage.free_bytes;
+
+    let detector_registry = DetectorRegistry::builtin();
+
+    let mut iterations_run: u32 = 0;
+    let mut actions_executed: u32 = 0;
+    let mut actions_declined_or_skipped: u32 = 0;
+    let mut total_bytes_freed: u64 = 0;
+    let mut no_retry: HashSet<ResourceId> = HashSet::new();
+    let mut no_progress_streak: u32 = 0;
+    let mut last_free_bytes = started_free_bytes;
+
+    loop {
+        // 1. Measure.
+        let usage = match fs_stat.stat(target_mount) {
+            Ok(usage) => usage,
+            Err(e) => {
+                return build_report(
+                    StopReason::Error(format!("disk measurement failed: {e}")),
+                    iterations_run,
+                    actions_executed,
+                    actions_declined_or_skipped,
+                    total_bytes_freed,
+                    started_free_bytes,
+                    last_free_bytes,
+                );
+            }
+        };
+        last_free_bytes = usage.free_bytes;
+
+        // 2. Target already met?
+        if target_met(&usage, &config.target) {
+            return build_report(
+                StopReason::TargetReached,
+                iterations_run,
+                actions_executed,
+                actions_declined_or_skipped,
+                total_bytes_freed,
+                started_free_bytes,
+                last_free_bytes,
+            );
+        }
+
+        // 3. Budget check.
+        let elapsed = clock.now().duration_since(start_instant);
+        if iterations_run >= config.max_iterations
+            || actions_executed >= config.max_actions
+            || elapsed >= config.max_duration
+        {
+            return build_report(
+                StopReason::BudgetExceeded,
+                iterations_run,
+                actions_executed,
+                actions_declined_or_skipped,
+                total_bytes_freed,
+                started_free_bytes,
+                last_free_bytes,
+            );
+        }
+
+        // 4. Discover.
+        let statuses = detector_registry.discover_all(discovery_ctx);
+        let candidates = candidates_with_actions(statuses);
+
+        // 5-6. Refresh evidence, classify, select one candidate.
+        let now = wall_clock.now();
+        let (selected, ask_skipped) = select_candidate(
+            candidates,
+            policy_cfg,
+            collector,
+            now,
+            &no_retry,
+            config.auto_approve_ask,
+        );
+        actions_declined_or_skipped += ask_skipped;
+
+        let Some(candidate) = selected else {
+            return build_report(
+                StopReason::SafeExhausted,
+                iterations_run,
+                actions_executed,
+                actions_declined_or_skipped,
+                total_bytes_freed,
+                started_free_bytes,
+                last_free_bytes,
+            );
+        };
+
+        iterations_run += 1;
+
+        let resource = candidate.evidence.resource.clone();
+        let fingerprint = candidate.evidence.fingerprint.clone();
+        let native_cleanup = candidate.evidence.native_cleanup;
+        let decision_class = candidate.decision.class;
+
+        // 7. Authorize. AutoSafe needs no consent; Ask needs a
+        // UserConsent built from the exact evidence/fingerprint just
+        // classified — a non-interactive auto-consent, only when
+        // `auto_approve_ask` is true (see `RecoveryConfig::auto_approve_ask`
+        // doc comment for why this is an MVP simplification, not real
+        // interactive approval).
+        let consent = if decision_class == PolicyClass::Ask {
+            Some(UserConsent::new(resource.clone(), fingerprint.clone(), now))
+        } else {
+            None
+        };
+        let approval = match authorize(candidate.decision, fingerprint, consent.as_ref()) {
+            Some(approval) => approval,
+            None => {
+                // Should not happen given how `consent` was just built to
+                // match exactly, but never silently retry a candidate
+                // authorize() refused.
+                no_retry.insert(resource);
+                actions_declined_or_skipped += 1;
+                continue;
+            }
+        };
+
+        // 8. Resolve the action.
+        let action_id = match native_cleanup {
+            NativeCleanup::Available(id) => id,
+            NativeCleanup::Unsupported => {
+                no_retry.insert(resource);
+                actions_declined_or_skipped += 1;
+                continue;
+            }
+        };
+        let action = match action_registry.get(action_id.0) {
+            Some(action) => action,
+            None => {
+                no_retry.insert(resource);
+                actions_declined_or_skipped += 1;
+                continue;
+            }
+        };
+
+        // 8-9. Execute for real, reusing HORO-951's fully-hardened
+        // revalidate-then-mutate path exactly as-is.
+        let report = execute(action, &approval, collector, policy_cfg, now);
+
+        match report.outcome {
+            ExecutionOutcome::Succeeded => {
+                actions_executed += 1;
+                let progressed = match report.actual_reclaimed_bytes {
+                    ProbeOutcome::Observed(bytes) => {
+                        total_bytes_freed += bytes;
+                        bytes > 0
+                    }
+                    ProbeOutcome::Unavailable(_) => false,
+                };
+
+                // 10. No-progress guard: consecutive successful executions
+                // that freed nothing measurable.
+                if progressed {
+                    no_progress_streak = 0;
+                } else {
+                    no_progress_streak += 1;
+                    if no_progress_streak >= NO_PROGRESS_STREAK_THRESHOLD {
+                        let final_free_bytes = fs_stat
+                            .stat(target_mount)
+                            .map(|u| u.free_bytes)
+                            .unwrap_or(last_free_bytes);
+                        return build_report(
+                            StopReason::NoProgress,
+                            iterations_run,
+                            actions_executed,
+                            actions_declined_or_skipped,
+                            total_bytes_freed,
+                            started_free_bytes,
+                            final_free_bytes,
+                        );
+                    }
+                }
+            }
+            ExecutionOutcome::Failed(_) | ExecutionOutcome::AbortedByRevalidation(_) => {
+                // 9. Never retry this exact candidate again this run.
+                no_retry.insert(resource);
+                actions_declined_or_skipped += 1;
+                no_progress_streak = 0;
+            }
+            ExecutionOutcome::DryRun => {
+                // execute() never returns this variant; defensively treat
+                // it like a no-op rather than panicking.
+                no_retry.insert(resource);
+                actions_declined_or_skipped += 1;
+            }
+        }
+
+        // 11. Loop back to step 1 — the top of the next iteration
+        // re-measures disk usage rather than trusting expected bytes.
+    }
+}
+
 /// Parses a `--target` CLI value into a [`FreeTarget`].
 ///
 /// Format (deliberately minimal — see the PR's "Known limitations"):
