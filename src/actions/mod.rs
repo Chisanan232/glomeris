@@ -9,7 +9,11 @@
 //! resource's [`Evidence`] — the typed [`Action::plan`] implementation
 //! decides the actual steps.
 
+mod cargo;
+
 use std::path::PathBuf;
+
+pub use cargo::CargoCleanTargetDir;
 
 // Reuse the exact `ActionId` type `evidence::model` already defines for
 // this purpose — see that module's doc comment: "the future `actions`
@@ -126,7 +130,7 @@ impl ActionRegistry {
     /// Registers all built-in actions.
     pub fn builtin() -> Self {
         Self {
-            actions: Vec::new(),
+            actions: vec![Box::new(CargoCleanTargetDir)],
         }
     }
 
@@ -158,5 +162,11 @@ mod tests {
     fn get_returns_none_for_unknown_id() {
         let registry = ActionRegistry::builtin();
         assert!(registry.get("docker.clean.everything").is_none());
+    }
+
+    #[test]
+    fn get_finds_cargo_action_by_id() {
+        let registry = ActionRegistry::builtin();
+        assert!(registry.get("cargo.clean.target_dir").is_some());
     }
 }
