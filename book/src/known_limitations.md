@@ -5,34 +5,20 @@ code and from the PRs that introduced each piece — not a generic disclaimer.
 This is an experimental MVP; treat every claim elsewhere in this book as
 scoped by what's on this page.
 
-## No detector-produced candidate can currently complete a real deletion
+## Resolved: real detector-produced candidates now complete real deletions
 
-This is the single most important limitation to understand before running
-`glomeris free` or `glomeris emergency` expecting real bytes to be freed
-from a developer-tool cache.
-
-- Detectors **do** populate `Evidence::reclaimable_bytes` at discovery time
-  today (fixed in HORO-992) — Xcode/Cargo/Node/Homebrew via a real shallow
-  size estimate, Docker via `docker system df`'s own reported figure. So
-  `policy::classify()` genuinely can reach `AutoSafe` from a detector's
-  fresh output.
-- But `executor::execute()`'s deletion-time TOCTOU revalidation
-  (`executor::build_fresh_evidence`) rebuilds evidence **independently** of
-  whatever the detector observed, and hardcodes `reclaimable_bytes` back to
-  `Unavailable(NotAttempted)`. That downgrades the freshly rebuilt
-  evidence's completeness from `Complete` to `Partial`, so re-running
-  `classify()` on it returns `Ask`, not `AutoSafe` — which trips the
-  `PolicyClassDowngraded` abort inside `execute()`, before the resource is
-  ever touched.
-- **This affects `glomeris free --target` and `glomeris emergency`
-  identically** — both call the same `executor::execute()`.
-- The only path that currently frees real bytes end to end is emergency
-  mode's step 1 (deleting its own `history.tsv`), which is deliberately
-  **not** policy-gated at all (see [Emergency Mode](emergency_mode.md)).
-- This is a pre-existing gap in `executor`, not something any later ticket
-  worked around — fixing it (teaching `build_fresh_evidence` to reuse a
-  detector's own reclaimable-bytes estimate) is explicitly called out as
-  follow-up work in the `emergency` module's own doc comments.
+Fixed in HORO-994. Detectors populate `Evidence::reclaimable_bytes` at
+discovery time (HORO-992) — Xcode/Cargo/Node/Homebrew via a real shallow
+size estimate, Docker via `docker system df`'s own reported figure — and
+`executor::execute()`'s deletion-time TOCTOU revalidation
+(`executor::build_fresh_evidence`) now reuses the same shallow-size
+computation for `reclaimable_bytes` that it already used for
+`logical_bytes`, rather than hardcoding it back to `Unavailable`. A golden
+end-to-end integration test (`tests/golden_chain_execute.rs`) proves the
+full chain — real detector → `AutoSafe` classification → `Approval` →
+`execute()` → real deletion → real re-measured freed bytes — against a
+disposable fixture. `glomeris free --target` and `glomeris emergency` can
+both now actually free real bytes, not just report a dry-run plan.
 
 ## Docker build cache can never reach `Completeness::Complete`
 

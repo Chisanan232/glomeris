@@ -67,21 +67,13 @@ already failed:
   implemented.** The originating ticket named it as an experimental idea to
   reject or defer without reliable measured evidence; this module does not
   build it.
-- **The candidate loop still cannot free real bytes via a real
-  detector-produced candidate today.** Detectors do populate
-  `reclaimable_bytes` at discovery time, but `executor::execute`'s own
-  deletion-time revalidation rebuilds evidence independently and always
-  reports `reclaimable_bytes` as `Unavailable` regardless of what the
-  detector observed — so a synthetically constructed `AutoSafe` approval
-  still aborts inside that revalidation step (see
-  [Known Limitations](known_limitations.md)). This is a pre-existing gap in
-  `executor`, not something this module introduces or works around. **The
-  self-owned-disposable-state step (step 1 above) is therefore the only
-  path that actually reclaims bytes today.** The candidate-iteration wiring
-  is correct and will start reclaiming bytes automatically once a future
-  ticket teaches `executor::build_fresh_evidence` to reuse a detector's
-  reclaimable-bytes estimate — no change needed in this module when that
-  happens.
+- **Resolved (HORO-994): the candidate loop now frees real bytes via a real
+  detector-produced candidate.** `executor::build_fresh_evidence`'s
+  deletion-time revalidation reuses the same shallow-size computation for
+  `reclaimable_bytes` that it already used for `logical_bytes`, so a real
+  `AutoSafe` approval survives revalidation and executes. Both the
+  self-owned-disposable-state step (step 1 above) and real detector-found
+  candidates can now reclaim bytes.
 - **Near-zero-real-disk-space testing was not performed.** Driving a real
   machine's free space to near zero to test this path was judged too
   destructive to be worth the risk; fault injection via fakes covers the

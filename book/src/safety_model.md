@@ -126,21 +126,16 @@ because partial-deletion byte accounting has no way to report a correct
 total if a later step fails after an earlier one already succeeded. No
 registered action emits more than one step today.
 
-## AUTO_SAFE is not currently end-to-end reachable through real execution
+## AUTO_SAFE is end-to-end reachable through real execution
 
-Detectors do populate `reclaimable_bytes` at discovery time today, so
-`classify()` genuinely can reach `AutoSafe` when evidence is collected fresh.
-But the deletion-time revalidation path (`executor::build_fresh_evidence`)
-rebuilds evidence independently and hardcodes `reclaimable_bytes` back to
-`Unavailable(NotAttempted)` — it does not reuse whatever a detector observed
-at discovery time. That downgrades the freshly rebuilt evidence's
-completeness from `Complete` to `Partial`, which makes `classify()` return
-`Ask` instead of `AutoSafe` at revalidation, which trips the
-`PolicyClassDowngraded` abort in step 5 above. In practice, a real
-`AutoSafe` approval built from a detector's evidence today aborts during
-revalidation rather than executing. See
-[Known Limitations](known_limitations.md) for the full picture, including
-why this doesn't affect emergency mode's own self-owned-state cleanup.
+Detectors populate `reclaimable_bytes` at discovery time (HORO-992), and the
+deletion-time revalidation path (`executor::build_fresh_evidence`) reuses
+the same shallow-size computation for `reclaimable_bytes` that it already
+used for `logical_bytes` (HORO-994) — it no longer hardcodes the field back
+to `Unavailable`. A real `AutoSafe` approval built from a detector's
+evidence genuinely survives revalidation and executes for real, proven by
+`tests/golden_chain_execute.rs`. See [Known Limitations](known_limitations.md)
+for what's still out of scope (Docker build cache's own completeness gap).
 
 ## Actions never receive raw commands
 
