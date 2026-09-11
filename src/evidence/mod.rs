@@ -6,12 +6,13 @@
 //! judgments — it does not decide what to do about a resource; that is the
 //! policy layer's job (future ticket).
 
+pub mod correlate;
 pub mod model;
 pub mod probe;
 
 pub use model::{
-    ActionId, Completeness, Confidence, Evidence, EvidenceField, GitStatePlaceholder,
-    NativeCleanup, OwningTool, Recoverability, Regenerability, ResourceFingerprint, ResourceId,
+    ActionId, Completeness, Confidence, Evidence, EvidenceField, GitState, NativeCleanup,
+    OwningTool, ProcessRef, Recoverability, Regenerability, ResourceFingerprint, ResourceId,
     ResourceKind, ResourceLocator,
 };
 pub use probe::{ProbeOutcome, ProbeReason};

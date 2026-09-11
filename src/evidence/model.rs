@@ -229,10 +229,27 @@ pub enum EvidenceField {
     ToolLiveness,
 }
 
-/// Placeholder marker type for git worktree/status correlation. Empty for
-/// now — real shape lands in HORO-949.
+/// A single process discovered (via [`crate::evidence::correlate`]) to
+/// have a resource open, or to have it as its current working directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitStatePlaceholder;
+pub struct ProcessRef {
+    pub pid: u32,
+    pub command: String,
+}
+
+/// Git repository state for a resource's containing directory, as
+/// determined by [`crate::evidence::correlate::GitProbe`].
+///
+/// This type only exists when `path` is genuinely inside a git working
+/// tree — see the doc comment on [`Evidence::git_state`] for why the
+/// field wraps this in `Option`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitState {
+    pub repo_root: PathBuf,
+    pub dirty: bool,
+    pub untracked: bool,
+    pub worktree: bool,
+}
 
 /// Bound on how many provenance notes an [`Evidence`] retains in
 /// `sources`.
@@ -247,9 +264,11 @@ const MAX_SOURCES: usize = 8;
 /// `native_cleanup` judgments. The four correlation fields
 /// (`open_by_process`, `process_cwd_match`, `git_state`, `tool_liveness`)
 /// are ALWAYS `ProbeOutcome::Unavailable(ProbeReason::NotAttempted)` here —
-/// a later ticket (HORO-949) is responsible for actually attempting that
-/// correlation. This is what keeps a freshly-discovered `Evidence` from
-/// ever reporting [`Completeness::Complete`].
+/// [`crate::evidence::correlate`] (HORO-949) is responsible for actually
+/// attempting that correlation and filling these in via
+/// [`crate::evidence::correlate::merge_into`]. This is what keeps a
+/// freshly-discovered `Evidence` from ever reporting
+/// [`Completeness::Complete`] before correlation runs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Evidence {
     pub resource: ResourceId,
@@ -267,10 +286,15 @@ pub struct Evidence {
     pub recoverability: Recoverability,
     pub native_cleanup: NativeCleanup,
     // Correlation fields — HORO-948 always sets these to `NotAttempted`;
-    // HORO-949 fills them in.
-    pub open_by_process: ProbeOutcome<Vec<String>>,
-    pub process_cwd_match: ProbeOutcome<Vec<String>>,
-    pub git_state: ProbeOutcome<GitStatePlaceholder>,
+    // `crate::evidence::correlate` (HORO-949) fills them in.
+    pub open_by_process: ProbeOutcome<Vec<ProcessRef>>,
+    pub process_cwd_match: ProbeOutcome<Vec<ProcessRef>>,
+    /// `Observed(None)` means the probe ran successfully and determined
+    /// the resource is genuinely not inside a git working tree — a
+    /// legitimate, complete answer, not a missing one. Only
+    /// `Unavailable(reason)` means the probe itself failed. See
+    /// [`crate::evidence::correlate::GitProbe`].
+    pub git_state: ProbeOutcome<Option<GitState>>,
     pub tool_liveness: ProbeOutcome<bool>,
     pub collected_at: SystemTime,
     /// Bounded provenance notes (capped at [`MAX_SOURCES`] entries).
@@ -424,7 +448,9 @@ mod tests {
         evidence.last_modified = ProbeOutcome::Observed(SystemTime::UNIX_EPOCH);
         evidence.open_by_process = ProbeOutcome::Observed(Vec::new());
         evidence.process_cwd_match = ProbeOutcome::Observed(Vec::new());
-        evidence.git_state = ProbeOutcome::Observed(GitStatePlaceholder);
+        // `Observed(None)` — "determined this isn't a git repo" — is a
+        // fully-observed answer, not a missing one.
+        evidence.git_state = ProbeOutcome::Observed(None);
         evidence.tool_liveness = ProbeOutcome::Observed(true);
 
         assert_eq!(evidence.completeness(), Completeness::Complete);
