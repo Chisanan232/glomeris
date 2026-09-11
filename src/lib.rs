@@ -4,3 +4,4 @@
 //! `main`, and so binary wiring in `main.rs` stays a thin CLI shim.
 
 pub mod monitor;
+pub mod platform;
