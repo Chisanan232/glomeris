@@ -68,12 +68,24 @@ impl ResourceKind {
     /// considered [`Completeness::Complete`]. This is the single source of
     /// truth [`Evidence::completeness`] checks against — extend this list,
     /// not the completeness logic, when a kind needs more evidence.
+    ///
+    /// `ToolLiveness` is only required for kinds whose owning tool has a
+    /// real running-process signal to observe (Xcode.app, the Docker
+    /// daemon). For `Cargo`/`Npm`/`Pnpm`/`Yarn`/`Homebrew`, `tool_liveness`
+    /// is structurally always `Unavailable(ToolNotRunning)` — see
+    /// [`crate::evidence::correlate::tool_liveness::PgrepToolLivenessProbe`]
+    /// — so requiring it here would make [`Completeness::Complete`]
+    /// permanently unreachable for those kinds.
     pub fn required_evidence(&self) -> &'static [EvidenceField] {
-        // MVP: every kind requires the same baseline set (size + staleness
-        // + the correlation fields that HORO-949 will fill in). This is a
-        // per-kind hook, not a global constant, so future kinds can narrow
-        // or widen their own requirements independently.
-        const BASE: &[EvidenceField] = &[
+        const WITHOUT_TOOL_LIVENESS: &[EvidenceField] = &[
+            EvidenceField::LogicalBytes,
+            EvidenceField::ReclaimableBytes,
+            EvidenceField::LastModified,
+            EvidenceField::OpenByProcess,
+            EvidenceField::ProcessCwdMatch,
+            EvidenceField::GitState,
+        ];
+        const WITH_TOOL_LIVENESS: &[EvidenceField] = &[
             EvidenceField::LogicalBytes,
             EvidenceField::ReclaimableBytes,
             EvidenceField::LastModified,
@@ -82,7 +94,17 @@ impl ResourceKind {
             EvidenceField::GitState,
             EvidenceField::ToolLiveness,
         ];
-        BASE
+        match self {
+            ResourceKind::XcodeDerivedData
+            | ResourceKind::DockerBuildCache
+            | ResourceKind::DockerImageCache => WITH_TOOL_LIVENESS,
+            ResourceKind::HomebrewCache
+            | ResourceKind::CargoTargetDir
+            | ResourceKind::CargoRegistryCache
+            | ResourceKind::NodeModules
+            | ResourceKind::NodePackageManagerCache
+            | ResourceKind::Unknown => WITHOUT_TOOL_LIVENESS,
+        }
     }
 }
 
@@ -455,6 +477,37 @@ mod tests {
 
         assert_eq!(evidence.completeness(), Completeness::Complete);
         assert_eq!(evidence.confidence(), Confidence::High);
+    }
+
+    #[test]
+    fn non_daemon_tool_kinds_reach_complete_despite_tool_liveness_unavailable() {
+        // Cargo/Node/Homebrew have no persistent daemon, so tool_liveness is
+        // structurally always Unavailable(ToolNotRunning) for them (see
+        // crate::evidence::correlate::tool_liveness). required_evidence()
+        // must exclude ToolLiveness for these kinds so Complete stays
+        // reachable — otherwise AUTO_SAFE would be unreachable for them.
+        for kind in [
+            ResourceKind::CargoTargetDir,
+            ResourceKind::CargoRegistryCache,
+            ResourceKind::NodeModules,
+            ResourceKind::NodePackageManagerCache,
+            ResourceKind::HomebrewCache,
+        ] {
+            let mut evidence = base_evidence(kind);
+            evidence.logical_bytes = ProbeOutcome::Observed(1024);
+            evidence.reclaimable_bytes = ProbeOutcome::Observed(1024);
+            evidence.last_modified = ProbeOutcome::Observed(SystemTime::UNIX_EPOCH);
+            evidence.open_by_process = ProbeOutcome::Observed(Vec::new());
+            evidence.process_cwd_match = ProbeOutcome::Observed(Vec::new());
+            evidence.git_state = ProbeOutcome::Observed(None);
+            evidence.tool_liveness = ProbeOutcome::Unavailable(ProbeReason::ToolNotRunning);
+
+            assert_eq!(
+                evidence.completeness(),
+                Completeness::Complete,
+                "{kind:?} should reach Complete with tool_liveness Unavailable(ToolNotRunning)"
+            );
+        }
     }
 
     #[test]
