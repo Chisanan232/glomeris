@@ -1,9 +1,25 @@
 //! Optional BYOK LLM planner (HORO-954).
 //!
 //! **What this module is**: an advisory ranking suggestion over evidence
-//! the crate already collected. This first piece is [`LlmResourceView`]:
-//! an explicit, bounded projection of one [`Evidence`] record, safe to
-//! serialize and hand to a model.
+//! the crate already collected. [`LlmResourceView`] is an explicit,
+//! bounded projection of one [`Evidence`] record, safe to serialize and
+//! hand to a model. [`LlmPlan`]/[`LlmPlanItem`] are the model-facing
+//! response shape.
+//!
+//! **Why only two `Deserialize` types exist here (and in the whole
+//! crate)**: [`LlmPlan`]/[`LlmPlanItem`] are the sole external-input
+//! parse targets. Everything they can produce is either a `String`
+//! resolved against real, already-in-memory data, or a plain
+//! `u32`/`Option<String>` used only for display/ranking — never a path,
+//! never a shell fragment, never anything that reaches
+//! [`crate::actions::ActionStep`] construction directly.
+//! `#[serde(deny_unknown_fields)]` on [`LlmPlanItem`] additionally
+//! ensures a model cannot smuggle an extra field (e.g. a `command`) past
+//! the parser: any unknown field fails deserialization of the whole
+//! struct, which fails the whole `Vec`, which fails the whole
+//! [`LlmPlan`] — see `unexpected_field_rejects_whole_plan` below.
+
+use serde::Deserialize;
 
 use crate::evidence::model::{Completeness, Evidence, Regenerability};
 
@@ -72,6 +88,35 @@ fn completeness_tag(c: &Completeness) -> &'static str {
     }
 }
 
+/// The ONLY model-facing `Deserialize` type in the crate, together with
+/// [`LlmPlanItem`]. See the module doc comment for why this is safe.
+#[derive(Debug, Deserialize, PartialEq)]
+pub struct LlmPlan {
+    pub items: Vec<LlmPlanItem>,
+}
+
+/// One item of a model-proposed plan. `#[serde(deny_unknown_fields)]`
+/// means any extra field (e.g. a smuggled `"command"`) fails
+/// deserialization of the whole item — and therefore the whole
+/// surrounding `Vec`/`LlmPlan` — rather than being silently ignored. See
+/// `unexpected_field_rejects_whole_plan` in this module's tests.
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LlmPlanItem {
+    /// Resolved against the evidence set passed to `plan_with_llm` (a
+    /// follow-up commit) — unknown -> the item is dropped, never a hard
+    /// error for the whole plan.
+    pub resource_id: String,
+    /// Resolved via `ActionRegistry::get` — unknown -> the item is
+    /// dropped, never a hard error for the whole plan.
+    pub action_id: String,
+    pub priority: Option<u32>,
+    /// Human-readable explanation. Informational only — NEVER
+    /// interpreted as an instruction, a path, or anything that reaches
+    /// execution. It exists purely for a human to read in a UI/log.
+    pub reason: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -133,5 +178,16 @@ mod tests {
         let actions = ActionRegistry::builtin();
         let view = LlmResourceView::from_evidence(&ev, &actions);
         assert_eq!(view.age_days, None);
+    }
+
+    #[test]
+    fn unexpected_field_rejects_whole_plan() {
+        // deny_unknown_fields rejects the WHOLE containing struct on any
+        // unknown field — not just the offending item. A model trying to
+        // smuggle a "command" field fails the entire Vec<LlmPlanItem>
+        // deserialization, hence the entire LlmPlan. Confirmed here
+        // rather than assumed.
+        let text = r#"{"items": [{"resource_id": "a", "action_id": "b", "priority": 1, "reason": null, "command": "rm -rf /"}]}"#;
+        assert!(serde_json::from_str::<LlmPlan>(text).is_err());
     }
 }
