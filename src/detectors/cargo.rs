@@ -6,6 +6,14 @@
 //! [`DiscoveryContext::known_project_roots`] for a `target/` directory —
 //! callers (CLI wiring, future config) are responsible for supplying that
 //! list. With an empty list, this detector reports [`DetectorStatus::ToolAbsent`].
+//!
+//! `reclaimable_bytes` reuses the same [`shallow_logical_bytes`] estimate
+//! as `logical_bytes` (HORO-992): a `target/` directory is fully owned,
+//! regenerable build output with no partial-retention concept, so
+//! `reclaimable_bytes == logical_bytes` is an honest equivalence of
+//! meaning here. Because the underlying probe is shallow/non-recursive,
+//! both figures are an honest *lower bound* on the real subtree size, not
+//! a precise one.
 
 use std::path::PathBuf;
 
@@ -43,11 +51,13 @@ impl Detector for CargoDetector {
                         ResourceKind::CargoTargetDir,
                         ResourceLocator::Path(canonical.clone()),
                     );
+                    let logical_bytes = shallow_logical_bytes(&canonical);
                     evidence.push(discovery_evidence(
                         resource,
                         self.id(),
                         &canonical,
-                        shallow_logical_bytes(&canonical),
+                        logical_bytes.clone(),
+                        logical_bytes,
                         probe_mtime(&canonical),
                         Regenerability::RegenerableByRebuild,
                         Recoverability::RegenerableByRebuild,
