@@ -7,6 +7,7 @@
 pub mod class;
 pub mod config;
 pub mod decision;
+mod protected;
 
 pub use class::{PolicyClass, ReasonCode};
 pub use config::PolicyConfig;
