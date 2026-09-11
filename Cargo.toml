@@ -1,0 +1,13 @@
+[package]
+name = "glomeris"
+version = "0.0.0"
+edition = "2021"
+description = "Evidence-first, policy-constrained developer storage autopilot for macOS."
+license = "Apache-2.0"
+repository = "https://github.com/Chisanan232/glomeris"
+
+[[bin]]
+name = "glomeris"
+path = "src/main.rs"
+
+[dependencies]
