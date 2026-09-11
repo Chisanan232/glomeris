@@ -446,6 +446,20 @@ mod tests {
         }
     }
 
+    /// A backend that always fails specifically at the temp/log
+    /// directory-creation step `FilePersistence::record` performs before
+    /// writing — a distinct simulated cause from
+    /// `AlwaysFailingPersistence`, exercising the same "any persistence
+    /// call is wrapped" contract from a different failure origin.
+    struct AlwaysFailingDirCreationPersistence;
+    impl PersistenceBackend for AlwaysFailingDirCreationPersistence {
+        fn record(&self, _event: &PressureEvent) -> io::Result<()> {
+            Err(io::Error::other(
+                "simulated failure creating history log directory",
+            ))
+        }
+    }
+
     /// A collector reporting a fully clean, non-active resource on every
     /// call: empty process lists, no git repo, tool not live. Used where
     /// a test wants correlation to fill in cleanly so it can isolate a
@@ -754,6 +768,44 @@ mod tests {
         assert!(!self_state.exists());
         assert_eq!(report.actions_succeeded, 1);
         assert_eq!(report.total_bytes_freed, 256);
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("failed to persist emergency run record")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Same wrap point, a distinct simulated cause: a backend whose
+    /// `record()` fails specifically at the temp/log directory-creation
+    /// step must be handled identically — never fatal, never a panic.
+    #[test]
+    fn run_emergency_survives_history_directory_creation_failure_and_frees_self_owned_state() {
+        let dir = make_temp_dir("run-dircreate-failure");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 64]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+
+        let ctx = DiscoveryContext::new(home_dir);
+        let registry = DetectorRegistry::builtin();
+        let actions = ActionRegistry::builtin();
+        let fs_stat = FakeFsStat(FsUsage::new(100, 3));
+
+        let report = run_emergency(
+            &fs_stat,
+            &CleanCollector,
+            &registry,
+            &actions,
+            &AlwaysFailingDirCreationPersistence,
+            &ctx,
+            &self_state,
+            10,
+            Duration::from_secs(10),
+        );
+
+        assert!(!self_state.exists());
+        assert_eq!(report.actions_succeeded, 1);
         assert!(report
             .errors
             .iter()
