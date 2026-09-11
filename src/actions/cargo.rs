@@ -56,6 +56,7 @@ impl Action for CargoCleanTargetDir {
                 "--target-dir".to_string(),
                 target_dir.to_string_lossy().into_owned(),
             ],
+            scoped_path: Some(target_dir.clone()),
         }];
 
         let explain = format!(
@@ -196,12 +197,17 @@ mod tests {
         assert_eq!(plan.action, ID);
         assert_eq!(plan.steps.len(), 1);
         match &plan.steps[0] {
-            ActionStep::RunTool { tool, args } => {
+            ActionStep::RunTool {
+                tool,
+                args,
+                scoped_path,
+            } => {
                 assert_eq!(*tool, ToolBinary::Cargo);
                 assert_eq!(args[0], "clean");
                 assert!(args.contains(&"--manifest-path".to_string()));
                 assert!(args.contains(&"--target-dir".to_string()));
                 assert!(args.contains(&target_dir.to_string_lossy().into_owned()));
+                assert_eq!(scoped_path.as_deref(), Some(target_dir.as_path()));
             }
             other => panic!("expected RunTool, got {other:?}"),
         }
@@ -237,7 +243,7 @@ mod tests {
 
         let ev = evidence_for(target_dir.clone(), RK::CargoTargetDir);
         let plan = CargoCleanTargetDir.plan(&ev).expect("plan should succeed");
-        let ActionStep::RunTool { tool, args } = &plan.steps[0] else {
+        let ActionStep::RunTool { tool, args, .. } = &plan.steps[0] else {
             panic!("expected a RunTool step");
         };
 

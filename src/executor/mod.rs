@@ -298,8 +298,38 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
 
     for step in &plan.steps {
         match step {
-            ActionStep::RunTool { tool, args } => {
+            ActionStep::RunTool {
+                tool,
+                args,
+                scoped_path,
+            } => {
                 saw_run_tool = true;
+                if let Some(scoped) = scoped_path {
+                    let snapshot = match &identity_snapshot {
+                        Some(s) => s,
+                        None => {
+                            return failed_report(
+                                plan.action,
+                                plan.resource,
+                                format!(
+                                    "refusing to run {}: no verified resource identity snapshot \
+                                     available for scoped path {}",
+                                    tool.program(),
+                                    scoped.display()
+                                ),
+                                plan.expected_reclaimed_bytes,
+                            );
+                        }
+                    };
+                    if let Err(message) = verify_identity_unchanged(scoped, snapshot) {
+                        return failed_report(
+                            plan.action,
+                            plan.resource,
+                            message,
+                            plan.expected_reclaimed_bytes,
+                        );
+                    }
+                }
                 match Command::new(tool.program()).args(args).output() {
                     Ok(output) if output.status.success() => {}
                     Ok(output) => {
@@ -925,5 +955,117 @@ mod tests {
 
         fs::remove_dir_all(&root).ok();
         fs::remove_dir_all(&victim_root).ok();
+    }
+
+    /// Defect 2 regression test (HORO-951 adversarial review), using a REAL
+    /// `cargo clean` invocation against two real disposable temp Cargo
+    /// projects — a "victim" with a real built `target/`, and an "approver"
+    /// whose own `target/` is a symlink to the victim's.
+    ///
+    /// Note on scope: the reviewer's original hypothesis was that `cargo
+    /// clean --target-dir <symlink>` follows the link and wholesale-deletes
+    /// the linked directory's *contents*. Hand-verified against the
+    /// installed `cargo` (1.98.0) before writing this test: that specific
+    /// data-loss outcome does NOT reproduce — this cargo version removes
+    /// only the symlink directory entry itself (a real destructive action
+    /// against something outside the approved resource, just not the one
+    /// originally hypothesized) and leaves the victim's real files
+    /// untouched. The underlying defect is still real and still exactly
+    /// what the fix targets — spawning a path-scoped tool command against
+    /// an unverified path is unsafe regardless of which particular cargo
+    /// version's behavior makes it observable, and other tool
+    /// versions/invocations are not guaranteed to be as forgiving. This
+    /// test therefore proves the guard's actual, verifiable contract: given
+    /// a symlinked scoped path, `execute()` must refuse BEFORE spawning
+    /// `cargo` at all. That is directly observable here because real
+    /// `cargo clean` provably does mutate the symlink entry itself when
+    /// allowed to run (confirmed above) — so the symlink surviving
+    /// untouched is proof the tool was never spawned.
+    #[test]
+    fn execute_refuses_cargo_clean_when_scoped_target_dir_is_a_symlink_to_another_project() {
+        let victim_root = make_temp_dir("cargoguard-victim");
+        fs::write(
+            victim_root.join("Cargo.toml"),
+            "[package]\nname = \"victim-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(victim_root.join("src")).unwrap();
+        fs::write(victim_root.join("src/lib.rs"), "pub fn x() {}\n").unwrap();
+        let victim_target = victim_root.join("target");
+
+        let build_status = Command::new("cargo")
+            .arg("build")
+            .arg("--manifest-path")
+            .arg(victim_root.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&victim_target)
+            .status()
+            .expect("failed to spawn cargo build for victim fixture");
+        assert!(build_status.success(), "victim fixture build must succeed");
+        assert!(
+            victim_target.join("debug").exists(),
+            "victim fixture must have real build output before the test runs"
+        );
+
+        let approver_root = make_temp_dir("cargoguard-approver");
+        fs::write(
+            approver_root.join("Cargo.toml"),
+            "[package]\nname = \"approver-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(approver_root.join("src")).unwrap();
+        fs::write(approver_root.join("src/lib.rs"), "pub fn y() {}\n").unwrap();
+        let approver_target = approver_root.join("target");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim_target, &approver_target)
+            .expect("create approver target symlink pointing at victim");
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(approver_target.clone()),
+        );
+        let fingerprint = fingerprint_of(&approver_target);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::EvidenceIncomplete],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("Ask decision with matching consent must authorize");
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            victim_target.join("debug").exists(),
+            "victim's real build output must survive regardless"
+        );
+        assert!(
+            fs::symlink_metadata(&approver_target).is_ok(),
+            "the approver's target symlink must still exist — cargo must never have been \
+             spawned; a real `cargo clean --target-dir <symlink>` provably removes this \
+             symlink entry when allowed to run, so its survival proves the guard refused \
+             before spawning the tool"
+        );
+        match &report.outcome {
+            ExecutionOutcome::Failed(msg) => assert!(
+                msg.contains("symlink") || msg.contains("identity changed"),
+                "expected a symlink/identity refusal, got message: {msg}"
+            ),
+            other => panic!("expected ExecutionOutcome::Failed(...), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&victim_root).ok();
+        fs::remove_dir_all(&approver_root).ok();
     }
 }

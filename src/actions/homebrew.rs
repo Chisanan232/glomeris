@@ -38,6 +38,12 @@ impl Action for HomebrewCleanupCache {
             steps: vec![ActionStep::RunTool {
                 tool: ToolBinary::Brew,
                 args: vec!["cleanup".to_string(), "-s".to_string()],
+                // ACCEPTED design trade-off, not an oversight: `brew
+                // cleanup -s` takes no single path argument to scope. Its
+                // blast radius is bounded by Homebrew's own
+                // retention/cleanup logic, not by this executor's
+                // per-resource identity guard.
+                scoped_path: None,
             }],
             expected_reclaimed_bytes: ev.reclaimable_bytes.clone(),
             explain: "Run `brew cleanup -s` to let Homebrew prune its own cache under its own retention policy".to_string(),
@@ -102,9 +108,14 @@ mod tests {
         assert_eq!(plan.action, ID);
         assert_eq!(plan.steps.len(), 1);
         match &plan.steps[0] {
-            ActionStep::RunTool { tool, args } => {
+            ActionStep::RunTool {
+                tool,
+                args,
+                scoped_path,
+            } => {
                 assert_eq!(*tool, ToolBinary::Brew);
                 assert_eq!(args, &vec!["cleanup".to_string(), "-s".to_string()]);
+                assert_eq!(*scoped_path, None);
             }
             other => panic!("expected RunTool, got {other:?}"),
         }

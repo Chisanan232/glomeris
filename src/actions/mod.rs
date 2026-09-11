@@ -84,12 +84,18 @@ pub enum ActionStep {
     RunTool {
         tool: ToolBinary,
         args: Vec<String>,
+        /// The single path this command's blast radius is scoped to, if
+        /// any — the executor re-verifies this path's filesystem identity
+        /// immediately before spawning `tool` and refuses to run it if the
+        /// identity has changed (e.g. a symlink swap) since the earliest
+        /// point `execute()` could observe it. `None` means the tool is
+        /// genuinely unscoped by design (see e.g.
+        /// `HomebrewCleanupCache`) — not that no check was thought about.
+        scoped_path: Option<PathBuf>,
     },
     /// The executor re-canonicalizes this path immediately before use and
     /// never trusts it as-is — see [`crate::executor::execute`].
-    DeletePath {
-        path: PathBuf,
-    },
+    DeletePath { path: PathBuf },
 }
 
 /// CLOSED set of binaries a [`ActionStep::RunTool`] may invoke. No
