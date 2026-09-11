@@ -67,17 +67,20 @@ pub enum ActionError {
 /// pre-registered [`ActionId`] via `ActionRegistry::get` and handing it
 /// [`Evidence`] for a real [`Action::plan`] implementation to interpret.
 ///
-/// This is NOT a guarantee that intra-crate code cannot construct a value
-/// of this type directly — `ActionPlan`'s and `ActionStep`'s fields are
-/// `pub`, so any code within this crate has the same field-level
-/// visibility `Action::plan` implementations do. Nothing currently
-/// executes an externally-supplied or hand-built plan (every call to
-/// [`crate::executor::execute`]/[`crate::executor::dry_run`] in this
-/// codebase is fed a plan freshly returned by a real `Action::plan` call),
-/// so today's guarantee rests on there being no execution-facing API that
-/// accepts a caller-supplied plan — not on the fields being inaccessible.
-/// If that ever changes, revisit whether these fields should become
-/// private with constructor functions instead.
+/// This is NOT a guarantee that this type is only constructible inside
+/// this crate. `ActionPlan`'s, `ActionStep`'s, and `ToolBinary`'s fields
+/// are `pub` — not `pub(crate)` — and re-exported at `glomeris::actions`,
+/// so ANY external crate depending on `glomeris` as a library can
+/// hand-build a value of this type too, not just intra-crate code.
+/// Nothing currently executes an externally-supplied or hand-built plan
+/// (every call to [`crate::executor::execute`]/[`crate::executor::dry_run`]
+/// in this codebase is fed a plan freshly returned by a real
+/// `Action::plan` call), so today's guarantee rests entirely on there
+/// being no execution-facing API — anywhere, including for a downstream
+/// library consumer — that accepts a caller-supplied plan, not on the
+/// fields being inaccessible to anyone. If that ever changes, or if this
+/// crate is ever consumed as a library by untrusted code, revisit whether
+/// these fields should become private with constructor functions instead.
 #[derive(Debug, Clone)]
 pub struct ActionPlan {
     pub action: ActionId,
