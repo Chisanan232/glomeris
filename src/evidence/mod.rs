@@ -6,6 +6,7 @@
 //! judgments — it does not decide what to do about a resource; that is the
 //! policy layer's job (future ticket).
 
+pub mod correlate;
 pub mod model;
 pub mod probe;
 
