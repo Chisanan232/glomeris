@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use crate::evidence::{Completeness, Evidence, ResourceKind};
+use crate::evidence::{Completeness, Evidence, Regenerability, ResourceKind};
 
 use super::class::{PolicyClass, ReasonCode};
 use super::config::PolicyConfig;
@@ -91,14 +91,22 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         return decision(PolicyClass::Ask, active_use_reasons);
     }
 
-    // Regenerability branch lands in a follow-up commit. Until then,
-    // Complete evidence with no active-use signal falls through to a
-    // placeholder AutoSafe — transitional within this commit series, not
-    // final behavior.
-    decision(
-        PolicyClass::AutoSafe,
-        vec![ReasonCode::EvidenceFreshAndComplete],
-    )
+    // 7-8. Complete evidence, no active use: the per-instance regenerability
+    // judgment on the Evidence itself decides (not the kind's static
+    // default — a detector may have determined something more specific
+    // about this instance). NotRegenerable is never auto-deleted,
+    // regardless of how clean the rest of the evidence looks.
+    if ev.regenerability == Regenerability::NotRegenerable {
+        return decision(PolicyClass::Ask, vec![ReasonCode::RebuildCostHigh]);
+    }
+
+    let mut auto_safe_reasons = vec![ReasonCode::EvidenceFreshAndComplete];
+    if ev.regenerability == Regenerability::RegenerableByTool {
+        auto_safe_reasons.push(ReasonCode::RegenerableByTool);
+    }
+    auto_safe_reasons.push(ReasonCode::NoActiveUseObserved);
+
+    decision(PolicyClass::AutoSafe, auto_safe_reasons)
 }
 
 #[cfg(test)]
@@ -286,6 +294,40 @@ mod tests {
         assert!(!decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
         assert!(!decision.reasons.contains(&ReasonCode::GitWorktreeDirty));
         assert!(!decision.reasons.contains(&ReasonCode::OwningToolLive));
+    }
+
+    #[test]
+    fn clean_complete_evidence_regenerable_by_rebuild_is_auto_safe() {
+        let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::EvidenceFreshAndComplete));
+        assert!(decision.reasons.contains(&ReasonCode::NoActiveUseObserved));
+        assert!(!decision.reasons.contains(&ReasonCode::RegenerableByTool));
+    }
+
+    #[test]
+    fn clean_complete_evidence_regenerable_by_tool_is_auto_safe_with_reason() {
+        let ev = complete_evidence(ResourceKind::CargoRegistryCache, NOW);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+        assert!(decision.reasons.contains(&ReasonCode::RegenerableByTool));
+    }
+
+    #[test]
+    fn not_regenerable_is_ask_rebuild_cost_high_even_when_clean() {
+        // Per-instance regenerability on Evidence (not the kind's static
+        // default) is what classify consults, so a detector that
+        // determines a specific instance is NotRegenerable is respected
+        // even though clean/complete evidence would otherwise be
+        // AutoSafe.
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.regenerability = Regenerability::NotRegenerable;
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::RebuildCostHigh]);
     }
 
     #[test]
