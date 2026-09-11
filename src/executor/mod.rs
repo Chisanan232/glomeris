@@ -455,17 +455,28 @@ fn snapshot_identity(path: &Path) -> Result<IdentitySnapshot, String> {
     })
 }
 
-/// Re-stats `path` immediately before a destructive mutation (no I/O may
-/// happen between this call and the actual mutation syscall) and refuses
+/// Re-stats `path` immediately before a destructive mutation and refuses
 /// unless it is bit-for-bit the same filesystem object `snapshot` was
 /// taken from: same (dev, ino), and NOT a symlink — unconditionally,
 /// regardless of what the original snapshot looked like, since a
 /// destructive action must never operate through a symlink no matter when
 /// it appeared. This closes the multi-second correlation-pass TOCTOU
-/// window down to the true, irreducible gap between this stat and the
-/// mutation syscall — an inherent OS-level limitation not fixable in
-/// userspace without holding an open directory file descriptor across the
-/// whole operation, and accepted as residual risk.
+/// window down to a residual gap whose size depends on the caller:
+///
+/// - For `DeletePath`, no further I/O happens between this call and the
+///   `fs::remove_dir_all`/`remove_file` syscall — the residual window is
+///   the true, irreducible gap between one stat and one syscall, an
+///   inherent OS-level limitation not fixable in userspace without holding
+///   an open directory file descriptor across the whole operation.
+/// - For a `RunTool` step whose `scoped_path` this guards, the residual
+///   window is materially wider: stat → `Command::spawn` (fork/exec) →
+///   the invoked tool's OWN re-resolution of the same path (e.g. `cargo`
+///   re-opening `--target-dir` itself). This function cannot close that
+///   second window — it only guarantees the path's identity was correct
+///   at the moment the tool was about to be spawned, not that the tool's
+///   own subsequent access re-validates it. Both windows are accepted
+///   residual risk; only the multi-second correlation-pass window (the
+///   actual TOCTOU defect this function fixes) is closed by design.
 #[cfg(unix)]
 fn verify_identity_unchanged(path: &Path, snapshot: &IdentitySnapshot) -> Result<(), String> {
     let current = snapshot_identity(path)?;
