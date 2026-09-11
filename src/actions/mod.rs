@@ -103,8 +103,9 @@ pub enum ActionStep {
         /// `HomebrewCleanupCache`) — not that no check was thought about.
         scoped_path: Option<PathBuf>,
     },
-    /// The executor re-canonicalizes this path immediately before use and
-    /// never trusts it as-is — see [`crate::executor::execute`].
+    /// The executor re-verifies this path's filesystem identity
+    /// immediately before use and never trusts it as-is — see
+    /// [`crate::executor::execute`].
     DeletePath { path: PathBuf },
 }
 

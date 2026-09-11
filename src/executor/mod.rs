@@ -289,7 +289,7 @@ fn failed_report(
 ///
 /// `identity_snapshot` is the early, pre-slow-I/O filesystem identity
 /// captured by `execute()` before revalidation ran (see its step 0
-/// comment). `DeletePath` re-verifies against it immediately before
+/// comment). Every mutating step re-verifies against it immediately before
 /// mutating — see [`verify_identity_unchanged`].
 ///
 /// Structural constraint (see PR "Known limitations"): a plan with more
