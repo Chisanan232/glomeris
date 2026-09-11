@@ -4,7 +4,20 @@
 //! the crate already collected. [`LlmResourceView`] is an explicit,
 //! bounded projection of one [`Evidence`] record, safe to serialize and
 //! hand to a model. [`LlmPlan`]/[`LlmPlanItem`] are the model-facing
-//! response shape.
+//! response shape, and [`plan_with_llm`] is the entry point that calls a
+//! provider and validates its response.
+//!
+//! **What this module is NOT, and never will be**: an authorization
+//! mechanism. `plan_with_llm`'s output is a ranking suggestion only — it
+//! never calls [`crate::policy::classify`]/`authorize`, and it must not.
+//! Every surviving `(ResourceId, ActionId, priority)` tuple still has to
+//! go through the exact same policy classification any other candidate
+//! resource would, in the caller, before anything executes. Keeping
+//! "recommend" (this module) and "decide" (`crate::policy`) in separate
+//! modules with no call edge from this one to that one is what makes it
+//! structurally impossible for a compromised/hallucinating LLM response
+//! to bypass policy — see `llm_plan_item_never_bypasses_policy` in this
+//! module's tests for a concrete demonstration.
 //!
 //! **Why only two `Deserialize` types exist here (and in the whole
 //! crate)**: [`LlmPlan`]/[`LlmPlanItem`] are the sole external-input
@@ -567,6 +580,48 @@ mod tests {
         assert!(result.validated_items.is_empty());
         assert_eq!(result.dropped_unknown_resource, 1);
         assert_eq!(result.dropped_unknown_action, 0);
+    }
+
+    #[test]
+    fn llm_plan_item_never_bypasses_policy() {
+        // Construct evidence for a genuinely Protected resource (SSH key
+        // material — mirrors policy::engine's own
+        // protected_path_wins_even_with_stale_evidence test).
+        let mut ev = evidence_for(ResourceKind::CargoTargetDir, "/Users/x/.ssh/id_ed25519");
+        ev.resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/Users/x/.ssh/id_ed25519")),
+        );
+
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": "looks stale"}}]}}"#
+        );
+        let provider = FakeProvider { response: Ok(text) };
+        let evidence_set = vec![ev.clone()];
+        let actions = ActionRegistry::builtin();
+
+        // The item survives plan_with_llm's validation: resource_id and
+        // action_id are both real.
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        assert!(result.provider_error.is_none());
+        assert_eq!(result.validated_items.len(), 1);
+
+        // But policy — which the caller is REQUIRED to re-run on every
+        // surviving item — still classifies this resource as Protected,
+        // regardless of what the LLM said. This is exactly why
+        // plan_with_llm never calls policy itself: the enforcement lives
+        // entirely at the policy layer.
+        let decision = crate::policy::classify(
+            &ev,
+            &crate::policy::PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(decision.class, crate::policy::PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![crate::policy::ReasonCode::ProtectedCredentialMaterial]
+        );
     }
 
     #[test]
