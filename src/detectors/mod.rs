@@ -6,6 +6,7 @@
 //! `scanner::walker`). A detector's tool being absent from the machine is
 //! normal, expected state, never an error.
 
+mod homebrew;
 mod xcode;
 
 use std::fs;
