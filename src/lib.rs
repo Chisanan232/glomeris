@@ -5,6 +5,7 @@
 //! in `main.rs` stays a thin CLI shim.
 
 pub mod actions;
+pub mod cli;
 pub mod detectors;
 pub mod emergency;
 pub mod evidence;
