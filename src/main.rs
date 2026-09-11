@@ -6,6 +6,7 @@ fn main() {
 
     match args.first().map(String::as_str) {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
+        Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             print_usage();
@@ -18,7 +19,7 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("usage: glomeris daemon <install|uninstall|status|run>");
+    eprintln!("usage: glomeris <daemon <install|uninstall|status|run>|scan>");
 }
 
 fn run_daemon_command(subcommand: Option<&str>) {
