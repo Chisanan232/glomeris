@@ -10,6 +10,7 @@ fn main() {
         Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(&args[1..]),
         Some("explain") => run_explain_command(&args[1..]),
+        Some("clean") => run_clean_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -225,6 +226,57 @@ fn run_explain_command(args: &[String]) {
         print_json_or_exit(&report);
     } else {
         glomeris::cli::print_explain_report(&report);
+    }
+}
+
+/// `glomeris clean --dry-run [--target <resource_id_or_path>]` — renders
+/// what would be cleaned, without executing anything (HORO-955). There is
+/// no non-dry-run execution path on this subcommand — see the PR's "Known
+/// limitations": real destructive execution stays `free --target`'s job.
+fn run_clean_command(args: &[String]) {
+    let mut dry_run = false;
+    let mut target: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            "--target" => {
+                target = args.get(i + 1).map(String::as_str);
+                if target.is_none() {
+                    eprintln!("glomeris clean: --target requires a value");
+                    std::process::exit(2);
+                }
+                i += 2;
+            }
+            other => {
+                eprintln!("glomeris clean: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    if !dry_run {
+        eprintln!(
+            "glomeris clean: --dry-run is required; real destructive cleanup is not \
+             implemented by this subcommand (use `glomeris free --target <N%|NB>` instead)"
+        );
+        std::process::exit(2);
+    }
+
+    use glomeris::actions::ActionRegistry;
+    let candidates = discover_and_classify_now();
+    let actions = ActionRegistry::builtin();
+
+    match glomeris::cli::build_clean_dry_run_report(&candidates, &actions, target) {
+        Ok(report) => glomeris::cli::print_clean_dry_run_report(&report),
+        Err(e) => {
+            eprintln!("glomeris clean: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
