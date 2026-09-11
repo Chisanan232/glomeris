@@ -9,6 +9,7 @@
 //! to reimplement correlation instead of reusing it.
 
 mod open_files;
+mod process;
 mod timeout;
 
 use std::time::Duration;
@@ -18,6 +19,7 @@ use super::probe::ProbeOutcome;
 
 pub use super::model::{GitState, ProcessRef};
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
+pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
 
 /// Time budget for one [`EvidenceCollector::collect`] call. Applied *per*
 /// underlying subprocess call (e.g. each of the up-to-four lsof/git/pgrep
