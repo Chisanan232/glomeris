@@ -21,7 +21,7 @@
 
 use serde::Deserialize;
 
-use crate::evidence::model::{Completeness, Evidence, Regenerability};
+use crate::evidence::model::{ActionId, Completeness, Evidence, Regenerability, ResourceId};
 
 use super::ActionRegistry;
 
@@ -173,6 +173,122 @@ fn extract_json_object_span(text: &str) -> Option<&str> {
     Some(&text[start..=end])
 }
 
+/// Result of one [`plan_with_llm`] call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmPlanResult {
+    pub validated_items: Vec<(ResourceId, ActionId, Option<u32>)>,
+    pub dropped_unknown_resource: u32,
+    pub dropped_unknown_action: u32,
+    /// `Some(..)` if the provider call itself failed, or the response
+    /// could not be parsed at all — in either case `validated_items` is
+    /// empty, and this is NOT an error return: callers fall back to
+    /// rule-only ranking uniformly, whether the provider was never
+    /// configured, the network call failed, or the response was
+    /// malformed.
+    pub provider_error: Option<LlmError>,
+}
+
+/// Calls `provider`, defensively parses its response, and validates every
+/// resulting item against the real `evidence_set` and real `actions`
+/// registry. Unknown `resource_id`/`action_id` values drop just that
+/// item (counted below), never the whole plan.
+///
+/// **This function's output is a RANKING SUGGESTION ONLY, never
+/// authorization.** It does not run policy, and must not: the caller
+/// (not this function) is REQUIRED to re-run
+/// [`crate::policy::engine::classify`] (or an equivalent authorize step)
+/// on every surviving item's fresh evidence before executing anything.
+/// A follow-up commit's `llm_plan_item_never_bypasses_policy` test
+/// demonstrates this concretely.
+///
+/// No integration wiring into any existing rule-only ranking loop is
+/// included here (deliberately out of scope per HORO-954) — a future
+/// ticket may call this from that loop as an optional enhancement,
+/// falling back to rule-only ranking whenever `provider_error.is_some()`.
+pub fn plan_with_llm(
+    provider: &dyn LlmProvider,
+    evidence_set: &[Evidence],
+    actions: &ActionRegistry,
+) -> LlmPlanResult {
+    let views: Vec<LlmResourceView> = evidence_set
+        .iter()
+        .map(|ev| LlmResourceView::from_evidence(ev, actions))
+        .collect();
+
+    let user_prompt = match serde_json::to_string(&views) {
+        Ok(json) => json,
+        Err(e) => {
+            return LlmPlanResult {
+                validated_items: Vec::new(),
+                dropped_unknown_resource: 0,
+                dropped_unknown_action: 0,
+                provider_error: Some(LlmError::InvalidResponse(format!(
+                    "failed to serialize evidence views: {e}"
+                ))),
+            };
+        }
+    };
+
+    let raw = match provider.complete(SYSTEM_PROMPT, &user_prompt) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return LlmPlanResult {
+                validated_items: Vec::new(),
+                dropped_unknown_resource: 0,
+                dropped_unknown_action: 0,
+                provider_error: Some(e),
+            };
+        }
+    };
+
+    let plan = match extract_plan(&raw) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return LlmPlanResult {
+                validated_items: Vec::new(),
+                dropped_unknown_resource: 0,
+                dropped_unknown_action: 0,
+                provider_error: Some(e),
+            };
+        }
+    };
+
+    let mut validated_items = Vec::new();
+    let mut dropped_unknown_resource = 0u32;
+    let mut dropped_unknown_action = 0u32;
+
+    for item in plan.items {
+        let Some(resource) = evidence_set
+            .iter()
+            .find(|ev| ev.resource.to_string() == item.resource_id)
+            .map(|ev| ev.resource.clone())
+        else {
+            dropped_unknown_resource += 1;
+            continue;
+        };
+
+        let Some(action_id) = actions.get(&item.action_id).map(|action| action.id()) else {
+            dropped_unknown_action += 1;
+            continue;
+        };
+
+        validated_items.push((resource, action_id, item.priority));
+    }
+
+    LlmPlanResult {
+        validated_items,
+        dropped_unknown_resource,
+        dropped_unknown_action,
+        provider_error: None,
+    }
+}
+
+const SYSTEM_PROMPT: &str = "You are a storage cleanup ranking assistant. \
+You will receive a JSON array of resource views. Respond with ONLY a JSON \
+object of the shape {\"items\": [{\"resource_id\": string, \"action_id\": \
+string, \"priority\": number, \"reason\": string}]}, choosing resource_id \
+and action_id only from the values you were given.";
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -185,6 +301,16 @@ mod tests {
     };
 
     use super::*;
+
+    struct FakeProvider {
+        response: Result<String, LlmError>,
+    }
+
+    impl LlmProvider for FakeProvider {
+        fn complete(&self, _system_prompt: &str, _user_prompt: &str) -> Result<String, LlmError> {
+            self.response.clone()
+        }
+    }
 
     fn evidence_for(kind: ResourceKind, path: &str) -> Evidence {
         Evidence {
@@ -295,8 +421,96 @@ mod tests {
     }
 
     #[test]
-    fn malformed_json_yields_invalid_response_error() {
-        let err = extract_plan("this is not json at all").unwrap_err();
-        assert!(matches!(err, LlmError::InvalidResponse(_)));
+    fn malformed_json_yields_invalid_response_and_empty_items() {
+        let provider = FakeProvider {
+            response: Ok("this is not json at all".to_string()),
+        };
+        let evidence_set = vec![evidence_for(ResourceKind::CargoTargetDir, "/tmp/x")];
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(matches!(
+            result.provider_error,
+            Some(LlmError::InvalidResponse(_))
+        ));
+        assert!(result.validated_items.is_empty());
+        assert_eq!(result.dropped_unknown_resource, 0);
+        assert_eq!(result.dropped_unknown_action, 0);
+    }
+
+    #[test]
+    fn hallucinated_action_id_is_dropped_and_counted() {
+        let ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "docker.nuke.everything", "priority": 1, "reason": null}}]}}"#
+        );
+        let provider = FakeProvider { response: Ok(text) };
+        let evidence_set = vec![ev];
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(result.provider_error.is_none());
+        assert!(result.validated_items.is_empty());
+        assert_eq!(result.dropped_unknown_action, 1);
+        assert_eq!(result.dropped_unknown_resource, 0);
+    }
+
+    #[test]
+    fn hallucinated_resource_id_is_dropped_and_counted() {
+        let ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
+        let text = r#"{"items": [{"resource_id": "cargo_target_dir:/nonexistent", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": null}]}"#;
+        let provider = FakeProvider {
+            response: Ok(text.to_string()),
+        };
+        let evidence_set = vec![ev];
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(result.provider_error.is_none());
+        assert!(result.validated_items.is_empty());
+        assert_eq!(result.dropped_unknown_resource, 1);
+        assert_eq!(result.dropped_unknown_action, 0);
+    }
+
+    #[test]
+    fn valid_item_survives_validation() {
+        let ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "cargo.clean.target_dir", "priority": 5, "reason": "stale build artifacts"}}]}}"#
+        );
+        let provider = FakeProvider { response: Ok(text) };
+        let evidence_set = vec![ev.clone()];
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(result.provider_error.is_none());
+        assert_eq!(result.validated_items.len(), 1);
+        let (resource, action_id, priority) = &result.validated_items[0];
+        assert_eq!(*resource, ev.resource);
+        assert_eq!(action_id.0, "cargo.clean.target_dir");
+        assert_eq!(*priority, Some(5));
+    }
+
+    #[test]
+    fn provider_network_error_yields_empty_items_and_error_set() {
+        let provider = FakeProvider {
+            response: Err(LlmError::NetworkError("connection refused".to_string())),
+        };
+        let evidence_set = vec![evidence_for(ResourceKind::CargoTargetDir, "/tmp/x")];
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(matches!(
+            result.provider_error,
+            Some(LlmError::NetworkError(_))
+        ));
+        assert!(result.validated_items.is_empty());
     }
 }
