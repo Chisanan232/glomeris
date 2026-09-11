@@ -136,6 +136,74 @@ pub enum LlmError {
     InvalidResponse(String),
 }
 
+/// Real provider: any OpenAI-compatible `/chat/completions` endpoint
+/// (OpenAI itself, OpenRouter, a self-hosted gateway, ...). BYOK: the
+/// caller (CLI layer) is responsible for reading `api_key` from an
+/// environment variable and never logging/printing it — this type only
+/// holds it long enough to build a request. Deliberately does not derive
+/// `Debug`: a derived `Debug` would print `api_key` verbatim, which would
+/// silently defeat the "never logged" guarantee the moment anyone
+/// `{:?}`-logs a provider value. If a `Debug` impl is ever needed, it
+/// must be hand-written to redact this field.
+pub struct OpenAiCompatibleProvider {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl LlmProvider for OpenAiCompatibleProvider {
+    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
+        let base = self.base_url.trim_end_matches('/');
+        let url = format!("{base}/chat/completions");
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": [
+                { "role": "system", "content": system_prompt },
+                { "role": "user", "content": user_prompt },
+            ],
+        });
+
+        let auth_header = format!("Bearer {}", self.api_key);
+
+        let response = ureq::post(&url)
+            .header("Authorization", &auth_header)
+            .header("Content-Type", "application/json")
+            .send_json(&body)
+            .map_err(|e| {
+                // `ureq::Error`'s `Display` never includes request headers
+                // (it reports transport/status information only), so this
+                // cannot leak `self.api_key` — but we deliberately format
+                // only the error itself, never anything derived from
+                // `auth_header`, to keep that invariant obviously true by
+                // construction rather than by trusting ureq's internals.
+                LlmError::NetworkError(e.to_string())
+            })?;
+
+        let text = response
+            .into_body()
+            .read_to_string()
+            .map_err(|e| LlmError::InvalidResponse(format!("failed to read response body: {e}")))?;
+
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| LlmError::InvalidResponse(format!("response was not JSON: {e}")))?;
+
+        let content = value
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(|content| content.as_str())
+            .ok_or_else(|| {
+                LlmError::InvalidResponse(
+                    "response JSON missing choices[0].message.content".to_string(),
+                )
+            })?;
+
+        Ok(content.to_string())
+    }
+}
+
 /// Finds the first plausible JSON object span in `text` and attempts to
 /// parse it as an [`LlmPlan`]. Handles two shapes defensively: a
 /// ```` ```json ... ``` ```` (or bare ` ``` `) fenced block, and a raw
