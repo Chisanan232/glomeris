@@ -1,0 +1,262 @@
+//! `cargo.clean.target_dir`: run `cargo clean` against the manifest
+//! sitting next to a detected `target/` directory.
+//!
+//! Deliberately passes an explicit `--target-dir` pointing at the exact
+//! resource path being cleaned, rather than relying on `cargo clean`'s
+//! ambient config resolution (`~/.cargo/config.toml`'s `[build]
+//! target-dir`, a workspace-level override, or `CARGO_TARGET_DIR`). An
+//! action that knows precisely which directory it intends to delete must
+//! not let ambient environment/config decide that for it — deferring to
+//! ambient config here could clean an entirely different (possibly
+//! shared, possibly much larger) target directory than the one the
+//! evidence and policy layers actually reasoned about.
+
+use std::path::{Path, PathBuf};
+
+use crate::evidence::model::{Evidence, EvidenceField, Recoverability, ResourceKind};
+use crate::evidence::model::{ResourceId, ResourceLocator};
+
+use super::{Action, ActionError, ActionId, ActionPlan, ActionStep, ToolBinary};
+
+pub const ID: ActionId = ActionId("cargo.clean.target_dir");
+
+pub struct CargoCleanTargetDir;
+
+impl Action for CargoCleanTargetDir {
+    fn id(&self) -> ActionId {
+        ID
+    }
+
+    fn applies_to(&self) -> &'static [ResourceKind] {
+        &[ResourceKind::CargoTargetDir]
+    }
+
+    fn required_evidence(&self) -> &'static [EvidenceField] {
+        &[EvidenceField::ReclaimableBytes]
+    }
+
+    fn recoverability(&self) -> Recoverability {
+        Recoverability::RegenerableByRebuild
+    }
+
+    fn plan(&self, ev: &Evidence) -> Result<ActionPlan, ActionError> {
+        if ev.resource.kind != ResourceKind::CargoTargetDir {
+            return Err(ActionError::ResourceMismatch);
+        }
+
+        let target_dir = target_dir_path(&ev.resource)?;
+        let manifest_path = manifest_path_for(target_dir)?;
+
+        let steps = vec![ActionStep::RunTool {
+            tool: ToolBinary::Cargo,
+            args: vec![
+                "clean".to_string(),
+                "--manifest-path".to_string(),
+                manifest_path.to_string_lossy().into_owned(),
+                "--target-dir".to_string(),
+                target_dir.to_string_lossy().into_owned(),
+            ],
+            scoped_path: Some(target_dir.clone()),
+        }];
+
+        let explain = format!(
+            "Run `cargo clean --manifest-path {} --target-dir {}` to remove {}",
+            manifest_path.display(),
+            target_dir.display(),
+            target_dir.display()
+        );
+
+        Ok(ActionPlan {
+            action: ID,
+            resource: ev.resource.clone(),
+            steps,
+            expected_reclaimed_bytes: ev.reclaimable_bytes.clone(),
+            explain,
+        })
+    }
+}
+
+fn target_dir_path(resource: &ResourceId) -> Result<&PathBuf, ActionError> {
+    match &resource.locator {
+        ResourceLocator::Path(p) => Ok(p),
+        ResourceLocator::Tool { .. } => Err(ActionError::Unsupported(
+            "cargo target dir resource must be a Path locator".to_string(),
+        )),
+    }
+}
+
+/// The manifest is expected to sit in the target dir's parent directory
+/// (`<project>/Cargo.toml` next to `<project>/target`). If it's not
+/// there, this action does not know how to clean the resource.
+fn manifest_path_for(target_dir: &Path) -> Result<PathBuf, ActionError> {
+    let parent = target_dir.parent().ok_or_else(|| {
+        ActionError::Unsupported(format!(
+            "target dir {} has no parent directory",
+            target_dir.display()
+        ))
+    })?;
+    let manifest_path = parent.join("Cargo.toml");
+    if !manifest_path.is_file() {
+        return Err(ActionError::Unsupported(format!(
+            "no Cargo.toml found at {}",
+            manifest_path.display()
+        )));
+    }
+    Ok(manifest_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::detectors::DetectorId;
+    use crate::evidence::model::{
+        NativeCleanup, ResourceFingerprint, ResourceKind as RK, ResourceLocator as RL,
+    };
+    use crate::evidence::probe::{ProbeOutcome, ProbeReason};
+    use std::fs;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn evidence_for(resource_path: PathBuf, kind: RK) -> Evidence {
+        Evidence {
+            resource: ResourceId::new(kind, RL::Path(resource_path)),
+            fingerprint: ResourceFingerprint {
+                dev_ino: None,
+                mtime: None,
+                tool_revision: None,
+            },
+            detector: DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(4096),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: kind.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Unsupported,
+            open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at: SystemTime::UNIX_EPOCH,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resource_mismatch_is_rejected() {
+        let ev = evidence_for(PathBuf::from("/tmp/x/target"), RK::NodeModules);
+        assert_eq!(
+            CargoCleanTargetDir.plan(&ev).unwrap_err(),
+            ActionError::ResourceMismatch
+        );
+    }
+
+    #[test]
+    fn missing_cargo_toml_is_unsupported() {
+        let root = make_temp_dir("cargo-plan-no-manifest");
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        let ev = evidence_for(target_dir, RK::CargoTargetDir);
+
+        match CargoCleanTargetDir.plan(&ev) {
+            Err(ActionError::Unsupported(_)) => {}
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn plan_renders_expected_run_tool_step() {
+        let root = make_temp_dir("cargo-plan-ok");
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+        let ev = evidence_for(target_dir.clone(), RK::CargoTargetDir);
+
+        let plan = CargoCleanTargetDir.plan(&ev).expect("plan should succeed");
+        assert_eq!(plan.action, ID);
+        assert_eq!(plan.steps.len(), 1);
+        match &plan.steps[0] {
+            ActionStep::RunTool {
+                tool,
+                args,
+                scoped_path,
+            } => {
+                assert_eq!(*tool, ToolBinary::Cargo);
+                assert_eq!(args[0], "clean");
+                assert!(args.contains(&"--manifest-path".to_string()));
+                assert!(args.contains(&"--target-dir".to_string()));
+                assert!(args.contains(&target_dir.to_string_lossy().into_owned()));
+                assert_eq!(scoped_path.as_deref(), Some(target_dir.as_path()));
+            }
+            other => panic!("expected RunTool, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Real-execution test against a disposable tempdir fixture, per
+    /// HORO-951's test requirements. This is safe: `root` is a
+    /// process-unique directory under `std::env::temp_dir()`, never a
+    /// real project. Includes a `CACHEDIR.TAG` marker because `cargo
+    /// clean --target-dir <dir>` refuses to clean a directory that
+    /// doesn't look like a real cargo target dir (a real safety feature
+    /// of cargo itself, discovered while building this fixture).
+    #[test]
+    fn plan_step_actually_removes_target_dir_when_run() {
+        let root = make_temp_dir("cargo-real-exec");
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        fs::write(
+            target_dir.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let ev = evidence_for(target_dir.clone(), RK::CargoTargetDir);
+        let plan = CargoCleanTargetDir.plan(&ev).expect("plan should succeed");
+        let ActionStep::RunTool { tool, args, .. } = &plan.steps[0] else {
+            panic!("expected a RunTool step");
+        };
+
+        let status = Command::new(tool.program())
+            .args(args)
+            .status()
+            .expect("failed to spawn cargo clean");
+        assert!(status.success(), "cargo clean exited with {status}");
+        assert!(
+            !target_dir.exists(),
+            "expected target dir to be removed by cargo clean"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+}
