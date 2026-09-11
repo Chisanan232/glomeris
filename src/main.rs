@@ -7,7 +7,10 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
-        Some("detect") => run_detect_command(),
+        Some("status") => run_status_command(&args[1..]),
+        Some("detect") => run_detect_command(&args[1..]),
+        Some("explain") => run_explain_command(&args[1..]),
+        Some("clean") => run_clean_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -23,8 +26,98 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: glomeris <daemon <install|uninstall|status|run>|scan|detect|emergency|free --target <N%|NB>>"
+        "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
+         detect [--json]|explain <resource_id_or_path> [--json]|\
+         clean --dry-run [--target <resource_id_or_path>]|emergency|\
+         free --target <N%|NB>>"
     );
+}
+
+/// Parses a flat argument list into a positional-args list and a set of
+/// bare `--flag` switches (no `--flag value` pairs handled here — callers
+/// that need a valued flag, e.g. `--target`, parse that one explicitly
+/// before calling this on what remains). Never panics on malformed input;
+/// every unrecognized `--...` token is treated as a flag, and every other
+/// token is positional.
+fn split_flags<'a>(args: &'a [String], known_flags: &[&str]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut positionals = Vec::new();
+    let mut flags = Vec::new();
+    for arg in args {
+        if known_flags.contains(&arg.as_str()) {
+            flags.push(arg.as_str());
+        } else {
+            positionals.push(arg.as_str());
+        }
+    }
+    (positionals, flags)
+}
+
+fn print_json_or_exit(value: &impl serde::Serialize) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => println!("{json}"),
+        Err(e) => {
+            eprintln!("glomeris: failed to render JSON report: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Builds the standard evidence-correlation-classification pipeline every
+/// `detect`/`explain`/`clean` subcommand uses: real detectors, the real
+/// `DefaultEvidenceCollector`, and the default policy config, evaluated at
+/// the current wall-clock time.
+fn discover_and_classify_now() -> Vec<(
+    glomeris::evidence::Evidence,
+    glomeris::policy::PolicyDecision,
+)> {
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::policy::PolicyConfig;
+    use std::time::SystemTime;
+
+    let ctx = DiscoveryContext::new(home_dir());
+    let registry = DetectorRegistry::builtin();
+    let collector = DefaultEvidenceCollector::default();
+    let cfg = PolicyConfig::default();
+    let now = SystemTime::now();
+
+    glomeris::cli::discover_and_classify(&registry, &ctx, &collector, &cfg, now)
+}
+
+/// `glomeris status` — current disk pressure state (HORO-955).
+#[cfg(target_os = "macos")]
+fn run_status_command(args: &[String]) {
+    use glomeris::monitor::{FsStat, ThresholdConfig};
+    use glomeris::platform::macos::MacosFsStat;
+
+    let (_positionals, flags) = split_flags(args, &["--json"]);
+    let fs_stat = MacosFsStat;
+    let usage = match fs_stat.stat(std::path::Path::new("/")) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("glomeris status: failed to read filesystem usage: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let report = glomeris::cli::build_status_report(&usage, &ThresholdConfig::default());
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_status_report(&report);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_status_command(_args: &[String]) {
+    eprintln!("glomeris status: only supported on macOS");
+    std::process::exit(1);
 }
 
 /// `glomeris emergency` — the degraded-path recovery command (HORO-953).
@@ -76,27 +169,115 @@ fn run_emergency_command() {
     std::process::exit(1);
 }
 
-fn run_detect_command() {
+/// `glomeris detect` — per-detector discovery status, plus (HORO-955) a
+/// per-candidate report line showing reclaimable bytes and policy
+/// classification.
+fn run_detect_command(args: &[String]) {
     use glomeris::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 
-    let home_dir = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let (_positionals, flags) = split_flags(args, &["--json"]);
 
-    let ctx = DiscoveryContext::new(home_dir);
+    let ctx = DiscoveryContext::new(home_dir());
     let registry = DetectorRegistry::builtin();
 
-    for (id, status) in registry.discover_all(&ctx) {
-        match status {
-            DetectorStatus::Found(evidence) => {
-                println!("{:<24} found ({} evidence)", id.0, evidence.len());
+    if !flags.contains(&"--json") {
+        for (id, status) in registry.discover_all(&ctx) {
+            match status {
+                DetectorStatus::Found(evidence) => {
+                    println!("{:<24} found ({} evidence)", id.0, evidence.len());
+                }
+                DetectorStatus::ToolAbsent => {
+                    println!("{:<24} tool_absent", id.0);
+                }
+                DetectorStatus::Failed(reason) => {
+                    println!("{:<24} failed: {reason}", id.0);
+                }
             }
-            DetectorStatus::ToolAbsent => {
-                println!("{:<24} tool_absent", id.0);
+        }
+    }
+
+    let candidates = discover_and_classify_now();
+    let report = glomeris::cli::build_detect_report(&candidates);
+
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_detect_report(&report);
+    }
+}
+
+/// `glomeris explain <resource_id_or_path>` — full evidence-and-policy
+/// picture for exactly one resource (HORO-955).
+fn run_explain_command(args: &[String]) {
+    let (positionals, flags) = split_flags(args, &["--json"]);
+
+    let Some(query) = positionals.first() else {
+        eprintln!("glomeris explain: a resource id or path argument is required");
+        print_usage();
+        std::process::exit(2);
+    };
+
+    let candidates = discover_and_classify_now();
+    let Some((ev, decision)) = glomeris::cli::find_candidate(query, &candidates) else {
+        eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
+        std::process::exit(1);
+    };
+
+    let report = glomeris::cli::build_explain_report(ev, decision);
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_explain_report(&report);
+    }
+}
+
+/// `glomeris clean --dry-run [--target <resource_id_or_path>]` — renders
+/// what would be cleaned, without executing anything (HORO-955). There is
+/// no non-dry-run execution path on this subcommand — see the PR's "Known
+/// limitations": real destructive execution stays `free --target`'s job.
+fn run_clean_command(args: &[String]) {
+    let mut dry_run = false;
+    let mut target: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
             }
-            DetectorStatus::Failed(reason) => {
-                println!("{:<24} failed: {reason}", id.0);
+            "--target" => {
+                target = args.get(i + 1).map(String::as_str);
+                if target.is_none() {
+                    eprintln!("glomeris clean: --target requires a value");
+                    std::process::exit(2);
+                }
+                i += 2;
             }
+            other => {
+                eprintln!("glomeris clean: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    if !dry_run {
+        eprintln!(
+            "glomeris clean: --dry-run is required; real destructive cleanup is not \
+             implemented by this subcommand (use `glomeris free --target <N%|NB>` instead)"
+        );
+        std::process::exit(2);
+    }
+
+    use glomeris::actions::ActionRegistry;
+    let candidates = discover_and_classify_now();
+    let actions = ActionRegistry::builtin();
+
+    match glomeris::cli::build_clean_dry_run_report(&candidates, &actions, target) {
+        Ok(report) => glomeris::cli::print_clean_dry_run_report(&report),
+        Err(e) => {
+            eprintln!("glomeris clean: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -136,6 +317,8 @@ fn run_free_command(args: &[String]) {
 }
 
 fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryReport) {
+    use glomeris::reporting::human_bytes;
+
     println!("stop reason:            {:?}", report.stop_reason);
     println!("iterations run:         {}", report.iterations_run);
     println!("actions executed:       {}", report.actions_executed);
@@ -143,12 +326,26 @@ fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryRep
         "actions declined/skipped: {}",
         report.actions_declined_or_skipped
     );
-    println!("bytes freed:            {}", report.total_bytes_freed);
+    // `total_bytes_freed` is a MEASURED total (see
+    // `RecoveryReport::total_bytes_freed`'s own doc comment: "Sum of
+    // ACTUAL (not expected) reclaimed bytes"), never an estimate — labeled
+    // explicitly as such so this never reads as the same kind of number as
+    // a detector's `reclaimable_bytes` estimate.
     println!(
-        "free before:            {} bytes",
+        "bytes freed (measured): {} ({} bytes)",
+        human_bytes(report.total_bytes_freed),
+        report.total_bytes_freed
+    );
+    println!(
+        "free before:            {} ({} bytes)",
+        human_bytes(report.started_free_bytes),
         report.started_free_bytes
     );
-    println!("free after:             {} bytes", report.final_free_bytes);
+    println!(
+        "free after:             {} ({} bytes)",
+        human_bytes(report.final_free_bytes),
+        report.final_free_bytes
+    );
 }
 
 fn run_daemon_command(subcommand: Option<&str>) {
