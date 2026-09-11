@@ -65,11 +65,36 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         Completeness::Complete => {}
     }
 
-    // Remaining steps (active-use, regenerability) land in follow-up
-    // commits. Until then, Complete/clean evidence with no active-use
-    // check yet falls through to AutoSafe with no reasons attached — this
-    // is a transitional state within this commit series, not final
-    // behavior; see the following commits for the real steps 6-8.
+    // 6. Active-use signals, most-significant first.
+    let mut active_use_reasons = Vec::new();
+
+    let process_active = matches!(ev.open_by_process.observed(), Some(v) if !v.is_empty())
+        || matches!(ev.process_cwd_match.observed(), Some(v) if !v.is_empty());
+    if process_active {
+        active_use_reasons.push(ReasonCode::ResourceInActiveUse);
+    }
+
+    let git_active = matches!(
+        ev.git_state.observed(),
+        Some(Some(g)) if g.dirty || g.worktree
+    );
+    if git_active {
+        active_use_reasons.push(ReasonCode::GitWorktreeDirty);
+    }
+
+    let tool_live = matches!(ev.tool_liveness.observed(), Some(true));
+    if tool_live {
+        active_use_reasons.push(ReasonCode::OwningToolLive);
+    }
+
+    if !active_use_reasons.is_empty() {
+        return decision(PolicyClass::Ask, active_use_reasons);
+    }
+
+    // Regenerability branch lands in a follow-up commit. Until then,
+    // Complete evidence with no active-use signal falls through to a
+    // placeholder AutoSafe — transitional within this commit series, not
+    // final behavior.
     decision(
         PolicyClass::AutoSafe,
         vec![ReasonCode::EvidenceFreshAndComplete],
@@ -83,7 +108,8 @@ mod tests {
 
     use crate::detectors::DetectorId;
     use crate::evidence::{
-        ProbeOutcome, ProbeReason, Recoverability, ResourceFingerprint, ResourceId, ResourceLocator,
+        GitState, ProbeOutcome, ProbeReason, Recoverability, ResourceFingerprint, ResourceId,
+        ResourceLocator,
     };
 
     use super::*;
@@ -187,6 +213,79 @@ mod tests {
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::EvidenceIncomplete]);
+    }
+
+    #[test]
+    fn open_by_process_is_ask_in_active_use() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
+            pid: 1,
+            command: "cargo".to_string(),
+        }]);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+    }
+
+    #[test]
+    fn process_cwd_match_is_ask_in_active_use() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.process_cwd_match = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
+            pid: 1,
+            command: "cargo".to_string(),
+        }]);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+    }
+
+    #[test]
+    fn dirty_git_worktree_is_ask() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp"),
+            dirty: true,
+            untracked: false,
+            worktree: false,
+        }));
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::GitWorktreeDirty));
+    }
+
+    #[test]
+    fn is_worktree_true_is_ask_even_when_not_dirty() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp"),
+            dirty: false,
+            untracked: false,
+            worktree: true,
+        }));
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::GitWorktreeDirty));
+    }
+
+    #[test]
+    fn tool_live_is_ask() {
+        let mut ev = complete_evidence(ResourceKind::XcodeDerivedData, NOW);
+        ev.tool_liveness = ProbeOutcome::Observed(true);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::OwningToolLive));
+    }
+
+    #[test]
+    fn clean_git_state_and_no_process_activity_is_not_ask_for_active_use() {
+        // Baseline sanity: complete_evidence()'s defaults (empty process
+        // lists, git_state Observed(None), tool_liveness Observed(false))
+        // must not themselves trigger any active-use reason.
+        let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert!(!decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+        assert!(!decision.reasons.contains(&ReasonCode::GitWorktreeDirty));
+        assert!(!decision.reasons.contains(&ReasonCode::OwningToolLive));
     }
 
     #[test]
