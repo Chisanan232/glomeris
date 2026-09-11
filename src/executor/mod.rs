@@ -232,18 +232,24 @@ fn build_fresh_evidence(
     };
     let fingerprint_path: &Path = path.unwrap_or_else(|| Path::new(""));
 
+    // HORO-994 fix: reuse the SAME `reclaimable_bytes == logical_bytes`
+    // equivalence HORO-992 established for detectors, on this revalidation
+    // rebuild too. Before this fix, this always reported `NotAttempted`
+    // here regardless of what the originating detector observed at
+    // discovery time — that degraded `Completeness`/reason set relative
+    // to plan time on every single real execution, tripping
+    // `PolicyClassDowngraded`/`PolicyReasonsWidened`/`EvidenceDegraded`
+    // and aborting every real cleanup unconditionally. `ResourceLocator::Tool`
+    // resources (Docker) have no equivalent shallow estimate and stay
+    // `Unavailable` — Docker has no registered cleanup action anyway.
+    let reclaimable_bytes = logical_bytes.clone();
+
     let mut evidence = discovery_evidence(
         resource.clone(),
         DetectorId("executor_revalidation"),
         fingerprint_path,
         logical_bytes,
-        // Pre-existing gap, not addressed here (HORO-992 only fixes the
-        // detectors, not this revalidation path): this rebuild never
-        // reuses a detector's own reclaimable-bytes estimate, so it
-        // always reports `NotAttempted` here regardless of what the
-        // originating detector observed at discovery time. See this
-        // ticket's PR "Known limitations".
-        ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        reclaimable_bytes,
         last_modified,
         resource.kind.regenerability(),
         action.recoverability(),
@@ -751,15 +757,35 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// A collector that reports the resource as actively in use by a
+    /// live process — used to force a fresh `classify()` read to stay in
+    /// the same `PolicyClass::Ask` bucket as the planned decision while
+    /// still carrying a genuinely different reason code, so the
+    /// reason-widening check (step 6) is exercised in isolation from the
+    /// class check (step 5).
+    struct ActiveUseCollector;
+    impl EvidenceCollector for ActiveUseCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(vec![ProcessRef {
+                    pid: 1,
+                    command: "node".to_string(),
+                }]),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
     /// Proves the reason-widening abort path (step 6): the fresh decision
-    /// stays the same `PolicyClass` (`Ask`) as the approved decision, but
-    /// carries a reason code the approved consent never covered. This
-    /// happens naturally here because `build_fresh_evidence` (this
-    /// module) never reuses a detector's own `reclaimable_bytes` estimate
-    /// — see this crate's `emergency` module's "Known limitations" — so a
-    /// freshly rebuilt `Evidence` is always `Partial` ->
-    /// `Ask{EvidenceIncomplete}`, regardless of what the original
-    /// decision's reason was.
+    /// stays the same `PolicyClass` (`Ask`) as the approved decision —
+    /// evidence is complete on both sides (post-HORO-994, `reclaimable_bytes`
+    /// is populated on revalidation the same way a detector reports it at
+    /// plan time), but a live process is observed using the resource at
+    /// revalidation time, which `classify()` surfaces as
+    /// `Ask{ResourceInActiveUse}` — a reason the plan-time consent (granted
+    /// against `Ask{RebuildCostHigh}`) never covered.
     #[test]
     fn execute_aborts_when_fresh_reasons_widen_beyond_planned_ask_bucket() {
         let root = make_temp_dir("execute-reason-widening");
@@ -790,7 +816,7 @@ mod tests {
         let report = execute(
             &NodeCleanNodeModules,
             &approval,
-            &FakeCollector,
+            &ActiveUseCollector,
             &PolicyConfig::default(),
             now,
         );
@@ -805,11 +831,13 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
-    /// Full happy-path real execution: an `Ask{EvidenceIncomplete}`
-    /// approval (the only reachable class today, see PR "Known
-    /// limitations") whose fresh revalidation reproduces the identical
-    /// class/reasons, so `execute()` proceeds to actually delete a real
-    /// disposable `node_modules` fixture.
+    /// Full happy-path real execution: an `AutoSafe` approval — matching
+    /// what a real detector plus `classify()` would produce for a clean,
+    /// complete, regenerable-by-rebuild `node_modules` (post-HORO-994,
+    /// `build_fresh_evidence` populates `reclaimable_bytes` the same way
+    /// a detector does, so the fresh revalidation reproduces the
+    /// identical class/reasons) — so `execute()` proceeds to actually
+    /// delete a real disposable `node_modules` fixture.
     #[test]
     fn execute_real_deletion_removes_node_modules_and_reports_actual_bytes() {
         let root = make_temp_dir("execute-real-node");
@@ -825,15 +853,18 @@ mod tests {
         let now = SystemTime::now();
         let decision = PolicyDecision {
             resource: resource.clone(),
-            class: PolicyClass::Ask,
-            reasons: vec![ReasonCode::EvidenceIncomplete],
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
             evidence_collected_at: now,
             evaluated_at: now,
             policy_version: 1,
         };
         let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
         let approval = authorize(decision, fingerprint, Some(&consent))
-            .expect("Ask decision with matching consent must authorize");
+            .expect("AutoSafe decision must always authorize");
 
         let report = execute(
             &NodeCleanNodeModules,
@@ -883,15 +914,18 @@ mod tests {
         let now = SystemTime::now();
         let decision = PolicyDecision {
             resource: resource.clone(),
-            class: PolicyClass::Ask,
-            reasons: vec![ReasonCode::EvidenceIncomplete],
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
             evidence_collected_at: now,
             evaluated_at: now,
             policy_version: 1,
         };
         let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
         let approval = authorize(decision, fingerprint, Some(&consent))
-            .expect("Ask decision with matching consent must authorize");
+            .expect("AutoSafe decision must always authorize");
 
         let report = execute(
             &CargoCleanTargetDir,
@@ -966,17 +1000,29 @@ mod tests {
         );
         let fingerprint = fingerprint_of(&node_modules);
         let now = SystemTime::now();
+        // AutoSafe, matching what a real detector + classify() compute
+        // for this clean, complete, regenerable-by-rebuild `node_modules`
+        // fixture — post-HORO-994, the fresh revalidation below also
+        // reproduces AutoSafe (its `shallow_logical_bytes`/`probe_mtime`
+        // reads happen against the REAL pre-swap directory, before
+        // `SymlinkSwapCollector::collect()` performs the swap), so
+        // classify/reasons-widening pass and control reaches the actual
+        // pre-mutation identity guard (`verify_identity_unchanged`) this
+        // test exists to exercise.
         let decision = PolicyDecision {
             resource: resource.clone(),
-            class: PolicyClass::Ask,
-            reasons: vec![ReasonCode::EvidenceIncomplete],
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
             evidence_collected_at: now,
             evaluated_at: now,
             policy_version: 1,
         };
         let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
         let approval = authorize(decision, fingerprint, Some(&consent))
-            .expect("Ask decision with matching consent must authorize");
+            .expect("AutoSafe decision must always authorize");
 
         let collector = SymlinkSwapCollector {
             swap_path: node_modules.clone(),
@@ -1078,17 +1124,27 @@ mod tests {
         );
         let fingerprint = fingerprint_of(&approver_target);
         let now = SystemTime::now();
+        // AutoSafe, matching what a real detector + classify() compute for
+        // this clean, complete, regenerable-by-rebuild `CargoTargetDir`
+        // resource — post-HORO-994 the fresh revalidation below also
+        // reproduces AutoSafe (evidence is read through the pre-existing
+        // symlink either way; nothing changes it mid-flight in this test),
+        // so classify/reasons-widening pass and control reaches the plan +
+        // pre-spawn identity guard this test exists to exercise.
         let decision = PolicyDecision {
             resource: resource.clone(),
-            class: PolicyClass::Ask,
-            reasons: vec![ReasonCode::EvidenceIncomplete],
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
             evidence_collected_at: now,
             evaluated_at: now,
             policy_version: 1,
         };
         let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
         let approval = authorize(decision, fingerprint, Some(&consent))
-            .expect("Ask decision with matching consent must authorize");
+            .expect("AutoSafe decision must always authorize");
 
         let report = execute(
             &CargoCleanTargetDir,
