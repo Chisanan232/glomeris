@@ -8,6 +8,7 @@
 //! correlation, calling `policy::classify`) lives in [`crate::cli`].
 
 pub mod bytes;
+pub mod dto;
 pub mod policy_label;
 
 pub use bytes::human_bytes;
