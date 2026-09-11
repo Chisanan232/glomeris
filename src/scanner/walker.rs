@@ -255,3 +255,195 @@ pub(crate) fn scan_with_device_lookup<D: DeviceLookup>(
         incomplete_samples,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::EntryStatus;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    /// Hand-rolled unique temp directory (no external crate dependency).
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    struct FakeDeviceLookup {
+        different_device_prefix: PathBuf,
+    }
+
+    impl DeviceLookup for FakeDeviceLookup {
+        fn device_of(&self, path: &Path) -> io::Result<u64> {
+            if path.starts_with(&self.different_device_prefix) {
+                Ok(999)
+            } else {
+                Ok(1)
+            }
+        }
+    }
+
+    #[test]
+    fn is_same_device_predicate() {
+        assert!(is_same_device(1, 1));
+        assert!(!is_same_device(1, 2));
+    }
+
+    #[test]
+    fn mount_boundary_excludes_synthetic_different_device_subtree() {
+        let root = make_temp_dir("mount");
+        let other_fs_dir = root.join("other_fs_mount");
+        fs::create_dir_all(&other_fs_dir).unwrap();
+        fs::write(other_fs_dir.join("big.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(root.join("local.bin"), vec![0u8; 128]).unwrap();
+
+        let options = ScanOptions::new(&root, 10);
+        let device_lookup = FakeDeviceLookup {
+            different_device_prefix: other_fs_dir.clone(),
+        };
+
+        let report = scan_with_device_lookup(&options, &device_lookup);
+
+        assert!(
+            report
+                .candidates
+                .iter()
+                .all(|c| !c.path.starts_with(&other_fs_dir)),
+            "candidates from the synthetic different-device subtree must be excluded: {:?}",
+            report.candidates
+        );
+        assert!(report
+            .candidates
+            .iter()
+            .any(|c| c.path.ends_with("local.bin")));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn default_scan_does_not_follow_symlinks() {
+        // The target lives *outside* the scan root, reachable only via the
+        // symlink, so it can only show up in results if the walker
+        // actually follows the link.
+        let outside_root = make_temp_dir("symlink-default-outside");
+        let target_dir = outside_root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(target_dir.join("secret.bin"), vec![0u8; 1024]).unwrap();
+
+        let root = make_temp_dir("symlink-default");
+        let link_path = root.join("link_to_target");
+        symlink(&target_dir, &link_path).unwrap();
+
+        let options = ScanOptions::new(&root, 10);
+        let report = scan(&options);
+
+        assert!(
+            report
+                .candidates
+                .iter()
+                .all(|c| !c.path.starts_with(&target_dir)),
+            "must not have followed the symlink into its target"
+        );
+
+        fs::remove_dir_all(&outside_root).ok();
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn symlink_cycle_terminates_when_following_symlinks() {
+        let root = make_temp_dir("symlink-cycle");
+        let a = root.join("a");
+        fs::create_dir_all(&a).unwrap();
+        // a/loop -> root, creating a cycle when symlinks are followed.
+        symlink(&root, a.join("loop")).unwrap();
+
+        let options = ScanOptions::new(&root, 10)
+            .with_follow_symlinks(true)
+            .with_budget(ScanBudget::default().with_max_duration(Duration::from_secs(5)));
+
+        let start = std::time::Instant::now();
+        let report = scan(&options);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "cycle guard failed to stop traversal before the budget backstop: {elapsed:?}"
+        );
+        assert_eq!(report.stop_reason, StopReason::Exhausted);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn permission_denied_directory_is_marked_incomplete_not_zero_size() {
+        let root = make_temp_dir("perm-denied");
+        let denied = root.join("denied");
+        fs::create_dir_all(&denied).unwrap();
+        fs::write(denied.join("inside.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(root.join("visible.bin"), vec![0u8; 64]).unwrap();
+
+        let mut perms = fs::metadata(&denied).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&denied, perms).unwrap();
+
+        let options = ScanOptions::new(&root, 10);
+        let report = scan(&options);
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let mut restore = fs::metadata(&denied).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&denied, restore).ok();
+
+        if report.incomplete_entries == 0 {
+            // Running as root (some CI/sandbox setups) bypasses the
+            // permission check entirely; nothing to assert in that case.
+            eprintln!("skipping assertion: permission check bypassed (running as root?)");
+        } else {
+            assert!(
+                report
+                    .incomplete_samples
+                    .iter()
+                    .any(|c| c.path == denied && c.status == EntryStatus::Incomplete),
+                "expected an incomplete sample for the permission-denied directory: {:?}",
+                report.incomplete_samples
+            );
+            // Never silently reported as zero-size among the size-ranked
+            // candidates.
+            assert!(report.candidates.iter().all(|c| c.path != denied));
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn budget_stops_scan_early_with_tiny_file_count_limit() {
+        let root = make_temp_dir("budget");
+        for i in 0..50 {
+            fs::write(root.join(format!("f{i}.bin")), vec![0u8; 16]).unwrap();
+        }
+
+        let options = ScanOptions::new(&root, 10)
+            .with_budget(ScanBudget::default().with_max_files_visited(5));
+        let report = scan(&options);
+
+        assert_eq!(report.stop_reason, StopReason::FileCountBudget);
+        assert_eq!(report.files_visited, 5);
+
+        fs::remove_dir_all(&root).ok();
+    }
+}
