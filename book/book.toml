@@ -1,0 +1,15 @@
+[book]
+title = "Glomeris"
+description = "Evidence-first, policy-constrained developer storage autopilot for macOS."
+authors = ["Chisanan232"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/Chisanan232/glomeris"
+edit-url-template = "https://github.com/Chisanan232/glomeris/edit/main/book/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.search]
+enable = true
