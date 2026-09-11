@@ -6,6 +6,8 @@
 //! `scanner::walker`). A detector's tool being absent from the machine is
 //! normal, expected state, never an error.
 
+mod xcode;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
