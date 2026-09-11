@@ -237,6 +237,13 @@ fn build_fresh_evidence(
         DetectorId("executor_revalidation"),
         fingerprint_path,
         logical_bytes,
+        // Pre-existing gap, not addressed here (HORO-992 only fixes the
+        // detectors, not this revalidation path): this rebuild never
+        // reuses a detector's own reclaimable-bytes estimate, so it
+        // always reports `NotAttempted` here regardless of what the
+        // originating detector observed at discovery time. See this
+        // ticket's PR "Known limitations".
+        ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         last_modified,
         resource.kind.regenerability(),
         action.recoverability(),
@@ -726,10 +733,11 @@ mod tests {
     /// Proves the reason-widening abort path (step 6): the fresh decision
     /// stays the same `PolicyClass` (`Ask`) as the approved decision, but
     /// carries a reason code the approved consent never covered. This
-    /// happens naturally here because `reclaimable_bytes` is never
-    /// populated by any detector in this codebase (see PR "Known
-    /// limitations"), so a freshly rebuilt `Evidence` is always `Partial`
-    /// -> `Ask{EvidenceIncomplete}`, regardless of what the original
+    /// happens naturally here because `build_fresh_evidence` (this
+    /// module) never reuses a detector's own `reclaimable_bytes` estimate
+    /// — see this crate's `emergency` module's "Known limitations" — so a
+    /// freshly rebuilt `Evidence` is always `Partial` ->
+    /// `Ask{EvidenceIncomplete}`, regardless of what the original
     /// decision's reason was.
     #[test]
     fn execute_aborts_when_fresh_reasons_widen_beyond_planned_ask_bucket() {

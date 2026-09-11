@@ -36,25 +36,25 @@
 //!   should be rejected or deferred without reliable measured evidence —
 //!   and that building that evidence is itself out of scope for this
 //!   pass. This module does not implement it.
-//! - **The candidate loop frees nothing on a real machine today.** No
-//!   detector in this crate ever populates `Evidence::reclaimable_bytes`
-//!   (every detector leaves it `Unavailable(NotAttempted)`), so
-//!   `Completeness::Complete` — and therefore `PolicyClass::AutoSafe` —
-//!   is structurally unreachable for a real, detector-produced candidate;
-//!   `policy::classify` correctly denies every one of them as
-//!   `Ask{EvidenceIncomplete}` instead. Independently, even a
-//!   synthetically constructed `AutoSafe` approval aborts inside
-//!   `executor::execute`'s own deletion-time revalidation, because that
-//!   revalidation rebuilds `Evidence` the exact same way a detector
-//!   would (see `executor::build_fresh_evidence`) and loses
-//!   `reclaimable_bytes` again. Both are pre-existing upstream gaps in
-//!   `detectors`/`executor`, not introduced or worked around here — this
-//!   module reuses those modules exactly as-is, per its own constraints.
-//!   The self-owned-disposable-state step (step 1) is therefore the only
-//!   path that actually reclaims bytes today; the candidate-iteration
-//!   wiring is correct and will start reclaiming bytes automatically the
-//!   moment a future ticket populates `reclaimable_bytes`, with no
-//!   change needed here.
+//! - **The candidate loop still frees nothing via a real detector-produced
+//!   candidate today (HORO-992 update).** Detectors now populate
+//!   `Evidence::reclaimable_bytes` (xcode/cargo/node/homebrew via a real
+//!   shallow size estimate, docker via `docker system df`'s own reported
+//!   figure), so that specific gap is closed. What remains open is
+//!   `executor::execute`'s own deletion-time revalidation: it rebuilds
+//!   `Evidence` via `executor::build_fresh_evidence`, which does not reuse
+//!   a detector's reclaimable-bytes estimate and always reports
+//!   `Unavailable(NotAttempted)` for that field regardless of what the
+//!   originating detector observed. So a synthetically constructed
+//!   `AutoSafe` approval still aborts inside that revalidation step. This
+//!   is a pre-existing upstream gap in `executor`, not introduced or
+//!   worked around here — this module reuses `executor::execute` exactly
+//!   as-is, per its own constraints. The self-owned-disposable-state step
+//!   (step 1) is therefore still the only path that actually reclaims
+//!   bytes today; the candidate-iteration wiring is correct and will
+//!   start reclaiming bytes automatically the moment a future ticket
+//!   teaches `executor::build_fresh_evidence` to reuse a detector's
+//!   reclaimable-bytes estimate, with no change needed here.
 //! - **Near-zero-real-disk-space testing was not performed.** Actually
 //!   driving a test machine's free space to near zero is destructive to
 //!   that machine and was judged not worth the risk for this pass. Fault
@@ -413,12 +413,15 @@ fn process_candidate(
             report.push_error(format!("action {action_id} failed: {message}"));
         }
         ExecutionOutcome::AbortedByRevalidation(reason) => {
-            // See this ticket's PR "Known limitations": today, `execute`'s
-            // own deletion-time revalidation rebuilds evidence the same
-            // way detectors do (never populating `reclaimable_bytes`), so
-            // even a genuinely `AutoSafe` approval is expected to abort
-            // here with `PolicyClassDowngraded` — a pre-existing upstream
-            // gap, not something this module papers over.
+            // See this module's own "Known limitations" (updated by
+            // HORO-992): `execute`'s own deletion-time revalidation
+            // rebuilds evidence via `executor::build_fresh_evidence`,
+            // which does not reuse a detector's `reclaimable_bytes`
+            // estimate and always reports it `Unavailable(NotAttempted)`,
+            // so even a genuinely `AutoSafe` approval is expected to
+            // abort here with `PolicyClassDowngraded` — a pre-existing
+            // upstream gap in `executor`, not something this module
+            // papers over.
             report.push_error(format!(
                 "action {action_id} aborted by revalidation: {reason:?}"
             ));
@@ -535,11 +538,11 @@ mod tests {
     /// Builds an [`Evidence`] that is `Completeness::Complete` and clean
     /// (no active-use signals) for `path`/`kind` as of `collected_at` —
     /// i.e. exactly the shape `policy::classify` maps to `AutoSafe`.
-    /// `reclaimable_bytes` is deliberately `Observed` here even though no
-    /// real detector in this crate ever populates it (see this module's
-    /// docs and the PR's "Known limitations") — this fixture exists to
-    /// prove `process_candidate`'s AutoSafe-only wiring, not to claim
-    /// today's detectors can produce it.
+    /// `reclaimable_bytes` is `Observed` here as a hand-built stand-in for
+    /// whatever a real detector would report — this fixture exists to
+    /// prove `process_candidate`'s AutoSafe-only wiring in isolation, not
+    /// to exercise a real detector (see `tests/reclaimable_bytes_reaches_auto_safe.rs`
+    /// at the crate root for that proof).
     fn autosafe_evidence(path: PathBuf, kind: ResourceKind, collected_at: SystemTime) -> Evidence {
         Evidence {
             resource: ResourceId::new(kind, ResourceLocator::Path(path.clone())),
@@ -598,10 +601,10 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Candidate iteration reuses `policy::classify` exactly as normal:
-    /// an incomplete-evidence candidate (the realistic shape today's real
-    /// detectors produce, since no detector populates `reclaimable_bytes`
-    /// — see this module's docs) is correctly denied, never executed.
+    /// Candidate iteration reuses `policy::classify` exactly as normal: an
+    /// incomplete-evidence candidate (e.g. `reclaimable_bytes` missing —
+    /// the shape a detector still reports whenever its own size probe
+    /// fails) is correctly denied, never executed.
     #[test]
     fn process_candidate_denies_incomplete_evidence_without_executing() {
         let dir = make_temp_dir("candidate-denied");
@@ -609,8 +612,6 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         let now = SystemTime::now();
 
-        // Same shape `discovery_evidence` produces for every real
-        // detector: `reclaimable_bytes` is `Unavailable(NotAttempted)`.
         let mut evidence = autosafe_evidence(target, ResourceKind::CargoTargetDir, now);
         evidence.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
 
@@ -661,13 +662,14 @@ mod tests {
     /// A genuinely `AutoSafe`-classified candidate IS authorized and
     /// handed to `executor::execute` — reusing policy/executor exactly as
     /// normal, no parallel/looser path. Documents the pre-existing
-    /// upstream gap (see PR "Known limitations"): `execute()`'s own
-    /// deletion-time revalidation rebuilds evidence the same way
-    /// detectors do, so `reclaimable_bytes` is lost again and the fresh
-    /// classification downgrades to `Ask`, aborting the execution. This
-    /// is NOT a bug introduced by this module — it proves the wiring is
-    /// correct and that the abort (not a silent success or a panic) is
-    /// exactly what happens today.
+    /// upstream gap (see this module's own "Known limitations", updated
+    /// by HORO-992): `execute()`'s own deletion-time revalidation rebuilds
+    /// evidence via `executor::build_fresh_evidence`, which does not reuse
+    /// a detector's `reclaimable_bytes` estimate, so it is lost again at
+    /// that step and the fresh classification downgrades to `Ask`,
+    /// aborting the execution. This is NOT a bug introduced by this
+    /// module — it proves the wiring is correct and that the abort (not a
+    /// silent success or a panic) is exactly what happens today.
     #[test]
     fn process_candidate_attempts_autosafe_and_reports_the_revalidation_abort() {
         let dir = make_temp_dir("candidate-autosafe-abort");
@@ -969,7 +971,27 @@ mod tests {
         assert!(!self_state.exists());
         assert_eq!(report.actions_succeeded, 1);
         assert_eq!(report.total_bytes_freed, 32);
-        assert!(report.errors.is_empty());
+        // `DetectorRegistry::builtin()` includes the homebrew/docker
+        // detectors, which shell out to whatever real `brew`/`docker` this
+        // machine actually has — environment state this test deliberately
+        // does not control (see `CleanCollector`'s doc comment). As of
+        // HORO-992, a machine with a real Homebrew cache can now produce a
+        // genuinely `AutoSafe` candidate for it, which `process_candidate`
+        // correctly attempts and then `executor::execute` aborts at its
+        // own deletion-time revalidation (see this module's "Known
+        // limitations"). So the only error this test can assert never
+        // appears is a *persistence* failure — this run's `FilePersistence`
+        // is real and working — while tolerating zero-or-more environment-
+        // dependent revalidation aborts.
+        assert!(
+            report
+                .errors
+                .iter()
+                .all(|e| e.contains("aborted by revalidation")),
+            "expected only (possibly zero) revalidation-abort errors from \
+             environment-dependent detectors, got {:?}",
+            report.errors
+        );
         assert!(
             history_log.exists(),
             "a working backend must actually persist a record"
