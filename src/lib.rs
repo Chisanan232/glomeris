@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod detectors;
 pub mod evidence;
+pub mod executor;
 pub mod monitor;
 pub mod platform;
 pub mod policy;
