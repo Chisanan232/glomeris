@@ -117,6 +117,25 @@ pub struct LlmPlanItem {
     pub reason: Option<String>,
 }
 
+/// A provider of raw LLM completions. Implementors return the model's raw
+/// text response, which a follow-up commit's `plan_with_llm` parses
+/// defensively — it is expected to contain JSON matching [`LlmPlan`], but
+/// may be wrapped in prose or markdown code fences.
+pub trait LlmProvider {
+    fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError>;
+}
+
+/// Why an [`LlmProvider`] call failed. Its `Debug` output is safe to log:
+/// none of these variants embed the API key (see
+/// `openai_error_never_leaks_api_key` in this module's tests, added
+/// alongside the real `OpenAiCompatibleProvider` implementation).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LlmError {
+    NotConfigured,
+    NetworkError(String),
+    InvalidResponse(String),
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -189,5 +208,22 @@ mod tests {
         // rather than assumed.
         let text = r#"{"items": [{"resource_id": "a", "action_id": "b", "priority": 1, "reason": null, "command": "rm -rf /"}]}"#;
         assert!(serde_json::from_str::<LlmPlan>(text).is_err());
+    }
+
+    #[test]
+    fn api_key_never_appears_in_error_debug_output() {
+        let fake_key = "sk-super-secret-test-key-should-not-leak";
+        let errors = vec![
+            LlmError::NotConfigured,
+            LlmError::NetworkError("request to provider failed".to_string()),
+            LlmError::InvalidResponse("bad json".to_string()),
+        ];
+        for err in errors {
+            let debug_output = format!("{err:?}");
+            assert!(
+                !debug_output.contains(fake_key),
+                "LlmError Debug output must never contain the API key"
+            );
+        }
     }
 }
