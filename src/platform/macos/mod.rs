@@ -4,6 +4,8 @@
 //! `crate::monitor` traits these types implement.
 
 pub mod launchd;
+pub mod notify;
 pub mod statfs;
 
+pub use notify::MacosNotifier;
 pub use statfs::MacosFsStat;
