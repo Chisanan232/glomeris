@@ -8,7 +8,9 @@
 pub mod budget;
 pub mod candidate;
 pub mod topk;
+pub mod walker;
 
 pub use budget::{ScanBudget, StopReason};
 pub use candidate::{CandidateKind, EntryStatus, ScanCandidate};
 pub use topk::TopKCandidates;
+pub use walker::{scan, ScanOptions, ScanReport};
