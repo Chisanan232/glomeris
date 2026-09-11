@@ -10,10 +10,12 @@
 //! decides the actual steps.
 
 mod cargo;
+mod node;
 
 use std::path::PathBuf;
 
 pub use cargo::CargoCleanTargetDir;
+pub use node::NodeCleanNodeModules;
 
 // Reuse the exact `ActionId` type `evidence::model` already defines for
 // this purpose — see that module's doc comment: "the future `actions`
@@ -130,7 +132,7 @@ impl ActionRegistry {
     /// Registers all built-in actions.
     pub fn builtin() -> Self {
         Self {
-            actions: vec![Box::new(CargoCleanTargetDir)],
+            actions: vec![Box::new(CargoCleanTargetDir), Box::new(NodeCleanNodeModules)],
         }
     }
 
@@ -168,5 +170,11 @@ mod tests {
     fn get_finds_cargo_action_by_id() {
         let registry = ActionRegistry::builtin();
         assert!(registry.get("cargo.clean.target_dir").is_some());
+    }
+
+    #[test]
+    fn get_finds_node_action_by_id() {
+        let registry = ActionRegistry::builtin();
+        assert!(registry.get("node.clean.node_modules").is_some());
     }
 }
