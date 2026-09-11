@@ -309,6 +309,16 @@ fn failed_report(
 /// one step today; this is a guard against that invariant silently
 /// breaking in the future, not a currently-reachable path.
 fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -> ExecutionReport {
+    if plan.steps.is_empty() {
+        return failed_report(
+            plan.action,
+            plan.resource,
+            "refusing to execute an empty plan: a plan with zero steps would otherwise fall \
+             through to a false ExecutionOutcome::Succeeded report despite mutating nothing"
+                .to_string(),
+            plan.expected_reclaimed_bytes,
+        );
+    }
     if plan.steps.len() > 1 {
         return failed_report(
             plan.action,
@@ -1152,5 +1162,34 @@ mod tests {
         assert!(b.exists(), "second step must not have run");
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A zero-step plan must never fall through to a false `Succeeded`
+    /// report — no registered `Action::plan` produces one today, but this
+    /// guards defense-in-depth against a future buggy `Action` impl doing
+    /// so silently.
+    #[test]
+    fn execute_plan_rejects_empty_plans_instead_of_reporting_false_success() {
+        let resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(PathBuf::from("/tmp/glomeris-empty-plan-test")),
+        );
+        let plan = ActionPlan {
+            action: ActionId("test.empty.plan"),
+            resource,
+            steps: vec![],
+            expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            explain: "test-only empty plan".to_string(),
+        };
+
+        let report = execute_plan(plan, None);
+
+        match &report.outcome {
+            ExecutionOutcome::Failed(msg) => assert!(
+                msg.contains("empty"),
+                "unexpected failure message: {msg}"
+            ),
+            other => panic!("expected ExecutionOutcome::Failed(...), got {other:?}"),
+        }
     }
 }
