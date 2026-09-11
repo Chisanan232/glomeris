@@ -7,6 +7,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
+        Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
@@ -23,8 +24,70 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: glomeris <daemon <install|uninstall|status|run>|scan|detect|emergency|free --target <N%|NB>>"
+        "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
+         detect [--json]|explain <resource_id_or_path> [--json]|\
+         clean --dry-run [--target <resource_id_or_path>]|emergency|\
+         free --target <N%|NB>>"
     );
+}
+
+/// Parses a flat argument list into a positional-args list and a set of
+/// bare `--flag` switches (no `--flag value` pairs handled here — callers
+/// that need a valued flag, e.g. `--target`, parse that one explicitly
+/// before calling this on what remains). Never panics on malformed input;
+/// every unrecognized `--...` token is treated as a flag, and every other
+/// token is positional.
+fn split_flags<'a>(args: &'a [String], known_flags: &[&str]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut positionals = Vec::new();
+    let mut flags = Vec::new();
+    for arg in args {
+        if known_flags.contains(&arg.as_str()) {
+            flags.push(arg.as_str());
+        } else {
+            positionals.push(arg.as_str());
+        }
+    }
+    (positionals, flags)
+}
+
+fn print_json_or_exit(value: &impl serde::Serialize) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => println!("{json}"),
+        Err(e) => {
+            eprintln!("glomeris: failed to render JSON report: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `glomeris status` — current disk pressure state (HORO-955).
+#[cfg(target_os = "macos")]
+fn run_status_command(args: &[String]) {
+    use glomeris::monitor::{FsStat, ThresholdConfig};
+    use glomeris::platform::macos::MacosFsStat;
+
+    let (_positionals, flags) = split_flags(args, &["--json"]);
+    let fs_stat = MacosFsStat;
+    let usage = match fs_stat.stat(std::path::Path::new("/")) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("glomeris status: failed to read filesystem usage: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let report = glomeris::cli::build_status_report(&usage, &ThresholdConfig::default());
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_status_report(&report);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_status_command(_args: &[String]) {
+    eprintln!("glomeris status: only supported on macOS");
+    std::process::exit(1);
 }
 
 /// `glomeris emergency` — the degraded-path recovery command (HORO-953).
