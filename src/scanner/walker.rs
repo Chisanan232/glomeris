@@ -83,7 +83,7 @@ pub struct ScanReport {
     /// (permission denied, vanished mid-walk, I/O error, ...).
     pub incomplete_entries: u64,
     /// Bounded sample of the paths behind `incomplete_entries`, capped at
-    /// [`MAX_INCOMPLETE_SAMPLES`].
+    /// `MAX_INCOMPLETE_SAMPLES`.
     pub incomplete_samples: Vec<ScanCandidate>,
 }
 

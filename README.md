@@ -43,17 +43,19 @@ Prebuilt macOS release artifacts will be published under
 ## Quick start
 
 ```sh
-glomeris status
+glomeris detect
 glomeris scan
-glomeris explain <candidate>
-glomeris clean --dry-run
+glomeris free --target 10GB
 ```
+
+See the [CLI reference](https://chisanan232.github.io/glomeris/cli_reference.html)
+for the full, current command surface — it is still evolving.
 
 ## Docs
 
 Full documentation (safety model, evidence model, emergency mode, BYOK
-configuration, architecture) will be published via GitHub Pages once
-HORO-956 lands.
+configuration, architecture) is published at
+[chisanan232.github.io/glomeris](https://chisanan232.github.io/glomeris/).
 
 ## License
 

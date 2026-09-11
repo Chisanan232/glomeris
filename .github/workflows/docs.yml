@@ -1,0 +1,65 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install mdBook
+        run: cargo install mdbook --locked --version 0.5.2
+
+      - name: Build mdBook
+        run: mdbook build book
+
+      - name: Build rustdoc
+        run: cargo doc --no-deps
+
+      - name: Assemble combined site
+        run: |
+          set -euo pipefail
+          SITE=site
+          rm -rf "$SITE"
+          mkdir -p "$SITE"
+          cp -R book/book/. "$SITE"/
+          mkdir -p "$SITE/rustdoc"
+          cp -R target/doc/. "$SITE/rustdoc"/
+          cat > "$SITE/rustdoc/index.html" <<'EOF'
+          <!doctype html>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=glomeris/index.html">
+          <p>Redirecting to <a href="glomeris/index.html">rustdoc</a>...</p>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
