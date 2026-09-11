@@ -1185,10 +1185,9 @@ mod tests {
         let report = execute_plan(plan, None);
 
         match &report.outcome {
-            ExecutionOutcome::Failed(msg) => assert!(
-                msg.contains("empty"),
-                "unexpected failure message: {msg}"
-            ),
+            ExecutionOutcome::Failed(msg) => {
+                assert!(msg.contains("empty"), "unexpected failure message: {msg}")
+            }
             other => panic!("expected ExecutionOutcome::Failed(...), got {other:?}"),
         }
     }
