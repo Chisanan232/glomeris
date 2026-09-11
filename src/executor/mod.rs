@@ -291,7 +291,28 @@ fn failed_report(
 /// captured by `execute()` before revalidation ran (see its step 0
 /// comment). `DeletePath` re-verifies against it immediately before
 /// mutating — see [`verify_identity_unchanged`].
+///
+/// Structural constraint (see PR "Known limitations"): a plan with more
+/// than one step is rejected outright rather than executed, because
+/// `actual_bytes_total` accounting below has no way to report a partial
+/// total if a later step fails after an earlier `DeletePath` step already
+/// succeeded. No registered `Action::plan` implementation emits more than
+/// one step today; this is a guard against that invariant silently
+/// breaking in the future, not a currently-reachable path.
 fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -> ExecutionReport {
+    if plan.steps.len() > 1 {
+        return failed_report(
+            plan.action,
+            plan.resource,
+            format!(
+                "refusing to execute a {}-step plan: multi-step plans are not yet supported \
+                 (partial-deletion byte accounting would be discarded on a later-step failure)",
+                plan.steps.len()
+            ),
+            plan.expected_reclaimed_bytes,
+        );
+    }
+
     let mut actual_bytes_total: u64 = 0;
     let mut saw_run_tool = false;
     let mut saw_delete = false;
@@ -1067,5 +1088,48 @@ mod tests {
 
         fs::remove_dir_all(&victim_root).ok();
         fs::remove_dir_all(&approver_root).ok();
+    }
+
+    /// Defect 3 regression test: a plan with more than one step is
+    /// rejected outright by `execute_plan` rather than run — today no
+    /// registered `Action::plan` emits more than one step, but this guards
+    /// the structural invariant `actual_bytes_total` accounting relies on
+    /// (a later step's failure must never silently discard an earlier
+    /// `DeletePath` step's already-accumulated real byte total).
+    #[test]
+    fn execute_plan_rejects_multi_step_plans_without_touching_either_path() {
+        let root = make_temp_dir("execute-plan-multistep");
+        let a = root.join("a");
+        fs::create_dir_all(&a).unwrap();
+        fs::write(a.join("f"), b"x").unwrap();
+        let b = root.join("b");
+        fs::create_dir_all(&b).unwrap();
+        fs::write(b.join("f"), b"y").unwrap();
+
+        let resource = ResourceId::new(ResourceKind::NodeModules, ResourceLocator::Path(a.clone()));
+        let plan = ActionPlan {
+            action: ActionId("test.multi.step"),
+            resource,
+            steps: vec![
+                ActionStep::DeletePath { path: a.clone() },
+                ActionStep::DeletePath { path: b.clone() },
+            ],
+            expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            explain: "test-only multi-step plan".to_string(),
+        };
+
+        let report = execute_plan(plan, None);
+
+        match &report.outcome {
+            ExecutionOutcome::Failed(msg) => assert!(
+                msg.contains("multi-step") || msg.contains("more than one"),
+                "unexpected failure message: {msg}"
+            ),
+            other => panic!("expected ExecutionOutcome::Failed(...), got {other:?}"),
+        }
+        assert!(a.exists(), "first step must not have run");
+        assert!(b.exists(), "second step must not have run");
+
+        fs::remove_dir_all(&root).ok();
     }
 }
