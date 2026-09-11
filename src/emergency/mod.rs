@@ -27,6 +27,40 @@
 //!   [`crate::detectors::DetectorRegistry::discover_all`] (already
 //!   bounded/shallow), never from the scanner's full, still-potentially-
 //!   slow filesystem walk.
+//!
+//! ## Known limitations
+//!
+//! - **Preallocated emergency reserve file: deferred, not implemented.**
+//!   The originating ticket names a "preallocated emergency reserve
+//!   file" as an experimental/optional idea and is explicit that it
+//!   should be rejected or deferred without reliable measured evidence —
+//!   and that building that evidence is itself out of scope for this
+//!   pass. This module does not implement it.
+//! - **The candidate loop frees nothing on a real machine today.** No
+//!   detector in this crate ever populates `Evidence::reclaimable_bytes`
+//!   (every detector leaves it `Unavailable(NotAttempted)`), so
+//!   `Completeness::Complete` — and therefore `PolicyClass::AutoSafe` —
+//!   is structurally unreachable for a real, detector-produced candidate;
+//!   `policy::classify` correctly denies every one of them as
+//!   `Ask{EvidenceIncomplete}` instead. Independently, even a
+//!   synthetically constructed `AutoSafe` approval aborts inside
+//!   `executor::execute`'s own deletion-time revalidation, because that
+//!   revalidation rebuilds `Evidence` the exact same way a detector
+//!   would (see `executor::build_fresh_evidence`) and loses
+//!   `reclaimable_bytes` again. Both are pre-existing upstream gaps in
+//!   `detectors`/`executor`, not introduced or worked around here — this
+//!   module reuses those modules exactly as-is, per its own constraints.
+//!   The self-owned-disposable-state step (step 1) is therefore the only
+//!   path that actually reclaims bytes today; the candidate-iteration
+//!   wiring is correct and will start reclaiming bytes automatically the
+//!   moment a future ticket populates `reclaimable_bytes`, with no
+//!   change needed here.
+//! - **Near-zero-real-disk-space testing was not performed.** Actually
+//!   driving a test machine's free space to near zero is destructive to
+//!   that machine and was judged not worth the risk for this pass. Fault
+//!   injection via fakes (`AlwaysFailingPersistence`, an always-failing
+//!   `EvidenceCollector`, a nonexistent self-state path, …) exercises the
+//!   equivalent failure modes without that risk.
 
 use std::fs;
 use std::path::Path;
