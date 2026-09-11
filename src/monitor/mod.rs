@@ -8,6 +8,7 @@ pub mod config;
 pub mod fs_stat;
 pub mod notifier;
 pub mod persistence;
+pub mod poller;
 pub mod pressure;
 pub mod state_machine;
 
@@ -16,5 +17,6 @@ pub use config::ThresholdConfig;
 pub use fs_stat::{FsStat, FsUsage};
 pub use notifier::Notifier;
 pub use persistence::{FilePersistence, PersistenceBackend, PressureEvent};
+pub use poller::{poll_once, run, PollConfig, PollOutcome};
 pub use pressure::PressureState;
 pub use state_machine::{PressureStateMachine, Transition};
