@@ -185,6 +185,23 @@ impl DetectorRegistry {
         }
     }
 
+    /// Builds a registry from an explicit detector list. Crate-internal:
+    /// production code always uses [`DetectorRegistry::builtin`]; this
+    /// exists so tests elsewhere in the crate can substitute fake
+    /// detectors instead of exercising the real tool-probing ones.
+    ///
+    /// This matters beyond mere convenience: several built-in detectors
+    /// (e.g. [`homebrew::HomebrewDetector`]) shell out to a real,
+    /// already-installed system tool regardless of
+    /// [`DiscoveryContext::home_dir`]/`known_project_roots`, so
+    /// `builtin()` can discover a genuine resource on whatever machine
+    /// runs the test — the caller controls what a fake `Detector` reports
+    /// instead.
+    #[cfg(test)]
+    pub(crate) fn from_detectors(detectors: Vec<Box<dyn Detector>>) -> Self {
+        Self { detectors }
+    }
+
     pub fn discover_all(&self, ctx: &DiscoveryContext) -> Vec<(DetectorId, DetectorStatus)> {
         self.detectors
             .iter()
@@ -209,5 +226,36 @@ mod tests {
         let ctx = DiscoveryContext::new("/nonexistent-home-for-test");
         let results = registry.discover_all(&ctx);
         assert_eq!(results.len(), 5);
+    }
+
+    struct StubDetector(DetectorStatus);
+
+    impl Detector for StubDetector {
+        fn id(&self) -> DetectorId {
+            DetectorId("stub")
+        }
+
+        fn resource_kinds(&self) -> &'static [crate::evidence::ResourceKind] {
+            &[]
+        }
+
+        fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+            match &self.0 {
+                DetectorStatus::Found(evidence) => DetectorStatus::Found(evidence.clone()),
+                DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
+                DetectorStatus::Failed(msg) => DetectorStatus::Failed(msg.clone()),
+            }
+        }
+    }
+
+    #[test]
+    fn from_detectors_uses_exactly_the_given_detectors() {
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(StubDetector(
+            DetectorStatus::ToolAbsent,
+        ))]);
+        let ctx = DiscoveryContext::new("/nonexistent-home-for-test");
+        let results = registry.discover_all(&ctx);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, DetectorId("stub"));
     }
 }
