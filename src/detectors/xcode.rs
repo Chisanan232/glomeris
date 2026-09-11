@@ -9,6 +9,15 @@
 //! about safely today. Splitting into per-project evidence can be
 //! revisited once there's a stable way to correlate a subdirectory back
 //! to its owning `.xcodeproj`.
+//!
+//! `reclaimable_bytes` reuses the exact same [`shallow_logical_bytes`]
+//! estimate as `logical_bytes` (HORO-992): DerivedData is fully owned,
+//! regenerable build output with no partial-retention concept — deleting
+//! it never leaves behind a smaller-but-still-useful remainder, so
+//! `reclaimable_bytes == logical_bytes` is an honest equivalence of
+//! meaning here. Because the underlying probe is shallow/non-recursive,
+//! both figures are an honest *lower bound* on the real subtree size, not
+//! a precise one — see [`shallow_logical_bytes`]'s own doc comment.
 
 use std::path::PathBuf;
 
@@ -62,11 +71,13 @@ impl Detector for XcodeDetector {
             ResourceKind::XcodeDerivedData,
             ResourceLocator::Path(canonical.clone()),
         );
+        let logical_bytes = shallow_logical_bytes(&canonical);
         let evidence = discovery_evidence(
             resource,
             self.id(),
             &canonical,
-            shallow_logical_bytes(&canonical),
+            logical_bytes.clone(),
+            logical_bytes,
             probe_mtime(&canonical),
             Regenerability::RegenerableByRebuild,
             Recoverability::RegenerableByRebuild,
