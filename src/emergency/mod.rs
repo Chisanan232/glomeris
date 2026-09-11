@@ -779,6 +779,44 @@ mod tests {
         }
     }
 
+    /// Partial-cleanup-continues: one candidate's `execute()` outcome
+    /// (here, the revalidation abort documented above) never stops the
+    /// loop from reaching the next candidate — both are attempted, both
+    /// are individually reported, the run as a whole still completes.
+    #[test]
+    fn process_candidates_continues_after_one_candidate_aborts() {
+        let dir = make_temp_dir("candidates-partial-continue");
+        let node_modules_a = dir.join("a").join("node_modules");
+        let node_modules_b = dir.join("b").join("node_modules");
+        fs::create_dir_all(&node_modules_a).unwrap();
+        fs::create_dir_all(&node_modules_b).unwrap();
+        let now = SystemTime::now();
+
+        let evidence_a = autosafe_evidence(node_modules_a.clone(), ResourceKind::NodeModules, now);
+        let evidence_b = autosafe_evidence(node_modules_b.clone(), ResourceKind::NodeModules, now);
+
+        let mut report = EmergencyReport::default();
+        process_candidates(
+            vec![evidence_a, evidence_b],
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            u32::MAX,
+            Instant::now(),
+            Duration::from_secs(30),
+            &mut report,
+        );
+
+        // Both candidates were reached and individually attempted/
+        // reported — the first's abort did not short-circuit the loop.
+        assert_eq!(report.actions_attempted, 2);
+        assert_eq!(report.errors.len(), 2);
+        assert!(node_modules_a.exists());
+        assert!(node_modules_b.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Persistence-failure fault injection at the whole-`run_emergency`
     /// level: a backend whose `record()` always fails must never stop
     /// the run, and at least one safe fixture (the self-owned disposable
