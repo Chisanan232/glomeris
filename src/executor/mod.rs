@@ -4,17 +4,18 @@
 //!
 //! Canonical safety invariant: AI can recommend. Policy decides. Executor
 //! verifies. Filesystem reality wins. This module is the "executor
-//! verifies" half of that sentence: [`execute`] (added in a follow-up
-//! commit) never trusts a previously-computed
-//! [`crate::policy::PolicyDecision`] at face value — it always
-//! re-collects evidence and re-runs [`crate::policy::classify`]
+//! verifies" half of that sentence: [`execute`] never trusts a
+//! previously-computed [`crate::policy::PolicyDecision`] at face value —
+//! it always re-collects evidence and re-runs [`crate::policy::classify`]
 //! immediately before mutating anything, and aborts rather than acts if
 //! that fresh read disagrees with what was approved.
 
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime};
 
-use crate::actions::{Action, ActionError, ActionId, ActionPlan};
+use crate::actions::{Action, ActionError, ActionId, ActionPlan, ActionStep};
 use crate::detectors::{discovery_evidence, probe_mtime, shallow_logical_bytes, DetectorId};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Completeness, Evidence, NativeCleanup, ResourceId, ResourceLocator};
@@ -70,8 +71,8 @@ pub enum AbortReason {
 }
 
 /// Render a plan without executing it. Identical output to what
-/// `execute` (added in a follow-up commit) would act on, because both
-/// call the same [`Action::plan`] on the same [`Evidence`].
+/// [`execute`] would act on, because both call the same [`Action::plan`]
+/// on the same [`Evidence`].
 pub fn dry_run(action: &dyn Action, ev: &Evidence) -> Result<ActionPlan, ActionError> {
     action.plan(ev)
 }
@@ -82,10 +83,8 @@ pub fn dry_run(action: &dyn Action, ev: &Evidence) -> Result<ActionPlan, ActionE
 /// skips it. Immediately before mutating anything, this function
 /// re-collects evidence and re-classifies it (see module docs), aborting
 /// rather than acting if that fresh read disagrees with what was
-/// approved. Actually running the validated plan's steps (and
-/// re-measuring reclaimed bytes) lands in a follow-up commit — for now,
-/// once revalidation passes, this returns a `DryRun` outcome carrying the
-/// freshly-rendered plan's expected bytes.
+/// approved. Only once revalidation passes does it actually run the
+/// plan's steps.
 pub fn execute(
     action: &dyn Action,
     approval: &Approval,
@@ -136,8 +135,10 @@ pub fn execute(
         return aborted_report(action.id(), resource, AbortReason::EvidenceDegraded);
     }
 
-    // 8-9 (actually running the plan's steps and re-measuring reclaimed
-    // bytes) land in a follow-up commit.
+    // 8. Build the plan from the SAME fresh evidence just validated —
+    // this is what makes dry-run and real execution structurally
+    // identical: both call `Action::plan` on the same `Evidence`. Only
+    // after all of 1-7 pass do we actually run the steps.
     let plan = match action.plan(&fresh_evidence) {
         Ok(p) => p,
         Err(e) => {
@@ -150,13 +151,7 @@ pub fn execute(
         }
     };
 
-    ExecutionReport {
-        action: plan.action,
-        resource: plan.resource,
-        outcome: ExecutionOutcome::DryRun,
-        expected_reclaimed_bytes: plan.expected_reclaimed_bytes,
-        actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
-    }
+    execute_plan(plan)
 }
 
 /// `Ask` is a heterogeneous bucket: a reason present in `fresh` but not
@@ -273,10 +268,159 @@ fn failed_report(
     }
 }
 
+/// Runs every step of `plan` for real. No `unwrap()`/`panic!` — every
+/// fallible step produces `ExecutionOutcome::Failed(reason)` instead of
+/// crashing.
+fn execute_plan(plan: ActionPlan) -> ExecutionReport {
+    let mut actual_bytes_total: u64 = 0;
+    let mut saw_run_tool = false;
+    let mut saw_delete = false;
+
+    for step in &plan.steps {
+        match step {
+            ActionStep::RunTool { tool, args } => {
+                saw_run_tool = true;
+                match Command::new(tool.program()).args(args).output() {
+                    Ok(output) if output.status.success() => {}
+                    Ok(output) => {
+                        return failed_report(
+                            plan.action,
+                            plan.resource,
+                            format!(
+                                "{} exited with {}: {}",
+                                tool.program(),
+                                output.status,
+                                String::from_utf8_lossy(&output.stderr)
+                            ),
+                            plan.expected_reclaimed_bytes,
+                        );
+                    }
+                    Err(e) => {
+                        return failed_report(
+                            plan.action,
+                            plan.resource,
+                            format!("failed to spawn {}: {e}", tool.program()),
+                            plan.expected_reclaimed_bytes,
+                        );
+                    }
+                }
+            }
+            ActionStep::DeletePath { path } => {
+                saw_delete = true;
+                match delete_path_with_guard(path, &plan.resource) {
+                    Ok(bytes_removed) => actual_bytes_total += bytes_removed,
+                    Err(message) => {
+                        return failed_report(
+                            plan.action,
+                            plan.resource,
+                            message,
+                            plan.expected_reclaimed_bytes,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 9. Re-measure actual reclaimed bytes. For a `RunTool` step there is
+    // no general way to know what the external tool actually freed, so
+    // that is honestly reported as `Unavailable` rather than estimated —
+    // only a plan made entirely of `DeletePath` steps gets a real
+    // measured total.
+    let actual_reclaimed_bytes = if saw_run_tool {
+        ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+    } else if saw_delete {
+        ProbeOutcome::Observed(actual_bytes_total)
+    } else {
+        ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+    };
+
+    ExecutionReport {
+        action: plan.action,
+        resource: plan.resource,
+        outcome: ExecutionOutcome::Succeeded,
+        expected_reclaimed_bytes: plan.expected_reclaimed_bytes,
+        actual_reclaimed_bytes,
+    }
+}
+
+/// Deletes `path` after re-canonicalizing it and verifying the
+/// canonicalized path is still a descendant of `resource`'s originally
+/// observed canonical root. Defends against a symlink-swap race between
+/// plan time and this exact moment: if something replaced a path
+/// component with a symlink pointing elsewhere between when the plan was
+/// built and now, the freshly canonicalized real path would resolve
+/// outside the expected root, and this refuses to delete it.
+///
+/// Returns the pre-deletion byte size on success (best-effort, for
+/// `actual_reclaimed_bytes` accounting).
+fn delete_path_with_guard(path: &Path, resource: &ResourceId) -> Result<u64, String> {
+    let original_root = match &resource.locator {
+        ResourceLocator::Path(p) => p,
+        ResourceLocator::Tool { .. } => {
+            return Err("DeletePath step on a non-path resource".to_string())
+        }
+    };
+
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("failed to canonicalize delete path {}: {e}", path.display()))?;
+    let original_root_canonical = original_root.canonicalize().map_err(|e| {
+        format!(
+            "failed to canonicalize resource root {}: {e}",
+            original_root.display()
+        )
+    })?;
+
+    if !canonical.starts_with(&original_root_canonical) {
+        return Err(format!(
+            "refusing to delete {}: resolved outside expected root {}",
+            canonical.display(),
+            original_root_canonical.display()
+        ));
+    }
+
+    let bytes_before = total_size_best_effort(&canonical);
+
+    let remove_result = if canonical.is_dir() {
+        fs::remove_dir_all(&canonical)
+    } else {
+        fs::remove_file(&canonical)
+    };
+    remove_result.map_err(|e| format!("failed to delete {}: {e}", canonical.display()))?;
+
+    Ok(bytes_before)
+}
+
+/// Best-effort recursive size sum. Errors reading any entry are silently
+/// skipped — this is used only for reclaim accounting, never for a
+/// safety decision.
+fn total_size_best_effort(path: &Path) -> u64 {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(_) => return 0,
+    };
+
+    if !metadata.is_dir() {
+        return metadata.len();
+    }
+
+    let read_dir = match fs::read_dir(path) {
+        Ok(rd) => rd,
+        Err(_) => return 0,
+    };
+
+    let mut total = 0u64;
+    for entry in read_dir.flatten() {
+        total += total_size_best_effort(&entry.path());
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::NodeCleanNodeModules;
+    use crate::actions::{CargoCleanTargetDir, NodeCleanNodeModules};
     use crate::detectors::dev_ino_fingerprint;
     use crate::evidence::correlate::CorrelationResult;
     use crate::evidence::model::{
@@ -486,6 +630,112 @@ mod tests {
         );
         // Nothing was mutated.
         assert!(node_modules.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Full happy-path real execution: an `Ask{EvidenceIncomplete}`
+    /// approval (the only reachable class today, see PR "Known
+    /// limitations") whose fresh revalidation reproduces the identical
+    /// class/reasons, so `execute()` proceeds to actually delete a real
+    /// disposable `node_modules` fixture.
+    #[test]
+    fn execute_real_deletion_removes_node_modules_and_reports_actual_bytes() {
+        let root = make_temp_dir("execute-real-node");
+        let node_modules = root.join("node_modules");
+        fs::create_dir_all(node_modules.join("pkg")).unwrap();
+        fs::write(node_modules.join("pkg/index.js"), vec![0u8; 4096]).unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(node_modules.clone()),
+        );
+        let fingerprint = fingerprint_of(&node_modules);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::EvidenceIncomplete],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("Ask decision with matching consent must authorize");
+
+        let report = execute(
+            &NodeCleanNodeModules,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        assert!(!node_modules.exists());
+        match report.actual_reclaimed_bytes {
+            ProbeOutcome::Observed(bytes) => assert!(bytes > 0),
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Same happy-path shape as above, but for the cargo action —
+    /// exercises the `RunTool` branch (real `cargo clean`), whose
+    /// `actual_reclaimed_bytes` is honestly `Unavailable`.
+    #[test]
+    fn execute_real_run_tool_cleans_cargo_target_dir() {
+        let root = make_temp_dir("execute-real-cargo");
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        fs::write(
+            target_dir.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target_dir.clone()),
+        );
+        let fingerprint = fingerprint_of(&target_dir);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::EvidenceIncomplete],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("Ask decision with matching consent must authorize");
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        assert!(!target_dir.exists());
+        assert_eq!(
+            report.actual_reclaimed_bytes,
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
 
         fs::remove_dir_all(&root).ok();
     }
