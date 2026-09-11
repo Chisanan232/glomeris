@@ -476,6 +476,21 @@ mod tests {
         }
     }
 
+    /// A collector whose every correlation probe reports `Unavailable` —
+    /// simulates a total process/liveness-probe outage (e.g. `lsof`/
+    /// `git`/`pgrep` all missing or timing out).
+    struct AllProbesUnavailableCollector;
+    impl EvidenceCollector for AllProbesUnavailableCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                git_state: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                tool_liveness: ProbeOutcome::Unavailable(ProbeReason::Failed),
+            }
+        }
+    }
+
     /// Builds an [`Evidence`] that is `Completeness::Complete` and clean
     /// (no active-use signals) for `path`/`kind` as of `collected_at` —
     /// i.e. exactly the shape `policy::classify` maps to `AutoSafe`.
@@ -562,6 +577,34 @@ mod tests {
         process_candidate(
             evidence,
             &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            &mut report,
+        );
+
+        assert_eq!(report.denied_candidates, 1);
+        assert_eq!(report.actions_attempted, 0);
+        assert_eq!(report.actions_succeeded, 0);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Process/liveness-probe-failure fault injection: even a candidate
+    /// that is otherwise `Complete` (would reach `AutoSafe`) must be
+    /// correctly denied — never silently treated as `AutoSafe` — once
+    /// every correlation probe reports `Unavailable`.
+    #[test]
+    fn process_candidate_denies_when_all_correlation_probes_are_unavailable() {
+        let dir = make_temp_dir("candidate-probes-unavailable");
+        let target = dir.join("target");
+        fs::create_dir_all(&target).unwrap();
+        let now = SystemTime::now();
+
+        let evidence = autosafe_evidence(target, ResourceKind::CargoTargetDir, now);
+        let mut report = EmergencyReport::default();
+        process_candidate(
+            evidence,
+            &AllProbesUnavailableCollector,
             &ActionRegistry::builtin(),
             now,
             &mut report,
