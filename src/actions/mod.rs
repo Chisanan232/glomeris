@@ -11,6 +11,7 @@
 
 mod cargo;
 mod homebrew;
+pub mod llm;
 mod node;
 
 use std::path::PathBuf;
@@ -167,6 +168,19 @@ impl ActionRegistry {
             .iter()
             .find(|action| action.id().0 == id)
             .map(|action| action.as_ref())
+    }
+
+    /// Stable ids of every registered action whose [`Action::applies_to`]
+    /// includes `kind` — additive read-only accessor (HORO-954) so
+    /// `actions::llm::LlmResourceView` can report which real actions are
+    /// actually registered for a resource's kind, without exposing the
+    /// private `actions` field or its ordering.
+    pub fn ids_for_kind(&self, kind: ResourceKind) -> Vec<&'static str> {
+        self.actions
+            .iter()
+            .filter(|action| action.applies_to().contains(&kind))
+            .map(|action| action.id().0)
+            .collect()
     }
 }
 
