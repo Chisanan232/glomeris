@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime};
 use crate::actions::ActionRegistry;
 use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
-use crate::evidence::model::{Evidence, NativeCleanup, ResourceId};
+use crate::evidence::model::{ActionId, Evidence, NativeCleanup, ResourceId};
 use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome};
 use crate::monitor::{Clock, FsStat, FsUsage};
@@ -172,15 +172,32 @@ fn candidate_size(ev: &Evidence) -> u64 {
         .unwrap_or(0)
 }
 
+/// Resolves the [`ActionId`] to execute for `ev`, if any: prefers
+/// `Evidence::native_cleanup` when it names a real registered action,
+/// otherwise falls back to [`ActionRegistry::find_for_kind`]. The
+/// fallback matters today — see [`ActionRegistry::find_for_kind`]'s doc
+/// comment — because every built-in detector currently always leaves
+/// `native_cleanup` as `Unsupported`.
+fn resolve_action_id(ev: &Evidence, registry: &ActionRegistry) -> Option<ActionId> {
+    if let NativeCleanup::Available(id) = ev.native_cleanup {
+        if registry.get(id.0).is_some() {
+            return Some(id);
+        }
+    }
+    registry.find_for_kind(ev.resource.kind).map(|a| a.id())
+}
+
 /// Flattens every detector's [`DetectorStatus::Found`] evidence into one
-/// list, keeping only candidates that have a resolvable native cleanup
-/// action. `ToolAbsent` (normal — the tool isn't installed) and `Failed`
-/// (a detector-level probe failure, not a per-resource evidence gap) are
-/// silently dropped here: this loop only ever acts on resources evidence
-/// was actually found for.
+/// list, pairing each candidate with its resolved [`ActionId`] and
+/// dropping any candidate with no resolvable action at all. `ToolAbsent`
+/// (normal — the tool isn't installed) and `Failed` (a detector-level
+/// probe failure, not a per-resource evidence gap) are silently dropped
+/// here: this loop only ever acts on resources evidence was actually
+/// found for.
 fn candidates_with_actions(
     statuses: Vec<(crate::detectors::DetectorId, DetectorStatus)>,
-) -> Vec<Evidence> {
+    registry: &ActionRegistry,
+) -> Vec<(Evidence, ActionId)> {
     statuses
         .into_iter()
         .filter_map(|(_, status)| match status {
@@ -188,13 +205,17 @@ fn candidates_with_actions(
             DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => None,
         })
         .flatten()
-        .filter(|ev| matches!(ev.native_cleanup, NativeCleanup::Available(_)))
+        .filter_map(|ev| {
+            let action_id = resolve_action_id(&ev, registry)?;
+            Some((ev, action_id))
+        })
         .collect()
 }
 
 /// One classified, sized candidate ready for approval.
 struct ScoredCandidate {
     evidence: Evidence,
+    action_id: ActionId,
     decision: PolicyDecision,
     size: u64,
 }
@@ -230,7 +251,7 @@ fn refresh_evidence(
 /// `Ask` candidates seen but not eligible for auto-approval, for the
 /// caller's `actions_declined_or_skipped` bookkeeping.
 fn select_candidate(
-    candidates: Vec<Evidence>,
+    candidates: Vec<(Evidence, ActionId)>,
     policy_cfg: &PolicyConfig,
     collector: &dyn EvidenceCollector,
     now: SystemTime,
@@ -240,7 +261,7 @@ fn select_candidate(
     let mut auto_safe: Vec<ScoredCandidate> = Vec::new();
     let mut ask: Vec<ScoredCandidate> = Vec::new();
 
-    for ev in candidates {
+    for (ev, action_id) in candidates {
         if excluded.contains(&ev.resource) {
             continue;
         }
@@ -250,11 +271,13 @@ fn select_candidate(
         match decision.class {
             PolicyClass::AutoSafe => auto_safe.push(ScoredCandidate {
                 evidence: refreshed,
+                action_id,
                 decision,
                 size,
             }),
             PolicyClass::Ask => ask.push(ScoredCandidate {
                 evidence: refreshed,
+                action_id,
                 decision,
                 size,
             }),
@@ -280,7 +303,7 @@ mod select_candidate_tests {
     use crate::detectors::DetectorId;
     use crate::evidence::correlate::CorrelationResult;
     use crate::evidence::model::{
-        ActionId, GitState, Recoverability, ResourceFingerprint, ResourceKind, ResourceLocator,
+        GitState, Recoverability, ResourceFingerprint, ResourceKind, ResourceLocator,
     };
     use crate::evidence::probe::ProbeReason;
     use std::path::PathBuf;
@@ -348,7 +371,10 @@ mod select_candidate_tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
         let (selected, ask_skipped) = select_candidate(
-            vec![small, big],
+            vec![
+                (small, ActionId("test.action")),
+                (big, ActionId("test.action")),
+            ],
             &PolicyConfig::default(),
             &CleanCollector,
             now,
@@ -371,7 +397,7 @@ mod select_candidate_tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
         let (selected, _) = select_candidate(
-            vec![only],
+            vec![(only, ActionId("test.action"))],
             &PolicyConfig::default(),
             &CleanCollector,
             now,
@@ -388,7 +414,7 @@ mod select_candidate_tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
         let (selected, ask_skipped) = select_candidate(
-            vec![ev],
+            vec![(ev, ActionId("test.action"))],
             &PolicyConfig::default(),
             &ToolLiveCollector,
             now,
@@ -406,7 +432,7 @@ mod select_candidate_tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
         let (selected, ask_skipped) = select_candidate(
-            vec![ev],
+            vec![(ev, ActionId("test.action"))],
             &PolicyConfig::default(),
             &ToolLiveCollector,
             now,
@@ -427,7 +453,7 @@ mod select_candidate_tests {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
         let (selected, _) = select_candidate(
-            vec![ev],
+            vec![(ev, ActionId("test.action"))],
             &PolicyConfig::default(),
             &CleanCollector,
             now,
@@ -562,7 +588,7 @@ pub fn run(
 
         // 4. Discover.
         let statuses = detector_registry.discover_all(discovery_ctx);
-        let candidates = candidates_with_actions(statuses);
+        let candidates = candidates_with_actions(statuses, action_registry);
 
         // 5-6. Refresh evidence, classify, select one candidate.
         let now = wall_clock.now();
@@ -592,7 +618,7 @@ pub fn run(
 
         let resource = candidate.evidence.resource.clone();
         let fingerprint = candidate.evidence.fingerprint.clone();
-        let native_cleanup = candidate.evidence.native_cleanup;
+        let action_id = candidate.action_id;
         let decision_class = candidate.decision.class;
 
         // 7. Authorize. AutoSafe needs no consent; Ask needs a
@@ -618,15 +644,9 @@ pub fn run(
             }
         };
 
-        // 8. Resolve the action.
-        let action_id = match native_cleanup {
-            NativeCleanup::Available(id) => id,
-            NativeCleanup::Unsupported => {
-                no_retry.insert(resource);
-                actions_declined_or_skipped += 1;
-                continue;
-            }
-        };
+        // 8. Resolve the action (already resolved by `candidates_with_actions`
+        // via `resolve_action_id`; re-look-up defensively rather than
+        // trusting the id is still valid).
         let action = match action_registry.get(action_id.0) {
             Some(action) => action,
             None => {
