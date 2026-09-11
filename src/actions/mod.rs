@@ -168,6 +168,25 @@ impl ActionRegistry {
             .find(|action| action.id().0 == id)
             .map(|action| action.as_ref())
     }
+
+    /// Finds a registered action whose [`Action::applies_to`] includes
+    /// `kind`. Used by HORO-952's recovery loop as a fallback when a
+    /// candidate's `Evidence::native_cleanup` is
+    /// [`crate::evidence::model::NativeCleanup::Unsupported`] even though
+    /// a real action exists for the resource's kind — every built-in
+    /// detector (HORO-948) currently always sets `native_cleanup` to
+    /// `Unsupported` at discovery time (populating
+    /// `NativeCleanup::Available` from a real registry lookup was noted
+    /// as future work in those detectors' own doc comments, e.g.
+    /// `detectors::homebrew`), so relying on `NativeCleanup::Available`
+    /// alone would make every action registered here unreachable from
+    /// real discovery output today.
+    pub fn find_for_kind(&self, kind: ResourceKind) -> Option<&dyn Action> {
+        self.actions
+            .iter()
+            .find(|action| action.applies_to().contains(&kind))
+            .map(|action| action.as_ref())
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +224,23 @@ mod tests {
     fn get_finds_homebrew_action_by_id() {
         let registry = ActionRegistry::builtin();
         assert!(registry.get("homebrew.cleanup.cache").is_some());
+    }
+
+    #[test]
+    fn find_for_kind_finds_cargo_action_for_cargo_target_dir() {
+        let registry = ActionRegistry::builtin();
+        let action = registry
+            .find_for_kind(ResourceKind::CargoTargetDir)
+            .expect("expected a registered action for CargoTargetDir");
+        assert_eq!(action.id(), ActionId("cargo.clean.target_dir"));
+    }
+
+    #[test]
+    fn find_for_kind_returns_none_for_a_kind_with_no_registered_action() {
+        let registry = ActionRegistry::builtin();
+        assert!(registry
+            .find_for_kind(ResourceKind::DockerBuildCache)
+            .is_none());
     }
 
     #[test]

@@ -8,6 +8,7 @@ fn main() {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("detect") => run_detect_command(),
+        Some("free") => run_free_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             print_usage();
@@ -20,7 +21,9 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("usage: glomeris <daemon <install|uninstall|status|run>|scan|detect>");
+    eprintln!(
+        "usage: glomeris <daemon <install|uninstall|status|run>|scan|detect|free --target <N%|NB>>"
+    );
 }
 
 fn run_detect_command() {
@@ -46,6 +49,56 @@ fn run_detect_command() {
             }
         }
     }
+}
+
+fn run_free_command(args: &[String]) {
+    let mut target_arg: Option<&str> = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--target" {
+            target_arg = args.get(i + 1).map(String::as_str);
+            i += 2;
+        } else {
+            eprintln!("glomeris free: unrecognized argument '{}'", args[i]);
+            print_usage();
+            std::process::exit(2);
+        }
+    }
+
+    let target_arg = match target_arg {
+        Some(t) => t,
+        None => {
+            eprintln!("glomeris free: --target is required");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+
+    let target = match glomeris::executor::recovery_loop::parse_free_target(target_arg) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("glomeris free: {e}");
+            std::process::exit(2);
+        }
+    };
+
+    free_run(target);
+}
+
+fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryReport) {
+    println!("stop reason:            {:?}", report.stop_reason);
+    println!("iterations run:         {}", report.iterations_run);
+    println!("actions executed:       {}", report.actions_executed);
+    println!(
+        "actions declined/skipped: {}",
+        report.actions_declined_or_skipped
+    );
+    println!("bytes freed:            {}", report.total_bytes_freed);
+    println!(
+        "free before:            {} bytes",
+        report.started_free_bytes
+    );
+    println!("free after:             {} bytes", report.final_free_bytes);
 }
 
 fn run_daemon_command(subcommand: Option<&str>) {
@@ -156,6 +209,65 @@ fn daemon_run() {
             }
         },
     );
+}
+
+#[cfg(target_os = "macos")]
+fn free_run(target: glomeris::executor::recovery_loop::FreeTarget) {
+    use glomeris::actions::ActionRegistry;
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::executor::recovery_loop::{
+        run as run_recovery_loop, RecoveryConfig, SystemWallClock,
+    };
+    use glomeris::monitor::SystemClock;
+    use glomeris::platform::macos::MacosFsStat;
+    use glomeris::policy::PolicyConfig;
+    use std::time::Duration;
+
+    let home_dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let discovery_ctx = DiscoveryContext::new(home_dir);
+
+    let config = RecoveryConfig {
+        target,
+        max_iterations: 100,
+        max_actions: 100,
+        max_duration: Duration::from_secs(600),
+        // No interactive prompt in this MVP — Ask candidates are
+        // reported as declined/skipped rather than executed. See
+        // RecoveryConfig::auto_approve_ask's doc comment.
+        auto_approve_ask: false,
+    };
+
+    let fs_stat = MacosFsStat;
+    let collector = DefaultEvidenceCollector::default();
+    let detector_registry = DetectorRegistry::builtin();
+    let action_registry = ActionRegistry::builtin();
+    let clock = SystemClock;
+    let wall_clock = SystemWallClock;
+    let policy_cfg = PolicyConfig::default();
+
+    let report = run_recovery_loop(
+        &config,
+        &fs_stat,
+        &collector,
+        &detector_registry,
+        &action_registry,
+        &clock,
+        &wall_clock,
+        &policy_cfg,
+        std::path::Path::new("/"),
+        &discovery_ctx,
+    );
+
+    print_recovery_report(&report);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn free_run(_target: glomeris::executor::recovery_loop::FreeTarget) {
+    eprintln!("glomeris free: only supported on macOS");
+    std::process::exit(1);
 }
 
 #[cfg(not(target_os = "macos"))]
