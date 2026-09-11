@@ -11,8 +11,8 @@
 //! immediately before mutating anything, and aborts rather than acts if
 //! that fresh read disagrees with what was approved.
 
-use crate::actions::ActionId;
-use crate::evidence::model::ResourceId;
+use crate::actions::{Action, ActionError, ActionId, ActionPlan};
+use crate::evidence::model::{Evidence, ResourceId};
 use crate::evidence::probe::ProbeOutcome;
 
 /// The outcome of one execution (or dry-run) attempt.
@@ -58,4 +58,83 @@ pub enum AbortReason {
     RevalidationEvidenceStale,
 }
 
-// `dry_run` and `execute` land in follow-up commits.
+/// Render a plan without executing it. Identical output to what
+/// `execute` (added in a follow-up commit) would act on, because both
+/// call the same [`Action::plan`] on the same [`Evidence`].
+pub fn dry_run(action: &dyn Action, ev: &Evidence) -> Result<ActionPlan, ActionError> {
+    action.plan(ev)
+}
+
+// `execute` lands in a follow-up commit.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::NodeCleanNodeModules;
+    use crate::evidence::model::{
+        NativeCleanup, Recoverability, ResourceFingerprint, ResourceKind, ResourceLocator,
+    };
+    use crate::evidence::probe::ProbeReason;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn evidence_for(resource_path: PathBuf, kind: ResourceKind) -> Evidence {
+        Evidence {
+            resource: ResourceId::new(kind, ResourceLocator::Path(resource_path)),
+            fingerprint: ResourceFingerprint {
+                dev_ino: None,
+                mtime: None,
+                tool_revision: None,
+            },
+            detector: crate::detectors::DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(1024),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: kind.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Unsupported,
+            open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at: SystemTime::UNIX_EPOCH,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dry_run_renders_a_plan_without_mutating_anything() {
+        let root = make_temp_dir("dry-run");
+        let node_modules = root.join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+
+        let ev = evidence_for(node_modules.clone(), ResourceKind::NodeModules);
+        let plan = dry_run(&NodeCleanNodeModules, &ev).expect("dry_run should succeed");
+
+        assert_eq!(plan.steps.len(), 1);
+        assert!(node_modules.exists(), "dry_run must not mutate anything");
+
+        fs::remove_dir_all(&root).ok();
+    }
+}
