@@ -8,7 +8,7 @@
 //! Canonical safety invariant (unchanged here): AI can recommend. Policy
 //! decides. Executor verifies. Filesystem reality wins. Emergency
 //! pressure is NOT permission to weaken that invariant — this module
-//! reuses [`crate::policy::classify`]/[`crate::policy::authorize`] and
+//! reuses [`crate::policy::classify`]/[`crate::policy::approval::authorize`] and
 //! [`crate::executor::execute`] exactly as-is, and never references
 //! anything network- or LLM-related. There is nothing in this file's
 //! production code (the part above its own test module) for the
@@ -111,7 +111,8 @@ pub struct EmergencyReport {
     /// instead, so this field stays a clean read of "policy said no".
     pub denied_candidates: u32,
     /// Non-fatal errors encountered along the way (e.g. a persistence
-    /// write failure) — reported, never fatal. Bounded at [`MAX_ERRORS`].
+    /// write failure) — reported, never fatal. Bounded internally so an
+    /// adversarial run can't grow this field unboundedly.
     pub errors: Vec<String>,
 }
 
@@ -339,7 +340,7 @@ fn process_candidates(
 /// classification is [`PolicyClass::AutoSafe`]. Never handles `Ask` —
 /// there is no interactive consent mechanism in a degraded path (see
 /// module docs) — and never executes `Protected`, which
-/// [`crate::policy::authorize`] refuses unconditionally anyway. This is a
+/// [`crate::policy::approval::authorize`] refuses unconditionally anyway. This is a
 /// deliberate MVP choice, not an oversight: emergency pressure is not
 /// permission to weaken policy.
 fn process_candidate(
@@ -356,6 +357,12 @@ fn process_candidate(
         },
     );
     merge_into(&mut evidence, correlation);
+    // Stamp with the freshly-correlated timestamp before classifying, same
+    // as `executor::build_fresh_evidence` does — this is evidence we just
+    // observed, so it is never stale by definition. It does NOT bypass
+    // `classify`'s staleness gate for anything else: only this just-probed
+    // snapshot gets the new timestamp, and every other check (Protected,
+    // completeness, active-use, regenerability) still runs unmodified.
     evidence.collected_at = now;
 
     let cfg = PolicyConfig::default();
