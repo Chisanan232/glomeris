@@ -5,8 +5,10 @@
 //! No persistence dependency: everything here is pure in-memory
 //! computation plus the filesystem walk itself.
 
+pub mod budget;
 pub mod candidate;
 pub mod topk;
 
+pub use budget::{ScanBudget, StopReason};
 pub use candidate::{CandidateKind, EntryStatus, ScanCandidate};
 pub use topk::TopKCandidates;
