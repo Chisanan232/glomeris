@@ -459,6 +459,31 @@ mod tests {
     }
 
     #[test]
+    fn openai_error_never_leaks_api_key() {
+        // OpenAiCompatibleProvider deliberately does not derive Debug (see
+        // its doc comment) — this test proves the invariant a different
+        // way: a real complete() call's error output never contains the
+        // key, regardless of which branch produced it.
+        let fake_key = "sk-super-secret-test-key-should-not-leak";
+        let provider = OpenAiCompatibleProvider {
+            // Loopback with (almost certainly) nothing listening: the
+            // kernel refuses the connection immediately (ECONNREFUSED)
+            // rather than timing out, unlike a genuinely unroutable
+            // address or port 0 (which some platforms handle
+            // unpredictably) — keeps this test fast and deterministic.
+            base_url: "http://127.0.0.1:1".to_string(),
+            api_key: fake_key.to_string(),
+            model: "test-model".to_string(),
+        };
+        let result = provider.complete("system", "user");
+        let output = format!("{result:?}");
+        assert!(
+            !output.contains(fake_key),
+            "provider error output must never contain the API key"
+        );
+    }
+
+    #[test]
     fn unfenced_json_object_parses() {
         let text =
             r#"{"items": [{"resource_id": "a", "action_id": "b", "priority": 1, "reason": null}]}"#;
