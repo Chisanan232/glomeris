@@ -2,7 +2,7 @@
 //! convention (HORO-950).
 //!
 //! [`Approval`] can only be constructed inside this module (see
-//! [`Seal`]) — the construction path itself ([`authorize`]) lands in a
+//! `Seal`) — the construction path itself (`authorize`) lands in a
 //! follow-up commit; this commit only defines the shapes it will build.
 
 use std::time::SystemTime;

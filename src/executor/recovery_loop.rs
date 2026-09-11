@@ -4,7 +4,7 @@
 //! This module wires together, without reimplementing any of them:
 //! [`crate::monitor::FsStat`] (measurement), [`crate::detectors::DetectorRegistry`]
 //! (discovery), [`crate::evidence::correlate::EvidenceCollector`]
-//! (correlation refresh), [`crate::policy::classify`]/[`crate::policy::authorize`]
+//! (correlation refresh), [`crate::policy::classify`]/`crate::policy::approval::authorize`
 //! (the AUTO_SAFE/ASK/PROTECTED decision), and [`crate::executor::execute`]
 //! (HORO-951's fully-hardened, TOCTOU-safe deletion). The loop itself adds
 //! only orchestration and bookkeeping — target/budget checks, one-candidate-
@@ -49,7 +49,7 @@ const CANDIDATE_CORRELATION_TIMEOUT: Duration = Duration::from_secs(5);
 const NO_PROGRESS_STREAK_THRESHOLD: u32 = 2;
 
 /// Abstraction over "what time is it right now" for the wall-clock
-/// timestamps [`crate::policy::classify`]/[`crate::policy::authorize`]
+/// timestamps [`crate::policy::classify`]/`crate::policy::approval::authorize`
 /// need (`Evidence::collected_at`, `UserConsent::granted_at`). Distinct
 /// from [`crate::monitor::Clock`] (which is `Instant`-based and used here
 /// only for the `max_duration` budget check) because `classify` takes a
@@ -115,7 +115,7 @@ pub enum StopReason {
     SafeExhausted,
     /// `max_iterations`, `max_actions`, or `max_duration` was reached.
     BudgetExceeded,
-    /// The last [`NO_PROGRESS_STREAK_THRESHOLD`] consecutive successfully
+    /// The last `NO_PROGRESS_STREAK_THRESHOLD` consecutive successfully
     /// executed actions each measured zero (or unmeasurable) actual
     /// reclaimed bytes.
     NoProgress,

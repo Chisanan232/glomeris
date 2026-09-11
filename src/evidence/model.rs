@@ -73,7 +73,7 @@ impl ResourceKind {
     /// real running-process signal to observe (Xcode.app, the Docker
     /// daemon). For `Cargo`/`Npm`/`Pnpm`/`Yarn`/`Homebrew`, `tool_liveness`
     /// is structurally always `Unavailable(ToolNotRunning)` — see
-    /// [`crate::evidence::correlate::tool_liveness::PgrepToolLivenessProbe`]
+    /// [`crate::evidence::correlate::PgrepToolLivenessProbe`]
     /// — so requiring it here would make [`Completeness::Complete`]
     /// permanently unreachable for those kinds.
     pub fn required_evidence(&self) -> &'static [EvidenceField] {
@@ -157,7 +157,7 @@ impl fmt::Display for ResourceLocator {
     }
 }
 
-/// Stable identity of one resource. [`ResourceId`]'s [`Display`] output is
+/// Stable identity of one resource. [`ResourceId`]'s [`Display`](std::fmt::Display) output is
 /// the ONLY resource handle a future LLM will ever see — keep the format
 /// stable: `"<resource_kind_snake_case>:<locator>"`, e.g.
 /// `"cargo_target_dir:/Users/x/proj/target"`.
@@ -173,7 +173,7 @@ impl ResourceId {
     }
 
     /// Stable, snake_case tag for `self.kind` — the same string
-    /// [`ResourceId`]'s [`Display`] impl uses before the locator. `pub`
+    /// [`ResourceId`]'s [`Display`](std::fmt::Display) impl uses before the locator. `pub`
     /// (HORO-954) so `actions::llm::LlmResourceView` can reuse this exact
     /// mapping instead of re-deriving its own copy of this match.
     pub fn kind_tag(&self) -> &'static str {
@@ -323,13 +323,13 @@ pub struct Evidence {
     pub git_state: ProbeOutcome<Option<GitState>>,
     pub tool_liveness: ProbeOutcome<bool>,
     pub collected_at: SystemTime,
-    /// Bounded provenance notes (capped at [`MAX_SOURCES`] entries).
+    /// Bounded provenance notes (capped at `MAX_SOURCES` entries).
     pub sources: Vec<String>,
 }
 
 impl Evidence {
     /// Push a provenance note, silently dropping it once `sources` has
-    /// reached [`MAX_SOURCES`] — provenance is advisory context, not a
+    /// reached `MAX_SOURCES` — provenance is advisory context, not a
     /// field callers should rely on being exhaustive.
     pub fn push_source(&mut self, note: impl Into<String>) {
         if self.sources.len() < MAX_SOURCES {
