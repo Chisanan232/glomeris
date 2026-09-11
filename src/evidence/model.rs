@@ -172,7 +172,11 @@ impl ResourceId {
         Self { kind, locator }
     }
 
-    fn kind_tag(&self) -> &'static str {
+    /// Stable, snake_case tag for `self.kind` — the same string
+    /// [`ResourceId`]'s [`Display`] impl uses before the locator. `pub`
+    /// (HORO-954) so `actions::llm::LlmResourceView` can reuse this exact
+    /// mapping instead of re-deriving its own copy of this match.
+    pub fn kind_tag(&self) -> &'static str {
         match self.kind {
             ResourceKind::XcodeDerivedData => "xcode_derived_data",
             ResourceKind::HomebrewCache => "homebrew_cache",
