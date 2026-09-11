@@ -6,6 +6,10 @@ description = "Evidence-first, policy-constrained developer storage autopilot fo
 license = "Apache-2.0"
 repository = "https://github.com/Chisanan232/glomeris"
 
+[lib]
+name = "glomeris"
+path = "src/lib.rs"
+
 [[bin]]
 name = "glomeris"
 path = "src/main.rs"
