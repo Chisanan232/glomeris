@@ -97,3 +97,34 @@ impl BudgetTracker {
         self.files_visited
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unlimited_budget_never_stops() {
+        let mut tracker = ScanBudget::unlimited().tracker();
+        for _ in 0..10_000 {
+            assert_eq!(tracker.record_visit(), None);
+        }
+    }
+
+    #[test]
+    fn file_count_budget_stops_at_the_limit() {
+        let mut tracker = ScanBudget::default().with_max_files_visited(3).tracker();
+        assert_eq!(tracker.record_visit(), None);
+        assert_eq!(tracker.record_visit(), None);
+        assert_eq!(tracker.record_visit(), Some(StopReason::FileCountBudget));
+        assert_eq!(tracker.files_visited(), 3);
+    }
+
+    #[test]
+    fn time_budget_stops_after_the_duration_elapses() {
+        let mut tracker = ScanBudget::default()
+            .with_max_duration(Duration::from_millis(1))
+            .tracker();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(tracker.record_visit(), Some(StopReason::TimeBudget));
+    }
+}
