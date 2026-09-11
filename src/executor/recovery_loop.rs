@@ -158,6 +158,287 @@ pub fn target_met(usage: &FsUsage, target: &FreeTarget) -> bool {
     }
 }
 
+/// Best-effort "how big is this candidate" metric used to rank candidates
+/// within a bucket: prefer `reclaimable_bytes` (the more precise probe),
+/// falling back to `logical_bytes`, falling back to `0` when neither was
+/// observed (such a candidate can still be selected — e.g. an
+/// `AutoSafe` bucket with only unmeasured candidates — just not
+/// preferentially).
+fn candidate_size(ev: &Evidence) -> u64 {
+    ev.reclaimable_bytes
+        .observed()
+        .or_else(|| ev.logical_bytes.observed())
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Flattens every detector's [`DetectorStatus::Found`] evidence into one
+/// list, keeping only candidates that have a resolvable native cleanup
+/// action. `ToolAbsent` (normal — the tool isn't installed) and `Failed`
+/// (a detector-level probe failure, not a per-resource evidence gap) are
+/// silently dropped here: this loop only ever acts on resources evidence
+/// was actually found for.
+fn candidates_with_actions(
+    statuses: Vec<(crate::detectors::DetectorId, DetectorStatus)>,
+) -> Vec<Evidence> {
+    statuses
+        .into_iter()
+        .filter_map(|(_, status)| match status {
+            DetectorStatus::Found(evidence) => Some(evidence),
+            DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => None,
+        })
+        .flatten()
+        .filter(|ev| matches!(ev.native_cleanup, NativeCleanup::Available(_)))
+        .collect()
+}
+
+/// One classified, sized candidate ready for approval.
+struct ScoredCandidate {
+    evidence: Evidence,
+    decision: PolicyDecision,
+    size: u64,
+}
+
+/// Refreshes `ev`'s correlation fields via `collector` (reusing
+/// [`crate::evidence::correlate::merge_into`] exactly as HORO-951's
+/// deletion-time revalidation does) and re-stamps `collected_at` with the
+/// injected wall-clock `now`, so [`crate::policy::classify`]'s staleness
+/// check is evaluated against genuinely fresh evidence rather than
+/// whatever moment the detector originally ran at.
+fn refresh_evidence(
+    mut ev: Evidence,
+    collector: &dyn EvidenceCollector,
+    now: SystemTime,
+) -> Evidence {
+    let correlation = collector.collect(
+        &ev.resource,
+        ProbeBudget {
+            timeout: CANDIDATE_CORRELATION_TIMEOUT,
+        },
+    );
+    merge_into(&mut ev, correlation);
+    ev.collected_at = now;
+    ev
+}
+
+/// Selects at most one candidate for this iteration: refreshes evidence
+/// and classifies every discovered candidate (skipping any resource in
+/// `excluded`, i.e. one this run has already given up on — see loop step
+/// 9), then picks the largest-by-`candidate_size` `AutoSafe` candidate if
+/// any exist; only when none exist, and only when `auto_approve_ask` is
+/// set, picks the largest `Ask` candidate instead. Returns the number of
+/// `Ask` candidates seen but not eligible for auto-approval, for the
+/// caller's `actions_declined_or_skipped` bookkeeping.
+fn select_candidate(
+    candidates: Vec<Evidence>,
+    policy_cfg: &PolicyConfig,
+    collector: &dyn EvidenceCollector,
+    now: SystemTime,
+    excluded: &HashSet<ResourceId>,
+    auto_approve_ask: bool,
+) -> (Option<ScoredCandidate>, u32) {
+    let mut auto_safe: Vec<ScoredCandidate> = Vec::new();
+    let mut ask: Vec<ScoredCandidate> = Vec::new();
+
+    for ev in candidates {
+        if excluded.contains(&ev.resource) {
+            continue;
+        }
+        let refreshed = refresh_evidence(ev, collector, now);
+        let decision = classify(&refreshed, policy_cfg, now);
+        let size = candidate_size(&refreshed);
+        match decision.class {
+            PolicyClass::AutoSafe => auto_safe.push(ScoredCandidate {
+                evidence: refreshed,
+                decision,
+                size,
+            }),
+            PolicyClass::Ask => ask.push(ScoredCandidate {
+                evidence: refreshed,
+                decision,
+                size,
+            }),
+            PolicyClass::Protected => {}
+        }
+    }
+
+    if let Some(best) = auto_safe.into_iter().max_by_key(|c| c.size) {
+        return (Some(best), 0);
+    }
+
+    if auto_approve_ask {
+        let best = ask.into_iter().max_by_key(|c| c.size);
+        (best, 0)
+    } else {
+        (None, ask.len() as u32)
+    }
+}
+
+#[cfg(test)]
+mod select_candidate_tests {
+    use super::*;
+    use crate::detectors::DetectorId;
+    use crate::evidence::correlate::CorrelationResult;
+    use crate::evidence::model::{
+        ActionId, GitState, Recoverability, ResourceFingerprint, ResourceKind, ResourceLocator,
+    };
+    use crate::evidence::probe::ProbeReason;
+    use std::path::PathBuf;
+
+    /// A collector that always reports clean, complete correlation — the
+    /// baseline that makes complete/fresh evidence reach `AutoSafe`.
+    struct CleanCollector;
+
+    impl EvidenceCollector for CleanCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
+    /// A collector that reports the owning tool as live — pins the
+    /// resulting decision to `Ask{OwningToolLive}`.
+    struct ToolLiveCollector;
+
+    impl EvidenceCollector for ToolLiveCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(true),
+            }
+        }
+    }
+
+    fn evidence(path: &str, kind: ResourceKind, logical_bytes: u64) -> Evidence {
+        Evidence {
+            resource: ResourceId::new(kind, ResourceLocator::Path(PathBuf::from(path))),
+            fingerprint: ResourceFingerprint {
+                dev_ino: None,
+                mtime: None,
+                tool_revision: None,
+            },
+            detector: DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(logical_bytes),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Observed(logical_bytes),
+            last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: kind.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Available(ActionId("test.action")),
+            open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at: SystemTime::UNIX_EPOCH,
+            sources: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn picks_largest_auto_safe_candidate_by_size() {
+        let small = evidence("/tmp/small/target", ResourceKind::CargoTargetDir, 100);
+        let big = evidence("/tmp/big/target", ResourceKind::CargoTargetDir, 10_000);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let (selected, ask_skipped) = select_candidate(
+            vec![small, big],
+            &PolicyConfig::default(),
+            &CleanCollector,
+            now,
+            &HashSet::new(),
+            false,
+        );
+
+        assert_eq!(ask_skipped, 0);
+        let selected = selected.expect("expected an AutoSafe candidate");
+        assert_eq!(selected.decision.class, PolicyClass::AutoSafe);
+        assert_eq!(selected.size, 10_000);
+    }
+
+    #[test]
+    fn excludes_resources_already_given_up_on() {
+        let only = evidence("/tmp/only/target", ResourceKind::CargoTargetDir, 100);
+        let resource = only.resource.clone();
+        let mut excluded = HashSet::new();
+        excluded.insert(resource);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let (selected, _) = select_candidate(
+            vec![only],
+            &PolicyConfig::default(),
+            &CleanCollector,
+            now,
+            &excluded,
+            false,
+        );
+
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn ask_candidates_are_not_selected_when_auto_approve_ask_is_false() {
+        let ev = evidence("/tmp/live/target", ResourceKind::XcodeDerivedData, 100);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let (selected, ask_skipped) = select_candidate(
+            vec![ev],
+            &PolicyConfig::default(),
+            &ToolLiveCollector,
+            now,
+            &HashSet::new(),
+            false,
+        );
+
+        assert!(selected.is_none());
+        assert_eq!(ask_skipped, 1);
+    }
+
+    #[test]
+    fn ask_candidates_are_selected_when_auto_approve_ask_is_true() {
+        let ev = evidence("/tmp/live/target", ResourceKind::XcodeDerivedData, 100);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let (selected, ask_skipped) = select_candidate(
+            vec![ev],
+            &PolicyConfig::default(),
+            &ToolLiveCollector,
+            now,
+            &HashSet::new(),
+            true,
+        );
+
+        assert_eq!(ask_skipped, 0);
+        let selected = selected.expect("expected an Ask candidate to be auto-approved");
+        assert_eq!(selected.decision.class, PolicyClass::Ask);
+    }
+
+    #[test]
+    fn protected_candidates_are_never_selected() {
+        // Unknown resource kind is unconditionally Protected regardless
+        // of evidence content.
+        let ev = evidence("/tmp/unknown/thing", ResourceKind::Unknown, 100);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let (selected, _) = select_candidate(
+            vec![ev],
+            &PolicyConfig::default(),
+            &CleanCollector,
+            now,
+            &HashSet::new(),
+            true,
+        );
+
+        assert!(selected.is_none());
+    }
+}
+
 /// Parses a `--target` CLI value into a [`FreeTarget`].
 ///
 /// Format (deliberately minimal — see the PR's "Known limitations"):
