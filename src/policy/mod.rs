@@ -5,5 +5,9 @@
 //! verifies. Filesystem reality wins.
 
 pub mod class;
+pub mod config;
+pub mod decision;
 
 pub use class::{PolicyClass, ReasonCode};
+pub use config::PolicyConfig;
+pub use decision::PolicyDecision;
