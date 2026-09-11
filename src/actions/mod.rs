@@ -58,15 +58,25 @@ pub enum ActionError {
 /// other deserialization impl) to this type, under any circumstance —
 /// including "just for testing".
 ///
-/// This is deliberately a construct-only type: an [`ActionPlan`] can only
-/// come from a trusted [`Action::plan`] implementation running in this
-/// process, never from parsed external/model/network input. That is the
-/// structural guard against an LLM (or any other untrusted input source)
-/// composing a plan directly and handing it to
-/// [`crate::executor::execute`] — there is no `from_str`/`from_json`/
-/// `Deserialize` path into this type, so the only way to get one is to
-/// call a real, reviewed `Action::plan` implementation. Adding
-/// `Deserialize` here would silently remove that guarantee.
+/// The actual guarantee this type provides: there is no `from_str`/
+/// `from_json`/`Deserialize` path into it, so no EXTERNAL input — a parsed
+/// network payload, LLM-composed text, anything from outside this process
+/// — can ever materialize an [`ActionPlan`] or [`ActionStep`] directly.
+/// The only way external input reaches execution is by selecting a
+/// pre-registered [`ActionId`] via `ActionRegistry::get` and handing it
+/// [`Evidence`] for a real [`Action::plan`] implementation to interpret.
+///
+/// This is NOT a guarantee that intra-crate code cannot construct a value
+/// of this type directly — `ActionPlan`'s and `ActionStep`'s fields are
+/// `pub`, so any code within this crate has the same field-level
+/// visibility `Action::plan` implementations do. Nothing currently
+/// executes an externally-supplied or hand-built plan (every call to
+/// [`crate::executor::execute`]/[`crate::executor::dry_run`] in this
+/// codebase is fed a plan freshly returned by a real `Action::plan` call),
+/// so today's guarantee rests on there being no execution-facing API that
+/// accepts a caller-supplied plan — not on the fields being inaccessible.
+/// If that ever changes, revisit whether these fields should become
+/// private with constructor functions instead.
 #[derive(Debug, Clone)]
 pub struct ActionPlan {
     pub action: ActionId,
