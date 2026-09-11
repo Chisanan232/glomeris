@@ -7,6 +7,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
+        Some("detect") => run_detect_command(),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             print_usage();
@@ -19,7 +20,32 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!("usage: glomeris <daemon <install|uninstall|status|run>|scan>");
+    eprintln!("usage: glomeris <daemon <install|uninstall|status|run>|scan|detect>");
+}
+
+fn run_detect_command() {
+    use glomeris::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
+
+    let home_dir = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+
+    let ctx = DiscoveryContext::new(home_dir);
+    let registry = DetectorRegistry::builtin();
+
+    for (id, status) in registry.discover_all(&ctx) {
+        match status {
+            DetectorStatus::Found(evidence) => {
+                println!("{:<24} found ({} evidence)", id.0, evidence.len());
+            }
+            DetectorStatus::ToolAbsent => {
+                println!("{:<24} tool_absent", id.0);
+            }
+            DetectorStatus::Failed(reason) => {
+                println!("{:<24} failed: {reason}", id.0);
+            }
+        }
+    }
 }
 
 fn run_daemon_command(subcommand: Option<&str>) {
