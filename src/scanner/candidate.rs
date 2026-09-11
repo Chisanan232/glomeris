@@ -81,3 +81,30 @@ impl ScanCandidate {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_candidate_reports_logical_size_not_reclaimable_bytes() {
+        let candidate = ScanCandidate::new(PathBuf::from("/tmp/example"), 4096, 2);
+
+        // The field is named and typed as a logical size (u64 byte count
+        // straight from the filesystem), never as a reclaimed/guaranteed
+        // figure — a caller reading this field name must see "logical".
+        let logical_size_bytes: u64 = candidate.logical_size_bytes;
+        assert_eq!(logical_size_bytes, 4096);
+        assert_eq!(candidate.status, EntryStatus::Complete);
+    }
+
+    #[test]
+    fn incomplete_candidate_is_marked_unknown_not_zero_size() {
+        let candidate = ScanCandidate::incomplete(PathBuf::from("/tmp/denied"), 1);
+
+        assert_eq!(candidate.status, EntryStatus::Incomplete);
+        // logical_size_bytes is 0 here, but callers must branch on
+        // `status`, never infer "empty" from a 0 byte count alone.
+        assert_eq!(candidate.logical_size_bytes, 0);
+    }
+}
