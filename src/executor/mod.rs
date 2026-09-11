@@ -94,6 +94,21 @@ pub fn execute(
 ) -> ExecutionReport {
     let resource = approval.decision().resource.clone();
 
+    // 0. Snapshot the resource's live filesystem identity via
+    // `symlink_metadata` (never `metadata` — a symlink must be detected as
+    // a symlink, not resolved through) as the VERY FIRST thing this
+    // function does, before the slow revalidation correlation pass
+    // (`build_fresh_evidence` -> `collector.collect()`) gets any chance to
+    // run. This is the anchor a symlink-swap TOCTOU attack cannot
+    // backdate: even if the attacker replaces the resource with a symlink
+    // during the slow correlation pass below, the final guard right before
+    // mutation (see `verify_identity_unchanged`) compares against THIS
+    // early snapshot, not against a freshly re-derived one.
+    let identity_snapshot = match &resource.locator {
+        ResourceLocator::Path(p) => snapshot_identity(p).ok(),
+        ResourceLocator::Tool { .. } => None,
+    };
+
     // 1-2: re-canonicalize/re-collect: `fresh_evidence` re-probes the
     // resource's basic fields (size/mtime/fingerprint) directly from the
     // filesystem and re-runs the same `EvidenceCollector` HORO-949
@@ -151,7 +166,7 @@ pub fn execute(
         }
     };
 
-    execute_plan(plan)
+    execute_plan(plan, identity_snapshot)
 }
 
 /// `Ask` is a heterogeneous bucket: a reason present in `fresh` but not
@@ -271,7 +286,12 @@ fn failed_report(
 /// Runs every step of `plan` for real. No `unwrap()`/`panic!` — every
 /// fallible step produces `ExecutionOutcome::Failed(reason)` instead of
 /// crashing.
-fn execute_plan(plan: ActionPlan) -> ExecutionReport {
+///
+/// `identity_snapshot` is the early, pre-slow-I/O filesystem identity
+/// captured by `execute()` before revalidation ran (see its step 0
+/// comment). `DeletePath` re-verifies against it immediately before
+/// mutating — see [`verify_identity_unchanged`].
+fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -> ExecutionReport {
     let mut actual_bytes_total: u64 = 0;
     let mut saw_run_tool = false;
     let mut saw_delete = false;
@@ -307,7 +327,7 @@ fn execute_plan(plan: ActionPlan) -> ExecutionReport {
             }
             ActionStep::DeletePath { path } => {
                 saw_delete = true;
-                match delete_path_with_guard(path, &plan.resource) {
+                match delete_path_with_guard(path, &plan.resource, identity_snapshot.as_ref()) {
                     Ok(bytes_removed) => actual_bytes_total += bytes_removed,
                     Err(message) => {
                         return failed_report(
@@ -344,50 +364,119 @@ fn execute_plan(plan: ActionPlan) -> ExecutionReport {
     }
 }
 
-/// Deletes `path` after re-canonicalizing it and verifying the
-/// canonicalized path is still a descendant of `resource`'s originally
-/// observed canonical root. Defends against a symlink-swap race between
-/// plan time and this exact moment: if something replaced a path
-/// component with a symlink pointing elsewhere between when the plan was
-/// built and now, the freshly canonicalized real path would resolve
-/// outside the expected root, and this refuses to delete it.
+/// A live filesystem identity — captured via `symlink_metadata` (never
+/// `metadata`, so the path itself being a symlink is observed as such,
+/// never silently resolved through to whatever it points at) — pinned to
+/// the exact path it was taken from.
+///
+/// This is the anchor for closing the symlink-swap TOCTOU window: taking
+/// this snapshot EARLY (before any slow revalidation I/O runs) and
+/// re-verifying against it immediately before a destructive mutation means
+/// an attacker who swaps the resource for a symlink *during* the slow
+/// window cannot make the final check agree with a snapshot it postdates.
+#[derive(Debug, Clone, Copy)]
+struct IdentitySnapshot {
+    dev: u64,
+    ino: u64,
+    is_symlink: bool,
+    is_dir: bool,
+}
+
+#[cfg(unix)]
+fn snapshot_identity(path: &Path) -> Result<IdentitySnapshot, String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|e| format!("failed to stat {}: {e}", path.display()))?;
+    Ok(IdentitySnapshot {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        is_symlink: metadata.file_type().is_symlink(),
+        is_dir: metadata.is_dir(),
+    })
+}
+
+/// Re-stats `path` immediately before a destructive mutation (no I/O may
+/// happen between this call and the actual mutation syscall) and refuses
+/// unless it is bit-for-bit the same filesystem object `snapshot` was
+/// taken from: same (dev, ino), and NOT a symlink — unconditionally,
+/// regardless of what the original snapshot looked like, since a
+/// destructive action must never operate through a symlink no matter when
+/// it appeared. This closes the multi-second correlation-pass TOCTOU
+/// window down to the true, irreducible gap between this stat and the
+/// mutation syscall — an inherent OS-level limitation not fixable in
+/// userspace without holding an open directory file descriptor across the
+/// whole operation, and accepted as residual risk.
+#[cfg(unix)]
+fn verify_identity_unchanged(path: &Path, snapshot: &IdentitySnapshot) -> Result<(), String> {
+    let current = snapshot_identity(path)?;
+
+    if current.is_symlink {
+        return Err(format!(
+            "refusing to act on {}: resource identity changed immediately before mutation \
+             (path is now a symlink)",
+            path.display()
+        ));
+    }
+
+    if current.dev != snapshot.dev || current.ino != snapshot.ino {
+        return Err(format!(
+            "refusing to act on {}: resource identity changed immediately before mutation \
+             (expected dev={} ino={}, found dev={} ino={})",
+            path.display(),
+            snapshot.dev,
+            snapshot.ino,
+            current.dev,
+            current.ino
+        ));
+    }
+
+    Ok(())
+}
+
+/// Deletes `path` after a final, immediately-preceding identity check
+/// against the EARLY snapshot `execute()` captured before any slow
+/// revalidation I/O ran (see [`verify_identity_unchanged`]). This is what
+/// defeats the symlink-swap TOCTOU: unlike re-deriving "the expected root"
+/// from the same live path being deleted (which degenerates to comparing a
+/// path to itself), this compares against an identity captured strictly
+/// earlier in time, before an attacker had the multi-second correlation-pass
+/// window to swap anything.
 ///
 /// Returns the pre-deletion byte size on success (best-effort, for
-/// `actual_reclaimed_bytes` accounting).
-fn delete_path_with_guard(path: &Path, resource: &ResourceId) -> Result<u64, String> {
-    let original_root = match &resource.locator {
-        ResourceLocator::Path(p) => p,
+/// `actual_reclaimed_bytes` accounting). The byte-size walk runs BEFORE the
+/// final identity check and deletion — not after — so no slow I/O is ever
+/// inserted between the check and the mutation syscall.
+fn delete_path_with_guard(
+    path: &Path,
+    resource: &ResourceId,
+    snapshot: Option<&IdentitySnapshot>,
+) -> Result<u64, String> {
+    match &resource.locator {
+        ResourceLocator::Path(_) => {}
         ResourceLocator::Tool { .. } => {
             return Err("DeletePath step on a non-path resource".to_string())
         }
     };
 
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("failed to canonicalize delete path {}: {e}", path.display()))?;
-    let original_root_canonical = original_root.canonicalize().map_err(|e| {
+    let snapshot = snapshot.ok_or_else(|| {
         format!(
-            "failed to canonicalize resource root {}: {e}",
-            original_root.display()
+            "refusing to delete {}: no verified resource identity snapshot available",
+            path.display()
         )
     })?;
 
-    if !canonical.starts_with(&original_root_canonical) {
-        return Err(format!(
-            "refusing to delete {}: resolved outside expected root {}",
-            canonical.display(),
-            original_root_canonical.display()
-        ));
-    }
+    // Best-effort size accounting first — this may walk a large tree, and
+    // must never land between the identity check and the mutation below.
+    let bytes_before = total_size_best_effort(path);
 
-    let bytes_before = total_size_best_effort(&canonical);
+    verify_identity_unchanged(path, snapshot)?;
 
-    let remove_result = if canonical.is_dir() {
-        fs::remove_dir_all(&canonical)
+    let remove_result = if snapshot.is_dir {
+        fs::remove_dir_all(path)
     } else {
-        fs::remove_file(&canonical)
+        fs::remove_file(path)
     };
-    remove_result.map_err(|e| format!("failed to delete {}: {e}", canonical.display()))?;
+    remove_result.map_err(|e| format!("failed to delete {}: {e}", path.display()))?;
 
     Ok(bytes_before)
 }
@@ -738,5 +827,103 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// A collector whose `collect()` implementation, as a side effect,
+    /// swaps the approved resource out for a symlink pointing at a
+    /// separate "victim" directory — DURING `collect()`, i.e. exactly when
+    /// the real revalidation correlation pass would be doing its slow I/O.
+    /// Proves the defect-1 TOCTOU regression: `execute()` must refuse to
+    /// delete rather than follow the swapped symlink into the victim.
+    struct SymlinkSwapCollector {
+        swap_path: PathBuf,
+        victim_target: PathBuf,
+    }
+
+    impl EvidenceCollector for SymlinkSwapCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            fs::remove_dir_all(&self.swap_path).expect("remove approved dir to stage the swap");
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&self.victim_target, &self.swap_path)
+                .expect("create swap symlink");
+
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::<ProcessRef>::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
+    /// Defect 1 regression test (HORO-951 adversarial review): reproduces
+    /// the reviewer's exact scenario — the approved `node_modules`
+    /// directory is replaced with a symlink to an unrelated victim
+    /// directory during the slow revalidation correlation pass inside
+    /// `execute()`. Before the fix, `delete_path_with_guard` re-canonicalized
+    /// the SAME live (now-swapped) path on both sides of its check, so
+    /// `X.starts_with(X)` always passed and the victim got deleted. After
+    /// the fix, the early identity snapshot taken before the slow pass
+    /// catches the swap at the final pre-mutation check and refuses.
+    #[test]
+    fn execute_refuses_deletion_when_resource_is_symlink_swapped_during_revalidation() {
+        let root = make_temp_dir("execute-toctou-symlink-swap");
+        let node_modules = root.join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        fs::write(node_modules.join("pkg.js"), vec![0u8; 128]).unwrap();
+
+        let victim_root = make_temp_dir("execute-toctou-victim");
+        let victim_target = victim_root.join("victim_target");
+        fs::create_dir_all(&victim_target).unwrap();
+        let marker = victim_target.join("marker.txt");
+        fs::write(&marker, b"do not delete me").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(node_modules.clone()),
+        );
+        let fingerprint = fingerprint_of(&node_modules);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::EvidenceIncomplete],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("Ask decision with matching consent must authorize");
+
+        let collector = SymlinkSwapCollector {
+            swap_path: node_modules.clone(),
+            victim_target: victim_target.clone(),
+        };
+
+        let report = execute(
+            &NodeCleanNodeModules,
+            &approval,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            marker.exists(),
+            "victim marker file must survive the attack — exploit succeeded if this fails"
+        );
+        match &report.outcome {
+            ExecutionOutcome::Failed(msg) => assert!(
+                msg.contains("identity changed"),
+                "expected an identity-changed refusal, got message: {msg}"
+            ),
+            other => {
+                panic!("expected ExecutionOutcome::Failed(identity changed...), got {other:?}")
+            }
+        }
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&victim_root).ok();
     }
 }
