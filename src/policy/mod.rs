@@ -7,8 +7,10 @@
 pub mod class;
 pub mod config;
 pub mod decision;
+pub mod engine;
 mod protected;
 
 pub use class::{PolicyClass, ReasonCode};
 pub use config::PolicyConfig;
 pub use decision::PolicyDecision;
+pub use engine::classify;
