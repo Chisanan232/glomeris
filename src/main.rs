@@ -8,7 +8,7 @@ fn main() {
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("status") => run_status_command(&args[1..]),
-        Some("detect") => run_detect_command(),
+        Some("detect") => run_detect_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -58,6 +58,32 @@ fn print_json_or_exit(value: &impl serde::Serialize) {
             std::process::exit(1);
         }
     }
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Builds the standard evidence-correlation-classification pipeline every
+/// `detect`/`explain`/`clean` subcommand uses: real detectors, the real
+/// `DefaultEvidenceCollector`, and the default policy config, evaluated at
+/// the current wall-clock time.
+fn discover_and_classify_now(
+) -> Vec<(glomeris::evidence::Evidence, glomeris::policy::PolicyDecision)> {
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::policy::PolicyConfig;
+    use std::time::SystemTime;
+
+    let ctx = DiscoveryContext::new(home_dir());
+    let registry = DetectorRegistry::builtin();
+    let collector = DefaultEvidenceCollector::default();
+    let cfg = PolicyConfig::default();
+    let now = SystemTime::now();
+
+    glomeris::cli::discover_and_classify(&registry, &ctx, &collector, &cfg, now)
 }
 
 /// `glomeris status` — current disk pressure state (HORO-955).
@@ -139,28 +165,40 @@ fn run_emergency_command() {
     std::process::exit(1);
 }
 
-fn run_detect_command() {
+/// `glomeris detect` — per-detector discovery status, plus (HORO-955) a
+/// per-candidate report line showing reclaimable bytes and policy
+/// classification.
+fn run_detect_command(args: &[String]) {
     use glomeris::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 
-    let home_dir = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
+    let (_positionals, flags) = split_flags(args, &["--json"]);
 
-    let ctx = DiscoveryContext::new(home_dir);
+    let ctx = DiscoveryContext::new(home_dir());
     let registry = DetectorRegistry::builtin();
 
-    for (id, status) in registry.discover_all(&ctx) {
-        match status {
-            DetectorStatus::Found(evidence) => {
-                println!("{:<24} found ({} evidence)", id.0, evidence.len());
-            }
-            DetectorStatus::ToolAbsent => {
-                println!("{:<24} tool_absent", id.0);
-            }
-            DetectorStatus::Failed(reason) => {
-                println!("{:<24} failed: {reason}", id.0);
+    if !flags.contains(&"--json") {
+        for (id, status) in registry.discover_all(&ctx) {
+            match status {
+                DetectorStatus::Found(evidence) => {
+                    println!("{:<24} found ({} evidence)", id.0, evidence.len());
+                }
+                DetectorStatus::ToolAbsent => {
+                    println!("{:<24} tool_absent", id.0);
+                }
+                DetectorStatus::Failed(reason) => {
+                    println!("{:<24} failed: {reason}", id.0);
+                }
             }
         }
+    }
+
+    let candidates = discover_and_classify_now();
+    let report = glomeris::cli::build_detect_report(&candidates);
+
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_detect_report(&report);
     }
 }
 
