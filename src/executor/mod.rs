@@ -232,18 +232,24 @@ fn build_fresh_evidence(
     };
     let fingerprint_path: &Path = path.unwrap_or_else(|| Path::new(""));
 
+    // HORO-994 fix: reuse the SAME `reclaimable_bytes == logical_bytes`
+    // equivalence HORO-992 established for detectors, on this revalidation
+    // rebuild too. Before this fix, this always reported `NotAttempted`
+    // here regardless of what the originating detector observed at
+    // discovery time — that degraded `Completeness`/reason set relative
+    // to plan time on every single real execution, tripping
+    // `PolicyClassDowngraded`/`PolicyReasonsWidened`/`EvidenceDegraded`
+    // and aborting every real cleanup unconditionally. `ResourceLocator::Tool`
+    // resources (Docker) have no equivalent shallow estimate and stay
+    // `Unavailable` — Docker has no registered cleanup action anyway.
+    let reclaimable_bytes = logical_bytes.clone();
+
     let mut evidence = discovery_evidence(
         resource.clone(),
         DetectorId("executor_revalidation"),
         fingerprint_path,
         logical_bytes,
-        // Pre-existing gap, not addressed here (HORO-992 only fixes the
-        // detectors, not this revalidation path): this rebuild never
-        // reuses a detector's own reclaimable-bytes estimate, so it
-        // always reports `NotAttempted` here regardless of what the
-        // originating detector observed at discovery time. See this
-        // ticket's PR "Known limitations".
-        ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        reclaimable_bytes,
         last_modified,
         resource.kind.regenerability(),
         action.recoverability(),
