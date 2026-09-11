@@ -113,6 +113,34 @@ impl ToolBinary {
     }
 }
 
+/// Plain compile-time list of the built-in actions — deliberately NOT a
+/// plugin/inventory registration system, matching
+/// [`crate::detectors::DetectorRegistry`]'s own reasoning. Built-in
+/// actions are registered one at a time in follow-up commits as each is
+/// implemented.
+pub struct ActionRegistry {
+    actions: Vec<Box<dyn Action>>,
+}
+
+impl ActionRegistry {
+    /// Registers all built-in actions.
+    pub fn builtin() -> Self {
+        Self {
+            actions: Vec::new(),
+        }
+    }
+
+    /// Look up a registered action by its stable id string. Returns
+    /// `None` for an unknown id — callers must hard-error on `None`,
+    /// never silently skip the requested action.
+    pub fn get(&self, id: &str) -> Option<&dyn Action> {
+        self.actions
+            .iter()
+            .find(|action| action.id().0 == id)
+            .map(|action| action.as_ref())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +152,11 @@ mod tests {
         assert_eq!(ToolBinary::Npm.program(), "npm");
         assert_eq!(ToolBinary::Pnpm.program(), "pnpm");
         assert_eq!(ToolBinary::Yarn.program(), "yarn");
+    }
+
+    #[test]
+    fn get_returns_none_for_unknown_id() {
+        let registry = ActionRegistry::builtin();
+        assert!(registry.get("docker.clean.everything").is_none());
     }
 }
