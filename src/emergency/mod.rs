@@ -470,7 +470,6 @@ mod tests {
         NativeCleanup, Recoverability, ResourceFingerprint, ResourceId, ResourceLocator,
     };
     use crate::evidence::probe::ProbeReason;
-    use crate::executor::AbortReason;
     use crate::monitor::fs_stat::FsUsage;
 
     /// A fixed-reading `FsStat` fake — never touches the real filesystem.
@@ -661,18 +660,21 @@ mod tests {
 
     /// A genuinely `AutoSafe`-classified candidate IS authorized and
     /// handed to `executor::execute` — reusing policy/executor exactly as
-    /// normal, no parallel/looser path. Documents the pre-existing
-    /// upstream gap (see this module's own "Known limitations", updated
-    /// by HORO-992): `execute()`'s own deletion-time revalidation rebuilds
-    /// evidence via `executor::build_fresh_evidence`, which does not reuse
-    /// a detector's `reclaimable_bytes` estimate, so it is lost again at
-    /// that step and the fresh classification downgrades to `Ask`,
-    /// aborting the execution. This is NOT a bug introduced by this
-    /// module — it proves the wiring is correct and that the abort (not a
-    /// silent success or a panic) is exactly what happens today.
+    /// normal, no parallel/looser path. Before HORO-994, `execute()`'s own
+    /// deletion-time revalidation rebuilt evidence via
+    /// `executor::build_fresh_evidence`, which did not reuse a detector's
+    /// `reclaimable_bytes` estimate, so it was lost again at that step and
+    /// the fresh classification downgraded to `Ask`, aborting the
+    /// execution unconditionally — see this module's own "Known
+    /// limitations" (as it read before HORO-994). Post-HORO-994,
+    /// `build_fresh_evidence` reproduces the same `reclaimable_bytes`
+    /// estimate a detector would, so the fresh classification agrees with
+    /// the plan-time one and this genuinely `AutoSafe`, fully-owned,
+    /// regenerable `node_modules` fixture is actually deleted for real —
+    /// this is the fix working as intended, not a regression.
     #[test]
-    fn process_candidate_attempts_autosafe_and_reports_the_revalidation_abort() {
-        let dir = make_temp_dir("candidate-autosafe-abort");
+    fn process_candidate_attempts_autosafe_and_succeeds() {
+        let dir = make_temp_dir("candidate-autosafe-succeeds");
         let node_modules = dir.join("node_modules");
         fs::create_dir_all(&node_modules).unwrap();
         fs::write(node_modules.join("pkg.js"), vec![0u8; 64]).unwrap();
@@ -689,14 +691,11 @@ mod tests {
         );
 
         assert_eq!(report.actions_attempted, 1);
-        assert_eq!(report.actions_succeeded, 0);
+        assert_eq!(report.actions_succeeded, 1);
         assert_eq!(report.denied_candidates, 0);
-        assert_eq!(report.errors.len(), 1);
-        assert!(report.errors[0].contains("aborted by revalidation"));
-        assert!(report.errors[0].contains(&format!("{:?}", AbortReason::PolicyClassDowngraded)));
-        // Nothing was actually deleted — the abort must be real, not
-        // just reported.
-        assert!(node_modules.exists());
+        assert!(report.errors.is_empty());
+        // The real fixture was actually deleted.
+        assert!(!node_modules.exists());
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -823,9 +822,12 @@ mod tests {
     }
 
     /// Partial-cleanup-continues: one candidate's `execute()` outcome
-    /// (here, the revalidation abort documented above) never stops the
-    /// loop from reaching the next candidate — both are attempted, both
-    /// are individually reported, the run as a whole still completes.
+    /// (here, a genuine `ResourceIdentityChanged` revalidation abort —
+    /// candidate `b`'s directory vanishes between detection and
+    /// `process_candidates` running, a real TOCTOU-shaped scenario, not
+    /// the pre-HORO-994 `reclaimable_bytes` gap) never stops the loop
+    /// from reaching the next candidate — both are attempted, both are
+    /// individually reported, the run as a whole still completes.
     #[test]
     fn process_candidates_continues_after_one_candidate_aborts() {
         let dir = make_temp_dir("candidates-partial-continue");
@@ -837,6 +839,11 @@ mod tests {
 
         let evidence_a = autosafe_evidence(node_modules_a.clone(), ResourceKind::NodeModules, now);
         let evidence_b = autosafe_evidence(node_modules_b.clone(), ResourceKind::NodeModules, now);
+        // Candidate b's resource vanishes after detection, before this
+        // loop revalidates it — `execute()`'s fingerprint check must
+        // catch this and abort, never treat a stale fingerprint as still
+        // valid.
+        fs::remove_dir_all(&node_modules_b).unwrap();
 
         let mut report = EmergencyReport::default();
         process_candidates(
@@ -851,11 +858,13 @@ mod tests {
         );
 
         // Both candidates were reached and individually attempted/
-        // reported — the first's abort did not short-circuit the loop.
+        // reported — b's abort did not short-circuit the loop, and a's
+        // genuinely AutoSafe fixture was actually deleted.
         assert_eq!(report.actions_attempted, 2);
-        assert_eq!(report.errors.len(), 2);
-        assert!(node_modules_a.exists());
-        assert!(node_modules_b.exists());
+        assert_eq!(report.actions_succeeded, 1);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("aborted by revalidation"));
+        assert!(!node_modules_a.exists());
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -864,6 +873,17 @@ mod tests {
     /// level: a backend whose `record()` always fails must never stop
     /// the run, and at least one safe fixture (the self-owned disposable
     /// history file) is still freed.
+    ///
+    /// Uses an empty `DetectorRegistry` — never `builtin()` — deliberately.
+    /// `builtin()`'s Homebrew/Docker detectors shell out to whatever
+    /// `brew`/`docker` the *real host machine* actually has, ignoring
+    /// `DiscoveryContext::home_dir` entirely (see `DetectorRegistry::
+    /// from_detectors`'s own doc comment). Post-HORO-994, a genuinely
+    /// `AutoSafe` real-machine Homebrew cache candidate is no longer
+    /// masked by the revalidation abort this module's tests used to rely
+    /// on — `process_candidate` would actually authorize and execute
+    /// `brew cleanup -s` against the developer's real cache. This test
+    /// must only ever mutate its own tempdir fixtures.
     #[test]
     fn run_emergency_survives_persistence_write_failure_and_frees_self_owned_state() {
         let dir = make_temp_dir("run-persistence-failure");
@@ -873,7 +893,7 @@ mod tests {
         fs::create_dir_all(&home_dir).unwrap();
 
         let ctx = DiscoveryContext::new(home_dir);
-        let registry = DetectorRegistry::builtin();
+        let registry = DetectorRegistry::from_detectors(vec![]);
         let actions = ActionRegistry::builtin();
         let fs_stat = FakeFsStat(FsUsage::new(100, 3));
 
@@ -903,6 +923,10 @@ mod tests {
     /// Same wrap point, a distinct simulated cause: a backend whose
     /// `record()` fails specifically at the temp/log directory-creation
     /// step must be handled identically — never fatal, never a panic.
+    ///
+    /// Uses an empty `DetectorRegistry` for the same reason as
+    /// `run_emergency_survives_persistence_write_failure_and_frees_self_owned_state`
+    /// above — see its doc comment.
     #[test]
     fn run_emergency_survives_history_directory_creation_failure_and_frees_self_owned_state() {
         let dir = make_temp_dir("run-dircreate-failure");
@@ -912,7 +936,7 @@ mod tests {
         fs::create_dir_all(&home_dir).unwrap();
 
         let ctx = DiscoveryContext::new(home_dir);
-        let registry = DetectorRegistry::builtin();
+        let registry = DetectorRegistry::from_detectors(vec![]);
         let actions = ActionRegistry::builtin();
         let fs_stat = FakeFsStat(FsUsage::new(100, 3));
 
@@ -941,6 +965,16 @@ mod tests {
     /// End-to-end happy path with a real, working `FilePersistence`:
     /// proves the non-failure path also works, not just the fault
     /// injection above.
+    ///
+    /// Uses an empty `DetectorRegistry` — never `builtin()` — for the same
+    /// reason as `run_emergency_survives_persistence_write_failure_and_frees_self_owned_state`
+    /// above: post-HORO-994, `builtin()`'s real Homebrew/Docker detectors
+    /// finding genuine machine state is no longer masked by a revalidation
+    /// abort, so this run would actually authorize and execute a real
+    /// `brew cleanup -s` against the host's real cache. With detection
+    /// scoped to zero fake detectors, the only action in this run is
+    /// freeing the tempdir `self_state` fixture, so the assertions below
+    /// are deterministic rather than "tolerate zero-or-more" hedges.
     #[test]
     fn run_emergency_end_to_end_with_working_persistence_frees_self_state_and_records_history() {
         let dir = make_temp_dir("run-happy-path");
@@ -951,7 +985,7 @@ mod tests {
         let history_log = dir.join("persisted-history.tsv");
 
         let ctx = DiscoveryContext::new(home_dir);
-        let registry = DetectorRegistry::builtin();
+        let registry = DetectorRegistry::from_detectors(vec![]);
         let actions = ActionRegistry::builtin();
         let fs_stat = FakeFsStat(FsUsage::new(100, 3));
         let persistence = crate::monitor::persistence::FilePersistence::new(&history_log);
@@ -971,25 +1005,9 @@ mod tests {
         assert!(!self_state.exists());
         assert_eq!(report.actions_succeeded, 1);
         assert_eq!(report.total_bytes_freed, 32);
-        // `DetectorRegistry::builtin()` includes the homebrew/docker
-        // detectors, which shell out to whatever real `brew`/`docker` this
-        // machine actually has — environment state this test deliberately
-        // does not control (see `CleanCollector`'s doc comment). As of
-        // HORO-992, a machine with a real Homebrew cache can now produce a
-        // genuinely `AutoSafe` candidate for it, which `process_candidate`
-        // correctly attempts and then `executor::execute` aborts at its
-        // own deletion-time revalidation (see this module's "Known
-        // limitations"). So the only error this test can assert never
-        // appears is a *persistence* failure — this run's `FilePersistence`
-        // is real and working — while tolerating zero-or-more environment-
-        // dependent revalidation aborts.
         assert!(
-            report
-                .errors
-                .iter()
-                .all(|e| e.contains("aborted by revalidation")),
-            "expected only (possibly zero) revalidation-abort errors from \
-             environment-dependent detectors, got {:?}",
+            report.errors.is_empty(),
+            "expected no errors with an empty detector registry, got {:?}",
             report.errors
         );
         assert!(
