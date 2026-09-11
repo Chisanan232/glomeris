@@ -3,3 +3,6 @@
 *.env
 .env
 target-local/
+
+# mdBook build output
+book/book/

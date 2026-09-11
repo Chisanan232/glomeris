@@ -22,7 +22,7 @@ pub trait ProcessCwdProbe {
 /// `-d cwd` restricts matches to a process's cwd file descriptor, and
 /// `-a` ANDs that restriction together with `+D <path>` (without `-a`,
 /// lsof would OR the two selectors and also return every open-file match
-/// from [`super::open_files`]). Reuses [`run_lsof`]'s output
+/// from the sibling open-files probe). Reuses `run_lsof`'s output
 /// interpretation and field parsing — same tool, same exit-code/stderr
 /// semantics, only the selector flags differ.
 pub struct LsofProcessCwdProbe;
