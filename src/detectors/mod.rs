@@ -197,6 +197,7 @@ impl DetectorRegistry {
     /// `builtin()` can discover a genuine resource on whatever machine
     /// runs the test — the caller controls what a fake `Detector` reports
     /// instead.
+    #[cfg(test)]
     pub(crate) fn from_detectors(detectors: Vec<Box<dyn Detector>>) -> Self {
         Self { detectors }
     }

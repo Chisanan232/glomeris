@@ -493,16 +493,23 @@ fn build_report(
 /// Every I/O-touching dependency is injected so this function itself is
 /// fully unit-testable with fakes: `fs_stat` (disk measurement),
 /// `collector` (correlation refresh, reused by `execute`'s own
-/// revalidation), `clock` (the `max_duration` budget check), and
-/// `wall_clock` (the `SystemTime` `classify`/`authorize` need).
-/// `action_registry` and `discovery_ctx` are plain data, not I/O seams,
-/// but are still parameters rather than constructed internally so a
-/// caller controls exactly what's registered/discoverable.
+/// revalidation), `detector_registry` (discovery — production callers
+/// pass `DetectorRegistry::builtin()`, but this must be a parameter
+/// rather than constructed internally here: several built-in detectors,
+/// e.g. `HomebrewDetector`, shell out to a real already-installed system
+/// tool regardless of `discovery_ctx`, which would make this function
+/// touch genuine machine state during a test no matter what `fs_stat`/
+/// `collector` fakes it was given), `clock` (the `max_duration` budget
+/// check), and `wall_clock` (the `SystemTime` `classify`/`authorize`
+/// need). `action_registry` and `discovery_ctx` are plain data, not I/O
+/// seams, but are still parameters rather than constructed internally so
+/// a caller controls exactly what's registered/discoverable.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     config: &RecoveryConfig,
     fs_stat: &dyn FsStat,
     collector: &dyn EvidenceCollector,
+    detector_registry: &DetectorRegistry,
     action_registry: &ActionRegistry,
     clock: &dyn Clock,
     wall_clock: &dyn WallClock,
@@ -527,8 +534,6 @@ pub fn run(
         }
     };
     let started_free_bytes = started_usage.free_bytes;
-
-    let detector_registry = DetectorRegistry::builtin();
 
     let mut iterations_run: u32 = 0;
     let mut actions_executed: u32 = 0;
@@ -716,12 +721,123 @@ pub fn run(
 #[cfg(test)]
 mod run_tests {
     use super::*;
-    use crate::detectors::DiscoveryContext;
+    use crate::detectors::{Detector, DetectorId, DiscoveryContext};
     use crate::evidence::correlate::CorrelationResult;
-    use crate::evidence::model::GitState;
+    use crate::evidence::model::{
+        ActionId as EvActionId, GitState, Recoverability, ResourceFingerprint, ResourceKind,
+        ResourceLocator,
+    };
+    use crate::evidence::probe::ProbeReason;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// A detector that always reports a fixed, caller-supplied
+    /// [`DetectorStatus`] regardless of `ctx`. Used everywhere in this
+    /// test module INSTEAD OF `DetectorRegistry::builtin()`'s real
+    /// detectors: several of those (e.g. `HomebrewDetector`) shell out to
+    /// a real, already-installed system tool and would discover a
+    /// genuine resource on whatever machine runs the test, which combined
+    /// with a real `ActionRegistry`/`executor::execute` could mutate real
+    /// user state — exactly the risk `DetectorRegistry::from_detectors`
+    /// exists to let tests avoid. See that constructor's doc comment.
+    struct FakeDetector {
+        found: Vec<Evidence>,
+    }
+
+    impl FakeDetector {
+        fn found(evidence: Vec<Evidence>) -> Self {
+            Self { found: evidence }
+        }
+
+        fn none() -> Self {
+            Self { found: Vec::new() }
+        }
+    }
+
+    impl Detector for FakeDetector {
+        fn id(&self) -> DetectorId {
+            DetectorId("fake_test_detector")
+        }
+
+        fn resource_kinds(&self) -> &'static [ResourceKind] {
+            &[]
+        }
+
+        fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+            // Re-checks each resource's path for existence on every call,
+            // the same way a real detector's `canonicalize()` would stop
+            // reporting a deleted resource — needed so a fixture actually
+            // deleted by an earlier loop iteration doesn't keep getting
+            // "rediscovered" with stale evidence on the next one. Only
+            // ever touches paths this test itself constructed, never any
+            // real machine state.
+            let live: Vec<Evidence> = self
+                .found
+                .iter()
+                .filter(|ev| match &ev.resource.locator {
+                    ResourceLocator::Path(p) => p.exists(),
+                    ResourceLocator::Tool { .. } => true,
+                })
+                .cloned()
+                .collect();
+
+            if live.is_empty() {
+                DetectorStatus::ToolAbsent
+            } else {
+                DetectorStatus::Found(live)
+            }
+        }
+    }
+
+    fn fake_registry(evidence: Vec<Evidence>) -> DetectorRegistry {
+        let detector: Box<dyn Detector> = if evidence.is_empty() {
+            Box::new(FakeDetector::none())
+        } else {
+            Box::new(FakeDetector::found(evidence))
+        };
+        DetectorRegistry::from_detectors(vec![detector])
+    }
+
+    /// A real, disposable temp `node_modules` directory (with no files
+    /// inside, so a real deletion measures zero bytes freed — see
+    /// `stops_with_no_progress_after_two_zero_byte_successful_deletions`),
+    /// paired with the `Evidence` a `FakeDetector` reports for it. The
+    /// directory itself is real (the loop's own `executor::execute` call
+    /// really deletes it, on purpose — that's what this loop is for); only
+    /// *discovery* is faked.
+    fn empty_node_modules_evidence(dir: &Path) -> Evidence {
+        let node_modules = dir.join("node_modules");
+        fs::create_dir_all(&node_modules).expect("create node_modules fixture");
+        Evidence {
+            resource: ResourceId::new(
+                ResourceKind::NodeModules,
+                ResourceLocator::Path(node_modules.clone()),
+            ),
+            fingerprint: ResourceFingerprint {
+                dev_ino: crate::detectors::dev_ino_fingerprint(&node_modules),
+                mtime: crate::detectors::probe_mtime(&node_modules)
+                    .observed()
+                    .copied(),
+                tool_revision: None,
+            },
+            detector: DetectorId("fake_test_detector"),
+            logical_bytes: ProbeOutcome::Observed(0),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            last_modified: ProbeOutcome::Observed(SystemTime::now()),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: ResourceKind::NodeModules.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Available(EvActionId("node.clean.node_modules")),
+            open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at: SystemTime::now(),
+            sources: Vec::new(),
+        }
+    }
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -797,12 +913,6 @@ mod run_tests {
     }
 
     fn empty_discovery_ctx() -> DiscoveryContext {
-        // A nonexistent home dir and no known project roots: every
-        // built-in detector reports ToolAbsent, so there are never any
-        // candidates to find — deliberately real (but trivially fast and
-        // touching nothing but a `canonicalize()`/`read_dir` miss)
-        // detector I/O, per the ticket's "reuse DetectorRegistry::builtin()
-        // as-is" instruction.
         DiscoveryContext::new(PathBuf::from("/nonexistent-glomeris-test-home"))
     }
 
@@ -818,10 +928,12 @@ mod run_tests {
         let action_registry = ActionRegistry::builtin();
         let ctx = empty_discovery_ctx();
 
+        let detector_registry = fake_registry(Vec::new());
         let report = run(
             &config,
             &FixedFsStat(usage),
             &CleanCollector,
+            &detector_registry,
             &action_registry,
             &clock,
             &wall_clock,
@@ -846,10 +958,12 @@ mod run_tests {
         let action_registry = ActionRegistry::builtin();
         let ctx = empty_discovery_ctx();
 
+        let detector_registry = fake_registry(Vec::new());
         let report = run(
             &config,
             &FixedFsStat(usage),
             &CleanCollector,
+            &detector_registry,
             &action_registry,
             &clock,
             &wall_clock,
@@ -875,10 +989,12 @@ mod run_tests {
         let action_registry = ActionRegistry::builtin();
         let ctx = empty_discovery_ctx();
 
+        let detector_registry = fake_registry(Vec::new());
         let report = run(
             &config,
             &FixedFsStat(usage),
             &CleanCollector,
+            &detector_registry,
             &action_registry,
             &clock,
             &wall_clock,
@@ -899,10 +1015,12 @@ mod run_tests {
         let action_registry = ActionRegistry::builtin();
         let ctx = empty_discovery_ctx();
 
+        let detector_registry = fake_registry(Vec::new());
         let report = run(
             &config,
             &FailingFsStat,
             &CleanCollector,
+            &detector_registry,
             &action_registry,
             &clock,
             &wall_clock,
@@ -917,23 +1035,26 @@ mod run_tests {
         }
     }
 
-    /// Real (disposable, temp-fixture) `node_modules` directories with no
-    /// files inside: `CargoDetector`/`NodeDetector` discover them for
-    /// real via `DetectorRegistry::builtin()`, and — because no detector
-    /// in this codebase ever populates `reclaimable_bytes` (see
-    /// `executor::tests`' own note on this same limitation) — every real
-    /// candidate classifies as `Ask{EvidenceIncomplete}`, never
-    /// `AutoSafe`. `auto_approve_ask: true` is required here for that
-    /// reason. Each directory being empty means `NodeCleanNodeModules`'s
-    /// real deletion measures `actual_reclaimed_bytes == Observed(0)` —
-    /// "succeeded but freed nothing measurable" — twice in a row, which
-    /// is exactly what the no-progress guard exists to catch.
+    /// Two real, disposable temp `node_modules` directories with no files
+    /// inside, reported by a [`FakeDetector`] (never `DetectorRegistry::
+    /// builtin()`'s real detectors — see that struct's doc comment for
+    /// why). Because no detector in this codebase ever populates
+    /// `reclaimable_bytes` (see `executor::tests`' own note on this same
+    /// limitation), a real candidate built the way a detector would
+    /// classifies as `Ask{EvidenceIncomplete}`, never `AutoSafe`, so
+    /// `auto_approve_ask: true` is required here. Each directory being
+    /// empty means `NodeCleanNodeModules`'s real deletion measures
+    /// `actual_reclaimed_bytes == Observed(0)` — "succeeded but freed
+    /// nothing measurable" — twice in a row, exactly what the no-progress
+    /// guard exists to catch.
     #[test]
     fn stops_with_no_progress_after_two_zero_byte_successful_deletions() {
         let root_a = make_temp_dir("no-progress-a");
         let root_b = make_temp_dir("no-progress-b");
-        fs::create_dir_all(root_a.join("node_modules")).unwrap();
-        fs::create_dir_all(root_b.join("node_modules")).unwrap();
+        let ev_a = empty_node_modules_evidence(&root_a);
+        let ev_b = empty_node_modules_evidence(&root_b);
+        let node_modules_a = root_a.join("node_modules");
+        let node_modules_b = root_b.join("node_modules");
 
         let usage = FsUsage::new(1_000_000_000, 100); // never meets target
         let config = RecoveryConfig {
@@ -943,13 +1064,14 @@ mod run_tests {
         let clock = crate::monitor::FakeClock::new();
         let wall_clock = FixedWallClock(SystemTime::now());
         let action_registry = ActionRegistry::builtin();
-        let ctx = DiscoveryContext::new(PathBuf::from("/nonexistent-glomeris-test-home"))
-            .with_known_project_roots(vec![root_a.clone(), root_b.clone()]);
+        let detector_registry = fake_registry(vec![ev_a, ev_b]);
+        let ctx = empty_discovery_ctx();
 
         let report = run(
             &config,
             &FixedFsStat(usage),
             &CleanCollector,
+            &detector_registry,
             &action_registry,
             &clock,
             &wall_clock,
@@ -962,8 +1084,8 @@ mod run_tests {
         assert_eq!(report.iterations_run, 2);
         assert_eq!(report.actions_executed, 2);
         assert_eq!(report.total_bytes_freed, 0);
-        assert!(!root_a.join("node_modules").exists());
-        assert!(!root_b.join("node_modules").exists());
+        assert!(!node_modules_a.exists());
+        assert!(!node_modules_b.exists());
 
         fs::remove_dir_all(&root_a).ok();
         fs::remove_dir_all(&root_b).ok();
