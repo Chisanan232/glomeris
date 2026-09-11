@@ -33,10 +33,14 @@ use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::actions::ActionRegistry;
+use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, ResourceKind};
 use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome};
+use crate::monitor::fs_stat::FsStat;
+use crate::monitor::persistence::{unix_now_secs, PersistenceBackend, PressureEvent};
+use crate::monitor::pressure::PressureState;
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig};
 
@@ -145,6 +149,126 @@ fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
             "failed to remove self-owned disposable state {}: {e}",
             path.display()
         )),
+    }
+}
+
+/// Runs emergency recovery end to end. See the module docs for the
+/// product requirement this exists to satisfy: it must run and produce a
+/// useful result even when SQLite/history/log writes fail, there's no
+/// network, no LLM provider, and no GUI.
+///
+/// Signature note: this deviates from a hypothetical minimal signature in
+/// two ways, both required to make every failure mode this ticket must
+/// fault-inject actually injectable from a test, per this crate's "fully
+/// unit-testable with fakes" constraint:
+/// - `persistence`/`discovery_ctx`/`self_state_path` are explicit
+///   parameters rather than resolved internally from `$HOME` the way
+///   `main.rs`'s `daemon_run`/`run_detect_command` do for the real binary
+///   — a test must never depend on, or mutate, the developer's real home
+///   directory (this repo's `CLAUDE.md`: "never depend on the developer's
+///   real home directory contents in a test"). The real CLI wiring in
+///   `main.rs` computes these the same way `daemon_run` does and passes
+///   them in.
+/// - `#[allow(clippy::too_many_arguments)]`: nine parameters, every one
+///   an independently fakeable seam — bundling them into a config struct
+///   would only rename this list, not shrink it. Precedented in this
+///   crate at `detectors::discovery_evidence`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_emergency(
+    fs_stat: &dyn FsStat,
+    collector: &dyn EvidenceCollector,
+    registry: &DetectorRegistry,
+    actions: &ActionRegistry,
+    persistence: &dyn PersistenceBackend,
+    discovery_ctx: &DiscoveryContext,
+    self_state_path: &Path,
+    max_actions: u32,
+    max_duration: Duration,
+) -> EmergencyReport {
+    let start = Instant::now();
+    let now = SystemTime::now();
+    let mut report = EmergencyReport::default();
+
+    // Step 1: free the tool's own disposable state first — the safest
+    // possible thing to reclaim, and the only step here that does not
+    // depend on detectors/policy/executor at all.
+    free_self_owned_disposable_state(self_state_path, &mut report);
+
+    // Step 2: bounded, cheap candidate discovery — detectors only, never
+    // the scanner's full filesystem walk (see module docs).
+    let mut candidates: Vec<Evidence> = Vec::new();
+    for (_detector_id, status) in registry.discover_all(discovery_ctx) {
+        match status {
+            DetectorStatus::Found(evidences) => candidates.extend(evidences),
+            // A detector's tool being absent is normal, expected state,
+            // never an error (see `crate::detectors` module docs).
+            DetectorStatus::ToolAbsent => {}
+            DetectorStatus::Failed(message) => {
+                report.push_error(format!("detector failed: {message}"));
+            }
+        }
+    }
+
+    process_candidates(
+        candidates,
+        collector,
+        actions,
+        now,
+        max_actions,
+        start,
+        max_duration,
+        &mut report,
+    );
+
+    // Step 3: best-effort persistence, recorded LAST, deliberately AFTER
+    // step 1's deletion. In production `self_state_path` and this
+    // record's destination are the same file (see `main.rs`): step 1
+    // reclaims whatever bulk history had accumulated, and this step then
+    // appends exactly one small fresh line documenting the run — a
+    // deliberate net-positive trade (`FilePersistence::record` recreates
+    // the file via `create_dir_all` + append either way; ordering it
+    // last just means the "before" byte count step 1 reports reflects
+    // the accumulated history, not this run's own single-line record).
+    // Any failure here is caught and pushed into `report.errors`, never
+    // propagated as a panic or early-return — see `record_emergency_run`.
+    record_emergency_run(fs_stat, persistence, &mut report);
+
+    report
+}
+
+/// Best-effort: records that emergency mode ran, via the exact same
+/// [`crate::monitor::persistence::PersistenceBackend`] contract the
+/// healthy polling loop uses. ANY failure here — including one
+/// manufactured by a fake backend in a test, or a failure to even read
+/// filesystem usage via `fs_stat` — is caught and pushed into
+/// `report.errors`. It is NEVER allowed to panic or make this function
+/// (or its caller) return early: no feature in this crate may depend on
+/// persistence succeeding.
+fn record_emergency_run(
+    fs_stat: &dyn FsStat,
+    persistence: &dyn PersistenceBackend,
+    report: &mut EmergencyReport,
+) {
+    let usage = match fs_stat.stat(Path::new("/")) {
+        Ok(u) => u,
+        Err(e) => {
+            report.push_error(format!(
+                "failed to read filesystem usage for emergency history record: {e}"
+            ));
+            return;
+        }
+    };
+
+    let event = PressureEvent {
+        unix_time_secs: unix_now_secs(),
+        from: PressureState::Emergency,
+        to: PressureState::Emergency,
+        used_percent: usage.used_percent(),
+        free_bytes: usage.free_bytes,
+    };
+
+    if let Err(e) = persistence.record(&event) {
+        report.push_error(format!("failed to persist emergency run record: {e}"));
     }
 }
 
@@ -290,6 +414,7 @@ fn action_id_for_kind(kind: ResourceKind) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
@@ -302,6 +427,24 @@ mod tests {
     };
     use crate::evidence::probe::ProbeReason;
     use crate::executor::AbortReason;
+    use crate::monitor::fs_stat::FsUsage;
+
+    /// A fixed-reading `FsStat` fake — never touches the real filesystem.
+    struct FakeFsStat(FsUsage);
+    impl FsStat for FakeFsStat {
+        fn stat(&self, _path: &Path) -> io::Result<FsUsage> {
+            Ok(self.0)
+        }
+    }
+
+    /// A backend that always fails a plain write — simulates a genuine
+    /// persistence I/O failure (e.g. disk full, permission denied).
+    struct AlwaysFailingPersistence;
+    impl PersistenceBackend for AlwaysFailingPersistence {
+        fn record(&self, _event: &PressureEvent) -> io::Result<()> {
+            Err(io::Error::other("simulated persistence write failure"))
+        }
+    }
 
     /// A collector reporting a fully clean, non-active resource on every
     /// call: empty process lists, no git repo, tool not live. Used where
@@ -577,5 +720,87 @@ mod tests {
                 "emergency module's production code must never reference {needle}"
             );
         }
+    }
+
+    /// Persistence-failure fault injection at the whole-`run_emergency`
+    /// level: a backend whose `record()` always fails must never stop
+    /// the run, and at least one safe fixture (the self-owned disposable
+    /// history file) is still freed.
+    #[test]
+    fn run_emergency_survives_persistence_write_failure_and_frees_self_owned_state() {
+        let dir = make_temp_dir("run-persistence-failure");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 256]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+
+        let ctx = DiscoveryContext::new(home_dir);
+        let registry = DetectorRegistry::builtin();
+        let actions = ActionRegistry::builtin();
+        let fs_stat = FakeFsStat(FsUsage::new(100, 3));
+
+        let report = run_emergency(
+            &fs_stat,
+            &CleanCollector,
+            &registry,
+            &actions,
+            &AlwaysFailingPersistence,
+            &ctx,
+            &self_state,
+            10,
+            Duration::from_secs(10),
+        );
+
+        assert!(!self_state.exists());
+        assert_eq!(report.actions_succeeded, 1);
+        assert_eq!(report.total_bytes_freed, 256);
+        assert!(report
+            .errors
+            .iter()
+            .any(|e| e.contains("failed to persist emergency run record")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// End-to-end happy path with a real, working `FilePersistence`:
+    /// proves the non-failure path also works, not just the fault
+    /// injection above.
+    #[test]
+    fn run_emergency_end_to_end_with_working_persistence_frees_self_state_and_records_history() {
+        let dir = make_temp_dir("run-happy-path");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 32]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let history_log = dir.join("persisted-history.tsv");
+
+        let ctx = DiscoveryContext::new(home_dir);
+        let registry = DetectorRegistry::builtin();
+        let actions = ActionRegistry::builtin();
+        let fs_stat = FakeFsStat(FsUsage::new(100, 3));
+        let persistence = crate::monitor::persistence::FilePersistence::new(&history_log);
+
+        let report = run_emergency(
+            &fs_stat,
+            &CleanCollector,
+            &registry,
+            &actions,
+            &persistence,
+            &ctx,
+            &self_state,
+            10,
+            Duration::from_secs(10),
+        );
+
+        assert!(!self_state.exists());
+        assert_eq!(report.actions_succeeded, 1);
+        assert_eq!(report.total_bytes_freed, 32);
+        assert!(report.errors.is_empty());
+        assert!(
+            history_log.exists(),
+            "a working backend must actually persist a record"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
