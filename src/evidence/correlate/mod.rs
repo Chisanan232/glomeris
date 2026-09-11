@@ -8,6 +8,7 @@
 //! destructive action. If this were batch-only, that ticket would have
 //! to reimplement correlation instead of reusing it.
 
+mod default;
 mod git;
 mod open_files;
 mod process;
@@ -20,6 +21,7 @@ use super::model::ResourceId;
 use super::probe::ProbeOutcome;
 
 pub use super::model::{GitState, ProcessRef};
+pub use default::DefaultEvidenceCollector;
 pub use git::{GitCliProbe, GitProbe};
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
