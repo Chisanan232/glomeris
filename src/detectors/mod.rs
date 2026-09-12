@@ -305,7 +305,14 @@ mod tests {
     ///   `discover_all` only and never routes any evidence into
     ///   `authorize`/`execute` — its two real-registry occurrences prove
     ///   `--project-root` reaches the real cargo/node detectors and stop
-    ///   there, so no real-host cleanup action can ever fire from it.
+    ///   there, so no real-host cleanup action can ever fire from it;
+    /// - `tests/cargo_symlinked_target_manifest_round_trip.rs`
+    ///   (HORO-1017), which mirrors `tests/golden_chain_execute.rs`'s own
+    ///   already-reviewed shape: it scopes the real cargo detector's
+    ///   evidence to a single disposable tempdir fixture (a symlinked
+    ///   `target/` plus a decoy neighbor project, both under
+    ///   `std::env::temp_dir()`) and only ever runs `cargo clean` against
+    ///   that fixture's own real `target/` dir.
     ///
     /// Any new occurrence must be reviewed and added here explicitly —
     /// an un-reviewed new occurrence is exactly the failure mode this
@@ -328,6 +335,7 @@ mod tests {
             ("tests/golden_chain_execute.rs", 1),
             ("tests/reclaimable_bytes_reaches_auto_safe.rs", 1),
             ("tests/cli_project_root_wiring.rs", 2),
+            ("tests/cargo_symlinked_target_manifest_round_trip.rs", 1),
         ];
 
         for (rel_path, expected_count) in allowlist {
