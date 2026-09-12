@@ -1340,4 +1340,142 @@ mod tests {
             other => panic!("expected ExecutionOutcome::Failed(...), got {other:?}"),
         }
     }
+
+    /// Locks `estimate_logical_bytes` and `total_size_best_effort`'s byte
+    /// semantics together permanently (HORO-1016): both now count files
+    /// and symlinks by their own size and skip a directory's own inode
+    /// size, so they must agree exactly on the same real tree.
+    #[test]
+    fn estimate_matches_total_size_best_effort_on_the_same_tree() {
+        let root = make_temp_dir("estimate-parity");
+        fs::create_dir_all(root.join("nested/deeper")).unwrap();
+        fs::write(root.join("top.bin"), vec![0u8; 1000]).unwrap();
+        fs::write(root.join("nested/mid.bin"), vec![0u8; 2000]).unwrap();
+        fs::write(root.join("nested/deeper/leaf.bin"), vec![0u8; 3000]).unwrap();
+
+        let outside_target = std::env::temp_dir().join(format!(
+            "glomeris-estimate-parity-symlink-target-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside_target, vec![0u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(&outside_target, root.join("link")).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, crate::scanner::ScanBudget::unlimited());
+        let best_effort = total_size_best_effort(&root);
+
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => assert_eq!(bytes, best_effort),
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_file(&outside_target).ok();
+    }
+
+    /// Proves `build_fresh_evidence` now reports the full recursive total
+    /// for a nested tree, not just what the old non-recursive probe would
+    /// have summed at the top level (HORO-1016).
+    #[test]
+    fn build_fresh_evidence_reports_recursive_bytes_for_a_nested_tree() {
+        let root = make_temp_dir("fresh-evidence-nested");
+        let node_modules = root.join("node_modules");
+        fs::create_dir_all(node_modules.join("pkg/nested")).unwrap();
+        // Nothing directly at the top level of `node_modules/` itself —
+        // the old non-recursive probe would have reported ~0 bytes here.
+        fs::write(node_modules.join("pkg/index.js"), vec![0u8; 5000]).unwrap();
+        fs::write(node_modules.join("pkg/nested/deep.js"), vec![0u8; 7000]).unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(node_modules.clone()),
+        );
+        let now = SystemTime::now();
+
+        let evidence = build_fresh_evidence(&resource, &NodeCleanNodeModules, &FakeCollector, now);
+
+        match evidence.logical_bytes {
+            ProbeOutcome::Observed(bytes) => assert_eq!(bytes, 12000),
+            other => panic!("expected Observed(12000), got {other:?}"),
+        }
+        assert_eq!(evidence.reclaimable_bytes, evidence.logical_bytes);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The key safety-invariant test (HORO-1016): a byte-magnitude
+    /// mismatch between plan-time evidence and execute-time revalidation
+    /// must never trip `AbortReason::ResourceIdentityChanged` /
+    /// `PolicyClassDowngraded` / `PolicyReasonsWidened` / `EvidenceDegraded`
+    /// — those are keyed off fingerprint/class/reason/completeness, never
+    /// off the byte value itself.
+    #[test]
+    fn byte_estimate_magnitude_never_participates_in_revalidation() {
+        let root = make_temp_dir("byte-magnitude-invariant");
+        let node_modules = root.join("node_modules");
+        fs::create_dir_all(node_modules.join("pkg")).unwrap();
+        fs::write(node_modules.join("pkg/index.js"), vec![0u8; 4096]).unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(node_modules.clone()),
+        );
+        let real_fingerprint = fingerprint_of(&node_modules);
+        let now = SystemTime::now();
+
+        // Deliberately wrong/fabricated byte value, simulating a stale
+        // plan-time estimate that no longer matches the real fixture's
+        // actual ~4096 bytes.
+        let planned_evidence = Evidence {
+            resource: resource.clone(),
+            fingerprint: real_fingerprint.clone(),
+            detector: crate::detectors::DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(999_999_999),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Observed(999_999_999),
+            last_modified: ProbeOutcome::Observed(now),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: resource.kind.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Unsupported,
+            open_by_process: ProbeOutcome::Observed(Vec::new()),
+            process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+            git_state: ProbeOutcome::Observed(None),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at: now,
+            sources: Vec::new(),
+        };
+
+        let decision = classify(&planned_evidence, &PolicyConfig::default(), now);
+        assert_eq!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "expected AutoSafe from clean fabricated-bytes evidence, got {decision:?}"
+        );
+
+        let consent = UserConsent::new(resource.clone(), real_fingerprint.clone(), now);
+        let approval = authorize(decision, real_fingerprint, Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        let report = execute(
+            &NodeCleanNodeModules,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert_eq!(
+            report.outcome,
+            ExecutionOutcome::Succeeded,
+            "a byte-magnitude mismatch between plan-time (fabricated 999999999) and \
+             execute-time (real ~4096) must never abort revalidation"
+        );
+        assert!(!node_modules.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
 }
