@@ -504,6 +504,35 @@ mod tests {
     }
 
     #[test]
+    fn resource_id_equality_and_hash_ignore_source_project_root() {
+        // HORO-1019 regression: two different raw `--project-root`
+        // spellings of the same physical directory must not defeat
+        // dedup in a HashSet<ResourceId>/HashMap<ResourceId, _> —
+        // source_project_root is provenance metadata, not identity.
+        let id_a = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/tmp/proj/target")),
+        )
+        .with_source_project_root(PathBuf::from("/tmp/proj"));
+        let id_b = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/tmp/proj/target")),
+        )
+        .with_source_project_root(PathBuf::from("/tmp/proj/../proj"));
+
+        assert_ne!(
+            id_a.source_project_root, id_b.source_project_root,
+            "test fixture must exercise genuinely different source_project_root strings"
+        );
+        assert_eq!(id_a, id_b);
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(id_a);
+        set.insert(id_b);
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
     fn discovery_stage_evidence_with_no_correlation_is_never_complete() {
         // Discovery stage: only logical_bytes observed, everything else
         // (including all four correlation fields) is NotAttempted.
