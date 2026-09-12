@@ -7,7 +7,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") | Some("help") => {
             println!(
-                "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
+                "usage: glomeris <daemon <install [--force]|uninstall|status|run>|scan|status [--json]|\
                  detect [--project-root <path>]... [--json]|\
                  explain <resource_id_or_path> [--project-root <path>]... [--json]|\
                  clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
@@ -15,7 +15,7 @@ fn main() {
                  free --target <N%|NB> [--project-root <path>]...>"
             );
         }
-        Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
+        Some("daemon") => run_daemon_command(&args[1..]),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(&args[1..]),
@@ -36,7 +36,7 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
+        "usage: glomeris <daemon <install [--force]|uninstall|status|run>|scan|status [--json]|\
          detect [--project-root <path>]... [--json]|\
          explain <resource_id_or_path> [--project-root <path>]... [--json]|\
          clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
@@ -400,9 +400,12 @@ fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryRep
     );
 }
 
-fn run_daemon_command(subcommand: Option<&str>) {
-    match subcommand {
-        Some("install") => daemon_install(),
+fn run_daemon_command(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("install") => {
+            let force = args[1..].iter().any(|a| a == "--force");
+            daemon_install(force);
+        }
         Some("uninstall") => daemon_uninstall(),
         Some("status") => daemon_status(),
         Some("run") => daemon_run(),
@@ -424,7 +427,9 @@ fn current_exe_path() -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
-fn daemon_install() {
+fn daemon_install(force: bool) {
+    use platform::macos::launchd::InstallOutcome;
+
     let plist_path = match platform::macos::launchd::default_plist_path() {
         Ok(p) => p,
         Err(e) => {
@@ -432,14 +437,39 @@ fn daemon_install() {
             std::process::exit(1);
         }
     };
-    match platform::macos::launchd::install(&plist_path, &current_exe_path()) {
-        Ok(()) => println!("installed launch agent at {}", plist_path.display()),
-        Err(e) => {
-            eprintln!("glomeris daemon install: launchctl load failed: {e}");
-            eprintln!(
-                "plist was written to {} — retry `launchctl load -w` manually if needed",
+    match platform::macos::launchd::install(&plist_path, &current_exe_path(), force) {
+        Ok(InstallOutcome::Installed) => {
+            println!("installed launch agent at {}", plist_path.display());
+        }
+        Ok(InstallOutcome::AlreadyUpToDate) => {
+            println!(
+                "launch agent already up to date at {}",
                 plist_path.display()
             );
+        }
+        Ok(InstallOutcome::Repaired) => {
+            println!(
+                "repaired launch agent at {} (preserved existing StartInterval)",
+                plist_path.display()
+            );
+        }
+        Ok(InstallOutcome::RefusedNeedsForce) => {
+            eprintln!(
+                "refused: existing plist at {} has unrecognized customization — rerun with \
+                 --force to overwrite (a backup will be taken first)",
+                plist_path.display()
+            );
+            std::process::exit(2);
+        }
+        Ok(InstallOutcome::AbortedConcurrentModification) => {
+            eprintln!(
+                "aborted: {} was modified concurrently, no changes made — retry",
+                plist_path.display()
+            );
+            std::process::exit(2);
+        }
+        Err(e) => {
+            eprintln!("glomeris daemon install: {e}");
             std::process::exit(1);
         }
     }
@@ -570,7 +600,7 @@ fn free_run(_target: glomeris::executor::recovery_loop::FreeTarget, _project_roo
 }
 
 #[cfg(not(target_os = "macos"))]
-fn daemon_install() {
+fn daemon_install(_force: bool) {
     eprintln!("glomeris daemon install: only supported on macOS");
     std::process::exit(1);
 }
