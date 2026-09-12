@@ -35,21 +35,30 @@ Not macOS-gated. Both arguments are positional and optional:
 Prints a summary line (files visited, stop reason, incomplete-entry count)
 followed by one line per candidate: size, depth, path.
 
-## `glomeris detect`
+## `glomeris detect [--project-root <path>]...`
 
 Not macOS-gated. Runs `DetectorRegistry::builtin()`'s `discover_all` once and
 prints, per detector: `found (<N> evidence)`, `tool_absent`, or
 `failed: <reason>`.
+
+`--project-root <path>` is optional and repeatable — pass it once per
+project directory you want the cargo/node detectors to check for a
+`target/`/`node_modules/` dir. Without it, those two detectors have no
+project roots to scan and always report `tool_absent`.
 
 ## `glomeris emergency`
 
 macOS only (exits 1 with an error message on other platforms). Takes no
 arguments. See [Emergency Mode](emergency_mode.md).
 
-## `glomeris free --target <N%|NB>`
+## `glomeris free --target <N%|NB> [--project-root <path>]...`
 
 macOS only (exits 1 with an error message on other platforms). `--target` is
 required; any other argument is rejected (usage printed to stderr, exit 2).
+
+`--project-root <path>` is optional and repeatable, same meaning as
+`detect`'s flag above — it feeds the same `DiscoveryContext` the recovery
+loop discovers candidates from.
 
 Accepted `--target` value formats:
 
