@@ -8,9 +8,11 @@ fn main() {
         Some("--help") | Some("-h") | Some("help") => {
             println!(
                 "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
-                 detect [--json]|explain <resource_id_or_path> [--json]|\
-                 clean --dry-run [--target <resource_id_or_path>]|emergency|\
-                 free --target <N%|NB>>"
+                 detect [--project-root <path>]... [--json]|\
+                 explain <resource_id_or_path> [--project-root <path>]... [--json]|\
+                 clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
+                 emergency|\
+                 free --target <N%|NB> [--project-root <path>]...>"
             );
         }
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
@@ -35,9 +37,11 @@ fn main() {
 fn print_usage() {
     eprintln!(
         "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
-         detect [--json]|explain <resource_id_or_path> [--json]|\
-         clean --dry-run [--target <resource_id_or_path>]|emergency|\
-         free --target <N%|NB>>"
+         detect [--project-root <path>]... [--json]|\
+         explain <resource_id_or_path> [--project-root <path>]... [--json]|\
+         clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
+         emergency|\
+         free --target <N%|NB> [--project-root <path>]...>"
     );
 }
 
@@ -79,8 +83,14 @@ fn home_dir() -> PathBuf {
 /// Builds the standard evidence-correlation-classification pipeline every
 /// `detect`/`explain`/`clean` subcommand uses: real detectors, the real
 /// `DefaultEvidenceCollector`, and the default policy config, evaluated at
-/// the current wall-clock time.
-fn discover_and_classify_now() -> Vec<(
+/// the current wall-clock time. `project_roots` (HORO-957) is threaded into
+/// the `DiscoveryContext` so the cargo/node detectors — which only ever scan
+/// paths under `known_project_roots` — can actually find anything; it is
+/// empty when the caller passed no `--project-root` flags, preserving the
+/// prior behavior for anyone who doesn't use the new flag.
+fn discover_and_classify_now(
+    project_roots: Vec<PathBuf>,
+) -> Vec<(
     glomeris::evidence::Evidence,
     glomeris::policy::PolicyDecision,
 )> {
@@ -89,7 +99,7 @@ fn discover_and_classify_now() -> Vec<(
     use glomeris::policy::PolicyConfig;
     use std::time::SystemTime;
 
-    let ctx = DiscoveryContext::new(home_dir());
+    let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
     let collector = DefaultEvidenceCollector::default();
     let cfg = PolicyConfig::default();
@@ -183,9 +193,17 @@ fn run_emergency_command() {
 fn run_detect_command(args: &[String]) {
     use glomeris::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 
-    let (_positionals, flags) = split_flags(args, &["--json"]);
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris detect: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+    let (_positionals, flags) = split_flags(&remaining, &["--json"]);
 
-    let ctx = DiscoveryContext::new(home_dir());
+    let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots.clone());
     let registry = DetectorRegistry::builtin();
 
     if !flags.contains(&"--json") {
@@ -204,7 +222,7 @@ fn run_detect_command(args: &[String]) {
         }
     }
 
-    let candidates = discover_and_classify_now();
+    let candidates = discover_and_classify_now(project_roots);
     let report = glomeris::cli::build_detect_report(&candidates);
 
     if flags.contains(&"--json") {
@@ -217,7 +235,15 @@ fn run_detect_command(args: &[String]) {
 /// `glomeris explain <resource_id_or_path>` — full evidence-and-policy
 /// picture for exactly one resource (HORO-955).
 fn run_explain_command(args: &[String]) {
-    let (positionals, flags) = split_flags(args, &["--json"]);
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris explain: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+    let (positionals, flags) = split_flags(&remaining, &["--json"]);
 
     let Some(query) = positionals.first() else {
         eprintln!("glomeris explain: a resource id or path argument is required");
@@ -225,7 +251,7 @@ fn run_explain_command(args: &[String]) {
         std::process::exit(2);
     };
 
-    let candidates = discover_and_classify_now();
+    let candidates = discover_and_classify_now(project_roots);
     let Some((ev, decision)) = glomeris::cli::find_candidate(query, &candidates) else {
         eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
         std::process::exit(1);
@@ -244,17 +270,26 @@ fn run_explain_command(args: &[String]) {
 /// no non-dry-run execution path on this subcommand — see the PR's "Known
 /// limitations": real destructive execution stays `free --target`'s job.
 fn run_clean_command(args: &[String]) {
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris clean: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+
     let mut dry_run = false;
     let mut target: Option<&str> = None;
     let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
+    while i < remaining.len() {
+        match remaining[i].as_str() {
             "--dry-run" => {
                 dry_run = true;
                 i += 1;
             }
             "--target" => {
-                target = args.get(i + 1).map(String::as_str);
+                target = remaining.get(i + 1).map(String::as_str);
                 if target.is_none() {
                     eprintln!("glomeris clean: --target requires a value");
                     std::process::exit(2);
@@ -278,7 +313,7 @@ fn run_clean_command(args: &[String]) {
     }
 
     use glomeris::actions::ActionRegistry;
-    let candidates = discover_and_classify_now();
+    let candidates = discover_and_classify_now(project_roots);
     let actions = ActionRegistry::builtin();
 
     match glomeris::cli::build_clean_dry_run_report(&candidates, &actions, target) {
@@ -291,14 +326,23 @@ fn run_clean_command(args: &[String]) {
 }
 
 fn run_free_command(args: &[String]) {
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris free: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+
     let mut target_arg: Option<&str> = None;
     let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--target" {
-            target_arg = args.get(i + 1).map(String::as_str);
+    while i < remaining.len() {
+        if remaining[i] == "--target" {
+            target_arg = remaining.get(i + 1).map(String::as_str);
             i += 2;
         } else {
-            eprintln!("glomeris free: unrecognized argument '{}'", args[i]);
+            eprintln!("glomeris free: unrecognized argument '{}'", remaining[i]);
             print_usage();
             std::process::exit(2);
         }
@@ -321,7 +365,7 @@ fn run_free_command(args: &[String]) {
         }
     };
 
-    free_run(target);
+    free_run(target, project_roots);
 }
 
 fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryReport) {
@@ -467,7 +511,7 @@ fn daemon_run() {
 }
 
 #[cfg(target_os = "macos")]
-fn free_run(target: glomeris::executor::recovery_loop::FreeTarget) {
+fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots: Vec<PathBuf>) {
     use glomeris::actions::ActionRegistry;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
@@ -482,7 +526,7 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget) {
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    let discovery_ctx = DiscoveryContext::new(home_dir);
+    let discovery_ctx = DiscoveryContext::new(home_dir).with_known_project_roots(project_roots);
 
     let config = RecoveryConfig {
         target,
@@ -520,7 +564,7 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn free_run(_target: glomeris::executor::recovery_loop::FreeTarget) {
+fn free_run(_target: glomeris::executor::recovery_loop::FreeTarget, _project_roots: Vec<PathBuf>) {
     eprintln!("glomeris free: only supported on macOS");
     std::process::exit(1);
 }
