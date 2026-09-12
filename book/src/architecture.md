@@ -25,7 +25,7 @@ not depend on being reachable from a binary at all.
 |---|---|
 | `monitor` | Disk-pressure state machine and the polling loop that drives it. Cheap, O(1) capacity checks only (`statvfs`) — never walks a directory tree. See [Pressure Model](pressure_model.md). |
 | `scanner` | A generic, bounded, streaming filesystem walker that reports the top-K largest entries by size. Unrelated to the detectors below — it has no notion of resource kind, regenerability, or policy. |
-| `detectors` | Bounded, shallow, per-tool probes (Cargo, Homebrew, Node, Xcode, Docker) of known roots — not a full filesystem walk. Produces discovery-stage `Evidence` with the four correlation fields always `Unavailable(NotAttempted)`. |
+| `detectors` | Bounded, per-tool probes (Cargo, Homebrew, Node, Xcode, Docker) of known roots, with a bounded recursive size estimate under each root — not a full filesystem walk. Produces discovery-stage `Evidence` with the four correlation fields always `Unavailable(NotAttempted)`. |
 | `evidence` | The `Evidence`/`ProbeOutcome`/`Completeness` domain model (`evidence::model`, `evidence::probe`), plus the `correlate` submodule that fills in the four correlation fields via `lsof`/`git`/`pgrep`. See [Evidence Model](evidence_model.md). |
 | `policy` | The single deterministic `classify()`/`authorize()` pair that decides `AUTO_SAFE`/`ASK`/`PROTECTED`. See [Safety Model](safety_model.md). |
 | `actions` | Typed, pre-registered cleanup actions (`ActionRegistry`) that turn `Evidence` into a closed `ActionPlan`/`ActionStep` — never a caller-supplied string. Also home to the optional BYOK LLM planner (`actions::llm`). |

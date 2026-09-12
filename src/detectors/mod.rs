@@ -117,14 +117,14 @@ impl SizeEstimate {
         match self.stop_reason {
             StopReason::Exhausted => None,
             StopReason::TimeBudget => Some(format!(
-                "size estimate stopped early after {} entries: {:?} time budget exceeded — \
-                 reported bytes are a lower bound, not the full subtree total",
-                self.entries_visited, SIZE_ESTIMATE_DEADLINE
+                "size estimate stopped early after {} entries ({} unreadable): {:?} time \
+                 budget exceeded — reported bytes are a lower bound, not the full subtree total",
+                self.entries_visited, self.unreadable_entries, SIZE_ESTIMATE_DEADLINE
             )),
             StopReason::FileCountBudget => Some(format!(
-                "size estimate stopped early after {} entries: {} entry budget exceeded — \
-                 reported bytes are a lower bound, not the full subtree total",
-                self.entries_visited, SIZE_ESTIMATE_MAX_ENTRIES
+                "size estimate stopped early after {} entries ({} unreadable): {} entry \
+                 budget exceeded — reported bytes are a lower bound, not the full subtree total",
+                self.entries_visited, self.unreadable_entries, SIZE_ESTIMATE_MAX_ENTRIES
             )),
         }
     }

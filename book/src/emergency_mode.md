@@ -69,11 +69,11 @@ already failed:
   build it.
 - **Resolved (HORO-994): the candidate loop now frees real bytes via a real
   detector-produced candidate.** `executor::build_fresh_evidence`'s
-  deletion-time revalidation reuses the same shallow-size computation for
-  `reclaimable_bytes` that it already used for `logical_bytes`, so a real
-  `AutoSafe` approval survives revalidation and executes. Both the
-  self-owned-disposable-state step (step 1 above) and real detector-found
-  candidates can now reclaim bytes.
+  deletion-time revalidation reuses the same bounded recursive size
+  estimate (HORO-1016) for `reclaimable_bytes` that it already used for
+  `logical_bytes`, so a real `AutoSafe` approval survives revalidation and
+  executes. Both the self-owned-disposable-state step (step 1 above) and
+  real detector-found candidates can now reclaim bytes.
 - **Near-zero-real-disk-space testing was not performed.** Driving a real
   machine's free space to near zero to test this path was judged too
   destructive to be worth the risk; fault injection via fakes covers the

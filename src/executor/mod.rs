@@ -1096,7 +1096,7 @@ mod tests {
         // AutoSafe, matching what a real detector + classify() compute
         // for this clean, complete, regenerable-by-rebuild `node_modules`
         // fixture — post-HORO-994, the fresh revalidation below also
-        // reproduces AutoSafe (its `shallow_logical_bytes`/`probe_mtime`
+        // reproduces AutoSafe (its `estimate_logical_bytes`/`probe_mtime`
         // reads happen against the REAL pre-swap directory, before
         // `SymlinkSwapCollector::collect()` performs the swap), so
         // classify/reasons-widening pass and control reaches the actual

@@ -39,7 +39,7 @@
 //! - **The candidate loop still frees nothing via a real detector-produced
 //!   candidate today (HORO-992 update).** Detectors now populate
 //!   `Evidence::reclaimable_bytes` (xcode/cargo/node/homebrew via a real
-//!   shallow size estimate, docker via `docker system df`'s own reported
+//!   bounded recursive size estimate, docker via `docker system df`'s own reported
 //!   figure), so that specific gap is closed. What remains open is
 //!   `executor::execute`'s own deletion-time revalidation: it rebuilds
 //!   `Evidence` via `executor::build_fresh_evidence`, which does not reuse
