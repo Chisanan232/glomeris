@@ -1,10 +1,12 @@
 //! Detector registry (HORO-948).
 //!
-//! Each detector is a bounded, shallow probe of a known root for one
-//! family of tool-owned resources — NOT a full filesystem walk (that's
+//! Each detector is a bounded probe of a known root for one family of
+//! tool-owned resources — NOT a full filesystem walk (that's
 //! [`crate::scanner`]'s job; detectors deliberately do not reuse
-//! `scanner::walker`). A detector's tool being absent from the machine is
-//! normal, expected state, never an error.
+//! `scanner::walker`). A detector's per-resource size estimate does recurse
+//! within that known root, bounded by a fixed entry/time budget
+//! (HORO-1016; see `estimate_logical_bytes`). A detector's tool being
+//! absent from the machine is normal, expected state, never an error.
 
 mod cargo;
 mod docker;
@@ -14,12 +16,13 @@ mod xcode;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::evidence::{
     Evidence, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability, Regenerability,
     ResourceFingerprint, ResourceId,
 };
+use crate::scanner::{ScanBudget, StopReason};
 
 /// Stable identifier for one detector, e.g. `"cargo_target_dir"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,7 +67,7 @@ impl DiscoveryContext {
     }
 }
 
-/// One detector: a bounded, shallow probe for one family of resources.
+/// One detector: a bounded probe of a known root for one family of resources.
 pub trait Detector: Send + Sync {
     fn id(&self) -> DetectorId;
     fn resource_kinds(&self) -> &'static [crate::evidence::ResourceKind];
@@ -75,33 +78,191 @@ pub trait Detector: Send + Sync {
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus;
 }
 
-/// Shallow, non-recursive best-effort size probe: sums the `st_size` of
-/// `path`'s immediate directory entries only (no subtree recursion — that
-/// full-walk job belongs to [`crate::scanner`], not to detectors). For a
-/// directory whose children are themselves directories, this
-/// under-counts real content size; it is a deliberately bounded MVP
-/// approximation, not a reclaimable-bytes guarantee.
-pub(crate) fn shallow_logical_bytes(path: &Path) -> ProbeOutcome<u64> {
-    let read_dir = match fs::read_dir(path) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return ProbeOutcome::Unavailable(ProbeReason::PermissionDenied)
-        }
-        Err(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
-    };
+/// Maximum number of filesystem entries [`estimate_logical_bytes`] visits
+/// before treating its own budget as exhausted (HORO-1016).
+pub(crate) const SIZE_ESTIMATE_MAX_ENTRIES: u64 = 200_000;
 
-    let mut total: u64 = 0;
-    for entry in read_dir {
-        match entry {
-            Ok(e) => {
-                if let Ok(meta) = e.metadata() {
-                    total += meta.len();
-                }
-            }
-            Err(_) => continue,
+/// Wall-clock deadline for one [`estimate_logical_bytes`] call (HORO-1016).
+pub(crate) const SIZE_ESTIMATE_DEADLINE: Duration = Duration::from_millis(750);
+
+/// The bounded [`ScanBudget`] every detector's size estimate uses — shared
+/// by discovery-time probes and `executor::build_fresh_evidence`'s
+/// revalidation, so `detect`'s reported size and `clean`'s revalidated
+/// size stay consistent for an unchanged resource.
+pub(crate) fn size_estimate_budget() -> ScanBudget {
+    ScanBudget::default()
+        .with_max_files_visited(SIZE_ESTIMATE_MAX_ENTRIES)
+        .with_max_duration(SIZE_ESTIMATE_DEADLINE)
+}
+
+/// Outcome of one [`estimate_logical_bytes`] call.
+#[derive(Debug)]
+pub(crate) struct SizeEstimate {
+    pub bytes: ProbeOutcome<u64>,
+    /// Meaningful only when `bytes` is `Observed` — the root's own probe
+    /// failing (`Unavailable`) never got far enough to consult a budget.
+    pub stop_reason: StopReason,
+    pub entries_visited: u64,
+    pub unreadable_entries: u64,
+}
+
+impl SizeEstimate {
+    /// A provenance note for [`Evidence::push_source`], present only when
+    /// the walk stopped early (`stop_reason != Exhausted`) — i.e. `bytes`
+    /// is a truthful lower bound, not the full subtree total. Never a
+    /// policy input: this is advisory text only, not compared by
+    /// `classify()`/`execute()`'s revalidation.
+    pub fn lower_bound_note(&self) -> Option<String> {
+        if !self.bytes.is_observed() {
+            return None;
+        }
+        match self.stop_reason {
+            StopReason::Exhausted => None,
+            StopReason::TimeBudget => Some(format!(
+                "size estimate stopped early after {} entries ({} unreadable): {:?} time \
+                 budget exceeded — reported bytes are a lower bound, not the full subtree total",
+                self.entries_visited, self.unreadable_entries, SIZE_ESTIMATE_DEADLINE
+            )),
+            StopReason::FileCountBudget => Some(format!(
+                "size estimate stopped early after {} entries ({} unreadable): {} entry \
+                 budget exceeded — reported bytes are a lower bound, not the full subtree total",
+                self.entries_visited, self.unreadable_entries, SIZE_ESTIMATE_MAX_ENTRIES
+            )),
         }
     }
-    ProbeOutcome::Observed(total)
+}
+
+/// Bounded, recursive logical-byte estimate for `path` (HORO-1016):
+/// replaces the old non-recursive probe that only summed a directory's
+/// immediate entries (miscounting a subdirectory's own inode size instead
+/// of its contents). Walks the full subtree under `path` using an
+/// explicit stack — never real recursion, so an arbitrarily deep tree
+/// cannot risk a stack overflow — bounded by `budget`
+/// ([`crate::scanner::ScanBudget`]'s data types only; this module
+/// deliberately does not reuse `scanner::walker`'s traversal — see this
+/// module's own doc comment).
+///
+/// Once past `path`'s own `fs::symlink_metadata`/`fs::read_dir` (the only
+/// point that can yield `Unavailable`), this function always returns
+/// `Observed(_)`: budget exhaustion reports a truthful partial sum as a
+/// lower bound, never `Unavailable`, and a per-entry error (one unreadable
+/// child) is counted in `unreadable_entries` and skipped rather than
+/// failing the whole estimate. This is what keeps a truncated walk from
+/// ever looking like a probe failure to `Evidence::completeness()` or to
+/// `executor::execute`'s TOCTOU revalidation.
+///
+/// A symlink is counted by its own `lstat` size and never followed or
+/// descended into, matching `executor::total_size_best_effort`'s existing
+/// convention. A directory entry contributes 0 bytes itself (only its
+/// contents count), also matching that convention.
+pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEstimate {
+    let root_meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return SizeEstimate {
+                bytes: ProbeOutcome::Unavailable(ProbeReason::PermissionDenied),
+                stop_reason: StopReason::Exhausted,
+                entries_visited: 0,
+                unreadable_entries: 0,
+            };
+        }
+        Err(_) => {
+            return SizeEstimate {
+                bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                stop_reason: StopReason::Exhausted,
+                entries_visited: 0,
+                unreadable_entries: 0,
+            };
+        }
+    };
+
+    if !root_meta.is_dir() {
+        return SizeEstimate {
+            bytes: ProbeOutcome::Observed(root_meta.len()),
+            stop_reason: StopReason::Exhausted,
+            entries_visited: 0,
+            unreadable_entries: 0,
+        };
+    }
+
+    let mut total: u64 = 0;
+    let mut entries_visited: u64 = 0;
+    let mut unreadable_entries: u64 = 0;
+    let mut stop_reason = StopReason::Exhausted;
+    let mut tracker = budget.tracker();
+    // Explicit stack, never real recursion — a deep `target/`-style tree
+    // must not risk a stack overflow.
+    let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
+    // Only the FIRST `read_dir` (the root's own) yields `Unavailable` on
+    // failure; every subsequent directory's `read_dir` failure (a nested
+    // subdirectory that turned out to be unreadable mid-walk) instead just
+    // increments `unreadable_entries` — see this function's doc comment.
+    let mut is_root = true;
+
+    'walk: while let Some(dir) = stack.pop() {
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if is_root && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return SizeEstimate {
+                    bytes: ProbeOutcome::Unavailable(ProbeReason::PermissionDenied),
+                    stop_reason: StopReason::Exhausted,
+                    entries_visited: 0,
+                    unreadable_entries: 0,
+                };
+            }
+            Err(_) if is_root => {
+                return SizeEstimate {
+                    bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                    stop_reason: StopReason::Exhausted,
+                    entries_visited: 0,
+                    unreadable_entries: 0,
+                };
+            }
+            Err(_) => {
+                unreadable_entries += 1;
+                is_root = false;
+                continue;
+            }
+        };
+        is_root = false;
+
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+
+            entries_visited += 1;
+            if let Some(reason) = tracker.record_visit() {
+                stop_reason = reason;
+                break 'walk;
+            }
+
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+
+    SizeEstimate {
+        bytes: ProbeOutcome::Observed(total),
+        stop_reason,
+        entries_visited,
+        unreadable_entries,
+    }
 }
 
 /// Best-effort mtime probe for `path` itself.
@@ -430,5 +591,234 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// Regression tests for [`estimate_logical_bytes`] (HORO-1016) — the
+/// bounded recursive replacement for the old non-recursive
+/// `shallow_logical_bytes`, which only summed a directory's immediate
+/// entries and miscounted a subdirectory as its own inode size instead of
+/// its contents.
+#[cfg(test)]
+mod size_estimate_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-size-estimate-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn nested_tree_total_is_exact_sum_of_file_lengths() {
+        let root = make_temp_dir("nested-exact");
+        fs::write(root.join("top.bin"), vec![0u8; 1000]).unwrap();
+        fs::create_dir_all(root.join("mid")).unwrap();
+        fs::write(root.join("mid/mid.bin"), vec![0u8; 2000]).unwrap();
+        fs::create_dir_all(root.join("mid/leaf")).unwrap();
+        fs::write(root.join("mid/leaf/leaf.bin"), vec![0u8; 3000]).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(6000));
+        assert_eq!(estimate.stop_reason, StopReason::Exhausted);
+        assert!(estimate.lower_bound_note().is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn deep_tree_is_counted_at_every_depth() {
+        let root = make_temp_dir("deep-chain");
+        let mut cursor = root.clone();
+        for i in 0..6 {
+            cursor = cursor.join(format!("level{i}"));
+            fs::create_dir_all(&cursor).unwrap();
+        }
+        fs::write(cursor.join("leaf.bin"), vec![0u8; 4242]).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(4242));
+        assert_eq!(estimate.stop_reason, StopReason::Exhausted);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The single most important safety test: budget exhaustion must
+    /// always yield a truthful `Observed` lower bound, never
+    /// `Unavailable` — that's what keeps a truncated walk from ever
+    /// looking like a probe failure to `Evidence::completeness()` or
+    /// `executor::execute`'s TOCTOU revalidation.
+    #[test]
+    fn budget_exhaustion_returns_observed_lower_bound_never_unavailable() {
+        let root = make_temp_dir("budget-exhaustion");
+        let mut true_total: u64 = 0;
+        for i in 0..10 {
+            let sub = root.join(format!("dir{i}"));
+            fs::create_dir_all(&sub).unwrap();
+            for j in 0..5 {
+                let bytes = vec![0u8; 100 + i + j];
+                fs::write(sub.join(format!("file{j}.bin")), &bytes).unwrap();
+                true_total += bytes.len() as u64;
+            }
+        }
+
+        let file_count_budget = ScanBudget::default().with_max_files_visited(3);
+        let estimate = estimate_logical_bytes(&root, file_count_budget);
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => {
+                assert!(
+                    bytes < true_total,
+                    "expected a truncated lower bound, got the full total {bytes}"
+                );
+            }
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+        assert_eq!(estimate.stop_reason, StopReason::FileCountBudget);
+        assert!(estimate.lower_bound_note().is_some());
+
+        let time_budget = ScanBudget::default().with_max_duration(Duration::ZERO);
+        let estimate = estimate_logical_bytes(&root, time_budget);
+        assert!(estimate.bytes.is_observed());
+        assert_eq!(estimate.stop_reason, StopReason::TimeBudget);
+        assert!(estimate.lower_bound_note().is_some());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unreadable_subdirectory_does_not_change_the_outcome_variant() {
+        let root = make_temp_dir("unreadable-subdir");
+        let denied = root.join("denied");
+        fs::create_dir_all(&denied).unwrap();
+        fs::write(denied.join("inside.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(root.join("visible.bin"), vec![0u8; 64]).unwrap();
+
+        let mut perms = fs::metadata(&denied).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&denied, perms).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let mut restore = fs::metadata(&denied).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&denied, restore).ok();
+
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => {
+                if estimate.unreadable_entries == 0 {
+                    eprintln!(
+                        "skipping strict assertion: permission check bypassed (running as root?)"
+                    );
+                } else {
+                    assert!(bytes >= 64, "expected at least the visible file's bytes");
+                    assert!(estimate.unreadable_entries > 0);
+                }
+            }
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn permission_denied_root_is_unavailable_not_zero() {
+        let root = make_temp_dir("permission-denied-root");
+        fs::write(root.join("inside.bin"), vec![0u8; 4096]).unwrap();
+
+        let mut perms = fs::metadata(&root).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&root, perms).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let mut restore = fs::metadata(&root).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&root, restore).ok();
+
+        match estimate.bytes {
+            ProbeOutcome::Unavailable(ProbeReason::PermissionDenied) => {}
+            ProbeOutcome::Observed(_) => {
+                eprintln!("skipping assertion: permission check bypassed (running as root?)");
+            }
+            other => panic!("expected Unavailable(PermissionDenied), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn symlinks_are_counted_by_their_own_size_and_never_followed() {
+        let root = make_temp_dir("symlink-not-followed");
+        let outside_target = std::env::temp_dir().join(format!(
+            "glomeris-size-estimate-symlink-target-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside_target, vec![0u8; 1 << 20]).unwrap();
+        symlink(&outside_target, root.join("link_to_big_file")).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => {
+                assert!(
+                    bytes < 1024,
+                    "expected the symlink's own small lstat size, got {bytes} (target followed?)"
+                );
+            }
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_file(&outside_target).ok();
+    }
+
+    #[test]
+    fn sparse_file_is_counted_by_logical_length() {
+        let root = make_temp_dir("sparse-file");
+        let sparse_path = root.join("sparse.bin");
+        let file = fs::File::create(&sparse_path).unwrap();
+        file.set_len(1 << 20).unwrap();
+        drop(file);
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(1 << 20));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_directory_root_is_observed_file_length() {
+        let root = make_temp_dir("non-directory-root");
+        let file_path = root.join("plain.bin");
+        fs::write(&file_path, vec![0u8; 777]).unwrap();
+
+        let estimate = estimate_logical_bytes(&file_path, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(777));
+        assert_eq!(estimate.stop_reason, StopReason::Exhausted);
+
+        fs::remove_dir_all(&root).ok();
     }
 }

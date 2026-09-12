@@ -5,13 +5,14 @@
 //! `node_modules/` directory rather than discovering project roots on
 //! disk itself.
 //!
-//! `reclaimable_bytes` reuses the same [`shallow_logical_bytes`] estimate
+//! `reclaimable_bytes` reuses the same [`estimate_logical_bytes`] estimate
 //! as `logical_bytes` (HORO-992): `node_modules/` is fully owned,
 //! regenerable dependency output with no partial-retention concept, so
 //! `reclaimable_bytes == logical_bytes` is an honest equivalence of
-//! meaning here. Because the underlying probe is shallow/non-recursive,
-//! both figures are an honest *lower bound* on the real subtree size, not
-//! a precise one.
+//! meaning here. The estimate recurses through the full subtree, bounded
+//! by a size/time budget (HORO-1016) — see [`estimate_logical_bytes`]'s
+//! own doc comment for what happens if that budget is hit before the walk
+//! finishes (a truthful lower bound, never a precision guarantee).
 
 use std::path::PathBuf;
 
@@ -20,8 +21,8 @@ use crate::evidence::{
 };
 
 use super::{
-    discovery_evidence, probe_mtime, shallow_logical_bytes, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext,
+    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
+    DetectorId, DetectorStatus, DiscoveryContext,
 };
 
 pub struct NodeDetector;
@@ -49,8 +50,9 @@ impl Detector for NodeDetector {
                         ResourceKind::NodeModules,
                         ResourceLocator::Path(canonical.clone()),
                     );
-                    let logical_bytes = shallow_logical_bytes(&canonical);
-                    evidence.push(discovery_evidence(
+                    let estimate = estimate_logical_bytes(&canonical, size_estimate_budget());
+                    let logical_bytes = estimate.bytes.clone();
+                    let mut ev = discovery_evidence(
                         resource,
                         self.id(),
                         &canonical,
@@ -60,7 +62,11 @@ impl Detector for NodeDetector {
                         Regenerability::RegenerableByRebuild,
                         Recoverability::RegenerableByRebuild,
                         NativeCleanup::Unsupported,
-                    ));
+                    );
+                    if let Some(note) = estimate.lower_bound_note() {
+                        ev.push_source(note);
+                    }
+                    evidence.push(ev);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {

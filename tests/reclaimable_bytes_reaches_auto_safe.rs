@@ -116,19 +116,16 @@ fn real_cargo_detector_evidence_reaches_auto_safe_with_clean_correlation() {
     let target_dir = project_root.join("target");
     fs::create_dir_all(&target_dir).expect("create target dir");
 
-    // Real files directly at the top level of `target/`: `shallow_logical_bytes`
-    // is deliberately non-recursive (sums only immediate directory
-    // entries), so content must live at this level for the probe to see
-    // it — a nested file would be invisible to the shallow probe and this
-    // assertion would spuriously pass on a near-zero value.
+    // Two files directly at the top level of `target/`, plus one nested
+    // two levels down (HORO-1016): `estimate_logical_bytes` is bounded but
+    // recursive, so all three must be counted, not just the top-level
+    // ones — this is the exact case the old non-recursive
+    // `shallow_logical_bytes` would have under-counted.
     const FILE_BYTES: usize = 64 * 1024;
     fs::write(target_dir.join("libfoo.rlib"), vec![0xABu8; FILE_BYTES])
         .expect("write fixture file");
     fs::write(target_dir.join("libbar.rlib"), vec![0xCDu8; FILE_BYTES])
         .expect("write fixture file");
-    // A nested subdirectory too, for realism — its contents are expected
-    // to be under-counted by the shallow probe, which is exactly the
-    // documented lower-bound behavior.
     fs::create_dir_all(target_dir.join("debug/deps")).expect("create nested dir");
     fs::write(
         target_dir.join("debug/deps/some_dep-abcdef"),
@@ -167,10 +164,10 @@ fn real_cargo_detector_evidence_reaches_auto_safe_with_clean_correlation() {
     match evidence.reclaimable_bytes {
         ProbeOutcome::Observed(bytes) => {
             assert!(
-                bytes >= (2 * FILE_BYTES) as u64,
-                "expected reclaimable_bytes to cover at least the two top-level \
-                 fixture files ({} bytes), got {bytes}",
-                2 * FILE_BYTES
+                bytes >= (3 * FILE_BYTES) as u64,
+                "expected reclaimable_bytes to cover all three fixture files, \
+                 including the nested one ({} bytes), got {bytes}",
+                3 * FILE_BYTES
             );
         }
         ProbeOutcome::Unavailable(reason) => {

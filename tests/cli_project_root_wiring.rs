@@ -41,7 +41,7 @@ fn make_temp_dir(prefix: &str) -> PathBuf {
 /// Builds a project-root fixture containing both a Cargo `target/` dir and
 /// a `node_modules/` dir — the two "realistic developer storage hotspots"
 /// this whole ticket is about — with non-trivial file content so the
-/// shallow size probe has something real to sum.
+/// size probe has something real to sum.
 fn make_project_root_fixture() -> PathBuf {
     let root = make_temp_dir("horo957-project-root");
 

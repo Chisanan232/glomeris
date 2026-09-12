@@ -8,10 +8,10 @@ scoped by what's on this page.
 ## Resolved: real detector-produced candidates now complete real deletions
 
 Fixed in HORO-994. Detectors populate `Evidence::reclaimable_bytes` at
-discovery time (HORO-992) — Xcode/Cargo/Node/Homebrew via a real shallow
-size estimate, Docker via `docker system df`'s own reported figure — and
+discovery time (HORO-992) — Xcode/Cargo/Node/Homebrew via a real size
+estimate, Docker via `docker system df`'s own reported figure — and
 `executor::execute()`'s deletion-time TOCTOU revalidation
-(`executor::build_fresh_evidence`) now reuses the same shallow-size
+(`executor::build_fresh_evidence`) now reuses the same size-estimate
 computation for `reclaimable_bytes` that it already used for
 `logical_bytes`, rather than hardcoding it back to `Unavailable`. A golden
 end-to-end integration test (`tests/golden_chain_execute.rs`) proves the
@@ -19,6 +19,33 @@ full chain — real detector → `AutoSafe` classification → `Approval` →
 `execute()` → real deletion → real re-measured freed bytes — against a
 disposable fixture. `glomeris free --target` and `glomeris emergency` can
 both now actually free real bytes, not just report a dry-run plan.
+
+## Resolved (HORO-1016): the size estimate was non-recursive and badly under-counted nested trees
+
+Before this fix, `detectors::shallow_logical_bytes` (the shared size probe
+behind every detector's `logical_bytes`/`reclaimable_bytes` and behind
+`executor::build_fresh_evidence`'s revalidation) summed only a directory's
+*immediate* entries — for a subdirectory entry it counted the directory
+inode's own size, never its contents. On a real machine this reported a
+4.8 GB Xcode DerivedData tree as 34.9 KB, a 1.0 GB Homebrew cache as 1.3 MB,
+and a 16 GB Cargo `target/` directory as 4.6 KB. Fixed:
+`detectors::estimate_logical_bytes` walks the full subtree via an explicit
+stack (never real recursion, so an arbitrarily deep tree cannot overflow
+the stack), bounded by a shared 200,000-entry / 750ms budget
+(`detectors::size_estimate_budget`) used identically at discovery time and
+at deletion-time revalidation. Budget exhaustion always yields a truthful
+partial-sum lower bound — never `Unavailable` — so a truncated walk can
+never look like a probe failure to `Evidence::completeness()` or trip a
+spurious abort in `executor::execute`'s TOCTOU revalidation; when the walk
+does stop early, a provenance note is attached via `Evidence::push_source`
+(advisory only, never a policy input). `tests/reclaimable_bytes_reaches_auto_safe.rs`
+and the new `executor::tests::estimate_matches_total_size_best_effort_on_the_same_tree`
+lock the estimate's byte semantics to `executor::total_size_best_effort`'s
+existing convention (files and symlinks counted by their own size,
+directories contribute 0). On a real developer machine the 750ms deadline
+truncates the Xcode DerivedData walk at roughly 42,000 entries, so that
+resource's reported bytes are normally a lower bound, by design — no
+extrapolation is attempted.
 
 ## Docker build cache can never reach `Completeness::Complete`
 

@@ -130,9 +130,9 @@ registered action emits more than one step today.
 
 Detectors populate `reclaimable_bytes` at discovery time (HORO-992), and the
 deletion-time revalidation path (`executor::build_fresh_evidence`) reuses
-the same shallow-size computation for `reclaimable_bytes` that it already
-used for `logical_bytes` (HORO-994) — it no longer hardcodes the field back
-to `Unavailable`. A real `AutoSafe` approval built from a detector's
+the same bounded recursive size estimate (HORO-1016) for `reclaimable_bytes`
+that it already used for `logical_bytes` (HORO-994) — it no longer hardcodes
+the field back to `Unavailable`. A real `AutoSafe` approval built from a detector's
 evidence genuinely survives revalidation and executes for real, proven by
 `tests/golden_chain_execute.rs`. See [Known Limitations](known_limitations.md)
 for what's still out of scope (Docker build cache's own completeness gap).
