@@ -403,7 +403,15 @@ fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryRep
 fn run_daemon_command(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("install") => {
-            let force = args[1..].iter().any(|a| a == "--force");
+            let mut force = false;
+            for arg in &args[1..] {
+                if arg == "--force" {
+                    force = true;
+                } else {
+                    eprintln!("glomeris daemon install: unrecognized argument '{arg}'");
+                    std::process::exit(2);
+                }
+            }
             daemon_install(force);
         }
         Some("uninstall") => daemon_uninstall(),

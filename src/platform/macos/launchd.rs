@@ -96,8 +96,20 @@ pub fn default_log_dir() -> io::Result<PathBuf> {
 /// `<key>StartInterval</key>` in `xml`. Returns `None` if the file can't
 /// be read or doesn't match the expected shape — never errors the
 /// caller; this is advisory, not authoritative parsing.
+///
+/// Refuses (returns `None`) if `<key>StartInterval</key>` occurs more than
+/// once in the document: the real plists this tool generates have exactly
+/// one such marker, so more than one is a signal that either the document
+/// is adversarial (a `ProgramArguments` string embedding the literal
+/// marker text to fool a naive split) or structurally not what this tool
+/// expects — either way, guessing which occurrence is "the real one" is
+/// worse than declining to extract at all.
 fn extract_start_interval_secs(xml: &str) -> Option<u64> {
-    let after_key = xml.split("<key>StartInterval</key>").nth(1)?;
+    const MARKER: &str = "<key>StartInterval</key>";
+    if xml.matches(MARKER).count() != 1 {
+        return None;
+    }
+    let after_key = xml.split(MARKER).nth(1)?;
     let after_open = after_key.split("<integer>").nth(1)?;
     let value = after_open.split("</integer>").next()?;
     value.trim().parse::<u64>().ok()
@@ -107,8 +119,17 @@ fn extract_start_interval_secs(xml: &str) -> Option<u64> {
 /// `ProgramArguments` array (the program path) — used only to build the
 /// "what would this tool have generated, holding the interval fixed"
 /// comparison below, never trusted as an executable path on its own.
+///
+/// Refuses (returns `None`) if `<key>ProgramArguments</key>` occurs more
+/// than once in the document, for the same reason as
+/// [`extract_start_interval_secs`]: a single expected marker is a
+/// necessary precondition for the split-based extraction to be trusted.
 fn extract_program_path(xml: &str) -> Option<String> {
-    let after_key = xml.split("<key>ProgramArguments</key>").nth(1)?;
+    const MARKER: &str = "<key>ProgramArguments</key>";
+    if xml.matches(MARKER).count() != 1 {
+        return None;
+    }
+    let after_key = xml.split(MARKER).nth(1)?;
     let after_array = after_key.split("<array>").nth(1)?;
     let after_string = after_array.split("<string>").nth(1)?;
     let value = after_string.split("</string>").next()?;
@@ -240,6 +261,26 @@ fn install_impl(
     force: bool,
     log_dir: &Path,
 ) -> io::Result<InstallOutcome> {
+    install_impl_with_hook(plist_path, program_path, force, log_dir, None)
+}
+
+/// The real body of [`install_impl`], with one extra testing-only seam:
+/// `before_final_write`, a callback invoked once, right after the initial
+/// read/fingerprint of an existing plist and right before the final
+/// TOCTOU re-check that decides [`InstallOutcome::AbortedConcurrentModification`].
+/// Production and [`install_impl`] itself always pass `None`; only tests
+/// pass `Some` (e.g. to mutate the file out from under this function,
+/// deterministically driving the concurrent-modification-abort outcome
+/// without any real threads). This is the smallest addition that makes
+/// that outcome testable end-to-end through `install_impl` — everything
+/// else about the algorithm is unchanged.
+fn install_impl_with_hook(
+    plist_path: &Path,
+    program_path: &Path,
+    force: bool,
+    log_dir: &Path,
+    before_final_write: Option<Box<dyn FnOnce()>>,
+) -> io::Result<InstallOutcome> {
     std::fs::create_dir_all(log_dir)?;
 
     if !plist_path.exists() {
@@ -287,6 +328,13 @@ fn install_impl(
         return Ok(InstallOutcome::RefusedNeedsForce);
     }
 
+    // Testing-only seam: let a test simulate a concurrent modification
+    // landing between the initial read above and the TOCTOU re-check
+    // below. Always `None` outside tests, so this is a no-op in production.
+    if let Some(hook) = before_final_write {
+        hook();
+    }
+
     // TOCTOU guard: re-check right before mutating anything (including
     // the backup copy) so a call that aborts here truly leaves zero
     // mutation behind, matching `AbortedConcurrentModification`'s
@@ -296,7 +344,7 @@ fn install_impl(
     }
 
     let backup_path = plist_path.with_extension("plist.bak");
-    std::fs::copy(plist_path, &backup_path)?;
+    write_atomic(&backup_path, &existing_contents)?;
 
     write_atomic(plist_path, &candidate)?;
 
@@ -317,8 +365,9 @@ fn install_impl(
 pub fn uninstall(plist_path: &Path) -> io::Result<()> {
     let _ = run_launchctl(&["unload", "-w", &plist_path.display().to_string()]);
     if plist_path.exists() {
+        let contents = std::fs::read_to_string(plist_path)?;
         let backup_path = plist_path.with_extension("plist.bak");
-        std::fs::copy(plist_path, &backup_path)?;
+        write_atomic(&backup_path, &contents)?;
         std::fs::remove_file(plist_path)?;
     }
     Ok(())
@@ -670,6 +719,117 @@ mod tests {
         let before2 = fingerprint(&path);
         std::fs::remove_file(&path).unwrap();
         assert!(file_changed_since(&path, before2));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_start_interval_secs_refuses_ambiguous_duplicate_marker() {
+        // A legitimate `<key>StartInterval</key>` plus decoy text elsewhere
+        // in the document containing that same literal marker (e.g. an
+        // adversarially/coincidentally crafted `ProgramArguments` string)
+        // must not fool the extractor into picking either occurrence.
+        let xml = "<plist><dict>\
+            <key>ProgramArguments</key><array><string>decoy \
+            <key>StartInterval</key><integer>999</integer></string></array>\
+            <key>StartInterval</key><integer>60</integer>\
+            </dict></plist>";
+        assert_eq!(extract_start_interval_secs(xml), None);
+    }
+
+    #[test]
+    fn extract_program_path_refuses_ambiguous_duplicate_marker() {
+        let xml = "<plist><dict>\
+            <key>Comment</key><string>decoy \
+            <key>ProgramArguments</key><array><string>/decoy/path</string></array></string>\
+            <key>ProgramArguments</key><array><string>/real/path</string></array>\
+            </dict></plist>";
+        assert_eq!(extract_program_path(xml), None);
+    }
+
+    #[test]
+    fn uninstall_backup_write_failure_leaves_original_plist_intact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("backup-atomic-failure");
+        let plist_path = dir.join(format!("{LABEL}.plist"));
+        let log_dir = dir.join("logs");
+        install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
+        let original = std::fs::read_to_string(&plist_path).unwrap();
+
+        // Make the directory read-only so the backup's temp-file write
+        // (which must create a new file) fails before any rename is
+        // attempted — proving the backup goes through the same atomic
+        // temp-file+rename mechanism as the main plist write rather than
+        // a plain, non-atomic `fs::copy`.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = uninstall(&plist_path);
+
+        // Restore write permission before any further filesystem access,
+        // including test cleanup.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            result.is_err(),
+            "uninstall must surface the backup write failure rather than swallow it"
+        );
+        assert!(
+            plist_path.exists(),
+            "original plist must survive a failed backup write"
+        );
+        assert_eq!(std::fs::read_to_string(&plist_path).unwrap(), original);
+        assert!(!plist_path.with_extension("plist.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_impl_hook_triggers_aborted_concurrent_modification() {
+        let dir = unique_temp_dir("concurrent-abort");
+        let plist_path = dir.join(format!("{LABEL}.plist"));
+        let log_dir = dir.join("logs");
+
+        // Seed an existing plist with a hand-edited StartInterval so this
+        // call takes the "would repair" branch and actually reaches the
+        // TOCTOU re-check below.
+        install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
+        let hand_edited = std::fs::read_to_string(&plist_path).unwrap().replace(
+            &format!("<integer>{DEFAULT_START_INTERVAL_SECS}</integer>"),
+            "<integer>120</integer>",
+        );
+        std::fs::write(&plist_path, &hand_edited).unwrap();
+
+        let plist_path_for_hook = plist_path.clone();
+        let hook: Box<dyn FnOnce()> = Box::new(move || {
+            // Simulate a concurrent writer landing between install_impl's
+            // initial read/fingerprint and its final TOCTOU re-check.
+            std::fs::write(
+                &plist_path_for_hook,
+                "concurrently modified by someone else",
+            )
+            .unwrap();
+        });
+
+        let outcome = install_impl_with_hook(
+            &plist_path,
+            Path::new("/bin/echo"),
+            false,
+            &log_dir,
+            Some(hook),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, InstallOutcome::AbortedConcurrentModification);
+        let after = std::fs::read_to_string(&plist_path).unwrap();
+        assert_eq!(
+            after, "concurrently modified by someone else",
+            "the concurrent writer's content must be left untouched"
+        );
+        assert!(
+            !plist_path.with_extension("plist.bak").exists(),
+            "an aborted install must take no backup"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
