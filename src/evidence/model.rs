@@ -161,7 +161,7 @@ impl fmt::Display for ResourceLocator {
 /// the ONLY resource handle a future LLM will ever see — keep the format
 /// stable: `"<resource_kind_snake_case>:<locator>"`, e.g.
 /// `"cargo_target_dir:/Users/x/proj/target"`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct ResourceId {
     pub kind: ResourceKind,
     pub locator: ResourceLocator,
@@ -187,6 +187,27 @@ pub struct ResourceId {
     /// Homebrew, Node, Docker) — only the Cargo detector ever populates
     /// `Some(_)`.
     pub source_project_root: Option<PathBuf>,
+}
+
+/// Identity is `kind` + `locator` only. `source_project_root` is
+/// provenance metadata (see its own doc comment above), not part of
+/// resource identity — two `ResourceId`s discovered via different raw
+/// `--project-root` spellings of the same physical directory must still
+/// be recognized as the same resource by any `HashSet<ResourceId>` /
+/// `HashMap<ResourceId, _>` (HORO-1019).
+impl PartialEq for ResourceId {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.locator == other.locator
+    }
+}
+
+impl Eq for ResourceId {}
+
+impl std::hash::Hash for ResourceId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.locator.hash(state);
+    }
 }
 
 impl ResourceId {
