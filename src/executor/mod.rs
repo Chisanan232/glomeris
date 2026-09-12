@@ -350,31 +350,55 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                 scoped_path,
             } => {
                 saw_run_tool = true;
-                if let Some(scoped) = scoped_path {
-                    let snapshot = match &identity_snapshot {
-                        Some(s) => s,
-                        None => {
-                            return failed_report(
-                                plan.action,
-                                plan.resource,
-                                format!(
-                                    "refusing to run {}: no verified resource identity snapshot \
-                                     available for scoped path {}",
-                                    tool.program(),
-                                    scoped.display()
-                                ),
-                                plan.expected_reclaimed_bytes,
-                            );
-                        }
-                    };
-                    if let Err(message) = verify_identity_unchanged(scoped, snapshot) {
+                let scoped = match scoped_path {
+                    Some(scoped) => scoped,
+                    None => {
+                        // Fail-closed, not an accepted trade-off: a
+                        // mutating RunTool step with no scoped path has
+                        // nothing for verify_identity_unchanged to check,
+                        // which means it would run with zero TOCTOU/
+                        // path-safety guard — the exact hole the HORO-951
+                        // adversarial review closed for every other
+                        // mutating step. `brew cleanup -s` (the one
+                        // built-in action that hits this) genuinely can't
+                        // be scoped to a path, so it is refused here
+                        // unconditionally rather than executed unguarded.
                         return failed_report(
                             plan.action,
                             plan.resource,
-                            message,
+                            format!(
+                                "refusing to run {}: this step has no scoped_path, so its \
+                                 identity cannot be revalidated before mutation — an unscoped \
+                                 mutating action is never executed regardless of policy class",
+                                tool.program()
+                            ),
                             plan.expected_reclaimed_bytes,
                         );
                     }
+                };
+                let snapshot = match &identity_snapshot {
+                    Some(s) => s,
+                    None => {
+                        return failed_report(
+                            plan.action,
+                            plan.resource,
+                            format!(
+                                "refusing to run {}: no verified resource identity snapshot \
+                                 available for scoped path {}",
+                                tool.program(),
+                                scoped.display()
+                            ),
+                            plan.expected_reclaimed_bytes,
+                        );
+                    }
+                };
+                if let Err(message) = verify_identity_unchanged(scoped, snapshot) {
+                    return failed_report(
+                        plan.action,
+                        plan.resource,
+                        message,
+                        plan.expected_reclaimed_bytes,
+                    );
                 }
                 match Command::new(tool.program()).args(args).output() {
                     Ok(output) if output.status.success() => {}
@@ -941,6 +965,69 @@ mod tests {
             report.actual_reclaimed_bytes,
             ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Regression for a real defect found by HORO-957's independent
+    /// golden-scenario evaluation: `HomebrewCleanupCache`'s plan carries
+    /// `scoped_path: None` (real `brew cleanup -s` has no path argument
+    /// to scope to), and prior to this fix that meant `execute()` ran it
+    /// with NO identity/TOCTOU guard at all — a real, unscoped destructive
+    /// command reaching the developer's actual Homebrew Cellar the moment
+    /// Homebrew cache classified `AutoSafe` (which the evaluator confirmed
+    /// happens on a real machine). `execute()` must now refuse any
+    /// `RunTool` step whose `scoped_path` is `None`, unconditionally,
+    /// before ever spawning the tool. This test never spawns real `brew`
+    /// — the refusal must happen before `Command::new` is reached.
+    #[test]
+    fn execute_refuses_run_tool_step_with_no_scoped_path() {
+        use crate::actions::HomebrewCleanupCache;
+
+        let root = make_temp_dir("execute-refuses-unscoped-run-tool");
+        let cache_dir = root.join("homebrew-cache");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("download.tar.gz"), vec![0u8; 4096]).unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::HomebrewCache,
+            ResourceLocator::Path(cache_dir.clone()),
+        );
+        let now = SystemTime::now();
+        // Build the decision from the SAME evidence-rebuild path `execute`
+        // itself uses (rather than hand-writing reason codes and risking
+        // drift from `classify`'s real output) so this test's plan-time
+        // decision and execute()'s freshly re-derived decision agree —
+        // exactly as they would for a real, unchanged resource.
+        let evidence = build_fresh_evidence(&resource, &HomebrewCleanupCache, &FakeCollector, now);
+        let decision = classify(&evidence, &PolicyConfig::default(), now);
+        assert_eq!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "test fixture must reach AutoSafe for this regression to exercise the real path"
+        );
+        let consent = UserConsent::new(resource.clone(), evidence.fingerprint.clone(), now);
+        let approval = authorize(decision, evidence.fingerprint.clone(), Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        let report = execute(
+            &HomebrewCleanupCache,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        match &report.outcome {
+            ExecutionOutcome::Failed(message) => assert!(
+                message.contains("no scoped_path"),
+                "expected the unscoped-refusal message, got: {message}"
+            ),
+            other => panic!("expected Failed(_), got {other:?}"),
+        }
+        // The real point of this test: the cache dir must still exist —
+        // `brew` was never actually spawned.
+        assert!(cache_dir.exists());
 
         fs::remove_dir_all(&root).ok();
     }
