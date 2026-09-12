@@ -42,7 +42,10 @@ does stop early, a provenance note is attached via `Evidence::push_source`
 and the new `executor::tests::estimate_matches_total_size_best_effort_on_the_same_tree`
 lock the estimate's byte semantics to `executor::total_size_best_effort`'s
 existing convention (files and symlinks counted by their own size,
-directories contribute 0).
+directories contribute 0). On a real developer machine the 750ms deadline
+truncates the Xcode DerivedData walk at roughly 42,000 entries, so that
+resource's reported bytes are normally a lower bound, by design — no
+extrapolation is attempted.
 
 ## Docker build cache can never reach `Completeness::Complete`
 

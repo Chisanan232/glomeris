@@ -1,10 +1,12 @@
 //! Detector registry (HORO-948).
 //!
-//! Each detector is a bounded, shallow probe of a known root for one
-//! family of tool-owned resources — NOT a full filesystem walk (that's
+//! Each detector is a bounded probe of a known root for one family of
+//! tool-owned resources — NOT a full filesystem walk (that's
 //! [`crate::scanner`]'s job; detectors deliberately do not reuse
-//! `scanner::walker`). A detector's tool being absent from the machine is
-//! normal, expected state, never an error.
+//! `scanner::walker`). A detector's per-resource size estimate does recurse
+//! within that known root, bounded by a fixed entry/time budget
+//! (HORO-1016; see [`estimate_logical_bytes`]). A detector's tool being
+//! absent from the machine is normal, expected state, never an error.
 
 mod cargo;
 mod docker;
@@ -65,7 +67,7 @@ impl DiscoveryContext {
     }
 }
 
-/// One detector: a bounded, shallow probe for one family of resources.
+/// One detector: a bounded probe of a known root for one family of resources.
 pub trait Detector: Send + Sync {
     fn id(&self) -> DetectorId;
     fn resource_kinds(&self) -> &'static [crate::evidence::ResourceKind];
