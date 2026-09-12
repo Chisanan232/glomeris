@@ -14,12 +14,13 @@ mod xcode;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::evidence::{
     Evidence, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability, Regenerability,
     ResourceFingerprint, ResourceId,
 };
+use crate::scanner::{ScanBudget, StopReason};
 
 /// Stable identifier for one detector, e.g. `"cargo_target_dir"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,6 +82,9 @@ pub trait Detector: Send + Sync {
 /// directory whose children are themselves directories, this
 /// under-counts real content size; it is a deliberately bounded MVP
 /// approximation, not a reclaimable-bytes guarantee.
+///
+/// Superseded by [`estimate_logical_bytes`] (HORO-1016) — kept only until
+/// every call site has switched over, then deleted.
 pub(crate) fn shallow_logical_bytes(path: &Path) -> ProbeOutcome<u64> {
     let read_dir = match fs::read_dir(path) {
         Ok(rd) => rd,
@@ -102,6 +106,193 @@ pub(crate) fn shallow_logical_bytes(path: &Path) -> ProbeOutcome<u64> {
         }
     }
     ProbeOutcome::Observed(total)
+}
+
+/// Maximum number of filesystem entries [`estimate_logical_bytes`] visits
+/// before treating its own budget as exhausted (HORO-1016).
+pub(crate) const SIZE_ESTIMATE_MAX_ENTRIES: u64 = 200_000;
+
+/// Wall-clock deadline for one [`estimate_logical_bytes`] call (HORO-1016).
+pub(crate) const SIZE_ESTIMATE_DEADLINE: Duration = Duration::from_millis(750);
+
+/// The bounded [`ScanBudget`] every detector's size estimate uses — shared
+/// by discovery-time probes and `executor::build_fresh_evidence`'s
+/// revalidation, so `detect`'s reported size and `clean`'s revalidated
+/// size stay consistent for an unchanged resource.
+pub(crate) fn size_estimate_budget() -> ScanBudget {
+    ScanBudget::default()
+        .with_max_files_visited(SIZE_ESTIMATE_MAX_ENTRIES)
+        .with_max_duration(SIZE_ESTIMATE_DEADLINE)
+}
+
+/// Outcome of one [`estimate_logical_bytes`] call.
+#[derive(Debug)]
+pub(crate) struct SizeEstimate {
+    pub bytes: ProbeOutcome<u64>,
+    /// Meaningful only when `bytes` is `Observed` — the root's own probe
+    /// failing (`Unavailable`) never got far enough to consult a budget.
+    pub stop_reason: StopReason,
+    pub entries_visited: u64,
+    pub unreadable_entries: u64,
+}
+
+impl SizeEstimate {
+    /// A provenance note for [`Evidence::push_source`], present only when
+    /// the walk stopped early (`stop_reason != Exhausted`) — i.e. `bytes`
+    /// is a truthful lower bound, not the full subtree total. Never a
+    /// policy input: this is advisory text only, not compared by
+    /// `classify()`/`execute()`'s revalidation.
+    pub fn lower_bound_note(&self) -> Option<String> {
+        if !self.bytes.is_observed() {
+            return None;
+        }
+        match self.stop_reason {
+            StopReason::Exhausted => None,
+            StopReason::TimeBudget => Some(format!(
+                "size estimate stopped early after {} entries: {:?} time budget exceeded — \
+                 reported bytes are a lower bound, not the full subtree total",
+                self.entries_visited, SIZE_ESTIMATE_DEADLINE
+            )),
+            StopReason::FileCountBudget => Some(format!(
+                "size estimate stopped early after {} entries: {} entry budget exceeded — \
+                 reported bytes are a lower bound, not the full subtree total",
+                self.entries_visited, SIZE_ESTIMATE_MAX_ENTRIES
+            )),
+        }
+    }
+}
+
+/// Bounded, recursive logical-byte estimate for `path` (HORO-1016):
+/// replaces the old non-recursive probe that only summed a directory's
+/// immediate entries (miscounting a subdirectory's own inode size instead
+/// of its contents). Walks the full subtree under `path` using an
+/// explicit stack — never real recursion, so an arbitrarily deep tree
+/// cannot risk a stack overflow — bounded by `budget`
+/// ([`crate::scanner::ScanBudget`]'s data types only; this module
+/// deliberately does not reuse `scanner::walker`'s traversal — see this
+/// module's own doc comment).
+///
+/// Once past `path`'s own `fs::symlink_metadata`/`fs::read_dir` (the only
+/// point that can yield `Unavailable`), this function always returns
+/// `Observed(_)`: budget exhaustion reports a truthful partial sum as a
+/// lower bound, never `Unavailable`, and a per-entry error (one unreadable
+/// child) is counted in `unreadable_entries` and skipped rather than
+/// failing the whole estimate. This is what keeps a truncated walk from
+/// ever looking like a probe failure to `Evidence::completeness()` or to
+/// `executor::execute`'s TOCTOU revalidation.
+///
+/// A symlink is counted by its own `lstat` size and never followed or
+/// descended into, matching `executor::total_size_best_effort`'s existing
+/// convention. A directory entry contributes 0 bytes itself (only its
+/// contents count), also matching that convention.
+pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEstimate {
+    let root_meta = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return SizeEstimate {
+                bytes: ProbeOutcome::Unavailable(ProbeReason::PermissionDenied),
+                stop_reason: StopReason::Exhausted,
+                entries_visited: 0,
+                unreadable_entries: 0,
+            };
+        }
+        Err(_) => {
+            return SizeEstimate {
+                bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                stop_reason: StopReason::Exhausted,
+                entries_visited: 0,
+                unreadable_entries: 0,
+            };
+        }
+    };
+
+    if !root_meta.is_dir() {
+        return SizeEstimate {
+            bytes: ProbeOutcome::Observed(root_meta.len()),
+            stop_reason: StopReason::Exhausted,
+            entries_visited: 0,
+            unreadable_entries: 0,
+        };
+    }
+
+    let mut total: u64 = 0;
+    let mut entries_visited: u64 = 0;
+    let mut unreadable_entries: u64 = 0;
+    let mut stop_reason = StopReason::Exhausted;
+    let mut tracker = budget.tracker();
+    // Explicit stack, never real recursion — a deep `target/`-style tree
+    // must not risk a stack overflow.
+    let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
+    // Only the FIRST `read_dir` (the root's own) yields `Unavailable` on
+    // failure; every subsequent directory's `read_dir` failure (a nested
+    // subdirectory that turned out to be unreadable mid-walk) instead just
+    // increments `unreadable_entries` — see this function's doc comment.
+    let mut is_root = true;
+
+    'walk: while let Some(dir) = stack.pop() {
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if is_root && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return SizeEstimate {
+                    bytes: ProbeOutcome::Unavailable(ProbeReason::PermissionDenied),
+                    stop_reason: StopReason::Exhausted,
+                    entries_visited: 0,
+                    unreadable_entries: 0,
+                };
+            }
+            Err(_) if is_root => {
+                return SizeEstimate {
+                    bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                    stop_reason: StopReason::Exhausted,
+                    entries_visited: 0,
+                    unreadable_entries: 0,
+                };
+            }
+            Err(_) => {
+                unreadable_entries += 1;
+                is_root = false;
+                continue;
+            }
+        };
+        is_root = false;
+
+        for entry in read_dir {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+
+            entries_visited += 1;
+            if let Some(reason) = tracker.record_visit() {
+                stop_reason = reason;
+                break 'walk;
+            }
+
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => {
+                    unreadable_entries += 1;
+                    continue;
+                }
+            };
+
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+
+    SizeEstimate {
+        bytes: ProbeOutcome::Observed(total),
+        stop_reason,
+        entries_visited,
+        unreadable_entries,
+    }
 }
 
 /// Best-effort mtime probe for `path` itself.
