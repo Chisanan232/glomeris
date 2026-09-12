@@ -317,7 +317,7 @@ fn install_impl(
     }
 
     let backup_path = plist_path.with_extension("plist.bak");
-    std::fs::copy(plist_path, &backup_path)?;
+    write_atomic(&backup_path, &existing_contents)?;
 
     write_atomic(plist_path, &candidate)?;
 
@@ -338,8 +338,9 @@ fn install_impl(
 pub fn uninstall(plist_path: &Path) -> io::Result<()> {
     let _ = run_launchctl(&["unload", "-w", &plist_path.display().to_string()]);
     if plist_path.exists() {
+        let contents = std::fs::read_to_string(plist_path)?;
         let backup_path = plist_path.with_extension("plist.bak");
-        std::fs::copy(plist_path, &backup_path)?;
+        write_atomic(&backup_path, &contents)?;
         std::fs::remove_file(plist_path)?;
     }
     Ok(())
@@ -717,5 +718,42 @@ mod tests {
             <key>ProgramArguments</key><array><string>/real/path</string></array>\
             </dict></plist>";
         assert_eq!(extract_program_path(xml), None);
+    }
+
+    #[test]
+    fn uninstall_backup_write_failure_leaves_original_plist_intact() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_temp_dir("backup-atomic-failure");
+        let plist_path = dir.join(format!("{LABEL}.plist"));
+        let log_dir = dir.join("logs");
+        install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
+        let original = std::fs::read_to_string(&plist_path).unwrap();
+
+        // Make the directory read-only so the backup's temp-file write
+        // (which must create a new file) fails before any rename is
+        // attempted — proving the backup goes through the same atomic
+        // temp-file+rename mechanism as the main plist write rather than
+        // a plain, non-atomic `fs::copy`.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = uninstall(&plist_path);
+
+        // Restore write permission before any further filesystem access,
+        // including test cleanup.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            result.is_err(),
+            "uninstall must surface the backup write failure rather than swallow it"
+        );
+        assert!(
+            plist_path.exists(),
+            "original plist must survive a failed backup write"
+        );
+        assert_eq!(std::fs::read_to_string(&plist_path).unwrap(), original);
+        assert!(!plist_path.with_extension("plist.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
