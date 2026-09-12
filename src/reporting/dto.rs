@@ -203,6 +203,40 @@ pub struct CleanDryRunReport {
     pub items: Vec<CleanDryRunItem>,
 }
 
+/// One item of a `glomeris llm-plan` report (HORO-1008).
+///
+/// `Serialize` only, never `Deserialize` — alongside
+/// `crate::actions::llm::LlmPlan`/`LlmPlanItem`, no type in this module
+/// ever derives `Deserialize`. Those two remain the crate's only two
+/// `#[serde(deny_unknown_fields)]` `Deserialize` types; this DTO must never
+/// change that.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LlmPlanItemReport {
+    pub resource_id: String,
+    pub policy_label: &'static str,
+    pub requested_action_id: Option<&'static str>,
+    pub priority: Option<u32>,
+    /// Rendered from the typed `ActionPlan.explain` — `None` for a
+    /// `PROTECTED` item (never resolved) or a resolution/dry-run failure
+    /// (see `skip_reason` in that case).
+    pub explain: Option<String>,
+    pub skip_reason: Option<String>,
+}
+
+/// `glomeris llm-plan` report (HORO-1008): advisory ranking suggestion
+/// only — see `crate::cli::build_llm_plan_report`'s doc comment for why
+/// this command never executes anything.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct LlmPlanReport {
+    pub items: Vec<LlmPlanItemReport>,
+    pub dropped_unknown_resource: u32,
+    pub dropped_unknown_action: u32,
+    pub provider_error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

@@ -32,6 +32,8 @@
 //! struct, which fails the whole `Vec`, which fails the whole
 //! [`LlmPlan`] — see `unexpected_field_rejects_whole_plan` below.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 
 use crate::evidence::model::{ActionId, Completeness, Evidence, Regenerability, ResourceId};
@@ -215,6 +217,51 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         Ok(content.to_string())
     }
+}
+
+/// A [`LlmProvider`] backing `glomeris llm-plan --plan-file <path>`
+/// (HORO-1008): returns the fixture file's raw bytes as-is, exactly as if
+/// they were the model's raw response text. This lets the CLI's
+/// `--plan-file` path exercise the identical `extract_plan`/`LlmPlan`/
+/// [`plan_with_llm`] validation pipeline the live provider uses,
+/// deterministically and with no network call.
+pub struct FilePlanProvider {
+    pub path: PathBuf,
+}
+
+impl LlmProvider for FilePlanProvider {
+    fn complete(&self, _system_prompt: &str, _user_prompt: &str) -> Result<String, LlmError> {
+        std::fs::read_to_string(&self.path).map_err(|e| {
+            LlmError::InvalidResponse(format!(
+                "failed to read plan file {}: {e}",
+                self.path.display()
+            ))
+        })
+    }
+}
+
+/// Reads BYOK LLM credentials for live mode from the environment:
+/// `GLOMERIS_LLM_API_KEY`, `GLOMERIS_LLM_BASE_URL`, `GLOMERIS_LLM_MODEL`.
+/// All three are required, with no default `base_url` — a missing or empty
+/// value for any of them returns [`LlmError::NotConfigured`] rather than
+/// partially constructing a provider. `std::env::var` is called ONLY
+/// inside this function: the key value is held just long enough to build
+/// the returned [`OpenAiCompatibleProvider`] and is never logged, printed,
+/// or returned any other way.
+pub fn provider_from_env() -> Result<OpenAiCompatibleProvider, LlmError> {
+    let api_key = std::env::var("GLOMERIS_LLM_API_KEY").unwrap_or_default();
+    let base_url = std::env::var("GLOMERIS_LLM_BASE_URL").unwrap_or_default();
+    let model = std::env::var("GLOMERIS_LLM_MODEL").unwrap_or_default();
+
+    if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
+        return Err(LlmError::NotConfigured);
+    }
+
+    Ok(OpenAiCompatibleProvider {
+        base_url,
+        api_key,
+        model,
+    })
 }
 
 /// Finds the first plausible JSON object span in `text` and attempts to
@@ -643,6 +690,76 @@ mod tests {
         assert_eq!(*resource, ev.resource);
         assert_eq!(action_id.0, "cargo.clean.target_dir");
         assert_eq!(*priority, Some(5));
+    }
+
+    #[test]
+    fn file_plan_provider_round_trips_unfenced_fixture_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-file-plan-provider-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plan.json");
+        let text =
+            r#"{"items": [{"resource_id": "a", "action_id": "b", "priority": 1, "reason": null}]}"#;
+        std::fs::write(&path, text).unwrap();
+
+        let provider = FilePlanProvider { path: path.clone() };
+        let raw = provider.complete("system", "user").unwrap();
+        assert_eq!(raw, text);
+        let plan = extract_plan(&raw).unwrap();
+        assert_eq!(plan.items.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_plan_provider_round_trips_fenced_fixture_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-file-plan-provider-fenced-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plan.md");
+        let text = "Here is the plan:\n```json\n{\"items\": []}\n```\n";
+        std::fs::write(&path, text).unwrap();
+
+        let provider = FilePlanProvider { path: path.clone() };
+        let raw = provider.complete("system", "user").unwrap();
+        assert_eq!(raw, text);
+        let plan = extract_plan(&raw).unwrap();
+        assert_eq!(plan.items.len(), 0);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_plan_provider_reports_unreadable_path() {
+        let provider = FilePlanProvider {
+            path: PathBuf::from("/definitely/does/not/exist/glomeris-fixture.json"),
+        };
+        let result = provider.complete("system", "user");
+        assert!(matches!(result, Err(LlmError::InvalidResponse(_))));
+    }
+
+    #[test]
+    fn provider_from_env_is_not_configured_when_env_vars_are_unset() {
+        // Deliberately does not set/read any of the three GLOMERIS_LLM_*
+        // vars — only asserts the NotConfigured outcome for whatever state
+        // the test process's environment is actually in for these
+        // crate-specific names, never a secret's value.
+        assert!(std::env::var("GLOMERIS_LLM_API_KEY").is_err());
+        assert!(std::env::var("GLOMERIS_LLM_BASE_URL").is_err());
+        assert!(std::env::var("GLOMERIS_LLM_MODEL").is_err());
+        assert!(matches!(provider_from_env(), Err(LlmError::NotConfigured)));
     }
 
     #[test]

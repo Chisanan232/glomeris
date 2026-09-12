@@ -131,11 +131,36 @@ set of categories (credential material, git internals, infra state, system
 paths, unsafe mounts) and is explicitly documented in its own module comment
 as a starting point to extend, not a completeness guarantee.
 
-## The BYOK LLM planner is a library capability only, and PROTECTED is unreachable through the shipped CLI
+## Resolved (HORO-1008): the BYOK LLM planner now has a CLI surface, and PROTECTED refusal is proven end-to-end
 
-`actions::llm` has no CLI wiring, no defined environment variable name, and
-is not called from `glomeris free` or any other subcommand today. See
-[BYOK LLM Planner](byok.md).
+`glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json]`
+is an advisory, non-executing subcommand wired on top of `actions::llm` —
+see [BYOK LLM Planner](byok.md) and [CLI Reference](cli_reference.md). It
+never constructs a `policy::Approval` and never calls
+`policy::approval::authorize` or `executor::execute`.
+
+`--plan-file <path>` feeds a fixture response through the exact same
+`extract_plan`/`LlmPlan`/`plan_with_llm` pipeline the live provider uses,
+with no network call. `tests/golden_llm_plan_protected_refusal.rs` uses
+this to prove, through the real CLI-facing `crate::cli::build_llm_plan_report`
+function, that a plan request to delete SSH key material is refused —
+closing the gap the previous version of this section described:
+HORO-943's golden acceptance scenario step 6 ("prove a protected resource
+cannot be deleted even if an LLM plan requests it") was previously verified
+at the code level only (`llm_plan_item_never_bypasses_policy`), never
+through an actual CLI input surface.
+
+Remaining, deliberate scope cuts for this subcommand specifically:
+
+- Advisory-only, by design — no `--execute`/`--yes` flag exists or is
+  planned for this subcommand.
+- No retry/backoff, and no streaming — mirrors `actions::llm`'s own
+  existing limitations (see [BYOK LLM Planner](byok.md)).
+- Only one provider shape (`OpenAiCompatibleProvider`, any
+  OpenAI-compatible `/chat/completions` endpoint) — no Anthropic-native or
+  Azure-OpenAI-specific auth.
+- Not wired into `glomeris free`'s recovery loop — that remains a future
+  ticket's optional enhancement, per `actions::llm`'s own module docs.
 
 Separately, and independently of the LLM planner: no live detector
 (Xcode/Homebrew/Cargo/Node/Docker build cache) ever emits a resource whose
@@ -144,14 +169,11 @@ path matches any `policy::protected` pattern, or the unconditionally
 enforced at the code level (`policy::approval::authorize` unconditionally
 refuses it; `Approval` is unconstructible outside that module), but it is
 not reachable or observable by a real evaluator driving only the shipped
-product. Two independent fresh-context golden-scenario evaluations
-confirmed this. HORO-943's golden acceptance scenario step 6 ("prove a
-protected resource cannot be deleted even if an LLM plan requests it") is
-therefore verified at the code level only, not end-to-end through the CLI.
-This is a deliberate, documented scope decision for MVP 1.0 (BYOK is listed
-as optional in the epic), not a hidden gap — `HORO-1008` tracks adding a
-real LLM-plan CLI/input surface and proving this scenario end-to-end for a
-future version.
+product's *detectors*. The new golden test above reaches `Protected`
+through a hand-built `Evidence` fixture (mirroring
+`policy::engine`'s own test fixtures), the same way `llm_plan_item_never_bypasses_policy`
+always did — not through a live detector finding real SSH key material on
+disk.
 
 ## Resolved (HORO-957): prebuilt release artifacts
 

@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
+use crate::actions::llm::{plan_with_llm, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
@@ -19,7 +20,7 @@ use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision};
 use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DetectCandidateReport, DetectReport, ExplainReport,
-    StatusReport,
+    LlmPlanItemReport, LlmPlanReport, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -263,6 +264,133 @@ pub fn build_clean_dry_run_report(
     })
 }
 
+/// Extracts a single valued, optional `--plan-file <path>` occurrence from
+/// `args` (HORO-1008): returns the path (if present) plus every other
+/// token from `args`, in original order, with the `--plan-file`/value pair
+/// removed — same shape as [`extract_project_roots`], but for a flag that
+/// may appear at most once. A trailing `--plan-file` with no following
+/// value is reported as an error rather than silently dropped, mirroring
+/// `extract_project_roots`'s own handling of a missing value.
+pub fn extract_plan_file(args: &[String]) -> Result<(Option<PathBuf>, Vec<String>), String> {
+    let mut plan_file = None;
+    let mut remaining = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--plan-file" {
+            match args.get(i + 1) {
+                Some(value) => {
+                    plan_file = Some(PathBuf::from(value));
+                    i += 2;
+                }
+                None => return Err("--plan-file requires a value".to_string()),
+            }
+        } else {
+            remaining.push(args[i].clone());
+            i += 1;
+        }
+    }
+    Ok((plan_file, remaining))
+}
+
+/// Extracts the flag *name* from a `glomeris llm-plan` argument token,
+/// stripping off an `=`-joined value if present — `"--api-key=sk-..."` and
+/// `"--api-key"` both yield `"--api-key"`. Used to reject a credential
+/// flag by name only, so the token's value is never echoed into an error
+/// message regardless of which of the two forms the caller used.
+pub fn credential_flag_name(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(name, _)| name)
+}
+
+/// Builds an [`LlmPlanReport`] from already discovered-and-classified
+/// `candidates`, calling `plan_with_llm` and then resolving each validated
+/// item exactly the way [`build_clean_dry_run_item`] resolves a rule-only
+/// candidate.
+///
+/// **ADVISORY ONLY — never executes anything and never authorizes
+/// anything.** This function never constructs a
+/// [`crate::policy::Approval`] and never calls
+/// [`crate::policy::approval::authorize`] or
+/// [`crate::executor::execute`] — see `crate::actions::llm`'s module docs
+/// for why an LLM-proposed plan must never reach execution directly.
+///
+/// SAFETY-CRITICAL: a [`PolicyClass::Protected`] decision short-circuits
+/// here, BEFORE `actions.get`/`dry_run` are ever called for that item —
+/// this is what makes it structurally impossible for a hallucinating (or
+/// adversarial) LLM response to cause a protected resource's action to be
+/// resolved, let alone rendered. See `tests/golden_llm_plan_protected_refusal.rs`
+/// for an end-to-end proof.
+pub fn build_llm_plan_report(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    provider: &dyn LlmProvider,
+) -> LlmPlanReport {
+    let evidences: Vec<Evidence> = candidates.iter().map(|(ev, _)| ev.clone()).collect();
+    let result = plan_with_llm(provider, &evidences, actions);
+
+    let mut items = Vec::with_capacity(result.validated_items.len());
+    for (resource, action_id, priority) in result.validated_items {
+        let Some((ev, decision)) = candidates.iter().find(|(ev, _)| ev.resource == resource) else {
+            // Unreachable in practice: `resource` came from `evidences`,
+            // which is itself derived from `candidates` — but never panic
+            // on a defensive fallback, matching this module's style.
+            continue;
+        };
+
+        let resource_id = ev.resource.to_string();
+        let policy_label = crate::reporting::label_for(decision).as_str();
+
+        if decision.class == PolicyClass::Protected {
+            items.push(LlmPlanItemReport {
+                resource_id,
+                policy_label,
+                requested_action_id: None,
+                priority,
+                explain: None,
+                skip_reason: Some(
+                    "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
+                ),
+            });
+            continue;
+        }
+
+        items.push(match actions.get(action_id.0) {
+            Some(action) => match dry_run(action, ev) {
+                Ok(plan) => LlmPlanItemReport {
+                    resource_id,
+                    policy_label,
+                    requested_action_id: Some(action.id().0),
+                    priority,
+                    explain: Some(plan.explain),
+                    skip_reason: None,
+                },
+                Err(e) => LlmPlanItemReport {
+                    resource_id,
+                    policy_label,
+                    requested_action_id: Some(action.id().0),
+                    priority,
+                    explain: None,
+                    skip_reason: Some(format!("{e:?}")),
+                },
+            },
+            None => LlmPlanItemReport {
+                resource_id,
+                policy_label,
+                requested_action_id: None,
+                priority,
+                explain: None,
+                skip_reason: Some("no registered action for this action id".to_string()),
+            },
+        });
+    }
+
+    LlmPlanReport {
+        items,
+        dropped_unknown_resource: result.dropped_unknown_resource,
+        dropped_unknown_action: result.dropped_unknown_action,
+        provider_error: result.provider_error.map(|e| format!("{e:?}")),
+    }
+}
+
 /// Prints a [`StatusReport`] as concise, human-readable text.
 pub fn print_status_report(report: &StatusReport) {
     println!("disk pressure state: {}", report.pressure_state);
@@ -354,6 +482,43 @@ pub fn print_clean_dry_run_report(report: &CleanDryRunReport) {
     }
     for item in &report.items {
         println!("[{}] {}", item.policy_label, item.resource_id);
+        match (&item.explain, &item.skip_reason) {
+            (Some(explain), _) => println!("  {explain}"),
+            (None, Some(reason)) => println!("  skipped: {reason}"),
+            (None, None) => println!("  (no plan rendered)"),
+        }
+    }
+}
+
+/// Prints an [`LlmPlanReport`] as concise, human-readable text. Always
+/// opens with an explicit advisory banner — this command never executes
+/// anything, and its output must never be mistaken for `clean --dry-run`'s
+/// or `free --target`'s output.
+pub fn print_llm_plan_report(report: &LlmPlanReport) {
+    println!("LLM SUGGESTION — advisory only, nothing is executed by this command");
+    if let Some(err) = &report.provider_error {
+        println!("provider error: {err}");
+    }
+    if report.dropped_unknown_resource > 0 || report.dropped_unknown_action > 0 {
+        println!(
+            "dropped: {} unknown resource(s), {} unknown action(s)",
+            report.dropped_unknown_resource, report.dropped_unknown_action
+        );
+    }
+    if report.items.is_empty() {
+        println!("no suggestions");
+        return;
+    }
+    for item in &report.items {
+        let action = item.requested_action_id.unwrap_or("(none)");
+        let priority = item
+            .priority
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "[{}] {} action={} priority={}",
+            item.policy_label, item.resource_id, action, priority
+        );
         match (&item.explain, &item.skip_reason) {
             (Some(explain), _) => println!("  {explain}"),
             (None, Some(reason)) => println!("  skipped: {reason}"),
@@ -741,5 +906,226 @@ mod tests {
         let ev = evidence("/tmp/x/target", ResourceKind::CargoTargetDir, None);
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
         print_explain_report(&build_explain_report(&ev, &decision));
+    }
+
+    #[test]
+    fn extract_plan_file_with_no_flag_returns_all_args_unchanged() {
+        let args = vec!["--json".to_string()];
+        let (plan_file, remaining) = extract_plan_file(&args).unwrap();
+        assert!(plan_file.is_none());
+        assert_eq!(remaining, args);
+    }
+
+    #[test]
+    fn extract_plan_file_collects_the_value() {
+        let args = vec!["--plan-file".to_string(), "/tmp/plan.json".to_string()];
+        let (plan_file, remaining) = extract_plan_file(&args).unwrap();
+        assert_eq!(plan_file, Some(PathBuf::from("/tmp/plan.json")));
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn extract_plan_file_leaves_other_args_in_order() {
+        let args = vec![
+            "--json".to_string(),
+            "--plan-file".to_string(),
+            "/tmp/plan.json".to_string(),
+            "--project-root".to_string(),
+            "/tmp/proj".to_string(),
+        ];
+        let (plan_file, remaining) = extract_plan_file(&args).unwrap();
+        assert_eq!(plan_file, Some(PathBuf::from("/tmp/plan.json")));
+        assert_eq!(
+            remaining,
+            vec![
+                "--json".to_string(),
+                "--project-root".to_string(),
+                "/tmp/proj".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_plan_file_errors_on_missing_trailing_value() {
+        let args = vec!["--plan-file".to_string()];
+        assert!(extract_plan_file(&args).is_err());
+    }
+
+    #[test]
+    fn credential_flag_name_matches_space_separated_form() {
+        assert_eq!(credential_flag_name("--api-key"), "--api-key");
+    }
+
+    #[test]
+    fn credential_flag_name_strips_an_equals_joined_value() {
+        // HORO-1008 adversarial review finding: `--api-key=<secret>` must
+        // still be recognized as the `--api-key` flag, not fall through to
+        // an error path that echoes the whole token (and the secret with
+        // it) verbatim.
+        assert_eq!(
+            credential_flag_name("--api-key=sk-should-never-appear-anywhere"),
+            "--api-key"
+        );
+        assert_eq!(credential_flag_name("--token=sk-abc"), "--token");
+        assert_eq!(credential_flag_name("--key=sk-abc"), "--key");
+    }
+
+    #[test]
+    fn credential_flag_name_leaves_an_unrelated_equals_joined_token_alone() {
+        assert_eq!(
+            credential_flag_name("--project-root=/tmp/x"),
+            "--project-root"
+        );
+    }
+
+    struct FakeLlmPlanProvider {
+        response: Result<String, crate::actions::llm::LlmError>,
+    }
+
+    impl LlmProvider for FakeLlmPlanProvider {
+        fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+        ) -> Result<String, crate::actions::llm::LlmError> {
+            self.response.clone()
+        }
+    }
+
+    /// SAFETY-CRITICAL regression test: a `PROTECTED` candidate that the
+    /// LLM "approves" for a real, registered action must short-circuit
+    /// before that action is ever resolved — `requested_action_id` and
+    /// `explain` must stay `None`, and `skip_reason` must be set,
+    /// regardless of the fact that `cargo.clean.target_dir` is a real
+    /// action that WOULD otherwise resolve for `CargoTargetDir`. See
+    /// `tests/golden_llm_plan_protected_refusal.rs` for the stronger,
+    /// type-level end-to-end version of this proof.
+    #[test]
+    fn build_llm_plan_report_short_circuits_protected_before_action_resolution() {
+        let mut ev = evidence(
+            "/Users/x/.ssh/id_ed25519",
+            ResourceKind::CargoTargetDir,
+            Some(1024),
+        );
+        ev.resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/Users/x/.ssh/id_ed25519")),
+        );
+        let cfg = PolicyConfig::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let decision = classify(&ev, &cfg, now);
+        assert_eq!(decision.class, PolicyClass::Protected);
+
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": "looks stale"}}]}}"#
+        );
+        let provider = FakeLlmPlanProvider { response: Ok(text) };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report = build_llm_plan_report(&candidates, &actions, &provider);
+
+        assert!(report.provider_error.is_none());
+        assert_eq!(report.items.len(), 1);
+        let item = &report.items[0];
+        assert_eq!(item.policy_label, "PROTECTED");
+        assert!(item.requested_action_id.is_none());
+        assert!(item.explain.is_none());
+        assert!(item.skip_reason.is_some());
+    }
+
+    #[test]
+    fn build_llm_plan_report_renders_explain_for_auto_safe_item() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-llm-plan-report-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target_dir = dir.join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+
+        // `evidence()`'s defaults leave open_by_process/process_cwd_match/
+        // git_state/tool_liveness `Unavailable` (matching its other
+        // callers' needs), which alone would classify `Ask` via
+        // `EvidenceIncomplete` — override them to `Observed` so this
+        // fixture actually reaches `AutoSafe`, which is what this test is
+        // about.
+        let mut ev = evidence(
+            target_dir.to_str().unwrap(),
+            ResourceKind::CargoTargetDir,
+            Some(4096),
+        );
+        ev.open_by_process = ProbeOutcome::Observed(Vec::new());
+        ev.process_cwd_match = ProbeOutcome::Observed(Vec::new());
+        ev.git_state = ProbeOutcome::Observed(None);
+        ev.tool_liveness = ProbeOutcome::Observed(false);
+
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "cargo.clean.target_dir", "priority": 3, "reason": "stale"}}]}}"#
+        );
+        let provider = FakeLlmPlanProvider { response: Ok(text) };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report = build_llm_plan_report(&candidates, &actions, &provider);
+
+        assert!(report.provider_error.is_none());
+        assert_eq!(report.items.len(), 1);
+        let item = &report.items[0];
+        assert_eq!(item.policy_label, "AUTO_SAFE");
+        assert_eq!(item.requested_action_id, Some("cargo.clean.target_dir"));
+        assert_eq!(item.priority, Some(3));
+        assert!(item.explain.is_some());
+        assert!(item.skip_reason.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn build_llm_plan_report_propagates_dropped_counters() {
+        let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1));
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let text = r#"{"items": [
+            {"resource_id": "cargo_target_dir:/nonexistent", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": null},
+            {"resource_id": "cargo_target_dir:/tmp/proj/target", "action_id": "docker.nuke.everything", "priority": 1, "reason": null}
+        ]}"#;
+        let provider = FakeLlmPlanProvider {
+            response: Ok(text.to_string()),
+        };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report = build_llm_plan_report(&candidates, &actions, &provider);
+
+        assert!(report.items.is_empty());
+        assert_eq!(report.dropped_unknown_resource, 1);
+        assert_eq!(report.dropped_unknown_action, 1);
+    }
+
+    #[test]
+    fn build_llm_plan_report_propagates_provider_error() {
+        let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1));
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let provider = FakeLlmPlanProvider {
+            response: Err(crate::actions::llm::LlmError::NetworkError(
+                "connection refused".to_string(),
+            )),
+        };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report = build_llm_plan_report(&candidates, &actions, &provider);
+
+        assert!(report.items.is_empty());
+        assert!(report.provider_error.is_some());
     }
 }

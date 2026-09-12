@@ -8,15 +8,19 @@ anywhere in the codebase is the optional BYOK LLM planner's HTTP call to
 whatever endpoint you configure (see [BYOK LLM Planner](byok.md)) — nothing
 else in the crate makes a network request.
 
-## No raw filesystem inventory sent to any LLM by default
+## No raw filesystem inventory sent to any LLM, except resource paths when you explicitly invoke `llm-plan` with live config
 
-The LLM planner is not wired into the binary at all today (see
-[BYOK LLM Planner](byok.md)), so no filesystem data is sent to any LLM in
-current builds. Even the library-level design constrains this for the
-future: `LlmResourceView` is an explicit, bounded, hand-maintained
-projection of one `Evidence` record — never a serialization of `Evidence`
-itself — so a future field added to `Evidence` does not automatically start
-flowing to a model; a human has to explicitly add it to the projection.
+As of HORO-1008, `glomeris llm-plan` is wired into the binary (see
+[BYOK LLM Planner](byok.md)). No filesystem data is sent anywhere unless you
+explicitly run that subcommand without `--plan-file` *and* have all three
+`GLOMERIS_LLM_*` environment variables set — every other command in this
+book never makes a network request. Even then, what is sent is bounded and
+explicit: `LlmResourceView` is a hand-maintained projection of one
+`Evidence` record containing a resource's path/id, kind, size estimate,
+age, regenerability, and completeness — never raw file contents, never a
+directory listing, never anything beyond that fixed set of fields. Adding a
+field to `Evidence` later has no effect on what a model sees unless a human
+explicitly adds it to `LlmResourceView` too.
 
 ## BYOK secret handling
 
@@ -24,8 +28,13 @@ flowing to a model; a human has to explicitly add it to the projection.
   accidental `{:?}`-log of the provider value cannot leak the API key.
 - Verified by test: neither `LlmError`'s `Debug` output nor a real failed
   `complete()` call's error output contains the key.
-- There is currently no CLI/env-var wiring for this key at all — see BYOK
-  page for what that means in practice today.
+- `glomeris llm-plan` reads the key only from `GLOMERIS_LLM_API_KEY` via
+  `actions::llm::provider_from_env` — `std::env::var` for this value is
+  called nowhere else in the crate. The key is never accepted as a CLI
+  flag: `--api-key`/`--key`/`--token` are explicitly rejected with an error
+  pointing at the environment variable instead, so a key never appears in
+  `ps` output or shell history. See the [BYOK page](byok.md) for the full
+  configuration contract.
 
 ## Subprocess invocation
 

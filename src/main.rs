@@ -11,6 +11,7 @@ fn main() {
                  detect [--project-root <path>]... [--json]|\
                  explain <resource_id_or_path> [--project-root <path>]... [--json]|\
                  clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
+                 llm-plan [--project-root <path>]... [--plan-file <path>] [--json]|\
                  emergency|\
                  free --target <N%|NB> [--project-root <path>]...>"
             );
@@ -21,6 +22,7 @@ fn main() {
         Some("detect") => run_detect_command(&args[1..]),
         Some("explain") => run_explain_command(&args[1..]),
         Some("clean") => run_clean_command(&args[1..]),
+        Some("llm-plan") => run_llm_plan_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -322,6 +324,102 @@ fn run_clean_command(args: &[String]) {
             eprintln!("glomeris clean: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// `glomeris llm-plan [--project-root <path>]... [--plan-file <path>]
+/// [--json]` — ADVISORY, NON-EXECUTING BYOK LLM suggestion surface
+/// (HORO-1008). Never constructs a [`glomeris::policy::Approval`] and
+/// never calls [`glomeris::policy::approval::authorize`] or
+/// [`glomeris::executor::execute`] — see
+/// [`glomeris::cli::build_llm_plan_report`]'s doc comment.
+///
+/// Without `--plan-file`, credentials are read only from
+/// `GLOMERIS_LLM_API_KEY`/`GLOMERIS_LLM_BASE_URL`/`GLOMERIS_LLM_MODEL` via
+/// [`glomeris::actions::llm::provider_from_env`] — never accepted as a CLI
+/// argument, to keep a key out of `ps`/shell history.
+fn run_llm_plan_command(args: &[String]) {
+    use glomeris::actions::llm::{provider_from_env, FilePlanProvider};
+    use glomeris::actions::ActionRegistry;
+
+    let (project_roots, after_roots) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris llm-plan: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+    let (plan_file, remaining) = match glomeris::cli::extract_plan_file(&after_roots) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris llm-plan: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+
+    let mut json = false;
+    let mut i = 0;
+    while i < remaining.len() {
+        match remaining[i].as_str() {
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            other => {
+                // Match on the flag name only — never the whole token — so a
+                // `--api-key=<secret>` invocation can't echo the secret to
+                // stderr the way printing `other`/`remaining[i]` verbatim
+                // would. `credential_flag_name` isolates the flag name for
+                // both the space-separated (`--api-key sk-...`) and
+                // `=`-joined (`--api-key=sk-...`) forms without ever
+                // touching the value.
+                let flag_name = glomeris::cli::credential_flag_name(other);
+                if matches!(flag_name, "--api-key" | "--key" | "--token") {
+                    eprintln!(
+                        "glomeris llm-plan: unrecognized argument '{flag_name}' — read the key \
+                         from $GLOMERIS_LLM_API_KEY; passing a key in argv exposes it to ps and \
+                         shell history"
+                    );
+                    std::process::exit(2);
+                }
+                eprintln!("glomeris llm-plan: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let candidates = discover_and_classify_now(project_roots);
+    let actions = ActionRegistry::builtin();
+
+    let report = match plan_file {
+        Some(path) => {
+            let provider = FilePlanProvider { path };
+            glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider)
+        }
+        None => match provider_from_env() {
+            Ok(provider) => glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider),
+            Err(_) => {
+                eprintln!(
+                    "glomeris llm-plan: missing LLM configuration — set GLOMERIS_LLM_API_KEY, \
+                     GLOMERIS_LLM_BASE_URL, and GLOMERIS_LLM_MODEL, or pass \
+                     --plan-file <path> instead"
+                );
+                std::process::exit(2);
+            }
+        },
+    };
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_llm_plan_report(&report);
+    }
+
+    if report.provider_error.is_some() {
+        std::process::exit(1);
     }
 }
 
