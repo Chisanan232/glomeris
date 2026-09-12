@@ -261,6 +261,26 @@ fn install_impl(
     force: bool,
     log_dir: &Path,
 ) -> io::Result<InstallOutcome> {
+    install_impl_with_hook(plist_path, program_path, force, log_dir, None)
+}
+
+/// The real body of [`install_impl`], with one extra testing-only seam:
+/// `before_final_write`, a callback invoked once, right after the initial
+/// read/fingerprint of an existing plist and right before the final
+/// TOCTOU re-check that decides [`InstallOutcome::AbortedConcurrentModification`].
+/// Production and [`install_impl`] itself always pass `None`; only tests
+/// pass `Some` (e.g. to mutate the file out from under this function,
+/// deterministically driving the concurrent-modification-abort outcome
+/// without any real threads). This is the smallest addition that makes
+/// that outcome testable end-to-end through `install_impl` — everything
+/// else about the algorithm is unchanged.
+fn install_impl_with_hook(
+    plist_path: &Path,
+    program_path: &Path,
+    force: bool,
+    log_dir: &Path,
+    before_final_write: Option<Box<dyn FnOnce()>>,
+) -> io::Result<InstallOutcome> {
     std::fs::create_dir_all(log_dir)?;
 
     if !plist_path.exists() {
@@ -306,6 +326,13 @@ fn install_impl(
 
     if !matches_own_shape && !force {
         return Ok(InstallOutcome::RefusedNeedsForce);
+    }
+
+    // Testing-only seam: let a test simulate a concurrent modification
+    // landing between the initial read above and the TOCTOU re-check
+    // below. Always `None` outside tests, so this is a no-op in production.
+    if let Some(hook) = before_final_write {
+        hook();
     }
 
     // TOCTOU guard: re-check right before mutating anything (including
@@ -753,6 +780,56 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(&plist_path).unwrap(), original);
         assert!(!plist_path.with_extension("plist.bak").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_impl_hook_triggers_aborted_concurrent_modification() {
+        let dir = unique_temp_dir("concurrent-abort");
+        let plist_path = dir.join(format!("{LABEL}.plist"));
+        let log_dir = dir.join("logs");
+
+        // Seed an existing plist with a hand-edited StartInterval so this
+        // call takes the "would repair" branch and actually reaches the
+        // TOCTOU re-check below.
+        install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
+        let hand_edited = std::fs::read_to_string(&plist_path).unwrap().replace(
+            &format!("<integer>{DEFAULT_START_INTERVAL_SECS}</integer>"),
+            "<integer>120</integer>",
+        );
+        std::fs::write(&plist_path, &hand_edited).unwrap();
+
+        let plist_path_for_hook = plist_path.clone();
+        let hook: Box<dyn FnOnce()> = Box::new(move || {
+            // Simulate a concurrent writer landing between install_impl's
+            // initial read/fingerprint and its final TOCTOU re-check.
+            std::fs::write(
+                &plist_path_for_hook,
+                "concurrently modified by someone else",
+            )
+            .unwrap();
+        });
+
+        let outcome = install_impl_with_hook(
+            &plist_path,
+            Path::new("/bin/echo"),
+            false,
+            &log_dir,
+            Some(hook),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, InstallOutcome::AbortedConcurrentModification);
+        let after = std::fs::read_to_string(&plist_path).unwrap();
+        assert_eq!(
+            after, "concurrently modified by someone else",
+            "the concurrent writer's content must be left untouched"
+        );
+        assert!(
+            !plist_path.with_extension("plist.bak").exists(),
+            "an aborted install must take no backup"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
