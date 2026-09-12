@@ -382,6 +382,34 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                         );
                     }
                 };
+                // HORO-1005: a `scoped_path` is only meaningful if it is
+                // actually one of the values this same step is about to
+                // pass to `tool` — otherwise the identity guard below would
+                // faithfully verify a path that has nothing to do with what
+                // the command will really mutate. This is a structural
+                // check enforced by the executor itself, not trust in
+                // whatever a given `Action::plan()` implementation chose to
+                // put in `scoped_path`. Match the exact string
+                // representation a real `Action::plan()` uses when building
+                // `args` (see `CargoCleanTargetDir::plan`, which pushes
+                // `target_dir.to_string_lossy().into_owned()`) rather than
+                // some other `Path`/`PathBuf` comparison that could differ
+                // in representation despite denoting the same path.
+                let scoped_str = scoped.to_string_lossy();
+                if !args.iter().any(|a| a.as_str() == scoped_str) {
+                    return failed_report(
+                        plan.action,
+                        plan.resource,
+                        format!(
+                            "refusing to run {}: scoped_path {} does not appear in this \
+                             step's own args — the executor cannot confirm what this command \
+                             will actually mutate",
+                            tool.program(),
+                            scoped.display()
+                        ),
+                        plan.expected_reclaimed_bytes,
+                    );
+                }
                 let snapshot = match &identity_snapshot {
                     Some(s) => s,
                     None => {
@@ -626,7 +654,7 @@ fn total_size_best_effort(path: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actions::{CargoCleanTargetDir, NodeCleanNodeModules};
+    use crate::actions::{CargoCleanTargetDir, NodeCleanNodeModules, ToolBinary};
     use crate::detectors::dev_ino_fingerprint;
     use crate::evidence::correlate::CorrelationResult;
     use crate::evidence::model::{
@@ -1479,6 +1507,118 @@ mod tests {
              execute-time (real ~4096) must never abort revalidation"
         );
         assert!(!node_modules.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A deliberately-broken `Action` whose `plan()` supplies a
+    /// `scoped_path` that does NOT appear anywhere in the step's own
+    /// `args` — the exact structural gap HORO-1005 closes. Modeled on
+    /// `CargoCleanTargetDir`, which is the one real action carrying a
+    /// `Some(_)` `scoped_path`.
+    struct DecoyScopedPathAction {
+        decoy_path: PathBuf,
+    }
+
+    impl Action for DecoyScopedPathAction {
+        fn id(&self) -> ActionId {
+            ActionId("test.decoy.scoped_path_mismatch")
+        }
+
+        fn applies_to(&self) -> &'static [ResourceKind] {
+            &[ResourceKind::CargoTargetDir]
+        }
+
+        fn required_evidence(&self) -> &'static [crate::evidence::model::EvidenceField] {
+            &[]
+        }
+
+        fn recoverability(&self) -> Recoverability {
+            Recoverability::RegenerableByRebuild
+        }
+
+        fn plan(&self, ev: &Evidence) -> Result<ActionPlan, ActionError> {
+            Ok(ActionPlan {
+                action: self.id(),
+                resource: ev.resource.clone(),
+                steps: vec![ActionStep::RunTool {
+                    tool: ToolBinary::Cargo,
+                    // Deliberately a COMPLETELY DIFFERENT path than
+                    // `scoped_path` below — this is the mismatch the new
+                    // guard must catch. The path does not exist, so even
+                    // if the guard failed to catch this and `cargo` were
+                    // spawned, this would only fail loudly (no manifest
+                    // found), never touch anything real.
+                    args: vec![
+                        "clean".to_string(),
+                        "--target-dir".to_string(),
+                        "/some/other/real/path".to_string(),
+                    ],
+                    scoped_path: Some(self.decoy_path.clone()),
+                }],
+                expected_reclaimed_bytes: ev.reclaimable_bytes.clone(),
+                explain: "test-only decoy plan".to_string(),
+            })
+        }
+    }
+
+    /// HORO-1005: proves the new structural guard fires when `scoped_path`
+    /// does not appear in the step's own `args` — a fake `Action` supplies
+    /// a `scoped_path` pointing at a real, controlled tempdir while `args`
+    /// names a totally different, nonexistent path. `execute()` must
+    /// refuse before ever spawning `cargo`, so neither path is ever
+    /// touched or created.
+    #[test]
+    fn execute_refuses_run_tool_step_when_scoped_path_is_absent_from_args() {
+        let root = make_temp_dir("execute-scoped-path-args-mismatch");
+        let decoy_path = root.join("target");
+        fs::create_dir_all(&decoy_path).unwrap();
+        fs::write(decoy_path.join("marker.txt"), b"do not touch").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(decoy_path.clone()),
+        );
+        let now = SystemTime::now();
+        let action = DecoyScopedPathAction {
+            decoy_path: decoy_path.clone(),
+        };
+
+        // Build the decision from the same evidence-rebuild path `execute`
+        // itself uses, so plan-time and execute-time agree (same pattern
+        // as `execute_refuses_run_tool_step_with_no_scoped_path` above).
+        let evidence = build_fresh_evidence(&resource, &action, &FakeCollector, now);
+        let decision = classify(&evidence, &PolicyConfig::default(), now);
+        assert_eq!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "test fixture must reach AutoSafe for this regression to exercise the real path"
+        );
+        let consent = UserConsent::new(resource.clone(), evidence.fingerprint.clone(), now);
+        let approval = authorize(decision, evidence.fingerprint.clone(), Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        let report = execute(
+            &action,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        match &report.outcome {
+            ExecutionOutcome::Failed(message) => {
+                assert!(
+                    message.contains("does not appear in this step's own args"),
+                    "expected the scoped_path/args mismatch refusal, got: {message}"
+                );
+            }
+            other => panic!("expected Failed(_), got {other:?}"),
+        }
+        // Nothing spawned: the decoy dir survives untouched, and the
+        // bogus decoy path named in `args` was never created either.
+        assert!(decoy_path.join("marker.txt").exists());
+        assert!(!Path::new("/some/other/real/path").exists());
 
         fs::remove_dir_all(&root).ok();
     }
