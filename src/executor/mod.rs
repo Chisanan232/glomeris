@@ -18,7 +18,9 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use crate::actions::{Action, ActionError, ActionId, ActionPlan, ActionStep};
-use crate::detectors::{discovery_evidence, probe_mtime, shallow_logical_bytes, DetectorId};
+use crate::detectors::{
+    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, DetectorId,
+};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Completeness, Evidence, NativeCleanup, ResourceId, ResourceLocator};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
@@ -223,7 +225,7 @@ fn build_fresh_evidence(
     };
 
     let logical_bytes = match path {
-        Some(p) => shallow_logical_bytes(p),
+        Some(p) => estimate_logical_bytes(p, size_estimate_budget()).bytes,
         None => ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
     };
     let last_modified = match path {
@@ -240,8 +242,12 @@ fn build_fresh_evidence(
     // to plan time on every single real execution, tripping
     // `PolicyClassDowngraded`/`PolicyReasonsWidened`/`EvidenceDegraded`
     // and aborting every real cleanup unconditionally. `ResourceLocator::Tool`
-    // resources (Docker) have no equivalent shallow estimate and stay
+    // resources (Docker) have no equivalent path-based estimate and stay
     // `Unavailable` — Docker has no registered cleanup action anyway.
+    // HORO-1016: `logical_bytes` above is now the same bounded *recursive*
+    // estimate a detector uses at discovery time (same shared budget, see
+    // `crate::detectors::size_estimate_budget`), so `detect`'s reported
+    // size and `clean`'s revalidated size agree for an unchanged resource.
     let reclaimable_bytes = logical_bytes.clone();
 
     let mut evidence = discovery_evidence(

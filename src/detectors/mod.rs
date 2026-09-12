@@ -76,38 +76,6 @@ pub trait Detector: Send + Sync {
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus;
 }
 
-/// Shallow, non-recursive best-effort size probe: sums the `st_size` of
-/// `path`'s immediate directory entries only (no subtree recursion — that
-/// full-walk job belongs to [`crate::scanner`], not to detectors). For a
-/// directory whose children are themselves directories, this
-/// under-counts real content size; it is a deliberately bounded MVP
-/// approximation, not a reclaimable-bytes guarantee.
-///
-/// Superseded by [`estimate_logical_bytes`] (HORO-1016) — kept only until
-/// every call site has switched over, then deleted.
-pub(crate) fn shallow_logical_bytes(path: &Path) -> ProbeOutcome<u64> {
-    let read_dir = match fs::read_dir(path) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return ProbeOutcome::Unavailable(ProbeReason::PermissionDenied)
-        }
-        Err(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
-    };
-
-    let mut total: u64 = 0;
-    for entry in read_dir {
-        match entry {
-            Ok(e) => {
-                if let Ok(meta) = e.metadata() {
-                    total += meta.len();
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-    ProbeOutcome::Observed(total)
-}
-
 /// Maximum number of filesystem entries [`estimate_logical_bytes`] visits
 /// before treating its own budget as exhausted (HORO-1016).
 pub(crate) const SIZE_ESTIMATE_MAX_ENTRIES: u64 = 200_000;
