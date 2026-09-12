@@ -292,6 +292,15 @@ pub fn extract_plan_file(args: &[String]) -> Result<(Option<PathBuf>, Vec<String
     Ok((plan_file, remaining))
 }
 
+/// Extracts the flag *name* from a `glomeris llm-plan` argument token,
+/// stripping off an `=`-joined value if present — `"--api-key=sk-..."` and
+/// `"--api-key"` both yield `"--api-key"`. Used to reject a credential
+/// flag by name only, so the token's value is never echoed into an error
+/// message regardless of which of the two forms the caller used.
+pub fn credential_flag_name(arg: &str) -> &str {
+    arg.split_once('=').map_or(arg, |(name, _)| name)
+}
+
 /// Builds an [`LlmPlanReport`] from already discovered-and-classified
 /// `candidates`, calling `plan_with_llm` and then resolving each validated
 /// item exactly the way [`build_clean_dry_run_item`] resolves a rule-only
@@ -940,6 +949,33 @@ mod tests {
     fn extract_plan_file_errors_on_missing_trailing_value() {
         let args = vec!["--plan-file".to_string()];
         assert!(extract_plan_file(&args).is_err());
+    }
+
+    #[test]
+    fn credential_flag_name_matches_space_separated_form() {
+        assert_eq!(credential_flag_name("--api-key"), "--api-key");
+    }
+
+    #[test]
+    fn credential_flag_name_strips_an_equals_joined_value() {
+        // HORO-1008 adversarial review finding: `--api-key=<secret>` must
+        // still be recognized as the `--api-key` flag, not fall through to
+        // an error path that echoes the whole token (and the secret with
+        // it) verbatim.
+        assert_eq!(
+            credential_flag_name("--api-key=sk-should-never-appear-anywhere"),
+            "--api-key"
+        );
+        assert_eq!(credential_flag_name("--token=sk-abc"), "--token");
+        assert_eq!(credential_flag_name("--key=sk-abc"), "--key");
+    }
+
+    #[test]
+    fn credential_flag_name_leaves_an_unrelated_equals_joined_token_alone() {
+        assert_eq!(
+            credential_flag_name("--project-root=/tmp/x"),
+            "--project-root"
+        );
     }
 
     struct FakeLlmPlanProvider {

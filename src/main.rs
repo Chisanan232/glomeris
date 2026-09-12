@@ -367,16 +367,23 @@ fn run_llm_plan_command(args: &[String]) {
                 json = true;
                 i += 1;
             }
-            "--api-key" | "--key" | "--token" => {
-                eprintln!(
-                    "glomeris llm-plan: unrecognized argument '{}' — read the key from \
-                     $GLOMERIS_LLM_API_KEY; passing a key in argv exposes it to ps and shell \
-                     history",
-                    remaining[i]
-                );
-                std::process::exit(2);
-            }
             other => {
+                // Match on the flag name only — never the whole token — so a
+                // `--api-key=<secret>` invocation can't echo the secret to
+                // stderr the way printing `other`/`remaining[i]` verbatim
+                // would. `credential_flag_name` isolates the flag name for
+                // both the space-separated (`--api-key sk-...`) and
+                // `=`-joined (`--api-key=sk-...`) forms without ever
+                // touching the value.
+                let flag_name = glomeris::cli::credential_flag_name(other);
+                if matches!(flag_name, "--api-key" | "--key" | "--token") {
+                    eprintln!(
+                        "glomeris llm-plan: unrecognized argument '{flag_name}' — read the key \
+                         from $GLOMERIS_LLM_API_KEY; passing a key in argv exposes it to ps and \
+                         shell history"
+                    );
+                    std::process::exit(2);
+                }
                 eprintln!("glomeris llm-plan: unrecognized argument '{other}'");
                 print_usage();
                 std::process::exit(2);
