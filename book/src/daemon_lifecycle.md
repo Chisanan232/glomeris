@@ -48,12 +48,15 @@ Glomeris-owned artifact — no other tool reads or writes it. Even so,
   and exit status `2` rather than risk clobbering the concurrent change —
   rerun to retry. This is checked twice: once before anything is
   written, and again right before the live plist itself is overwritten
-  (after the backup copy has been taken) — closing the window where a
-  concurrent writer could land in between and be silently clobbered. If
-  the second check is the one that catches it, a `.plist.bak` backup of
-  the pre-race content may already be on disk; that stray backup is
-  harmless (never the concurrent writer's data) and is not treated as a
-  mutation of the live plist for the purposes of this guarantee.
+  (after the backup copy has been taken) — narrowing the window where a
+  concurrent writer could land and be silently clobbered down to the
+  instant between that second check and the write itself. That last
+  sliver can't be closed without holding a lock across the whole
+  read-check-write section, which is out of scope here. If the second
+  check is the one that catches a race, a `.plist.bak` backup of the
+  pre-race content may already be on disk; that stray backup is harmless
+  (never the concurrent writer's data) and is not treated as a mutation
+  of the live plist for the purposes of this guarantee.
 
 ## `glomeris daemon uninstall`
 
