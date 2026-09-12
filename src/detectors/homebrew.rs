@@ -8,15 +8,16 @@
 //! `reclaimable_bytes` (HORO-992): rather than parsing `brew cleanup -n`'s
 //! dry-run output (its exact wording/format is not a stable contract
 //! across Homebrew versions, so parsing it reliably is real ongoing
-//! maintenance risk), this detector reuses the same [`shallow_logical_bytes`]
+//! maintenance risk), this detector reuses the same [`estimate_logical_bytes`]
 //! estimate it already computes for `logical_bytes` against `brew --cache`'s
 //! path. The cache directory holds only downloaded bottles/sources that
 //! Homebrew fully owns and can re-download on demand, so
 //! `reclaimable_bytes == logical_bytes` is an honest equivalence of
-//! meaning here. Because the underlying probe is shallow/non-recursive
-//! (see [`shallow_logical_bytes`]) and the cache directory does have
-//! nested subdirectories (e.g. `Cask/`), both figures are an honest
-//! *lower bound* on the real cache size, not a precise one.
+//! meaning here. The estimate recurses through the full cache tree
+//! (including nested subdirectories like `Cask/`), bounded by a size/time
+//! budget (HORO-1016) — see [`estimate_logical_bytes`]'s own doc comment
+//! for what happens if that budget is hit before the walk finishes (a
+//! truthful lower bound, never a precision guarantee).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -26,8 +27,8 @@ use crate::evidence::{
 };
 
 use super::{
-    discovery_evidence, probe_mtime, shallow_logical_bytes, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext,
+    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
+    DetectorId, DetectorStatus, DiscoveryContext,
 };
 
 pub struct HomebrewDetector;
@@ -80,8 +81,9 @@ impl Detector for HomebrewDetector {
             ResourceKind::HomebrewCache,
             ResourceLocator::Path(canonical.clone()),
         );
-        let logical_bytes = shallow_logical_bytes(&canonical);
-        let evidence = discovery_evidence(
+        let estimate = estimate_logical_bytes(&canonical, size_estimate_budget());
+        let logical_bytes = estimate.bytes.clone();
+        let mut evidence = discovery_evidence(
             resource,
             self.id(),
             &canonical,
@@ -96,6 +98,9 @@ impl Detector for HomebrewDetector {
             // the resource.
             NativeCleanup::Unsupported,
         );
+        if let Some(note) = estimate.lower_bound_note() {
+            evidence.push_source(note);
+        }
 
         DetectorStatus::Found(vec![evidence])
     }

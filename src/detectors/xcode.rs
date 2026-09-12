@@ -10,14 +10,15 @@
 //! revisited once there's a stable way to correlate a subdirectory back
 //! to its owning `.xcodeproj`.
 //!
-//! `reclaimable_bytes` reuses the exact same [`shallow_logical_bytes`]
+//! `reclaimable_bytes` reuses the exact same [`estimate_logical_bytes`]
 //! estimate as `logical_bytes` (HORO-992): DerivedData is fully owned,
 //! regenerable build output with no partial-retention concept — deleting
 //! it never leaves behind a smaller-but-still-useful remainder, so
 //! `reclaimable_bytes == logical_bytes` is an honest equivalence of
-//! meaning here. Because the underlying probe is shallow/non-recursive,
-//! both figures are an honest *lower bound* on the real subtree size, not
-//! a precise one — see [`shallow_logical_bytes`]'s own doc comment.
+//! meaning here. The estimate recurses through the full subtree, bounded
+//! by a size/time budget (HORO-1016) — see [`estimate_logical_bytes`]'s
+//! own doc comment for what happens if that budget is hit before the walk
+//! finishes (a truthful lower bound, never a precision guarantee).
 
 use std::path::PathBuf;
 
@@ -26,8 +27,8 @@ use crate::evidence::{
 };
 
 use super::{
-    discovery_evidence, probe_mtime, shallow_logical_bytes, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext,
+    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
+    DetectorId, DetectorStatus, DiscoveryContext,
 };
 
 pub struct XcodeDetector;
@@ -71,8 +72,9 @@ impl Detector for XcodeDetector {
             ResourceKind::XcodeDerivedData,
             ResourceLocator::Path(canonical.clone()),
         );
-        let logical_bytes = shallow_logical_bytes(&canonical);
-        let evidence = discovery_evidence(
+        let estimate = estimate_logical_bytes(&canonical, size_estimate_budget());
+        let logical_bytes = estimate.bytes.clone();
+        let mut evidence = discovery_evidence(
             resource,
             self.id(),
             &canonical,
@@ -87,6 +89,9 @@ impl Detector for XcodeDetector {
             // native cleanup support is left unregistered for MVP.
             NativeCleanup::Unsupported,
         );
+        if let Some(note) = estimate.lower_bound_note() {
+            evidence.push_source(note);
+        }
 
         DetectorStatus::Found(vec![evidence])
     }
