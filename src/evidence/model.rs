@@ -165,11 +165,45 @@ impl fmt::Display for ResourceLocator {
 pub struct ResourceId {
     pub kind: ResourceKind,
     pub locator: ResourceLocator,
+    /// The project root a detector actually discovered this resource
+    /// under, BEFORE any symlink resolution — e.g. the entry from
+    /// [`crate::detectors::DiscoveryContext::known_project_roots`] that
+    /// [`crate::detectors::cargo::CargoDetector`] scanned to find this
+    /// `target/` directory.
+    ///
+    /// This exists to fix HORO-1017: when a project's `target/` is a
+    /// symlink to a physically different location, deriving the Cargo
+    /// manifest path from `locator`'s canonicalized (symlink-resolved)
+    /// path looks for `Cargo.toml` next to the *physical* target
+    /// location, not next to the project root the detector actually
+    /// discovered the resource under — and an unrelated project's
+    /// `Cargo.toml` sitting next to that physical location would be
+    /// picked up instead. `source_project_root` carries the real,
+    /// pre-canonicalization root forward so actions can bind their
+    /// manifest lookup to it instead of re-deriving identity from
+    /// `locator`.
+    ///
+    /// `None` for every resource kind that has no such concept (Xcode,
+    /// Homebrew, Node, Docker) — only the Cargo detector ever populates
+    /// `Some(_)`.
+    pub source_project_root: Option<PathBuf>,
 }
 
 impl ResourceId {
     pub fn new(kind: ResourceKind, locator: ResourceLocator) -> Self {
-        Self { kind, locator }
+        Self {
+            kind,
+            locator,
+            source_project_root: None,
+        }
+    }
+
+    /// Attach the project root this resource was actually discovered
+    /// under. See the field doc comment on [`ResourceId::source_project_root`]
+    /// for why this exists.
+    pub fn with_source_project_root(mut self, root: PathBuf) -> Self {
+        self.source_project_root = Some(root);
+        self
     }
 
     /// Stable, snake_case tag for `self.kind` — the same string

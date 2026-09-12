@@ -50,7 +50,8 @@ impl Detector for CargoDetector {
                     let resource = ResourceId::new(
                         ResourceKind::CargoTargetDir,
                         ResourceLocator::Path(canonical.clone()),
-                    );
+                    )
+                    .with_source_project_root(root.clone());
                     let logical_bytes = shallow_logical_bytes(&canonical);
                     evidence.push(discovery_evidence(
                         resource,
@@ -138,6 +139,33 @@ mod tests {
             DetectorStatus::Found(evidence) => {
                 assert_eq!(evidence.len(), 1);
                 assert_eq!(evidence[0].resource.kind, ResourceKind::CargoTargetDir);
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1017: the discovered `Evidence`'s `resource.source_project_root`
+    /// must carry the exact `known_project_roots` entry the target dir was
+    /// found under, so a later action can bind manifest lookup to the
+    /// real discovered root instead of re-deriving it from the
+    /// (possibly symlink-resolved) canonicalized target path.
+    #[test]
+    fn evidence_resource_carries_the_discovered_project_root() {
+        let root = make_temp_dir("cargo-project-root-carried");
+        fs::create_dir_all(root.join("target")).unwrap();
+
+        let ctx = DiscoveryContext::new("/tmp").with_known_project_roots(vec![root.clone()]);
+        let status = CargoDetector.discover(&ctx);
+
+        match status {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                assert_eq!(
+                    evidence[0].resource.source_project_root.as_deref(),
+                    Some(root.as_path())
+                );
             }
             other => panic!("expected Found, got {other:?}"),
         }
