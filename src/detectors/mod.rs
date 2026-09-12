@@ -623,3 +623,232 @@ mod tests {
         }
     }
 }
+
+/// Regression tests for [`estimate_logical_bytes`] (HORO-1016) — the
+/// bounded recursive replacement for the old non-recursive
+/// `shallow_logical_bytes`, which only summed a directory's immediate
+/// entries and miscounted a subdirectory as its own inode size instead of
+/// its contents.
+#[cfg(test)]
+mod size_estimate_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-size-estimate-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn nested_tree_total_is_exact_sum_of_file_lengths() {
+        let root = make_temp_dir("nested-exact");
+        fs::write(root.join("top.bin"), vec![0u8; 1000]).unwrap();
+        fs::create_dir_all(root.join("mid")).unwrap();
+        fs::write(root.join("mid/mid.bin"), vec![0u8; 2000]).unwrap();
+        fs::create_dir_all(root.join("mid/leaf")).unwrap();
+        fs::write(root.join("mid/leaf/leaf.bin"), vec![0u8; 3000]).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(6000));
+        assert_eq!(estimate.stop_reason, StopReason::Exhausted);
+        assert!(estimate.lower_bound_note().is_none());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn deep_tree_is_counted_at_every_depth() {
+        let root = make_temp_dir("deep-chain");
+        let mut cursor = root.clone();
+        for i in 0..6 {
+            cursor = cursor.join(format!("level{i}"));
+            fs::create_dir_all(&cursor).unwrap();
+        }
+        fs::write(cursor.join("leaf.bin"), vec![0u8; 4242]).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(4242));
+        assert_eq!(estimate.stop_reason, StopReason::Exhausted);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The single most important safety test: budget exhaustion must
+    /// always yield a truthful `Observed` lower bound, never
+    /// `Unavailable` — that's what keeps a truncated walk from ever
+    /// looking like a probe failure to `Evidence::completeness()` or
+    /// `executor::execute`'s TOCTOU revalidation.
+    #[test]
+    fn budget_exhaustion_returns_observed_lower_bound_never_unavailable() {
+        let root = make_temp_dir("budget-exhaustion");
+        let mut true_total: u64 = 0;
+        for i in 0..10 {
+            let sub = root.join(format!("dir{i}"));
+            fs::create_dir_all(&sub).unwrap();
+            for j in 0..5 {
+                let bytes = vec![0u8; 100 + i + j];
+                fs::write(sub.join(format!("file{j}.bin")), &bytes).unwrap();
+                true_total += bytes.len() as u64;
+            }
+        }
+
+        let file_count_budget = ScanBudget::default().with_max_files_visited(3);
+        let estimate = estimate_logical_bytes(&root, file_count_budget);
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => {
+                assert!(
+                    bytes < true_total,
+                    "expected a truncated lower bound, got the full total {bytes}"
+                );
+            }
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+        assert_eq!(estimate.stop_reason, StopReason::FileCountBudget);
+        assert!(estimate.lower_bound_note().is_some());
+
+        let time_budget = ScanBudget::default().with_max_duration(Duration::ZERO);
+        let estimate = estimate_logical_bytes(&root, time_budget);
+        assert!(estimate.bytes.is_observed());
+        assert_eq!(estimate.stop_reason, StopReason::TimeBudget);
+        assert!(estimate.lower_bound_note().is_some());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn unreadable_subdirectory_does_not_change_the_outcome_variant() {
+        let root = make_temp_dir("unreadable-subdir");
+        let denied = root.join("denied");
+        fs::create_dir_all(&denied).unwrap();
+        fs::write(denied.join("inside.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(root.join("visible.bin"), vec![0u8; 64]).unwrap();
+
+        let mut perms = fs::metadata(&denied).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&denied, perms).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let mut restore = fs::metadata(&denied).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&denied, restore).ok();
+
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => {
+                if estimate.unreadable_entries == 0 {
+                    eprintln!(
+                        "skipping strict assertion: permission check bypassed (running as root?)"
+                    );
+                } else {
+                    assert!(bytes >= 64, "expected at least the visible file's bytes");
+                    assert!(estimate.unreadable_entries > 0);
+                }
+            }
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn permission_denied_root_is_unavailable_not_zero() {
+        let root = make_temp_dir("permission-denied-root");
+        fs::write(root.join("inside.bin"), vec![0u8; 4096]).unwrap();
+
+        let mut perms = fs::metadata(&root).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&root, perms).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        // Restore permissions so the temp dir can be cleaned up.
+        let mut restore = fs::metadata(&root).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&root, restore).ok();
+
+        match estimate.bytes {
+            ProbeOutcome::Unavailable(ProbeReason::PermissionDenied) => {}
+            ProbeOutcome::Observed(_) => {
+                eprintln!("skipping assertion: permission check bypassed (running as root?)");
+            }
+            other => panic!("expected Unavailable(PermissionDenied), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn symlinks_are_counted_by_their_own_size_and_never_followed() {
+        let root = make_temp_dir("symlink-not-followed");
+        let outside_target = std::env::temp_dir().join(format!(
+            "glomeris-size-estimate-symlink-target-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside_target, vec![0u8; 1 << 20]).unwrap();
+        symlink(&outside_target, root.join("link_to_big_file")).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        match estimate.bytes {
+            ProbeOutcome::Observed(bytes) => {
+                assert!(
+                    bytes < 1024,
+                    "expected the symlink's own small lstat size, got {bytes} (target followed?)"
+                );
+            }
+            other => panic!("expected Observed(_), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_file(&outside_target).ok();
+    }
+
+    #[test]
+    fn sparse_file_is_counted_by_logical_length() {
+        let root = make_temp_dir("sparse-file");
+        let sparse_path = root.join("sparse.bin");
+        let file = fs::File::create(&sparse_path).unwrap();
+        file.set_len(1 << 20).unwrap();
+        drop(file);
+
+        let estimate = estimate_logical_bytes(&root, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(1 << 20));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_directory_root_is_observed_file_length() {
+        let root = make_temp_dir("non-directory-root");
+        let file_path = root.join("plain.bin");
+        fs::write(&file_path, vec![0u8; 777]).unwrap();
+
+        let estimate = estimate_logical_bytes(&file_path, ScanBudget::unlimited());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(777));
+        assert_eq!(estimate.stop_reason, StopReason::Exhausted);
+
+        fs::remove_dir_all(&root).ok();
+    }
+}
