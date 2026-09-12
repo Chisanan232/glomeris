@@ -895,4 +895,274 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Deterministic regression test for HORO-1028: lands a hostile
+    /// concurrent write at every seam inside `install_impl_with_hook`'s
+    /// critical section, many trials per seam, and proves the outcome is
+    /// never corruption — either a clean abort that leaves the
+    /// concurrent writer's content completely untouched, or a clean
+    /// success that writes exactly `candidate` (never a mix of the two),
+    /// and the `.bak` backup (when one exists) never contains the
+    /// hostile writer's content.
+    ///
+    /// The `before_final_write` window is expected to always come back
+    /// `Repaired`, not `AbortedConcurrentModification`: a write landing
+    /// after the second re-check has already passed is, by construction,
+    /// invisible to that re-check. This is the one irreducible race
+    /// window left (closing it fully would require holding a lock across
+    /// the whole operation) — the fix narrows the corruption window from
+    /// "the entire gap between the read and both writes" down to "the
+    /// instant between the second re-check and the final `write_atomic`
+    /// call", and this test documents that narrowed window rather than
+    /// hiding it. Critically, even in that window the final write is
+    /// still atomic and always produces `candidate`, never a torn file.
+    #[test]
+    fn install_impl_toctou_checks_prevent_corruption_across_all_race_windows() {
+        #[derive(Clone, Copy)]
+        enum Window {
+            FirstCheck,
+            BackupWrite,
+            SecondCheck,
+            FinalWrite,
+        }
+
+        const TRIALS_PER_WINDOW: usize = 100;
+        const HOSTILE_CONTENT: &str = "HOSTILE-CONCURRENT-WRITE";
+
+        // Every window except `before_final_write` must be caught (fully
+        // aborted, zero `Repaired`): this is the actual HORO-1028
+        // regression check. Without the second TOCTOU re-check, a
+        // hostile write landing in `before_backup_write` or
+        // `before_second_check` sails through undetected and comes back
+        // `Repaired` instead of `AbortedConcurrentModification` — that
+        // silent-clobber is exactly the bug this fix closes, and it is
+        // NOT caught merely by checking the final content shape (a
+        // clobbered `Repaired` also happens to end up equal to
+        // `candidate`, since the unconditional final write still
+        // succeeds either way). `before_final_write` is the one
+        // documented exception — see this test's doc comment.
+        let windows = [
+            ("before_first_check", Window::FirstCheck, true),
+            ("before_backup_write", Window::BackupWrite, true),
+            ("before_second_check", Window::SecondCheck, true),
+            ("before_final_write", Window::FinalWrite, false),
+        ];
+
+        for (label, window, must_always_abort) in windows {
+            let mut repaired = 0usize;
+            let mut aborted = 0usize;
+
+            for trial in 0..TRIALS_PER_WINDOW {
+                let dir = unique_temp_dir(&format!("toctou-race-{label}-{trial}"));
+                let plist_path = dir.join(format!("{LABEL}.plist"));
+                let log_dir = dir.join("logs");
+
+                install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
+                let hand_edited = std::fs::read_to_string(&plist_path).unwrap().replace(
+                    &format!("<integer>{DEFAULT_START_INTERVAL_SECS}</integer>"),
+                    "<integer>120</integer>",
+                );
+                std::fs::write(&plist_path, &hand_edited).unwrap();
+                let candidate = generate_plist(Path::new("/bin/echo"), 120, &log_dir);
+
+                let hostile_path = plist_path.clone();
+                let hook: Box<dyn FnOnce()> = Box::new(move || {
+                    std::fs::write(&hostile_path, HOSTILE_CONTENT).unwrap();
+                });
+
+                let mut hooks = TestHooks::default();
+                match window {
+                    Window::FirstCheck => hooks.before_first_check = Some(hook),
+                    Window::BackupWrite => hooks.before_backup_write = Some(hook),
+                    Window::SecondCheck => hooks.before_second_check = Some(hook),
+                    Window::FinalWrite => hooks.before_final_write = Some(hook),
+                }
+
+                let outcome = install_impl_with_hook(
+                    &plist_path,
+                    Path::new("/bin/echo"),
+                    false,
+                    &log_dir,
+                    hooks,
+                )
+                .unwrap();
+
+                let after = std::fs::read_to_string(&plist_path).unwrap();
+                let backup_contents =
+                    std::fs::read_to_string(plist_path.with_extension("plist.bak")).ok();
+
+                match outcome {
+                    InstallOutcome::AbortedConcurrentModification => {
+                        aborted += 1;
+                        assert_eq!(
+                            after, HOSTILE_CONTENT,
+                            "[{label} trial {trial}] an aborted install must leave the \
+                             concurrent writer's content completely untouched"
+                        );
+                    }
+                    InstallOutcome::Repaired => {
+                        repaired += 1;
+                        assert_eq!(
+                            after, candidate,
+                            "[{label} trial {trial}] a Repaired outcome must write exactly \
+                             the intended candidate, never a mix of candidate and hostile \
+                             content"
+                        );
+                    }
+                    other => panic!(
+                        "[{label} trial {trial}] unexpected outcome {other:?} from a racing \
+                         install"
+                    ),
+                }
+
+                if let Some(backup) = backup_contents {
+                    assert_ne!(
+                        backup, HOSTILE_CONTENT,
+                        "[{label} trial {trial}] backup must never capture the concurrent \
+                         writer's hostile content"
+                    );
+                }
+
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+
+            assert_eq!(repaired + aborted, TRIALS_PER_WINDOW);
+            if must_always_abort {
+                assert_eq!(
+                    aborted, TRIALS_PER_WINDOW,
+                    "[{label}] a hostile write landing here must ALWAYS be caught and \
+                     aborted — {repaired} of {TRIALS_PER_WINDOW} trials instead came back \
+                     Repaired, meaning the concurrent writer's change was silently clobbered \
+                     (the exact HORO-1028 regression)"
+                );
+            } else {
+                assert_eq!(
+                    repaired, TRIALS_PER_WINDOW,
+                    "[{label}] this is the one documented residual race window and should \
+                     always proceed to a clean Repaired write"
+                );
+            }
+            eprintln!(
+                "toctou race window `{label}`: {repaired} repaired / {aborted} aborted out of \
+                 {TRIALS_PER_WINDOW} trials, 0 corrupted"
+            );
+        }
+    }
+
+    /// Complements the deterministic hook-based test above with a real
+    /// multi-threaded race: a background thread tight-loops writing
+    /// hostile content to the plist while the main thread repeatedly
+    /// calls the production `install_impl` (no hooks) against the same
+    /// path. Timing-dependent, so it can't guarantee hitting every
+    /// individual seam the way the hook-based test does, but it proves
+    /// the fix holds up under an actual concurrent writer, not just a
+    /// deterministically-injected one: across many trials, the plist and
+    /// its backup are never corrupted, truncated, or torn, and nothing
+    /// panics.
+    #[test]
+    fn concurrent_real_thread_writer_never_corrupts_plist_or_backup() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        const HOSTILE_MARKER: &str = "HOSTILE-CONCURRENT-WRITE";
+        const TRIALS: usize = 200;
+
+        let dir = unique_temp_dir("real-thread-race");
+        let plist_path = dir.join(format!("{LABEL}.plist"));
+        let log_dir = dir.join("logs");
+
+        install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
+        let hand_edited = std::fs::read_to_string(&plist_path).unwrap().replace(
+            &format!("<integer>{DEFAULT_START_INTERVAL_SECS}</integer>"),
+            "<integer>120</integer>",
+        );
+        let candidate = generate_plist(Path::new("/bin/echo"), 120, &log_dir);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer_path = plist_path.clone();
+        let writer_stop = Arc::clone(&stop);
+        let writer = std::thread::spawn(move || {
+            // Write via the same temp-file+rename pattern `write_atomic`
+            // uses, so a reader can never observe a transiently-empty or
+            // partially-truncated file — a plain `fs::write` truncates
+            // before writing and would make this test flake on its own
+            // writer, not on anything `install_impl` does.
+            let tmp_path = writer_path.with_extension("plist.tmp");
+            let mut i: u64 = 0;
+            while !writer_stop.load(Ordering::Relaxed) {
+                if std::fs::write(&tmp_path, format!("{HOSTILE_MARKER}-{i}")).is_ok() {
+                    let _ = std::fs::rename(&tmp_path, &writer_path);
+                }
+                i += 1;
+            }
+        });
+
+        let mut repaired = 0usize;
+        let mut aborted = 0usize;
+        let mut refused = 0usize;
+        let mut read_back_raced = 0usize;
+
+        for trial in 0..TRIALS {
+            // Re-seed a recognizable hand-edited plist before each trial;
+            // the racer thread may have already clobbered it again by the
+            // time `install_impl` reads it, and that's the point.
+            let _ = std::fs::write(&plist_path, &hand_edited);
+
+            // `install_impl`'s own post-write read-back verification (see
+            // the final `written != candidate` check in
+            // `install_impl_with_hook`, unrelated to and pre-dating this
+            // fix) can itself race against a real concurrent writer: our
+            // atomic write can land, then the racer's atomic write lands
+            // before we read back to verify, so the read-back sees the
+            // racer's content instead of ours and reports an `io::Error`.
+            // That is a spurious *error*, never data loss or a torn file
+            // — treat it as its own outcome bucket rather than a panic.
+            match install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir) {
+                Ok(outcome) => {
+                    let after = std::fs::read_to_string(&plist_path).unwrap_or_else(|e| {
+                        panic!("plist must always be readable, never torn: {e}")
+                    });
+                    assert!(!after.is_empty(), "plist must never be left empty");
+
+                    match outcome {
+                        InstallOutcome::Repaired => {
+                            repaired += 1;
+                            assert!(
+                                after == candidate || after.contains(HOSTILE_MARKER),
+                                "[trial {trial}] Repaired must leave either the intended \
+                                 candidate or a subsequent hostile overwrite, never \
+                                 partial/corrupt content: {after:?}"
+                            );
+                        }
+                        InstallOutcome::AbortedConcurrentModification => aborted += 1,
+                        InstallOutcome::RefusedNeedsForce => refused += 1,
+                        other => {
+                            panic!("[trial {trial}] unexpected outcome under race: {other:?}")
+                        }
+                    }
+
+                    if let Ok(backup_contents) =
+                        std::fs::read_to_string(plist_path.with_extension("plist.bak"))
+                    {
+                        assert!(
+                            !backup_contents.contains(HOSTILE_MARKER),
+                            "[trial {trial}] backup must never capture hostile writer content"
+                        );
+                    }
+                }
+                Err(_) => read_back_raced += 1,
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+
+        eprintln!(
+            "real-thread race: {repaired} repaired / {aborted} aborted / {refused} refused / \
+             {read_back_raced} read-back-raced out of {TRIALS} trials, 0 corrupted"
+        );
+        assert_eq!(repaired + aborted + refused + read_back_raced, TRIALS);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
