@@ -1,0 +1,17 @@
+[workspace]
+members = ["cargo:."]
+
+# Config for 'dist'
+[dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.33.0"
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = []
+# Target platforms to build apps for (Rust target-triple syntax).
+# macOS-only MVP (HORO-957): Apple Silicon is the primary target;
+# x86_64-apple-darwin cross-compiles cleanly from this toolchain and is
+# kept so Intel Mac users get a native artifact too. Linux/Windows are
+# deliberately not targeted yet — this is a macOS-only MVP release.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
