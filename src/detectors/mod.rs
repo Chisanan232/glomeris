@@ -5,7 +5,7 @@
 //! [`crate::scanner`]'s job; detectors deliberately do not reuse
 //! `scanner::walker`). A detector's per-resource size estimate does recurse
 //! within that known root, bounded by a fixed entry/time budget
-//! (HORO-1016; see [`estimate_logical_bytes`]). A detector's tool being
+//! (HORO-1016; see `estimate_logical_bytes`). A detector's tool being
 //! absent from the machine is normal, expected state, never an error.
 
 mod cargo;
