@@ -7,6 +7,7 @@
 //! `glomeris scan`/`free`/`emergency`/`daemon` are unaffected and stay
 //! wired directly in `main.rs`, per this ticket's scope.
 
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use crate::actions::{Action, ActionRegistry};
@@ -82,6 +83,41 @@ pub fn discover_and_classify(
             (ev, decision)
         })
         .collect()
+}
+
+/// Extracts every repeatable, valued `--project-root <path>` occurrence
+/// from `args` (HORO-957): returns the collected roots in the order they
+/// appeared, plus every other token from `args` — in its original
+/// order, with the `--project-root`/value pairs removed — for the
+/// caller's own subcommand-specific parser to keep handling exactly as
+/// it does today. A trailing `--project-root` with no following value is
+/// reported as an error rather than silently dropped or left for the
+/// caller's parser to stumble over, mirroring how `clean`'s own
+/// `--target` parsing already reports a missing value.
+///
+/// Never validates or canonicalizes a collected path — a
+/// nonexistent-looking root is passed through as-is; the detectors'
+/// own real filesystem probes already degrade gracefully (`ToolAbsent`/
+/// empty results) for a root that isn't there.
+pub fn extract_project_roots(args: &[String]) -> Result<(Vec<PathBuf>, Vec<String>), String> {
+    let mut roots = Vec::new();
+    let mut remaining = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--project-root" {
+            match args.get(i + 1) {
+                Some(value) => {
+                    roots.push(PathBuf::from(value));
+                    i += 2;
+                }
+                None => return Err("--project-root requires a value".to_string()),
+            }
+        } else {
+            remaining.push(args[i].clone());
+            i += 1;
+        }
+    }
+    Ok((roots, remaining))
 }
 
 /// Finds the candidate whose [`crate::evidence::ResourceId::to_string`]
@@ -642,6 +678,56 @@ mod tests {
             build_clean_dry_run_report(&candidates, &actions, Some("/tmp/a/target")).unwrap();
         assert_eq!(report.items.len(), 1);
         assert_eq!(report.items[0].resource_id, ev_a.resource.to_string());
+    }
+
+    #[test]
+    fn extract_project_roots_with_no_flag_returns_all_args_unchanged() {
+        let args = vec!["--json".to_string()];
+        let (roots, remaining) = extract_project_roots(&args).unwrap();
+        assert!(roots.is_empty());
+        assert_eq!(remaining, args);
+    }
+
+    #[test]
+    fn extract_project_roots_collects_a_single_occurrence() {
+        let args = vec!["--project-root".to_string(), "/tmp/proj".to_string()];
+        let (roots, remaining) = extract_project_roots(&args).unwrap();
+        assert_eq!(roots, vec![PathBuf::from("/tmp/proj")]);
+        assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn extract_project_roots_collects_repeated_occurrences_in_order() {
+        let args = vec![
+            "--project-root".to_string(),
+            "/tmp/a".to_string(),
+            "--json".to_string(),
+            "--project-root".to_string(),
+            "/tmp/b".to_string(),
+        ];
+        let (roots, remaining) = extract_project_roots(&args).unwrap();
+        assert_eq!(
+            roots,
+            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
+        );
+        assert_eq!(remaining, vec!["--json".to_string()]);
+    }
+
+    #[test]
+    fn extract_project_roots_does_not_validate_nonexistent_paths() {
+        let args = vec![
+            "--project-root".to_string(),
+            "/definitely/does/not/exist".to_string(),
+        ];
+        let (roots, _remaining) = extract_project_roots(&args).unwrap();
+        assert_eq!(roots, vec![PathBuf::from("/definitely/does/not/exist")]);
+    }
+
+    #[test]
+    fn extract_project_roots_errors_on_missing_trailing_value() {
+        let args = vec!["--project-root".to_string()];
+        let result = extract_project_roots(&args);
+        assert!(result.is_err());
     }
 
     #[test]
