@@ -12,20 +12,48 @@ plain `launchctl load`/`unload` (`gui/<uid>` session semantics). Nothing
 writes to a system-level `LaunchDaemons` location, and no root/sudo access is
 required for any of these commands.
 
-## `glomeris daemon install`
+## `glomeris daemon install [--force]`
 
 Writes a plist that runs `<program_path> daemon run` every 60 seconds
-(`StartInterval`), with `RunAtLoad` set, and stdout/stderr redirected to
-`/tmp/glomeris-monitor.log`/`.err.log`. Then runs `launchctl load -w
-<plist_path>`. If `launchctl` fails, the plist file is left in place (so
-`status`/a manual retry can still see it) — only the final `launchctl`
-result is treated as a hard failure.
+(`StartInterval`) by default, with `RunAtLoad` set, and stdout/stderr
+redirected to `~/Library/Logs/Glomeris/monitor.log`/`.err.log`. Then runs
+`launchctl load -w <plist_path>`. If `launchctl` fails, the plist file is
+left in place (so `status`/a manual retry can still see it) — only the
+final `launchctl` result is treated as a hard failure.
+
+**What this owns, preserves, and refuses to clobber (HORO-1021):** the
+plist at `~/Library/LaunchAgents/com.glomeris.monitor.plist` is a wholly
+Glomeris-owned artifact — no other tool reads or writes it. Even so,
+`install` never silently discards a hand-edited value:
+
+- **Idempotent.** Re-running `install` against an already-up-to-date plist
+  (matching a fresh default install) writes nothing.
+- **Preserves a hand-edited `StartInterval`.** If you've changed the poll
+  interval by hand, re-running `install` keeps your value — only the
+  program path is refreshed (the actual point of reinstalling after
+  rebuilding/moving the binary).
+- **Refuses any other unrecognized customization without `--force`.** If
+  the on-disk plist has been changed in a way this tool doesn't manage
+  (a hand-added key, a flipped `RunAtLoad`, etc.), `install` makes zero
+  changes and exits with status `2`, explaining the refusal. Pass
+  `--force` to overwrite anyway — a backup of the current file is taken
+  first, at `<plist_path>.plist.bak`.
+- **Atomic, verified writes.** Every real write goes to a temp file in the
+  same directory, is renamed into place, and is read back and compared
+  before `install` reports success — a crash or concurrent `install` mid-write
+  can't leave a corrupt/partial plist.
+- **Aborts on concurrent modification.** If the plist changes on disk
+  between `install`'s read and its write (e.g. two `daemon install`s
+  racing), the later write aborts with zero mutation and exit status `2`
+  rather than risk clobbering the concurrent change — rerun to retry.
 
 ## `glomeris daemon uninstall`
 
 Runs `launchctl unload -w <plist_path>` (best-effort — an already-unloaded
-agent reporting an error from `launchctl` is not treated as fatal here), then
-removes the plist file if present.
+agent reporting an error from `launchctl` is not treated as fatal here),
+backs up the current plist to `<plist_path>.plist.bak`, then removes the
+plist file if present. Idempotent — uninstalling an already-missing plist
+is not an error.
 
 ## `glomeris daemon status`
 
