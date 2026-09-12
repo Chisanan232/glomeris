@@ -261,25 +261,52 @@ fn install_impl(
     force: bool,
     log_dir: &Path,
 ) -> io::Result<InstallOutcome> {
-    install_impl_with_hook(plist_path, program_path, force, log_dir, None)
+    install_impl_with_hook(
+        plist_path,
+        program_path,
+        force,
+        log_dir,
+        TestHooks::default(),
+    )
 }
 
-/// The real body of [`install_impl`], with one extra testing-only seam:
-/// `before_final_write`, a callback invoked once, right after the initial
-/// read/fingerprint of an existing plist and right before the final
-/// TOCTOU re-check that decides [`InstallOutcome::AbortedConcurrentModification`].
-/// Production and [`install_impl`] itself always pass `None`; only tests
-/// pass `Some` (e.g. to mutate the file out from under this function,
-/// deterministically driving the concurrent-modification-abort outcome
-/// without any real threads). This is the smallest addition that makes
-/// that outcome testable end-to-end through `install_impl` — everything
-/// else about the algorithm is unchanged.
+/// Testing-only seams inside [`install_impl_with_hook`]'s critical
+/// section: a callback for each point a concurrent writer could land,
+/// letting tests deterministically land a hostile write at a specific
+/// window without any real threads or wall-clock races. Every field
+/// defaults to `None` (a no-op); production code (via [`install_impl`])
+/// always passes `TestHooks::default()`, so this is a no-op outside
+/// tests.
+#[derive(Default)]
+struct TestHooks {
+    /// Fires right after the initial read/fingerprint of an existing
+    /// plist, right before the first TOCTOU re-check.
+    before_first_check: Option<Box<dyn FnOnce()>>,
+    /// Fires right after the first TOCTOU re-check passes, right before
+    /// the (already-atomic) backup write.
+    before_backup_write: Option<Box<dyn FnOnce()>>,
+    /// Fires right after the backup write, right before the second
+    /// TOCTOU re-check.
+    before_second_check: Option<Box<dyn FnOnce()>>,
+    /// Fires right after the second TOCTOU re-check passes, right before
+    /// the final write that mutates the live plist.
+    before_final_write: Option<Box<dyn FnOnce()>>,
+}
+
+/// The real body of [`install_impl`], parameterized on [`TestHooks`] so
+/// tests can deterministically inject a hostile concurrent write at any
+/// point in the critical section (see [`TestHooks`]'s field docs).
+/// Production and [`install_impl`] itself always pass
+/// `TestHooks::default()`; only tests populate individual fields. This is
+/// the smallest addition that makes every abort window testable
+/// end-to-end through `install_impl` — everything else about the
+/// algorithm is unchanged.
 fn install_impl_with_hook(
     plist_path: &Path,
     program_path: &Path,
     force: bool,
     log_dir: &Path,
-    before_final_write: Option<Box<dyn FnOnce()>>,
+    hooks: TestHooks,
 ) -> io::Result<InstallOutcome> {
     std::fs::create_dir_all(log_dir)?;
 
@@ -329,22 +356,54 @@ fn install_impl_with_hook(
     }
 
     // Testing-only seam: let a test simulate a concurrent modification
-    // landing between the initial read above and the TOCTOU re-check
-    // below. Always `None` outside tests, so this is a no-op in production.
-    if let Some(hook) = before_final_write {
+    // landing between the initial read above and the first TOCTOU
+    // re-check. Always `None` outside tests, so this is a no-op in
+    // production.
+    if let Some(hook) = hooks.before_first_check {
         hook();
     }
 
-    // TOCTOU guard: re-check right before mutating anything (including
-    // the backup copy) so a call that aborts here truly leaves zero
-    // mutation behind, matching `AbortedConcurrentModification`'s
-    // contract.
+    // First TOCTOU guard: re-check right before mutating anything
+    // (including the backup copy) so a call that aborts here truly
+    // leaves zero mutation behind, matching
+    // `AbortedConcurrentModification`'s contract.
     if file_changed_since(plist_path, before_fingerprint) {
         return Ok(InstallOutcome::AbortedConcurrentModification);
     }
 
+    if let Some(hook) = hooks.before_backup_write {
+        hook();
+    }
+
     let backup_path = plist_path.with_extension("plist.bak");
     write_atomic(&backup_path, &existing_contents)?;
+
+    if let Some(hook) = hooks.before_second_check {
+        hook();
+    }
+
+    // Second TOCTOU guard: the first check above only covers the window
+    // up to itself — a concurrent writer can still land between that
+    // check and this point (or, without this second check, between here
+    // and the final write below). Re-check against the *same*
+    // `before_fingerprint` baseline (what `candidate` was actually
+    // computed against, not a freshly recaptured one) so this catches
+    // any drift since the original read, exactly like the first check.
+    // If it fires, the live plist has already been left untouched, but
+    // the backup write just above has happened: that backup contains the
+    // pre-race `existing_contents`, never the concurrent writer's data,
+    // so a stray-but-correct backup left behind here is not data loss —
+    // it is not the "zero mutation" of the live plist this outcome
+    // promises, but it is harmless and arguably useful (it's a copy of
+    // what was on disk right before the abort). See
+    // `book/src/daemon_lifecycle.md`.
+    if file_changed_since(plist_path, before_fingerprint) {
+        return Ok(InstallOutcome::AbortedConcurrentModification);
+    }
+
+    if let Some(hook) = hooks.before_final_write {
+        hook();
+    }
 
     write_atomic(plist_path, &candidate)?;
 
@@ -816,7 +875,10 @@ mod tests {
             Path::new("/bin/echo"),
             false,
             &log_dir,
-            Some(hook),
+            TestHooks {
+                before_first_check: Some(hook),
+                ..Default::default()
+            },
         )
         .unwrap();
 
