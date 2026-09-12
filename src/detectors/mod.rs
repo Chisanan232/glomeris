@@ -300,7 +300,12 @@ mod tests {
     ///   `tests/reclaimable_bytes_reaches_auto_safe.rs`, which do use the
     ///   real registry but scope every subsequent policy/execute step to
     ///   a single detector's evidence for a disposable tempdir fixture
-    ///   (see those files' own doc comments).
+    ///   (see those files' own doc comments);
+    /// - `tests/cli_project_root_wiring.rs` (HORO-957), which calls
+    ///   `discover_all` only and never routes any evidence into
+    ///   `authorize`/`execute` — its two real-registry occurrences prove
+    ///   `--project-root` reaches the real cargo/node detectors and stop
+    ///   there, so no real-host cleanup action can ever fire from it.
     ///
     /// Any new occurrence must be reviewed and added here explicitly —
     /// an un-reviewed new occurrence is exactly the failure mode this
@@ -322,6 +327,7 @@ mod tests {
             ("src/detectors/mod.rs", 1),
             ("tests/golden_chain_execute.rs", 1),
             ("tests/reclaimable_bytes_reaches_auto_safe.rs", 1),
+            ("tests/cli_project_root_wiring.rs", 2),
         ];
 
         for (rel_path, expected_count) in allowlist {
