@@ -1364,6 +1364,10 @@ mod tests {
         fs::write(&outside_target, vec![0u8; 4096]).unwrap();
         std::os::unix::fs::symlink(&outside_target, root.join("link")).unwrap();
 
+        let sparse = fs::File::create(root.join("sparse.bin")).unwrap();
+        sparse.set_len(1 << 20).unwrap();
+        drop(sparse);
+
         let estimate = estimate_logical_bytes(&root, crate::scanner::ScanBudget::unlimited());
         let best_effort = total_size_best_effort(&root);
 
