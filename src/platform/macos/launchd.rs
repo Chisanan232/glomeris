@@ -96,8 +96,20 @@ pub fn default_log_dir() -> io::Result<PathBuf> {
 /// `<key>StartInterval</key>` in `xml`. Returns `None` if the file can't
 /// be read or doesn't match the expected shape — never errors the
 /// caller; this is advisory, not authoritative parsing.
+///
+/// Refuses (returns `None`) if `<key>StartInterval</key>` occurs more than
+/// once in the document: the real plists this tool generates have exactly
+/// one such marker, so more than one is a signal that either the document
+/// is adversarial (a `ProgramArguments` string embedding the literal
+/// marker text to fool a naive split) or structurally not what this tool
+/// expects — either way, guessing which occurrence is "the real one" is
+/// worse than declining to extract at all.
 fn extract_start_interval_secs(xml: &str) -> Option<u64> {
-    let after_key = xml.split("<key>StartInterval</key>").nth(1)?;
+    const MARKER: &str = "<key>StartInterval</key>";
+    if xml.matches(MARKER).count() != 1 {
+        return None;
+    }
+    let after_key = xml.split(MARKER).nth(1)?;
     let after_open = after_key.split("<integer>").nth(1)?;
     let value = after_open.split("</integer>").next()?;
     value.trim().parse::<u64>().ok()
@@ -107,8 +119,17 @@ fn extract_start_interval_secs(xml: &str) -> Option<u64> {
 /// `ProgramArguments` array (the program path) — used only to build the
 /// "what would this tool have generated, holding the interval fixed"
 /// comparison below, never trusted as an executable path on its own.
+///
+/// Refuses (returns `None`) if `<key>ProgramArguments</key>` occurs more
+/// than once in the document, for the same reason as
+/// [`extract_start_interval_secs`]: a single expected marker is a
+/// necessary precondition for the split-based extraction to be trusted.
 fn extract_program_path(xml: &str) -> Option<String> {
-    let after_key = xml.split("<key>ProgramArguments</key>").nth(1)?;
+    const MARKER: &str = "<key>ProgramArguments</key>";
+    if xml.matches(MARKER).count() != 1 {
+        return None;
+    }
+    let after_key = xml.split(MARKER).nth(1)?;
     let after_array = after_key.split("<array>").nth(1)?;
     let after_string = after_array.split("<string>").nth(1)?;
     let value = after_string.split("</string>").next()?;
@@ -672,5 +693,29 @@ mod tests {
         assert!(file_changed_since(&path, before2));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_start_interval_secs_refuses_ambiguous_duplicate_marker() {
+        // A legitimate `<key>StartInterval</key>` plus decoy text elsewhere
+        // in the document containing that same literal marker (e.g. an
+        // adversarially/coincidentally crafted `ProgramArguments` string)
+        // must not fool the extractor into picking either occurrence.
+        let xml = "<plist><dict>\
+            <key>ProgramArguments</key><array><string>decoy \
+            <key>StartInterval</key><integer>999</integer></string></array>\
+            <key>StartInterval</key><integer>60</integer>\
+            </dict></plist>";
+        assert_eq!(extract_start_interval_secs(xml), None);
+    }
+
+    #[test]
+    fn extract_program_path_refuses_ambiguous_duplicate_marker() {
+        let xml = "<plist><dict>\
+            <key>Comment</key><string>decoy \
+            <key>ProgramArguments</key><array><string>/decoy/path</string></array></string>\
+            <key>ProgramArguments</key><array><string>/real/path</string></array>\
+            </dict></plist>";
+        assert_eq!(extract_program_path(xml), None);
     }
 }
