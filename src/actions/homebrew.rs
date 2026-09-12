@@ -38,11 +38,13 @@ impl Action for HomebrewCleanupCache {
             steps: vec![ActionStep::RunTool {
                 tool: ToolBinary::Brew,
                 args: vec!["cleanup".to_string(), "-s".to_string()],
-                // ACCEPTED design trade-off, not an oversight: `brew
-                // cleanup -s` takes no single path argument to scope. Its
-                // blast radius is bounded by Homebrew's own
-                // retention/cleanup logic, not by this executor's
-                // per-resource identity guard.
+                // `brew cleanup -s` takes no single path argument to
+                // scope, so there is nothing for the executor's identity
+                // guard to verify. Per `executor::execute`, a `None`
+                // scoped_path is refused unconditionally rather than run
+                // unguarded — this action is therefore never actually
+                // executed today (dry-run/plan still work). Revisit only
+                // if a scoped equivalent becomes available upstream.
                 scoped_path: None,
             }],
             expected_reclaimed_bytes: ev.reclaimable_bytes.clone(),

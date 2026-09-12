@@ -102,9 +102,12 @@ pub enum ActionStep {
         /// any — the executor re-verifies this path's filesystem identity
         /// immediately before spawning `tool` and refuses to run it if the
         /// identity has changed (e.g. a symlink swap) since the earliest
-        /// point `execute()` could observe it. `None` means the tool is
-        /// genuinely unscoped by design (see e.g.
-        /// `HomebrewCleanupCache`) — not that no check was thought about.
+        /// point `execute()` could observe it. `None` means there is
+        /// nothing for that revalidation to check, so the executor
+        /// refuses to run the step at all (see e.g. `HomebrewCleanupCache`,
+        /// which is unscoped by design and is therefore never actually
+        /// executed by `executor::execute` today, fail-closed) — this is
+        /// not a lesser-verified variant, it is an unexecutable one.
         scoped_path: Option<PathBuf>,
     },
     /// The executor re-verifies this path's filesystem identity
