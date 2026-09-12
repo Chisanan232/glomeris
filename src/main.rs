@@ -5,6 +5,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(String::as_str) {
+        Some("--help") | Some("-h") | Some("help") => {
+            println!(
+                "usage: glomeris <daemon <install|uninstall|status|run>|scan|status [--json]|\
+                 detect [--json]|explain <resource_id_or_path> [--json]|\
+                 clean --dry-run [--target <resource_id_or_path>]|emergency|\
+                 free --target <N%|NB>>"
+            );
+        }
         Some("daemon") => run_daemon_command(args.get(1).map(String::as_str)),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("status") => run_status_command(&args[1..]),
