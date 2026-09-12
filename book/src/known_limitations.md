@@ -41,12 +41,34 @@ Docker (both build cache and image cache) has no registered `Action` at all
 — it stays detect-only, per an accepted design cut. Neither of these is
 accidental; both are documented design decisions, not bugs.
 
-## Homebrew's cleanup action is unscoped by design
+## Resolved (HORO-957): Homebrew's cleanup action is registered but never actually executes
 
-`HomebrewCleanupCache`'s `ActionStep::RunTool` has `scoped_path: None` — not
-because no one thought about scoping it, but because there is no narrower,
-safe way to ask `brew` to clean only one thing; the action is documented as
-genuinely unscoped by design, not an oversight to fix later.
+`HomebrewCleanupCache`'s `ActionStep::RunTool` has `scoped_path: None`
+because there is no narrower, safe way to ask `brew` to clean only one
+thing — real `brew cleanup -s` has no path argument to scope to. HORO-957's
+independent golden-scenario evaluation found that, before this fix, that
+meant `executor::execute()` ran this step with **zero identity/TOCTOU
+guard**, and confirmed the real Homebrew cache classifies `AutoSafe` on a
+real developer machine today — a live risk that `emergency`/`free --target`
+could silently trigger a real, irreversible `brew cleanup -s`. Fixed:
+`execute()` now refuses any `RunTool` step with `scoped_path: None`
+unconditionally, fail-closed, before ever spawning the tool. `dry_run`/
+`clean --dry-run` still render this action's plan; real execution stays
+permanently refused unless a scoped equivalent becomes available upstream.
+See `HORO-1005` for a related, non-blocking follow-up (`scoped_path` isn't
+yet structurally tied to what a `RunTool` step's `args` actually mutate —
+not currently exploitable, since this was the only unscoped action and it's
+now refused outright).
+
+## Resolved (HORO-957): Cargo `target/` and `node_modules` are now discoverable
+
+Before this fix, `DiscoveryContext::known_project_roots` defaulted to an
+empty list and was never populated by any real CLI code path — so the two
+most canonical "developer storage hotspots" named in the epic were
+structurally undiscoverable no matter what was actually on disk. Fixed: a
+repeatable `--project-root <path>` flag is now wired into `detect`/
+`explain`/`clean`/`free` (deliberately not `emergency`, which takes no
+arguments by design).
 
 ## `ASK` has no interactive handling in this MVP
 
@@ -82,17 +104,33 @@ set of categories (credential material, git internals, infra state, system
 paths, unsafe mounts) and is explicitly documented in its own module comment
 as a starting point to extend, not a completeness guarantee.
 
-## The BYOK LLM planner is a library capability only
+## The BYOK LLM planner is a library capability only, and PROTECTED is unreachable through the shipped CLI
 
 `actions::llm` has no CLI wiring, no defined environment variable name, and
 is not called from `glomeris free` or any other subcommand today. See
 [BYOK LLM Planner](byok.md).
 
-## No prebuilt release artifacts yet
+Separately, and independently of the LLM planner: no live detector
+(Xcode/Homebrew/Cargo/Node/Docker build cache) ever emits a resource whose
+path matches any `policy::protected` pattern, or the unconditionally
+`Protected` `DockerImageCache` kind — `PolicyClass::Protected` is real and
+enforced at the code level (`policy::approval::authorize` unconditionally
+refuses it; `Approval` is unconstructible outside that module), but it is
+not reachable or observable by a real evaluator driving only the shipped
+product. Two independent fresh-context golden-scenario evaluations
+confirmed this. HORO-943's golden acceptance scenario step 6 ("prove a
+protected resource cannot be deleted even if an LLM plan requests it") is
+therefore verified at the code level only, not end-to-end through the CLI.
+This is a deliberate, documented scope decision for MVP 1.0 (BYOK is listed
+as optional in the epic), not a hidden gap — `HORO-1008` tracks adding a
+real LLM-plan CLI/input surface and proving this scenario end-to-end for a
+future version.
 
-There is no packaged/signed macOS binary published under GitHub Releases as
-of this ticket. Building from source is the only supported install path
-until the packaging ticket (HORO-957) lands.
+## Resolved (HORO-957): prebuilt release artifacts
+
+`cargo-dist` packaging produces macOS artifacts for `aarch64-apple-darwin`
+and `x86_64-apple-darwin`, published as GitHub Release assets with
+checksums. Building from source remains fully supported.
 
 ## No GUI
 
