@@ -382,6 +382,34 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                         );
                     }
                 };
+                // HORO-1005: a `scoped_path` is only meaningful if it is
+                // actually one of the values this same step is about to
+                // pass to `tool` — otherwise the identity guard below would
+                // faithfully verify a path that has nothing to do with what
+                // the command will really mutate. This is a structural
+                // check enforced by the executor itself, not trust in
+                // whatever a given `Action::plan()` implementation chose to
+                // put in `scoped_path`. Match the exact string
+                // representation a real `Action::plan()` uses when building
+                // `args` (see `CargoCleanTargetDir::plan`, which pushes
+                // `target_dir.to_string_lossy().into_owned()`) rather than
+                // some other `Path`/`PathBuf` comparison that could differ
+                // in representation despite denoting the same path.
+                let scoped_str = scoped.to_string_lossy();
+                if !args.iter().any(|a| a.as_str() == scoped_str) {
+                    return failed_report(
+                        plan.action,
+                        plan.resource,
+                        format!(
+                            "refusing to run {}: scoped_path {} does not appear in this \
+                             step's own args — the executor cannot confirm what this command \
+                             will actually mutate",
+                            tool.program(),
+                            scoped.display()
+                        ),
+                        plan.expected_reclaimed_bytes,
+                    );
+                }
                 let snapshot = match &identity_snapshot {
                     Some(s) => s,
                     None => {
