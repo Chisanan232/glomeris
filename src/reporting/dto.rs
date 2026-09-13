@@ -91,6 +91,26 @@ pub struct StatusReport {
     pub pressure_state: &'static str,
 }
 
+/// `glomeris daemon status` report (HORO-1045).
+///
+/// `loaded` (launchd-reported: the job is registered/loaded) and
+/// `heartbeat_age_secs` (derived from the poll loop's own last-write) are
+/// deliberately kept as two separate fields and never collapsed into a
+/// single computed `healthy`/`ok` boolean — a loaded-but-wedged daemon and
+/// an actually-polling one must stay distinguishable to any caller (a
+/// future Swift UI decides what "healthy" means, not this report).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DaemonStatusReport {
+    pub plist_installed: bool,
+    pub plist_path: String,
+    /// `true` if `launchctl` currently reports the job as loaded. This is
+    /// NOT evidence the poll loop is alive — see `heartbeat_age_secs`.
+    pub loaded: bool,
+    /// Seconds since the poll loop's last recorded heartbeat, or `None`
+    /// when no heartbeat file exists yet (e.g. the daemon has never run).
+    pub heartbeat_age_secs: Option<u64>,
+}
+
 /// One candidate line of a `glomeris detect` report.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DetectCandidateReport {
