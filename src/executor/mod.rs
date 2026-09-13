@@ -10,6 +10,7 @@
 //! immediately before mutating anything, and aborts rather than acts if
 //! that fresh read disagrees with what was approved.
 
+pub mod lock;
 pub mod recovery_loop;
 
 use std::fs;
