@@ -1,0 +1,131 @@
+name: macOS App Release
+
+# cargo-dist (release.yml, dist-managed — do not hand-edit) builds and
+# publishes the Rust `glomeris` CLI binary but has no notion of the Swift
+# menu-bar app under macos/GlomerisMenuBar/. This workflow is a separate,
+# non-conflicting pipeline that runs after dist's release.yml has already
+# created the GitHub Release: it downloads the just-published
+# aarch64-apple-darwin CLI tarball, builds GlomerisMenuBar.app, embeds the
+# released binary into the bundle, and uploads the zipped app as an extra
+# asset on that same release.
+#
+# Trigger choice: `release: types: [published]` instead of matching
+# release.yml's `push: tags:` pattern. release.yml's `host` job creates the
+# GitHub Release with `gh release create ... artifacts/*` in a single call
+# (assets are attached atomically, not uploaded in a later step), so the
+# `published` event only fires once the release and all of dist's artifacts
+# already exist — no race to coordinate, no risk of two tag-triggered
+# workflows starting in parallel and this one downloading an asset that
+# isn't uploaded yet. It also naturally skips PR runs of release.yml (which
+# never publish a release) without needing to duplicate release.yml's
+# tag-matching regex here.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach the app build to (defaults to the latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-app-release-${{ github.event.release.tag_name || inputs.tag || 'latest' }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-upload:
+    runs-on: macos-14
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ASSET_NAME: glomeris-aarch64-apple-darwin.tar.xz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$EVENT_TAG" ]; then
+            TAG="$EVENT_TAG"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download released CLI binary archive
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" \
+            --repo "${{ github.repository }}" \
+            --pattern "$ASSET_NAME" \
+            --output "$ASSET_NAME" \
+            --clobber
+
+      - name: Extract glomeris binary
+        run: |
+          set -euo pipefail
+          mkdir -p extracted
+          tar -xJf "$ASSET_NAME" -C extracted
+          BIN_PATH="$(find extracted -type f -name glomeris -print -quit)"
+          if [ -z "$BIN_PATH" ]; then
+            echo "::error::glomeris binary not found inside $ASSET_NAME"
+            exit 1
+          fi
+          chmod +x "$BIN_PATH"
+          echo "bin_path=$BIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Build GlomerisMenuBar.app
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj \
+            -scheme GlomerisMenuBar \
+            -configuration Release \
+            build \
+            CODE_SIGNING_ALLOWED=NO \
+            CONFIGURATION_BUILD_DIR="$PWD/build"
+
+      - name: Embed released binary into app bundle
+        run: |
+          set -euo pipefail
+          APP="build/GlomerisMenuBar.app"
+          DEST="$APP/Contents/MacOS/glomeris"
+          cp "$bin_path" "$DEST"
+          chmod +x "$DEST"
+          # Ad-hoc self-sign only (identity "-", no Apple Developer account
+          # or certificate involved). Embedding a new executable after the
+          # build invalidates the bundle's original ad-hoc seal, so this
+          # re-seals it well enough to launch locally on the machine that
+          # unzips it. This is NOT the code signing / notarization that
+          # Gatekeeper requires for a binary downloaded via a browser
+          # (which sets the quarantine xattr) — that requires a real
+          # Developer ID and notarization ticket and is deliberately out of
+          # scope here; see HORO-1071.
+          codesign --force --deep --sign - "$APP"
+
+      - name: Zip app bundle
+        run: |
+          set -euo pipefail
+          cd build
+          ditto -c -k --sequesterRsrc --keepParent GlomerisMenuBar.app ../GlomerisMenuBar.app.zip
+
+      - name: Upload app bundle to the release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            GlomerisMenuBar.app.zip \
+            --repo "${{ github.repository }}" \
+            --clobber
