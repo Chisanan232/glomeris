@@ -445,6 +445,19 @@ pub fn print_daemon_status_report(report: &DaemonStatusReport) {
     }
 }
 
+/// Renders a human-readable byte-count string for text output, prefixing
+/// it with `≥` and an explicit "scan truncated" note when the underlying
+/// evidence marked it as a lower bound (HORO-1049) — `"unknown"` when no
+/// size was observed at all, matching this module's existing
+/// `unwrap_or("unknown")` convention.
+fn format_size_field(human: Option<&str>, is_lower_bound: bool) -> String {
+    match (human, is_lower_bound) {
+        (Some(human), true) => format!("≥ {human} (lower bound — scan truncated)"),
+        (Some(human), false) => human.to_string(),
+        (None, _) => "unknown".to_string(),
+    }
+}
+
 /// Prints a [`DetectReport`] as concise, human-readable text.
 pub fn print_detect_report(report: &DetectReport) {
     if report.candidates.is_empty() {
@@ -452,7 +465,10 @@ pub fn print_detect_report(report: &DetectReport) {
         return;
     }
     for c in &report.candidates {
-        let size = c.reclaimable_human.as_deref().unwrap_or("unknown");
+        let size = format_size_field(
+            c.reclaimable_human.as_deref(),
+            c.reclaimable_bytes_is_lower_bound,
+        );
         println!(
             "[{}] {:<28} {:<10} reclaimable(est.)={:<10} reasons={}",
             c.policy_label,
@@ -479,11 +495,17 @@ pub fn print_explain_report(report: &ExplainReport) {
     }
     println!(
         "logical size:  {}",
-        report.logical_human.as_deref().unwrap_or("unknown")
+        format_size_field(
+            report.logical_human.as_deref(),
+            report.reclaimable_bytes_is_lower_bound
+        )
     );
     println!(
         "reclaimable:   {} (estimate, not a measured result)",
-        report.reclaimable_human.as_deref().unwrap_or("unknown")
+        format_size_field(
+            report.reclaimable_human.as_deref(),
+            report.reclaimable_bytes_is_lower_bound
+        )
     );
     println!("completeness:  {}", report.completeness);
     println!("confidence:    {}", report.confidence);
@@ -595,6 +617,7 @@ mod tests {
                 Some(b) => ProbeOutcome::Observed(b),
                 None => ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             },
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: kind.regenerability(),
@@ -815,6 +838,151 @@ mod tests {
 
         let report = build_detect_report(&candidates);
         assert_eq!(report.candidates.len(), 2);
+    }
+
+    /// HORO-1049: `format_size_field` — the shared text-rendering helper
+    /// both `print_detect_report` and `print_explain_report` use — marks a
+    /// lower-bound size with the `"≥ ... (lower bound — scan truncated)"`
+    /// wording, leaves a settled size bare, and falls back to `"unknown"`
+    /// with no size at all (never marked, regardless of the flag).
+    #[test]
+    fn format_size_field_marks_lower_bound_only_when_flagged() {
+        assert_eq!(
+            format_size_field(Some("155.1 MB"), true),
+            "≥ 155.1 MB (lower bound — scan truncated)"
+        );
+        assert_eq!(format_size_field(Some("155.1 MB"), false), "155.1 MB");
+        assert_eq!(format_size_field(None, true), "unknown");
+        assert_eq!(format_size_field(None, false), "unknown");
+    }
+
+    /// Builds an [`Evidence`] the way a detector would for a genuinely
+    /// budget-truncated size estimate (HORO-1016/HORO-1049): a real
+    /// tempdir walked with a deliberately tiny [`crate::scanner::ScanBudget`]
+    /// (mirroring `detectors::size_estimate_tests`'s own truncation
+    /// fixture pattern), fed through the real `discovery_evidence` +
+    /// `SizeEstimate::is_lower_bound` plumbing this ticket adds — never a
+    /// hand-set `true` literal, so this proves the typed signal actually
+    /// flows from the estimate rather than being asserted by fiat.
+    fn evidence_from_truncated_estimate(root: &Path) -> Evidence {
+        use crate::detectors::{discovery_evidence, estimate_logical_bytes, probe_mtime};
+        use crate::evidence::{Recoverability, Regenerability};
+        use crate::scanner::ScanBudget;
+
+        let canonical = root.canonicalize().expect("canonicalize fixture root");
+        let budget = ScanBudget::default().with_max_files_visited(1);
+        let estimate = estimate_logical_bytes(&canonical, budget);
+        assert!(
+            estimate.is_lower_bound(),
+            "fixture must genuinely force truncation"
+        );
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(canonical.clone()),
+        );
+        let is_lower_bound = estimate.is_lower_bound();
+        discovery_evidence(
+            resource,
+            DetectorId("test"),
+            &canonical,
+            estimate.bytes.clone(),
+            estimate.bytes,
+            is_lower_bound,
+            probe_mtime(&canonical),
+            Regenerability::RegenerableByRebuild,
+            Recoverability::RegenerableByRebuild,
+            NativeCleanup::Unsupported,
+        )
+    }
+
+    /// HORO-1049 AC: a genuinely budget-truncated size estimate surfaces
+    /// the lower-bound marker in both `DetectCandidateReport`'s and
+    /// `ExplainReport`'s rendered text, and the typed flag is `true` in
+    /// their `--json` (`serde_json`) representation.
+    #[test]
+    fn genuinely_truncated_estimate_surfaces_lower_bound_marker_in_text_and_json() {
+        let root = std::env::temp_dir().join(format!(
+            "glomeris-cli-lower-bound-truncated-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.bin"), vec![0u8; 100]).unwrap();
+        std::fs::write(root.join("b.bin"), vec![0u8; 100]).unwrap();
+        std::fs::write(root.join("c.bin"), vec![0u8; 100]).unwrap();
+
+        let ev = evidence_from_truncated_estimate(&root);
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::now());
+
+        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())]);
+        let candidate = &detect_report.candidates[0];
+        assert!(candidate.reclaimable_bytes_is_lower_bound);
+        assert_eq!(
+            format_size_field(
+                candidate.reclaimable_human.as_deref(),
+                candidate.reclaimable_bytes_is_lower_bound
+            ),
+            format!(
+                "≥ {} (lower bound — scan truncated)",
+                candidate.reclaimable_human.as_deref().unwrap()
+            )
+        );
+        let detect_json = serde_json::to_string(&detect_report).expect("serialize");
+        assert!(detect_json.contains("\"reclaimable_bytes_is_lower_bound\":true"));
+
+        let explain_report = build_explain_report(&ev, &decision);
+        assert!(explain_report.reclaimable_bytes_is_lower_bound);
+        assert_eq!(
+            format_size_field(
+                explain_report.reclaimable_human.as_deref(),
+                explain_report.reclaimable_bytes_is_lower_bound
+            ),
+            format!(
+                "≥ {} (lower bound — scan truncated)",
+                explain_report.reclaimable_human.as_deref().unwrap()
+            )
+        );
+        let explain_json = serde_json::to_string(&explain_report).expect("serialize");
+        assert!(explain_json.contains("\"reclaimable_bytes_is_lower_bound\":true"));
+
+        // Prove the print functions don't panic on a lower-bound report —
+        // matches this module's existing `print_functions_do_not_panic_*`
+        // convention.
+        print_detect_report(&detect_report);
+        print_explain_report(&explain_report);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1049 AC: an estimate that completes within budget never shows
+    /// the lower-bound marker, in either text or `--json`.
+    #[test]
+    fn estimate_within_budget_shows_no_lower_bound_marker() {
+        let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1024));
+        assert!(!ev.reclaimable_bytes_is_lower_bound);
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+
+        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())]);
+        let candidate = &detect_report.candidates[0];
+        assert!(!candidate.reclaimable_bytes_is_lower_bound);
+        assert_eq!(
+            format_size_field(
+                candidate.reclaimable_human.as_deref(),
+                candidate.reclaimable_bytes_is_lower_bound
+            ),
+            candidate.reclaimable_human.as_deref().unwrap()
+        );
+        let detect_json = serde_json::to_string(&detect_report).expect("serialize");
+        assert!(detect_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
+
+        let explain_report = build_explain_report(&ev, &decision);
+        assert!(!explain_report.reclaimable_bytes_is_lower_bound);
+        let explain_json = serde_json::to_string(&explain_report).expect("serialize");
+        assert!(explain_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
     }
 
     #[test]
