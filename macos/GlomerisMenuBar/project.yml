@@ -29,3 +29,18 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBar
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: NO
+    scheme:
+      testTargets:
+        - GlomerisMenuBarTests
+  GlomerisMenuBarTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+        excludes:
+          - "Fixtures/**"
+      - path: Sources/GlomerisClient.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
+        GENERATE_INFOPLIST_FILE: YES
