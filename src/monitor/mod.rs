@@ -16,7 +16,9 @@ pub use clock::{Clock, FakeClock, SystemClock};
 pub use config::ThresholdConfig;
 pub use fs_stat::{FsStat, FsUsage};
 pub use notifier::Notifier;
-pub use persistence::{FilePersistence, PersistenceBackend, PressureEvent};
+pub use persistence::{
+    read_heartbeat, write_heartbeat, FilePersistence, Heartbeat, PersistenceBackend, PressureEvent,
+};
 pub use poller::{poll_once, run, PollConfig, PollOutcome};
 pub use pressure::PressureState;
 pub use state_machine::{PressureStateMachine, Transition};
