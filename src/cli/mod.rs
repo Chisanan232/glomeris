@@ -985,6 +985,52 @@ mod tests {
         assert!(explain_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
     }
 
+    /// HORO-1051 AC: `fingerprint_token` is `Some` for a resource that
+    /// carries any real fingerprint field, and `None` for one that
+    /// doesn't — e.g. a `ResourceLocator::Tool` resource such as Docker's
+    /// build cache, which never gets a dev/inode/mtime (see
+    /// `detectors/docker.rs`).
+    #[test]
+    fn fingerprint_token_is_some_for_path_resource_and_none_for_tool_resource() {
+        let mut ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1024));
+        ev.fingerprint = ResourceFingerprint {
+            dev_ino: Some((1, 2)),
+            mtime: Some(SystemTime::UNIX_EPOCH),
+            tool_revision: None,
+        };
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let report = build_explain_report(&ev, &decision);
+        let token = report
+            .fingerprint_token
+            .expect("path resource with a real fingerprint must report a token");
+        let decoded = crate::evidence::decode_fingerprint_token(&token).expect("token must decode");
+        assert_eq!(decoded, ev.fingerprint);
+
+        let mut tool_ev = evidence(
+            "/tmp/proj/target",
+            ResourceKind::DockerBuildCache,
+            Some(1024),
+        );
+        tool_ev.resource = ResourceId::new(
+            ResourceKind::DockerBuildCache,
+            ResourceLocator::Tool {
+                tool: crate::evidence::OwningTool::Docker,
+                id: "build_cache".to_string(),
+            },
+        );
+        tool_ev.fingerprint = ResourceFingerprint {
+            dev_ino: None,
+            mtime: None,
+            tool_revision: None,
+        };
+        let tool_decision = classify(&tool_ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let tool_report = build_explain_report(&tool_ev, &tool_decision);
+        assert!(
+            tool_report.fingerprint_token.is_none(),
+            "a resource with no real fingerprint fields must report no token"
+        );
+    }
+
     #[test]
     fn resolve_action_for_prefers_native_cleanup_when_registered() {
         let mut ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1));

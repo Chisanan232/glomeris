@@ -11,8 +11,9 @@ pub mod model;
 pub mod probe;
 
 pub use model::{
-    ActionId, Completeness, Confidence, Evidence, EvidenceField, GitState, NativeCleanup,
-    OwningTool, ProcessRef, Recoverability, Regenerability, ResourceFingerprint, ResourceId,
-    ResourceKind, ResourceLocator,
+    decode_fingerprint_token, encode_fingerprint_token, ActionId, Completeness, Confidence,
+    Evidence, EvidenceField, FingerprintTokenError, GitState, NativeCleanup, OwningTool,
+    ProcessRef, Recoverability, Regenerability, ResourceFingerprint, ResourceId, ResourceKind,
+    ResourceLocator,
 };
 pub use probe::{ProbeOutcome, ProbeReason};
