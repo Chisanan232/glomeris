@@ -1,4 +1,4 @@
-//! Advisory, machine-wide execution lock (HORO-1054).
+//! Advisory, per-user execution lock (HORO-1054).
 //!
 //! `free --target` and `emergency` have never raced against each other
 //! before: they are the only two real-execution paths, and each is a
