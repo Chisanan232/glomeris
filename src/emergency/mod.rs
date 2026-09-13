@@ -554,6 +554,7 @@ mod tests {
             logical_bytes: ProbeOutcome::Observed(4096),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Observed(4096),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(collected_at),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: kind.regenerability(),

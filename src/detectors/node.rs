@@ -58,6 +58,7 @@ impl Detector for NodeDetector {
                         &canonical,
                         logical_bytes.clone(),
                         logical_bytes,
+                        estimate.is_lower_bound(),
                         probe_mtime(&canonical),
                         Regenerability::RegenerableByRebuild,
                         Recoverability::RegenerableByRebuild,

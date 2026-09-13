@@ -107,6 +107,16 @@ pub(crate) struct SizeEstimate {
 }
 
 impl SizeEstimate {
+    /// Typed truncation signal for [`Evidence::reclaimable_bytes_is_lower_bound`]:
+    /// `true` only when `bytes` is `Observed` AND the walk stopped early on
+    /// its own budget rather than exhausting the subtree. This is the
+    /// single source of truth both this typed flag and
+    /// [`SizeEstimate::lower_bound_note`]'s advisory text are derived
+    /// from — callers must never derive one from the other.
+    pub fn is_lower_bound(&self) -> bool {
+        self.bytes.is_observed() && self.stop_reason != StopReason::Exhausted
+    }
+
     /// A provenance note for [`Evidence::push_source`], present only when
     /// the walk stopped early (`stop_reason != Exhausted`) — i.e. `bytes`
     /// is a truthful lower bound, not the full subtree total. Never a
@@ -295,6 +305,7 @@ pub(crate) fn discovery_evidence(
     path_for_fingerprint: &Path,
     logical_bytes: ProbeOutcome<u64>,
     reclaimable_bytes: ProbeOutcome<u64>,
+    reclaimable_bytes_is_lower_bound: bool,
     last_modified: ProbeOutcome<SystemTime>,
     regenerability: Regenerability,
     recoverability: Recoverability,
@@ -311,6 +322,7 @@ pub(crate) fn discovery_evidence(
         logical_bytes,
         physical_bytes: None,
         reclaimable_bytes,
+        reclaimable_bytes_is_lower_bound,
         last_modified,
         last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         regenerability,

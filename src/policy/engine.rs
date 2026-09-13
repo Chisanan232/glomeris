@@ -136,6 +136,7 @@ mod tests {
             logical_bytes: ProbeOutcome::Observed(1024),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Observed(1024),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: kind.regenerability(),
@@ -154,6 +155,50 @@ mod tests {
         PolicyConfig {
             max_evidence_age: Duration::from_secs(300),
         }
+    }
+
+    /// HORO-1049's critical AC: `reclaimable_bytes_is_lower_bound` is
+    /// purely a display/reporting concern and must NEVER become a policy
+    /// input. Two otherwise-identical `Evidence` values, differing only in
+    /// this field, must classify to an identical `PolicyDecision` — same
+    /// class, same reasons — in every branch `classify` can reach
+    /// (Protected via unknown kind, Ask via active-use, and the AutoSafe
+    /// happy path), not just the default AutoSafe case.
+    #[test]
+    fn reclaimable_bytes_is_lower_bound_never_affects_classify_output() {
+        let cfg = cfg();
+
+        // AutoSafe path.
+        let mut ev_false = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let mut ev_true = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev_false.reclaimable_bytes_is_lower_bound = false;
+        ev_true.reclaimable_bytes_is_lower_bound = true;
+        assert_eq!(
+            classify(&ev_false, &cfg, NOW),
+            classify(&ev_true, &cfg, NOW)
+        );
+
+        // Ask path (active use).
+        let mut ev_false = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let mut ev_true = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev_false.tool_liveness = ProbeOutcome::Observed(true);
+        ev_true.tool_liveness = ProbeOutcome::Observed(true);
+        ev_false.reclaimable_bytes_is_lower_bound = false;
+        ev_true.reclaimable_bytes_is_lower_bound = true;
+        assert_eq!(
+            classify(&ev_false, &cfg, NOW),
+            classify(&ev_true, &cfg, NOW)
+        );
+
+        // Protected path (unconditional, unknown kind).
+        let mut ev_false = complete_evidence(ResourceKind::Unknown, NOW);
+        let mut ev_true = complete_evidence(ResourceKind::Unknown, NOW);
+        ev_false.reclaimable_bytes_is_lower_bound = false;
+        ev_true.reclaimable_bytes_is_lower_bound = true;
+        assert_eq!(
+            classify(&ev_false, &cfg, NOW),
+            classify(&ev_true, &cfg, NOW)
+        );
     }
 
     #[test]

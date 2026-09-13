@@ -225,10 +225,12 @@ fn build_fresh_evidence(
         ResourceLocator::Tool { .. } => None,
     };
 
-    let logical_bytes = match path {
-        Some(p) => estimate_logical_bytes(p, size_estimate_budget()).bytes,
+    let size_estimate = path.map(|p| estimate_logical_bytes(p, size_estimate_budget()));
+    let logical_bytes = match &size_estimate {
+        Some(estimate) => estimate.bytes.clone(),
         None => ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
     };
+    let is_lower_bound = size_estimate.as_ref().is_some_and(|e| e.is_lower_bound());
     let last_modified = match path {
         Some(p) => probe_mtime(p),
         None => ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
@@ -257,6 +259,7 @@ fn build_fresh_evidence(
         fingerprint_path,
         logical_bytes,
         reclaimable_bytes,
+        is_lower_bound,
         last_modified,
         resource.kind.regenerability(),
         action.recoverability(),
@@ -696,6 +699,7 @@ mod tests {
             logical_bytes: ProbeOutcome::Observed(1024),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: kind.regenerability(),
@@ -1469,6 +1473,7 @@ mod tests {
             logical_bytes: ProbeOutcome::Observed(999_999_999),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Observed(999_999_999),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(now),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: resource.kind.regenerability(),

@@ -89,6 +89,7 @@ impl Detector for HomebrewDetector {
             &canonical,
             logical_bytes.clone(),
             logical_bytes,
+            estimate.is_lower_bound(),
             probe_mtime(&canonical),
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
