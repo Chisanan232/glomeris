@@ -1,6 +1,6 @@
 [package]
 name = "glomeris"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Evidence-first, policy-constrained developer storage autopilot for macOS."
 license = "Apache-2.0"
