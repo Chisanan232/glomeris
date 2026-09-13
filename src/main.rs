@@ -140,6 +140,42 @@ fn run_status_command(_args: &[String]) {
     std::process::exit(1);
 }
 
+/// Exit code used when [`glomeris::executor::lock::acquire_execution_lock`]
+/// reports [`glomeris::executor::lock::LockError::AlreadyHeld`] — a
+/// distinct "busy" signal (loosely following `sysexits.h`'s `EX_TEMPFAIL`)
+/// rather than a generic failure, so a caller/script can tell "another
+/// real execution is already in progress, retry later" apart from "this
+/// invocation itself failed".
+const EXIT_EXECUTION_LOCK_BUSY: i32 = 75;
+
+/// Acquires the standalone HORO-1054 execution lock or exits with
+/// [`EXIT_EXECUTION_LOCK_BUSY`]/a generic failure, printing `command_name`
+/// in the error message. Shared by `run_emergency_command` and
+/// `free_run` — the two existing real-execution entry points; a future
+/// `execute` subcommand (HORO-1055) reuses the same
+/// `glomeris::executor::lock::acquire_execution_lock` primitive.
+#[cfg(target_os = "macos")]
+fn acquire_execution_lock_or_exit(
+    command_name: &str,
+) -> glomeris::executor::lock::ExecutionLockGuard {
+    use glomeris::executor::lock::{acquire_execution_lock, LockError};
+
+    match acquire_execution_lock() {
+        Ok(guard) => guard,
+        Err(LockError::AlreadyHeld) => {
+            eprintln!(
+                "glomeris {command_name}: another glomeris execution is already in progress \
+                 (execution lock busy) — try again shortly"
+            );
+            std::process::exit(EXIT_EXECUTION_LOCK_BUSY);
+        }
+        Err(LockError::Io(e)) => {
+            eprintln!("glomeris {command_name}: failed to acquire the execution lock: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// `glomeris emergency` — the degraded-path recovery command (HORO-953).
 /// Never touches network or an LLM provider; see
 /// `glomeris::emergency`'s module docs for the full contract.
@@ -152,6 +188,11 @@ fn run_emergency_command() {
     use glomeris::monitor::FilePersistence;
     use glomeris::platform::macos::MacosFsStat;
     use std::time::Duration;
+
+    // HORO-1054: held for the duration of the real-execution portion
+    // below, released automatically (via `Drop`) when this function
+    // returns.
+    let _execution_lock = acquire_execution_lock_or_exit("emergency");
 
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
@@ -658,6 +699,11 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots
     use glomeris::platform::macos::MacosFsStat;
     use glomeris::policy::PolicyConfig;
     use std::time::Duration;
+
+    // HORO-1054: held for the duration of the real-execution portion
+    // below, released automatically (via `Drop`) when this function
+    // returns.
+    let _execution_lock = acquire_execution_lock_or_exit("free");
 
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
