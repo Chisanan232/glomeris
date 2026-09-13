@@ -5,6 +5,7 @@ edition = "2021"
 description = "Evidence-first, policy-constrained developer storage autopilot for macOS."
 license = "Apache-2.0"
 repository = "https://github.com/Chisanan232/glomeris"
+homepage = "https://github.com/Chisanan232/glomeris"
 
 [lib]
 name = "glomeris"
