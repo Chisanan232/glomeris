@@ -7,7 +7,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") | Some("help") => {
             println!(
-                "usage: glomeris <daemon <install [--force]|uninstall|status|run>|scan|status [--json]|\
+                "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|scan|status [--json]|\
                  detect [--project-root <path>]... [--json]|\
                  explain <resource_id_or_path> [--project-root <path>]... [--json]|\
                  clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
@@ -38,7 +38,7 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: glomeris <daemon <install [--force]|uninstall|status|run>|scan|status [--json]|\
+        "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|scan|status [--json]|\
          detect [--project-root <path>]... [--json]|\
          explain <resource_id_or_path> [--project-root <path>]... [--json]|\
          clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
@@ -513,7 +513,7 @@ fn run_daemon_command(args: &[String]) {
             daemon_install(force);
         }
         Some("uninstall") => daemon_uninstall(),
-        Some("status") => daemon_status(),
+        Some("status") => daemon_status(&args[1..]),
         Some("run") => daemon_run(),
         Some(other) => {
             eprintln!("glomeris daemon: unknown subcommand '{other}'");
@@ -599,8 +599,20 @@ fn daemon_uninstall() {
     }
 }
 
+/// Same `Library/Application Support/Glomeris/heartbeat.json` path
+/// `daemon_run` writes to (HORO-1044) — shared here so `daemon status
+/// --json` (HORO-1045) reads back exactly what the poll loop wrote.
 #[cfg(target_os = "macos")]
-fn daemon_status() {
+fn heartbeat_path() -> PathBuf {
+    std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/heartbeat.json"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-heartbeat.json"))
+}
+
+#[cfg(target_os = "macos")]
+fn daemon_status(args: &[String]) {
+    let (_positionals, flags) = split_flags(args, &["--json"]);
+
     let plist_path = match platform::macos::launchd::default_plist_path() {
         Ok(p) => p,
         Err(e) => {
@@ -609,9 +621,22 @@ fn daemon_status() {
         }
     };
     let status = platform::macos::launchd::status(&plist_path);
-    println!("plist installed: {}", status.plist_installed);
-    println!("plist path: {}", status.plist_path.display());
-    println!("loaded in launchd: {}", status.loaded);
+    let heartbeat = monitor::read_heartbeat(&heartbeat_path());
+    let now = monitor::persistence::unix_now_secs();
+
+    let report = glomeris::cli::build_daemon_status_report(
+        status.plist_installed,
+        &status.plist_path,
+        status.loaded,
+        heartbeat.as_ref(),
+        now,
+    );
+
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_daemon_status_report(&report);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -624,10 +649,9 @@ fn daemon_run() {
         .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-history.tsv"));
     // Same `Library/Application Support/Glomeris/` directory as
     // `history_path` above — see `monitor::run`'s doc comment (HORO-1044);
-    // a later ticket (HORO-1045) reads this back for `daemon status --json`.
-    let heartbeat_path = std::env::var("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/heartbeat.json"))
-        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-heartbeat.json"));
+    // `daemon_status`'s `heartbeat_path()` reads this back for `daemon
+    // status --json` (HORO-1045).
+    let heartbeat_path = heartbeat_path();
 
     let config = PollConfig::new("/");
     let thresholds = ThresholdConfig::default();
@@ -725,7 +749,7 @@ fn daemon_uninstall() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn daemon_status() {
+fn daemon_status(_args: &[String]) {
     eprintln!("glomeris daemon status: only supported on macOS");
     std::process::exit(1);
 }
