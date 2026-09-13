@@ -50,6 +50,7 @@ fn protected_evidence() -> Evidence {
         logical_bytes: ProbeOutcome::Observed(1024),
         physical_bytes: None,
         reclaimable_bytes: ProbeOutcome::Observed(1024),
+        reclaimable_bytes_is_lower_bound: false,
         last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
         last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         regenerability: ResourceKind::CargoTargetDir.regenerability(),

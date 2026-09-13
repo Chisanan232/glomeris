@@ -350,6 +350,7 @@ mod select_candidate_tests {
             logical_bytes: ProbeOutcome::Observed(logical_bytes),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Observed(logical_bytes),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: kind.regenerability(),
@@ -833,6 +834,7 @@ mod run_tests {
             // the real (genuinely zero-byte) deletion run, which is this
             // test's actual purpose (see its own doc comment above).
             reclaimable_bytes: ProbeOutcome::Observed(0),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(SystemTime::now()),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: ResourceKind::NodeModules.regenerability(),

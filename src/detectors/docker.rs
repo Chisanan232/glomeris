@@ -159,6 +159,10 @@ impl Detector for DockerDetector {
             logical_bytes,
             physical_bytes: None,
             reclaimable_bytes,
+            // Docker's byte counts come from `docker system df` output
+            // parsing, never `estimate_logical_bytes`'s budget-truncated
+            // walk — never a lower bound.
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: Regenerability::RegenerableByTool,

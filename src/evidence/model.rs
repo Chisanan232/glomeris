@@ -361,6 +361,18 @@ pub struct Evidence {
     /// ticket.
     pub physical_bytes: Option<u64>,
     pub reclaimable_bytes: ProbeOutcome<u64>,
+    /// `true` when `reclaimable_bytes` (and `logical_bytes`, which shares
+    /// the same estimate for every detector that sets this) is a truthful
+    /// lower bound rather than a settled measurement — i.e. the
+    /// size-estimate walk that produced it stopped early on
+    /// [`crate::detectors::SizeEstimate`]'s own entry/time budget
+    /// (HORO-1016) rather than exhausting the subtree. Set directly from
+    /// that typed signal at discovery/revalidation time — never derived by
+    /// string-sniffing `sources`/`SizeEstimate::lower_bound_note`. Purely a
+    /// display/reporting concern: `policy::classify()` must never read
+    /// this field (see the `classify()`-invariance regression test in
+    /// `src/policy/engine.rs`'s test module).
+    pub reclaimable_bytes_is_lower_bound: bool,
     pub last_modified: ProbeOutcome<SystemTime>,
     pub last_accessed: ProbeOutcome<SystemTime>,
     pub regenerability: Regenerability,
@@ -468,6 +480,7 @@ mod tests {
             logical_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: Regenerability::Unknown,

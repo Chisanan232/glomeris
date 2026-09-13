@@ -118,6 +118,11 @@ pub struct DetectCandidateReport {
     pub kind: &'static str,
     pub reclaimable_bytes: Option<u64>,
     pub reclaimable_human: Option<String>,
+    /// `true` when `reclaimable_bytes` is a truthful lower bound rather
+    /// than a settled measurement — see
+    /// [`Evidence::reclaimable_bytes_is_lower_bound`]'s doc comment.
+    /// Always `false` when `reclaimable_bytes` is `None`.
+    pub reclaimable_bytes_is_lower_bound: bool,
     pub policy_label: &'static str,
     pub reasons: Vec<&'static str>,
 }
@@ -130,6 +135,8 @@ impl DetectCandidateReport {
             kind: ev.resource.kind_tag(),
             reclaimable_bytes: reclaimable,
             reclaimable_human: reclaimable.map(human_bytes),
+            reclaimable_bytes_is_lower_bound: reclaimable.is_some()
+                && ev.reclaimable_bytes_is_lower_bound,
             policy_label: label_for(decision).as_str(),
             reasons: decision.reasons.iter().map(|r| r.as_str()).collect(),
         }
@@ -165,6 +172,11 @@ pub struct ExplainReport {
     /// the measured counterpart, which only exists after real execution.
     pub reclaimable_bytes: Option<u64>,
     pub reclaimable_human: Option<String>,
+    /// `true` when `logical_bytes`/`reclaimable_bytes` is a truthful lower
+    /// bound rather than a settled measurement — see
+    /// [`Evidence::reclaimable_bytes_is_lower_bound`]'s doc comment.
+    /// Always `false` when `reclaimable_bytes` is `None`.
+    pub reclaimable_bytes_is_lower_bound: bool,
     pub completeness: &'static str,
     pub confidence: &'static str,
     pub active_use_signals: Vec<String>,
@@ -193,6 +205,8 @@ impl ExplainReport {
             logical_human: logical.map(human_bytes),
             reclaimable_bytes: reclaimable,
             reclaimable_human: reclaimable.map(human_bytes),
+            reclaimable_bytes_is_lower_bound: reclaimable.is_some()
+                && ev.reclaimable_bytes_is_lower_bound,
             completeness: completeness_tag(&ev.completeness()),
             confidence: confidence_tag(ev.confidence()),
             active_use_signals: active_use_signals(ev),
@@ -285,6 +299,7 @@ mod tests {
             logical_bytes: ProbeOutcome::Observed(2048),
             physical_bytes: None,
             reclaimable_bytes: ProbeOutcome::Observed(1024),
+            reclaimable_bytes_is_lower_bound: false,
             last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
             last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             regenerability: Regenerability::RegenerableByRebuild,
@@ -323,6 +338,7 @@ mod tests {
         assert_eq!(report.kind, "cargo_target_dir");
         assert_eq!(report.reclaimable_bytes, Some(1024));
         assert_eq!(report.reclaimable_human.as_deref(), Some("1.0 KB"));
+        assert!(!report.reclaimable_bytes_is_lower_bound);
         assert_eq!(report.policy_label, "AUTO_SAFE");
         assert_eq!(report.reasons, vec!["no_active_use_observed"]);
     }
@@ -339,6 +355,32 @@ mod tests {
         assert_eq!(report.policy_label, "UNKNOWN_INCOMPLETE");
     }
 
+    /// HORO-1049: the typed lower-bound flag surfaces onto the DTO when
+    /// set on `Evidence`.
+    #[test]
+    fn detect_candidate_report_surfaces_lower_bound_flag() {
+        let mut ev = base_evidence();
+        ev.reclaimable_bytes_is_lower_bound = true;
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d);
+
+        assert!(report.reclaimable_bytes_is_lower_bound);
+    }
+
+    /// HORO-1049: the flag must never surface as `true` when there is no
+    /// observed `reclaimable_bytes` to attach it to — a lower bound on
+    /// nothing is a contradiction, not a signal.
+    #[test]
+    fn detect_candidate_report_lower_bound_flag_is_false_without_observed_bytes() {
+        let mut ev = base_evidence();
+        ev.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        ev.reclaimable_bytes_is_lower_bound = true;
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d);
+
+        assert!(!report.reclaimable_bytes_is_lower_bound);
+    }
+
     #[test]
     fn explain_report_distinguishes_logical_from_reclaimable_bytes() {
         let ev = base_evidence();
@@ -350,6 +392,18 @@ mod tests {
         assert_ne!(report.logical_bytes, report.reclaimable_bytes);
         assert_eq!(report.logical_human.as_deref(), Some("2.0 KB"));
         assert_eq!(report.reclaimable_human.as_deref(), Some("1.0 KB"));
+        assert!(!report.reclaimable_bytes_is_lower_bound);
+    }
+
+    /// HORO-1049: `explain`'s DTO surfaces the typed lower-bound flag too.
+    #[test]
+    fn explain_report_surfaces_lower_bound_flag() {
+        let mut ev = base_evidence();
+        ev.reclaimable_bytes_is_lower_bound = true;
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d);
+
+        assert!(report.reclaimable_bytes_is_lower_bound);
     }
 
     #[test]
