@@ -17,7 +17,7 @@ use crate::monitor::clock::Clock;
 use crate::monitor::config::ThresholdConfig;
 use crate::monitor::fs_stat::FsStat;
 use crate::monitor::notifier::Notifier;
-use crate::monitor::persistence::{unix_now_secs, PersistenceBackend, PressureEvent};
+use crate::monitor::persistence::{unix_now_secs, Heartbeat, PersistenceBackend, PressureEvent};
 use crate::monitor::pressure::PressureState;
 use crate::monitor::state_machine::PressureStateMachine;
 
@@ -58,9 +58,15 @@ pub fn default_confirm_after() -> u32 {
 #[derive(Debug, Clone)]
 pub struct PollOutcome {
     pub observed_state: PressureState,
+    pub used_percent: f64,
+    pub free_bytes: u64,
     pub transitioned: bool,
     pub notify_error: Option<String>,
     pub persist_error: Option<String>,
+    /// Set when this cycle's best-effort heartbeat write (see `run`)
+    /// failed. Never causes the loop to stop — same failure philosophy as
+    /// `persist_error`.
+    pub heartbeat_error: Option<String>,
 }
 
 /// Runs one observe → classify → (maybe) notify/persist step. Never panics
@@ -82,9 +88,12 @@ pub fn poll_once(
 
     let mut outcome = PollOutcome {
         observed_state,
+        used_percent,
+        free_bytes: usage.free_bytes,
         transitioned: false,
         notify_error: None,
         persist_error: None,
+        heartbeat_error: None,
     };
 
     if let Some(transition) = machine.observe(observed_state) {
@@ -117,6 +126,13 @@ pub fn poll_once(
 /// logged to `on_iteration` as an outcome-less iteration and does not stop
 /// the loop — only an unrecoverable setup error would do that, and there is
 /// none in this loop's steady state.
+///
+/// After each completed poll cycle, writes a best-effort heartbeat
+/// (`crate::monitor::persistence::Heartbeat`) to `heartbeat_path` so a
+/// later ticket (HORO-1045) can tell "loaded" apart from "actually
+/// polling". A write failure is reported via `PollOutcome::heartbeat_error`
+/// and otherwise ignored — it never stops the loop, matching
+/// `PersistenceBackend::record`'s failure philosophy.
 #[allow(clippy::too_many_arguments)]
 pub fn run<C, F, N, P>(
     config: &PollConfig,
@@ -125,6 +141,7 @@ pub fn run<C, F, N, P>(
     fs_stat: &F,
     notifier: &N,
     persistence: &P,
+    heartbeat_path: &Path,
     max_iterations: Option<u64>,
     mut on_iteration: impl FnMut(io::Result<PollOutcome>),
 ) where
@@ -143,7 +160,7 @@ pub fn run<C, F, N, P>(
             }
         }
 
-        let outcome = poll_once(
+        let mut outcome = poll_once(
             &config.watch_path,
             thresholds,
             &mut machine,
@@ -151,6 +168,18 @@ pub fn run<C, F, N, P>(
             notifier,
             persistence,
         );
+        if let Ok(ref mut o) = outcome {
+            let heartbeat = Heartbeat::new(
+                clock.unix_now_secs(),
+                o.observed_state,
+                o.used_percent,
+                o.free_bytes,
+            );
+            if let Err(e) = crate::monitor::persistence::write_heartbeat(heartbeat_path, &heartbeat)
+            {
+                o.heartbeat_error = Some(e.to_string());
+            }
+        }
         on_iteration(outcome);
 
         iterations += 1;
@@ -234,6 +263,16 @@ mod tests {
         }
     }
 
+    /// A unique temp path for a test's heartbeat file, mirroring the
+    /// `unique_temp_dir` convention in `platform::macos::launchd`'s tests.
+    fn unique_heartbeat_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "glomeris-heartbeat-test-{tag}-{}-{}",
+            std::process::id(),
+            unix_now_secs()
+        ))
+    }
+
     #[test]
     fn healthy_steady_state_never_transitions_or_notifies() {
         let fs = FixedFsStat {
@@ -313,6 +352,7 @@ mod tests {
             confirm_after: 1,
         };
         let mut iterations_seen = 0;
+        let heartbeat_path = unique_heartbeat_path("persist-failure");
         run(
             &config,
             &thresholds,
@@ -320,6 +360,7 @@ mod tests {
             &fs,
             &NoopNotifier,
             &AlwaysFailingPersistence,
+            &heartbeat_path,
             Some(20),
             |outcome| {
                 iterations_seen += 1;
@@ -327,6 +368,7 @@ mod tests {
             },
         );
         assert_eq!(iterations_seen, 20);
+        let _ = std::fs::remove_file(&heartbeat_path);
     }
 
     #[test]
@@ -342,6 +384,7 @@ mod tests {
             confirm_after: 1,
         };
 
+        let heartbeat_path = unique_heartbeat_path("sleep-cadence");
         run(
             &config,
             &thresholds,
@@ -349,6 +392,7 @@ mod tests {
             &fs,
             &NoopNotifier,
             &NoopPersistence,
+            &heartbeat_path,
             Some(4),
             |_| {},
         );
@@ -358,6 +402,7 @@ mod tests {
         // elapsed regardless.
         assert_eq!(clock.sleep_count(), 3);
         assert_eq!(clock.recorded_sleeps(), vec![Duration::from_secs(30); 3]);
+        let _ = std::fs::remove_file(&heartbeat_path);
     }
 
     #[test]
@@ -390,5 +435,108 @@ mod tests {
     fn state_types_are_send_sync_for_daemon_use() {
         assert_notifier_and_persistence_are_send_sync::<Arc<dyn Notifier>>();
         assert_notifier_and_persistence_are_send_sync::<Arc<dyn PersistenceBackend>>();
+    }
+
+    #[test]
+    fn heartbeat_timestamp_advances_across_consecutive_poll_cycles() {
+        use crate::monitor::persistence::read_heartbeat;
+
+        let thresholds = ThresholdConfig::default();
+        let fs = FixedFsStat {
+            usage: FsUsage::new(500_000_000_000, 450_000_000_000),
+        };
+        let clock = FakeClock::new();
+        let config = PollConfig {
+            watch_path: PathBuf::from("/"),
+            poll_interval: Duration::from_secs(30),
+            confirm_after: 1,
+        };
+        let heartbeat_path = unique_heartbeat_path("advancing-timestamp");
+
+        let mut observed_timestamps = Vec::new();
+        run(
+            &config,
+            &thresholds,
+            &clock,
+            &fs,
+            &NoopNotifier,
+            &NoopPersistence,
+            &heartbeat_path,
+            Some(3),
+            |outcome| {
+                assert!(outcome.is_ok());
+                let heartbeat = read_heartbeat(&heartbeat_path)
+                    .expect("heartbeat must be written and readable after every cycle");
+                observed_timestamps.push(heartbeat.last_poll_unix_secs);
+            },
+        );
+
+        assert_eq!(observed_timestamps.len(), 3);
+        // Same injected `FakeClock` seam `run_sleeps_between_polls_using_the_injected_clock`
+        // uses: `sleep` advances the fake clock deterministically, so each
+        // cycle's heartbeat timestamp must be strictly greater than the
+        // last, with no real time or wall-clock dependency.
+        assert!(
+            observed_timestamps.windows(2).all(|w| w[1] > w[0]),
+            "heartbeat timestamp must strictly advance across cycles: {observed_timestamps:?}"
+        );
+
+        let _ = std::fs::remove_file(&heartbeat_path);
+    }
+
+    #[test]
+    fn heartbeat_write_failure_does_not_stop_the_monitor_loop() {
+        let thresholds = ThresholdConfig::default();
+        let fs = FixedFsStat {
+            usage: FsUsage::new(500_000_000_000, 450_000_000_000),
+        };
+        let clock = FakeClock::new();
+        let config = PollConfig {
+            watch_path: PathBuf::from("/"),
+            poll_interval: Duration::from_secs(1),
+            confirm_after: 1,
+        };
+        // A path whose parent directory does not exist and cannot be
+        // created (parent is a *file*, not a directory), forcing every
+        // `write_heartbeat` call to fail deterministically.
+        let dir = unique_heartbeat_path("write-failure-parent");
+        std::fs::write(&dir, b"not a directory").unwrap();
+        let heartbeat_path = dir.join("heartbeat.json");
+
+        let mut iterations_seen = 0;
+        let mut heartbeat_errors_seen = 0;
+        run(
+            &config,
+            &thresholds,
+            &clock,
+            &fs,
+            &NoopNotifier,
+            &NoopPersistence,
+            &heartbeat_path,
+            Some(10),
+            |outcome| {
+                let outcome = outcome.expect("a heartbeat write failure must not error the loop");
+                iterations_seen += 1;
+                if outcome.heartbeat_error.is_some() {
+                    heartbeat_errors_seen += 1;
+                }
+            },
+        );
+
+        assert_eq!(
+            iterations_seen, 10,
+            "the loop must keep running for all iterations despite heartbeat write failures"
+        );
+        assert_eq!(
+            heartbeat_errors_seen, 10,
+            "every iteration must report the heartbeat write failure rather than silently \
+             succeed or panic"
+        );
+        assert!(
+            !heartbeat_path.exists(),
+            "a failed heartbeat write must not leave a partial file behind"
+        );
+
+        let _ = std::fs::remove_file(&dir);
     }
 }

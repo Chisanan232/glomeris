@@ -8,6 +8,7 @@
 //! No feature in this crate may depend on persistence succeeding.
 
 use crate::monitor::pressure::PressureState;
+use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -73,6 +74,85 @@ pub fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// A snapshot of the most recently completed poll cycle, written best-effort
+/// so a future `daemon status --json` (HORO-1045) can tell "installed and
+/// loaded" apart from "actually polling". `state` is the pressure state's
+/// stable string tag (`PressureState::as_str()`), not a derived
+/// serialization of the enum itself — same reasoning as
+/// `crate::reporting::dto`: never `#[derive(Serialize)]` a domain type
+/// directly, so adding a variant upstream can't silently change this file's
+/// shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    pub last_poll_unix_secs: u64,
+    pub state: String,
+    pub used_percent: f64,
+    pub free_bytes: u64,
+}
+
+impl Heartbeat {
+    pub fn new(
+        last_poll_unix_secs: u64,
+        state: PressureState,
+        used_percent: f64,
+        free_bytes: u64,
+    ) -> Self {
+        Self {
+            last_poll_unix_secs,
+            state: state.as_str().to_string(),
+            used_percent,
+            free_bytes,
+        }
+    }
+}
+
+/// Writes `heartbeat` to `path` as JSON, creating parent directories as
+/// needed. Best-effort by contract: callers must treat any error here as
+/// non-fatal to the poll loop, matching `PersistenceBackend::record`'s
+/// failure philosophy — see this module's doc comment.
+///
+/// Writes to a sibling temp file, then `fs::rename`s it over `path` — same
+/// atomic-write shape as `platform::macos::launchd::write_atomic` — so a
+/// concurrent `read_heartbeat` (a separate process, e.g. `daemon status
+/// --json`) can never observe a truncated or partially-written file. A
+/// plain truncate-then-write would let a reader briefly see an empty file,
+/// which `read_heartbeat` degrades to `None` — the exact signal that means
+/// "not polling", which would be a false report for an otherwise-healthy
+/// daemon.
+pub fn write_heartbeat(path: &Path, heartbeat: &Heartbeat) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let write_result = (|| -> io::Result<()> {
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        serde_json::to_writer(file, heartbeat).map_err(io::Error::from)
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Reads back the heartbeat previously written by `write_heartbeat`.
+/// Returns `None` on any error (missing file, unreadable, malformed JSON)
+/// rather than propagating — a later ticket (HORO-1045) reads this
+/// advisory file, and a bad/missing heartbeat must degrade to "no
+/// heartbeat available", never an error the CLI has to handle specially.
+pub fn read_heartbeat(path: &Path) -> Option<Heartbeat> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
 /// A backend that always fails, used by the polling-loop tests to prove
 /// persistence failure never stops monitoring.
 #[cfg(test)]
@@ -128,5 +208,56 @@ mod tests {
             free_bytes: 0,
         };
         assert!(backend.record(&event).is_err());
+    }
+
+    fn unique_heartbeat_test_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "glomeris-heartbeat-persistence-test-{tag}-{}-{}",
+            std::process::id(),
+            unix_now_secs()
+        ))
+    }
+
+    #[test]
+    fn heartbeat_round_trips_through_write_and_read() {
+        let path = unique_heartbeat_test_path("round-trip");
+        let heartbeat = Heartbeat::new(1_700_000_123, PressureState::Warn, 76.5, 40_000_000_000);
+
+        write_heartbeat(&path, &heartbeat).expect("write_heartbeat should succeed");
+        let read_back = read_heartbeat(&path).expect("heartbeat should be readable after write");
+
+        assert_eq!(read_back, heartbeat);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_heartbeat_returns_none_for_malformed_contents() {
+        let path = unique_heartbeat_test_path("malformed");
+        std::fs::write(&path, b"not valid json").unwrap();
+
+        assert!(read_heartbeat(&path).is_none());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_heartbeat_returns_none_for_missing_file() {
+        let path = unique_heartbeat_test_path("missing");
+        assert!(!path.exists());
+
+        assert!(read_heartbeat(&path).is_none());
+    }
+
+    #[test]
+    fn write_heartbeat_leaves_no_temp_file_on_success() {
+        let path = unique_heartbeat_test_path("no-tmp-leftover");
+        let heartbeat = Heartbeat::new(1_700_000_000, PressureState::Healthy, 10.0, 1_000_000);
+
+        write_heartbeat(&path, &heartbeat).expect("write_heartbeat should succeed");
+
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = std::fs::remove_file(&path);
     }
 }

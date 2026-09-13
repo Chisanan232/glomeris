@@ -622,6 +622,12 @@ fn daemon_run() {
     let history_path = std::env::var("HOME")
         .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/history.tsv"))
         .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-history.tsv"));
+    // Same `Library/Application Support/Glomeris/` directory as
+    // `history_path` above — see `monitor::run`'s doc comment (HORO-1044);
+    // a later ticket (HORO-1045) reads this back for `daemon status --json`.
+    let heartbeat_path = std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/heartbeat.json"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-heartbeat.json"));
 
     let config = PollConfig::new("/");
     let thresholds = ThresholdConfig::default();
@@ -637,6 +643,7 @@ fn daemon_run() {
         &fs_stat,
         &notifier,
         &persistence,
+        &heartbeat_path,
         None,
         |outcome| {
             if let Err(e) = outcome {

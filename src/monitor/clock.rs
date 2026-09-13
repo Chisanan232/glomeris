@@ -12,6 +12,11 @@ use std::time::{Duration, Instant};
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
     fn sleep(&self, duration: Duration);
+    /// Current unix time in seconds. Separate from `now()`'s opaque
+    /// `Instant` because heartbeat/event timestamps need to be a real,
+    /// storable wall-clock value — `Instant` can only measure elapsed
+    /// durations, never be serialized.
+    fn unix_now_secs(&self) -> u64;
 }
 
 /// Real wall-clock time, real sleeping. Used in production.
@@ -25,6 +30,10 @@ impl Clock for SystemClock {
 
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn unix_now_secs(&self) -> u64 {
+        crate::monitor::persistence::unix_now_secs()
     }
 }
 
@@ -42,6 +51,10 @@ struct FakeClockState {
     epoch: Instant,
     elapsed: Duration,
     sleeps: Vec<Duration>,
+    /// Fixed fake unix-time base; `unix_now_secs()` returns this plus
+    /// `elapsed`'s whole seconds, so it advances deterministically with
+    /// `sleep()` instead of tracking the real wall clock.
+    unix_epoch_secs: u64,
 }
 
 impl FakeClock {
@@ -51,6 +64,7 @@ impl FakeClock {
                 epoch: Instant::now(),
                 elapsed: Duration::ZERO,
                 sleeps: Vec::new(),
+                unix_epoch_secs: 1_700_000_000,
             })),
         }
     }
@@ -86,6 +100,11 @@ impl Clock for FakeClock {
         let mut state = self.inner.lock().expect("fake clock mutex poisoned");
         state.elapsed += duration;
         state.sleeps.push(duration);
+    }
+
+    fn unix_now_secs(&self) -> u64 {
+        let state = self.inner.lock().expect("fake clock mutex poisoned");
+        state.unix_epoch_secs + state.elapsed.as_secs()
     }
 }
 
