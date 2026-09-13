@@ -6,3 +6,8 @@ target-local/
 
 # mdBook build output
 book/book/
+
+# Xcode user-specific state (macos/GlomerisMenuBar/*.xcodeproj itself is committed)
+xcuserdata/
+*.xcuserstate
+DerivedData/
