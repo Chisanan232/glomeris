@@ -4,10 +4,13 @@
 //! here, only wired together and projected into
 //! [`crate::reporting`]'s report DTOs.
 //!
-//! `glomeris scan`/`free`/`emergency`/`daemon` are unaffected and stay
-//! wired directly in `main.rs`, per this ticket's scope.
+//! `glomeris scan`/`free`/`emergency`/`daemon install`/`uninstall`/`run`
+//! are unaffected and stay wired directly in `main.rs`, per this ticket's
+//! scope. `daemon status --json` (HORO-1045) is the one `daemon`
+//! subcommand whose report-building lives here, matching every other
+//! `--json`-capable subcommand's shape.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::actions::llm::{plan_with_llm, LlmProvider};
@@ -16,11 +19,11 @@ use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceLocator};
 use crate::executor::dry_run;
-use crate::monitor::{FsUsage, ThresholdConfig};
+use crate::monitor::{FsUsage, Heartbeat, ThresholdConfig};
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision};
 use crate::reporting::dto::{
-    CleanDryRunItem, CleanDryRunReport, DetectCandidateReport, DetectReport, ExplainReport,
-    LlmPlanItemReport, LlmPlanReport, StatusReport,
+    CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
+    ExplainReport, LlmPlanItemReport, LlmPlanReport, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -43,6 +46,30 @@ pub fn build_status_report(usage: &FsUsage, thresholds: &ThresholdConfig) -> Sta
         free_human: crate::reporting::human_bytes(usage.free_bytes),
         total_human: crate::reporting::human_bytes(usage.total_bytes),
         pressure_state,
+    }
+}
+
+/// Builds a [`DaemonStatusReport`] (HORO-1045) from the launchd-reported
+/// install/load state plus the poll loop's own heartbeat file. Pure — no
+/// I/O; callers pass in whatever `read_heartbeat` and `SystemTime`/
+/// `unix_now_secs` already produced.
+///
+/// `loaded` and `heartbeat_age_secs` are surfaced as two independent
+/// fields deliberately — see [`DaemonStatusReport`]'s doc comment for why
+/// this must never collapse into one `healthy` boolean.
+pub fn build_daemon_status_report(
+    plist_installed: bool,
+    plist_path: &Path,
+    loaded: bool,
+    heartbeat: Option<&Heartbeat>,
+    now_unix_secs: u64,
+) -> DaemonStatusReport {
+    DaemonStatusReport {
+        plist_installed,
+        plist_path: plist_path.display().to_string(),
+        loaded,
+        heartbeat_age_secs: heartbeat
+            .map(|hb| now_unix_secs.saturating_sub(hb.last_poll_unix_secs)),
     }
 }
 
@@ -404,6 +431,20 @@ pub fn print_status_report(report: &StatusReport) {
     );
 }
 
+/// Prints a [`DaemonStatusReport`] as concise, human-readable text.
+/// Includes the heartbeat line alongside install/load state — the whole
+/// point of HORO-1045 is making heartbeat staleness visible in the default
+/// text output, not only to `--json` consumers.
+pub fn print_daemon_status_report(report: &DaemonStatusReport) {
+    println!("plist installed: {}", report.plist_installed);
+    println!("plist path: {}", report.plist_path);
+    println!("loaded in launchd: {}", report.loaded);
+    match report.heartbeat_age_secs {
+        Some(age) => println!("last poll: {age}s ago"),
+        None => println!("last poll: never"),
+    }
+}
+
 /// Prints a [`DetectReport`] as concise, human-readable text.
 pub fn print_detect_report(report: &DetectReport) {
     if report.candidates.is_empty() {
@@ -622,6 +663,91 @@ mod tests {
         assert_eq!(report.free_bytes, 28 * GIB);
         assert!((report.used_percent - 86.0).abs() < 0.001);
         assert_eq!(report.pressure_state, "PRESSURED");
+    }
+
+    #[test]
+    fn daemon_status_report_computes_age_from_recent_heartbeat() {
+        let heartbeat = Heartbeat::new(
+            1_700_000_000,
+            crate::monitor::PressureState::Healthy,
+            10.0,
+            1_000_000,
+        );
+        let now = 1_700_000_042;
+
+        let report = build_daemon_status_report(
+            true,
+            Path::new("/Users/example/Library/LaunchAgents/dev.glomeris.plist"),
+            true,
+            Some(&heartbeat),
+            now,
+        );
+
+        assert_eq!(report.heartbeat_age_secs, Some(42));
+        assert!(report.plist_installed);
+        assert!(report.loaded);
+    }
+
+    #[test]
+    fn daemon_status_report_no_heartbeat_file_is_none_not_error() {
+        let report = build_daemon_status_report(
+            true,
+            Path::new("/Users/example/Library/LaunchAgents/dev.glomeris.plist"),
+            true,
+            None,
+            1_700_000_000,
+        );
+
+        assert_eq!(report.heartbeat_age_secs, None);
+    }
+
+    #[test]
+    fn daemon_status_report_never_installed_still_produces_valid_output() {
+        let report = build_daemon_status_report(
+            false,
+            Path::new("/Users/example/Library/LaunchAgents/dev.glomeris.plist"),
+            false,
+            None,
+            1_700_000_000,
+        );
+
+        assert!(!report.plist_installed);
+        assert!(!report.loaded);
+        assert_eq!(report.heartbeat_age_secs, None);
+    }
+
+    #[test]
+    fn daemon_status_report_json_never_collapses_loaded_and_heartbeat_into_healthy() {
+        let heartbeat = Heartbeat::new(
+            1_700_000_000,
+            crate::monitor::PressureState::Healthy,
+            10.0,
+            1_000_000,
+        );
+        let report = build_daemon_status_report(
+            true,
+            Path::new("/Users/example/Library/LaunchAgents/dev.glomeris.plist"),
+            true,
+            Some(&heartbeat),
+            1_700_000_042,
+        );
+
+        let json = serde_json::to_value(&report).expect("serialize");
+        let obj = json.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+
+        assert_eq!(
+            keys,
+            vec![
+                "heartbeat_age_secs",
+                "loaded",
+                "plist_installed",
+                "plist_path",
+            ]
+        );
+        assert!(!obj.contains_key("healthy"));
+        assert!(!obj.contains_key("ok"));
     }
 
     #[test]
