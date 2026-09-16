@@ -605,4 +605,202 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serialize");
         assert!(json.contains("\"pressure_state\":\"WARN\""));
     }
+
+    // --- HORO-1053: executable/offered_actions/refusal_reason mappings ---
+    //
+    // One test per policy-class/action-availability combination named in
+    // the ticket's AC, for BOTH `DetectCandidateReport` and `ExplainReport`
+    // — the ticket explicitly calls this the most important AC and warns
+    // against under-testing it.
+    //
+    // `base_evidence()`'s resource kind is `CargoTargetDir`, which has a
+    // real registered action (`cargo.clean.target_dir`); `DockerBuildCache`
+    // has none (see `actions::ActionRegistry`'s own
+    // `find_for_kind_returns_none_for_a_kind_with_no_registered_action`
+    // test) — used here for the "no resolvable action at all" case.
+
+    fn cargo_action() -> &'static dyn Action {
+        use std::sync::OnceLock;
+        static REGISTRY: OnceLock<crate::actions::ActionRegistry> = OnceLock::new();
+        REGISTRY
+            .get_or_init(crate::actions::ActionRegistry::builtin)
+            .find_for_kind(ResourceKind::CargoTargetDir)
+            .expect("cargo_target_dir must have a registered action")
+    }
+
+    #[test]
+    fn protected_is_never_executable_and_offers_no_action_detect() {
+        let ev = base_evidence();
+        let d = decision(
+            PolicyClass::Protected,
+            vec![ReasonCode::ProtectedCredentialMaterial],
+        );
+        let report =
+            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(!report.executable);
+        assert!(report.offered_actions.is_empty());
+        assert!(report.refusal_reason.is_some());
+        assert!(report
+            .refusal_reason
+            .as_deref()
+            .unwrap()
+            .contains("protected_credential_material"));
+    }
+
+    #[test]
+    fn protected_is_never_executable_and_offers_no_action_explain() {
+        let ev = base_evidence();
+        let d = decision(
+            PolicyClass::Protected,
+            vec![ReasonCode::ProtectedCredentialMaterial],
+        );
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(!report.executable);
+        assert!(report.offered_actions.is_empty());
+        assert!(report.refusal_reason.is_some());
+    }
+
+    #[test]
+    fn ask_with_resolvable_action_requires_confirmation_detect() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
+        let report =
+            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(report.executable);
+        assert_eq!(report.offered_actions.len(), 1);
+        assert_eq!(
+            report.offered_actions[0].action_id,
+            "cargo.clean.target_dir"
+        );
+        assert!(report.offered_actions[0].requires_confirmation);
+        assert!(report.refusal_reason.is_none());
+    }
+
+    #[test]
+    fn ask_with_resolvable_action_requires_confirmation_explain() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(report.executable);
+        assert_eq!(report.offered_actions.len(), 1);
+        assert!(report.offered_actions[0].requires_confirmation);
+        assert!(report.refusal_reason.is_none());
+    }
+
+    /// `UNKNOWN_INCOMPLETE` is `PolicyClass::Ask` presentation-side
+    /// (`label_for`), reached via an evidence-quality-only reason code —
+    /// see `reporting::policy_label`'s doc comment.
+    #[test]
+    fn unknown_incomplete_with_resolvable_action_requires_confirmation_detect() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
+        assert_eq!(label_for(&d), PolicyLabel::UnknownIncomplete);
+        let report =
+            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(report.executable);
+        assert_eq!(report.offered_actions.len(), 1);
+        assert!(report.offered_actions[0].requires_confirmation);
+        assert!(report.refusal_reason.is_none());
+    }
+
+    #[test]
+    fn unknown_incomplete_with_resolvable_action_requires_confirmation_explain() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
+        assert_eq!(label_for(&d), PolicyLabel::UnknownIncomplete);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(report.executable);
+        assert_eq!(report.offered_actions.len(), 1);
+        assert!(report.offered_actions[0].requires_confirmation);
+        assert!(report.refusal_reason.is_none());
+    }
+
+    #[test]
+    fn auto_safe_with_resolvable_action_does_not_require_confirmation_detect() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report =
+            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(report.executable);
+        assert_eq!(report.offered_actions.len(), 1);
+        assert_eq!(
+            report.offered_actions[0].action_id,
+            "cargo.clean.target_dir"
+        );
+        assert!(!report.offered_actions[0].requires_confirmation);
+        assert!(report.refusal_reason.is_none());
+    }
+
+    #[test]
+    fn auto_safe_with_resolvable_action_does_not_require_confirmation_explain() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        assert!(report.executable);
+        assert_eq!(report.offered_actions.len(), 1);
+        assert!(!report.offered_actions[0].requires_confirmation);
+        assert!(report.refusal_reason.is_none());
+    }
+
+    /// A resource with no resolvable action at all is `executable:false`
+    /// with `offered_actions:[]` regardless of policy class (tested here
+    /// with `AutoSafe`, the class that would otherwise be executable) —
+    /// and its `refusal_reason` must be distinguishable from PROTECTED's.
+    #[test]
+    fn no_resolvable_action_is_never_executable_regardless_of_policy_class_detect() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
+
+        assert!(!report.executable);
+        assert!(report.offered_actions.is_empty());
+        let reason = report.refusal_reason.expect("must set a refusal reason");
+        assert!(!reason.contains("PROTECTED"));
+        assert!(reason.contains("no registered cleanup action"));
+    }
+
+    #[test]
+    fn no_resolvable_action_is_never_executable_regardless_of_policy_class_explain() {
+        let ev = base_evidence();
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        assert!(!report.executable);
+        assert!(report.offered_actions.is_empty());
+        let reason = report.refusal_reason.expect("must set a refusal reason");
+        assert!(!reason.contains("PROTECTED"));
+        assert!(reason.contains("no registered cleanup action"));
+    }
+
+    /// The two `refusal_reason` shapes ("PROTECTED: ..." vs "no registered
+    /// cleanup action...") must never collide — a caller (the future
+    /// SwiftUI app) still must not need to parse this string to know
+    /// *which* refusal it got, but this locks that they are at least
+    /// textually distinguishable today.
+    #[test]
+    fn protected_and_no_action_refusal_reasons_are_distinguishable() {
+        let ev = base_evidence();
+        let protected = decision(
+            PolicyClass::Protected,
+            vec![ReasonCode::ProtectedCredentialMaterial],
+        );
+        let protected_report =
+            DetectCandidateReport::from_evidence_and_decision(&ev, &protected, None);
+        let no_action = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let no_action_report =
+            DetectCandidateReport::from_evidence_and_decision(&ev, &no_action, None);
+
+        assert_ne!(
+            protected_report.refusal_reason,
+            no_action_report.refusal_reason
+        );
+    }
 }
