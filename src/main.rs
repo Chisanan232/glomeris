@@ -266,7 +266,8 @@ fn run_detect_command(args: &[String]) {
     }
 
     let candidates = discover_and_classify_now(project_roots);
-    let report = glomeris::cli::build_detect_report(&candidates);
+    let actions = glomeris::actions::ActionRegistry::builtin();
+    let report = glomeris::cli::build_detect_report(&candidates, &actions);
 
     if flags.contains(&"--json") {
         print_json_or_exit(&report);
@@ -300,7 +301,8 @@ fn run_explain_command(args: &[String]) {
         std::process::exit(1);
     };
 
-    let report = glomeris::cli::build_explain_report(ev, decision);
+    let actions = glomeris::actions::ActionRegistry::builtin();
+    let report = glomeris::cli::build_explain_report(ev, decision, &actions);
     if flags.contains(&"--json") {
         print_json_or_exit(&report);
     } else {
