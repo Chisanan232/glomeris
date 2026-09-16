@@ -9,11 +9,12 @@
 
 use serde::Serialize;
 
+use crate::actions::Action;
 use crate::evidence::{Completeness, Confidence, Evidence, NativeCleanup, Regenerability};
-use crate::policy::PolicyDecision;
+use crate::policy::{PolicyClass, PolicyDecision};
 
 use super::bytes::human_bytes;
-use super::policy_label::label_for;
+use super::policy_label::{label_for, PolicyLabel};
 
 fn regenerability_tag(r: Regenerability) -> &'static str {
     match r {
@@ -38,6 +39,64 @@ fn confidence_tag(c: Confidence) -> &'static str {
         Confidence::Medium => "medium",
         Confidence::Low => "low",
     }
+}
+
+/// One action a caller (HORO-1053: the future SwiftUI menu-bar app) may
+/// offer to the user for a resource — never a raw policy label. This is
+/// the mechanism that keeps a second policy implementation out of that
+/// UI: it must never branch on `policy_label` itself to decide whether a
+/// "Clean" button is enabled or needs a confirmation step, it reads these
+/// already-computed fields instead.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OfferedAction {
+    pub action_id: String,
+    /// `true` for `ASK` and `UNKNOWN_INCOMPLETE` candidates (ambiguous or
+    /// incomplete evidence — still worth surfacing as available, but must
+    /// be confirmed before running), `false` for `AUTO_SAFE`.
+    pub requires_confirmation: bool,
+}
+
+/// Computes the `executable`/`offered_actions`/`refusal_reason` triple
+/// (HORO-1053) shared by [`DetectCandidateReport`] and [`ExplainReport`],
+/// from an already-computed [`PolicyDecision`] and the [`Action`] (if
+/// any) [`crate::cli::resolve_action_for`] resolved for this resource.
+/// Never reimplements policy logic — `decision.class` and
+/// [`label_for`]'s `UNKNOWN_INCOMPLETE` derivation are the only inputs
+/// consulted.
+fn executable_fields(
+    decision: &PolicyDecision,
+    resolved_action: Option<&dyn Action>,
+) -> (bool, Vec<OfferedAction>, Option<String>) {
+    if decision.class == PolicyClass::Protected {
+        let reason = decision
+            .reasons
+            .first()
+            .map(|r| r.as_str().to_string())
+            .unwrap_or_else(|| "protected".to_string());
+        return (false, Vec::new(), Some(format!("PROTECTED: {reason}")));
+    }
+
+    let Some(action) = resolved_action else {
+        return (
+            false,
+            Vec::new(),
+            Some("no registered cleanup action for this resource kind".to_string()),
+        );
+    };
+
+    let requires_confirmation = matches!(
+        label_for(decision),
+        PolicyLabel::Ask | PolicyLabel::UnknownIncomplete
+    );
+
+    (
+        true,
+        vec![OfferedAction {
+            action_id: action.id().0.to_string(),
+            requires_confirmation,
+        }],
+        None,
+    )
 }
 
 /// Human-readable active-use signal descriptions for `explain` output.
@@ -125,11 +184,27 @@ pub struct DetectCandidateReport {
     pub reclaimable_bytes_is_lower_bound: bool,
     pub policy_label: &'static str,
     pub reasons: Vec<&'static str>,
+    /// `true` only when there's a real registered action for this
+    /// resource AND its policy class doesn't unconditionally forbid it
+    /// (i.e. not `PROTECTED`) — see [`executable_fields`]. HORO-1053.
+    pub executable: bool,
+    /// Empty for `PROTECTED` or when no action resolves; one entry
+    /// otherwise. HORO-1053.
+    pub offered_actions: Vec<OfferedAction>,
+    /// Human-readable reason set exactly when `executable` is `false`.
+    /// HORO-1053.
+    pub refusal_reason: Option<String>,
 }
 
 impl DetectCandidateReport {
-    pub fn from_evidence_and_decision(ev: &Evidence, decision: &PolicyDecision) -> Self {
+    pub fn from_evidence_and_decision(
+        ev: &Evidence,
+        decision: &PolicyDecision,
+        resolved_action: Option<&dyn Action>,
+    ) -> Self {
         let reclaimable = ev.reclaimable_bytes.observed().copied();
+        let (executable, offered_actions, refusal_reason) =
+            executable_fields(decision, resolved_action);
         Self {
             resource_id: ev.resource.to_string(),
             kind: ev.resource.kind_tag(),
@@ -139,6 +214,9 @@ impl DetectCandidateReport {
                 && ev.reclaimable_bytes_is_lower_bound,
             policy_label: label_for(decision).as_str(),
             reasons: decision.reasons.iter().map(|r| r.as_str()).collect(),
+            executable,
+            offered_actions,
+            refusal_reason,
         }
     }
 }
@@ -193,10 +271,24 @@ pub struct ExplainReport {
     /// to report at all (e.g. a `ResourceLocator::Tool` resource such as
     /// Docker's build cache, which has no dev/inode/mtime identity).
     pub fingerprint_token: Option<String>,
+    /// `true` only when there's a real registered action for this
+    /// resource AND its policy class doesn't unconditionally forbid it
+    /// (i.e. not `PROTECTED`) — see [`executable_fields`]. HORO-1053.
+    pub executable: bool,
+    /// Empty for `PROTECTED` or when no action resolves; one entry
+    /// otherwise. HORO-1053.
+    pub offered_actions: Vec<OfferedAction>,
+    /// Human-readable reason set exactly when `executable` is `false`.
+    /// HORO-1053.
+    pub refusal_reason: Option<String>,
 }
 
 impl ExplainReport {
-    pub fn from_evidence_and_decision(ev: &Evidence, decision: &PolicyDecision) -> Self {
+    pub fn from_evidence_and_decision(
+        ev: &Evidence,
+        decision: &PolicyDecision,
+        resolved_action: Option<&dyn Action>,
+    ) -> Self {
         let logical = ev.logical_bytes.observed().copied();
         let reclaimable = ev.reclaimable_bytes.observed().copied();
         let (native_cleanup_available, native_cleanup_action_id) = match ev.native_cleanup {
@@ -211,6 +303,8 @@ impl ExplainReport {
         } else {
             None
         };
+        let (executable, offered_actions, refusal_reason) =
+            executable_fields(decision, resolved_action);
 
         Self {
             resource_id: ev.resource.to_string(),
@@ -232,6 +326,9 @@ impl ExplainReport {
             native_cleanup_available,
             native_cleanup_action_id,
             fingerprint_token,
+            executable,
+            offered_actions,
+            refusal_reason,
         }
     }
 }
@@ -349,7 +446,7 @@ mod tests {
     fn detect_candidate_report_projects_expected_fields() {
         let ev = base_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
 
         assert_eq!(report.resource_id, "cargo_target_dir:/tmp/proj/target");
         assert_eq!(report.kind, "cargo_target_dir");
@@ -365,7 +462,7 @@ mod tests {
         let mut ev = base_evidence();
         ev.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
 
         assert_eq!(report.reclaimable_bytes, None);
         assert_eq!(report.reclaimable_human, None);
@@ -379,7 +476,7 @@ mod tests {
         let mut ev = base_evidence();
         ev.reclaimable_bytes_is_lower_bound = true;
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
 
         assert!(report.reclaimable_bytes_is_lower_bound);
     }
@@ -393,7 +490,7 @@ mod tests {
         ev.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         ev.reclaimable_bytes_is_lower_bound = true;
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d);
+        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
 
         assert!(!report.reclaimable_bytes_is_lower_bound);
     }
@@ -402,7 +499,7 @@ mod tests {
     fn explain_report_distinguishes_logical_from_reclaimable_bytes() {
         let ev = base_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
 
         assert_eq!(report.logical_bytes, Some(2048));
         assert_eq!(report.reclaimable_bytes, Some(1024));
@@ -418,7 +515,7 @@ mod tests {
         let mut ev = base_evidence();
         ev.reclaimable_bytes_is_lower_bound = true;
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
 
         assert!(report.reclaimable_bytes_is_lower_bound);
     }
@@ -429,7 +526,7 @@ mod tests {
         ev.native_cleanup =
             NativeCleanup::Available(crate::evidence::ActionId("cargo.clean.target_dir"));
         let d = decision(PolicyClass::AutoSafe, vec![]);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
 
         assert!(report.native_cleanup_available);
         assert_eq!(
@@ -442,7 +539,7 @@ mod tests {
     fn explain_report_native_cleanup_unsupported() {
         let ev = base_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![]);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
 
         assert!(!report.native_cleanup_available);
         assert_eq!(report.native_cleanup_action_id, None);
