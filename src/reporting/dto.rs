@@ -185,6 +185,14 @@ pub struct ExplainReport {
     pub reasons: Vec<&'static str>,
     pub native_cleanup_available: bool,
     pub native_cleanup_action_id: Option<&'static str>,
+    /// Opaque, wire-safe encoding of `ev.fingerprint` (HORO-1051) — lets a
+    /// future interactive `execute` subcommand (HORO-1055) carry the exact
+    /// fingerprint the UI observed here back to a later process invocation,
+    /// so `policy::approval::authorize` can pin consent to this exact
+    /// resource instance. `None` when the resource carries no fingerprint
+    /// to report at all (e.g. a `ResourceLocator::Tool` resource such as
+    /// Docker's build cache, which has no dev/inode/mtime identity).
+    pub fingerprint_token: Option<String>,
 }
 
 impl ExplainReport {
@@ -194,6 +202,14 @@ impl ExplainReport {
         let (native_cleanup_available, native_cleanup_action_id) = match ev.native_cleanup {
             NativeCleanup::Available(id) => (true, Some(id.0)),
             NativeCleanup::Unsupported => (false, None),
+        };
+        let fingerprint_token = if ev.fingerprint.dev_ino.is_some()
+            || ev.fingerprint.mtime.is_some()
+            || ev.fingerprint.tool_revision.is_some()
+        {
+            Some(crate::evidence::encode_fingerprint_token(&ev.fingerprint))
+        } else {
+            None
         };
 
         Self {
@@ -215,6 +231,7 @@ impl ExplainReport {
             reasons: decision.reasons.iter().map(|r| r.as_str()).collect(),
             native_cleanup_available,
             native_cleanup_action_id,
+            fingerprint_token,
         }
     }
 }

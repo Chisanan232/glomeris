@@ -262,6 +262,178 @@ pub struct ResourceFingerprint {
     pub tool_revision: Option<String>,
 }
 
+const FP_DEV_INO_BIT: u8 = 0b001;
+const FP_MTIME_BIT: u8 = 0b010;
+const FP_TOOL_REVISION_BIT: u8 = 0b100;
+
+/// Error returned by [`decode_fingerprint_token`] when a token is
+/// malformed — truncated, non-hex, an unsupported version prefix, or
+/// otherwise not something [`encode_fingerprint_token`] could have
+/// produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintTokenError(String);
+
+impl fmt::Display for FingerprintTokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "invalid fingerprint token: {}", self.0)
+    }
+}
+
+impl std::error::Error for FingerprintTokenError {}
+
+/// Encodes a [`ResourceFingerprint`] as an opaque, wire-safe string
+/// (HORO-1051).
+///
+/// This exists so a future interactive `execute` subcommand (HORO-1055)
+/// can carry the exact fingerprint the UI observed at `explain` time
+/// across process boundaries to a later `execute` invocation, so
+/// [`crate::policy::approval::authorize`] can compare it against the
+/// freshly-observed fingerprint at execution time — reusing the existing
+/// fingerprint-pinning invariant `authorize` already enforces via
+/// `PartialEq`, not inventing a new consent mechanism. The only contract
+/// callers may rely on is: `decode_fingerprint_token(&encode_fingerprint_token(fp))
+/// == Ok(fp)` for every `fp`. The string layout is deliberately
+/// undocumented outside this pair of functions and must be treated as
+/// opaque.
+///
+/// Internally: `"v1:"` followed by a hex-encoded, hand-rolled binary
+/// layout — a 1-byte presence bitmask, then each present field in
+/// `dev_ino`, `mtime`, `tool_revision` order. `mtime` is stored as a sign
+/// byte plus 8-byte seconds and 4-byte nanoseconds (big-endian) relative
+/// to `UNIX_EPOCH`, which preserves full `SystemTime` precision — no
+/// rounding to whole seconds.
+pub fn encode_fingerprint_token(fingerprint: &ResourceFingerprint) -> String {
+    let mut flags = 0u8;
+    if fingerprint.dev_ino.is_some() {
+        flags |= FP_DEV_INO_BIT;
+    }
+    if fingerprint.mtime.is_some() {
+        flags |= FP_MTIME_BIT;
+    }
+    if fingerprint.tool_revision.is_some() {
+        flags |= FP_TOOL_REVISION_BIT;
+    }
+
+    let mut bytes = vec![flags];
+
+    if let Some((dev, ino)) = fingerprint.dev_ino {
+        bytes.extend_from_slice(&dev.to_be_bytes());
+        bytes.extend_from_slice(&ino.to_be_bytes());
+    }
+
+    if let Some(mtime) = fingerprint.mtime {
+        let (sign, duration) = match mtime.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(d) => (1u8, d),
+            Err(e) => (0u8, e.duration()),
+        };
+        bytes.push(sign);
+        bytes.extend_from_slice(&duration.as_secs().to_be_bytes());
+        bytes.extend_from_slice(&duration.subsec_nanos().to_be_bytes());
+    }
+
+    if let Some(revision) = &fingerprint.tool_revision {
+        let raw = revision.as_bytes();
+        bytes.extend_from_slice(&(raw.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(raw);
+    }
+
+    let mut token = String::with_capacity(bytes.len() * 2 + 3);
+    token.push_str("v1:");
+    for byte in bytes {
+        token.push_str(&format!("{byte:02x}"));
+    }
+    token
+}
+
+/// Reads exactly `n` bytes starting at `*cursor`, advancing `*cursor` past
+/// them. Shared truncation/overflow check for every field
+/// [`decode_fingerprint_token`] pulls off the wire.
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    cursor: &mut usize,
+    n: usize,
+) -> Result<&'a [u8], FingerprintTokenError> {
+    let end = cursor
+        .checked_add(n)
+        .ok_or_else(|| FingerprintTokenError("length overflow".to_string()))?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| FingerprintTokenError("truncated payload".to_string()))?;
+    *cursor = end;
+    Ok(slice)
+}
+
+/// Decodes a token produced by [`encode_fingerprint_token`] back into a
+/// [`ResourceFingerprint`]. See that function's doc comment for the
+/// round-trip contract this must uphold.
+pub fn decode_fingerprint_token(token: &str) -> Result<ResourceFingerprint, FingerprintTokenError> {
+    let hex = token.strip_prefix("v1:").ok_or_else(|| {
+        FingerprintTokenError("unsupported or missing version prefix".to_string())
+    })?;
+
+    if hex.len() % 2 != 0 {
+        return Err(FingerprintTokenError("odd-length hex payload".to_string()));
+    }
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    for chunk in hex.as_bytes().chunks(2) {
+        let s = std::str::from_utf8(chunk)
+            .map_err(|_| FingerprintTokenError("non-UTF8 hex payload".to_string()))?;
+        let byte = u8::from_str_radix(s, 16)
+            .map_err(|_| FingerprintTokenError("invalid hex byte".to_string()))?;
+        bytes.push(byte);
+    }
+
+    let mut cursor = 0usize;
+    let flags = *take_bytes(&bytes, &mut cursor, 1)?.first().unwrap();
+
+    let dev_ino = if flags & FP_DEV_INO_BIT != 0 {
+        let dev = u64::from_be_bytes(take_bytes(&bytes, &mut cursor, 8)?.try_into().unwrap());
+        let ino = u64::from_be_bytes(take_bytes(&bytes, &mut cursor, 8)?.try_into().unwrap());
+        Some((dev, ino))
+    } else {
+        None
+    };
+
+    let mtime = if flags & FP_MTIME_BIT != 0 {
+        let sign = *take_bytes(&bytes, &mut cursor, 1)?.first().unwrap();
+        let secs = u64::from_be_bytes(take_bytes(&bytes, &mut cursor, 8)?.try_into().unwrap());
+        let nanos = u32::from_be_bytes(take_bytes(&bytes, &mut cursor, 4)?.try_into().unwrap());
+        let duration = std::time::Duration::new(secs, nanos);
+        let t = if sign == 1 {
+            SystemTime::UNIX_EPOCH.checked_add(duration)
+        } else {
+            SystemTime::UNIX_EPOCH.checked_sub(duration)
+        };
+        Some(t.ok_or_else(|| FingerprintTokenError("mtime out of range".to_string()))?)
+    } else {
+        None
+    };
+
+    let tool_revision = if flags & FP_TOOL_REVISION_BIT != 0 {
+        let len =
+            u32::from_be_bytes(take_bytes(&bytes, &mut cursor, 4)?.try_into().unwrap()) as usize;
+        let raw = take_bytes(&bytes, &mut cursor, len)?;
+        Some(
+            String::from_utf8(raw.to_vec())
+                .map_err(|_| FingerprintTokenError("invalid utf8 tool_revision".to_string()))?,
+        )
+    } else {
+        None
+    };
+
+    if cursor != bytes.len() {
+        return Err(FingerprintTokenError(
+            "trailing bytes after payload".to_string(),
+        ));
+    }
+
+    Ok(ResourceFingerprint {
+        dev_ino,
+        mtime,
+        tool_revision,
+    })
+}
+
 /// Static, per-kind property: can this resource be regenerated, and how.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Regenerability {
@@ -634,5 +806,182 @@ mod tests {
             Regenerability::Unknown
         );
         assert_eq!(ResourceKind::Unknown.owning_tool(), OwningTool::None);
+    }
+}
+
+/// Tests for the opaque fingerprint token codec (HORO-1051). Kept as its
+/// own module so the round-trip/`authorize` interaction tests — which pull
+/// in `crate::policy` and touch real files on disk — stay separate from
+/// `mod tests` above's pure in-memory `Evidence` fixtures.
+#[cfg(test)]
+mod fingerprint_token_tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use crate::policy::approval::authorize;
+    use crate::policy::{PolicyClass, PolicyDecision, ReasonCode, UserConsent};
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-fp-token-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// Builds a [`ResourceFingerprint`] from a REAL file on disk (never a
+    /// hand-built/fabricated value), with its mtime explicitly set to a
+    /// timestamp carrying sub-second precision — a codec that silently
+    /// rounds `mtime` to whole seconds must fail every test that uses this
+    /// helper with a non-zero `nanos`.
+    fn real_file_fingerprint(dir: &std::path::Path, name: &str, nanos: u32) -> ResourceFingerprint {
+        let path = dir.join(name);
+        fs::write(&path, b"hello fingerprint token").expect("write temp file");
+
+        let mtime = SystemTime::UNIX_EPOCH + Duration::new(1_725_000_000, nanos);
+        let file = fs::File::open(&path).expect("open temp file");
+        file.set_modified(mtime).expect("set mtime");
+
+        // Use the SAME producers real evidence-collection uses
+        // (`discovery_evidence` in `src/detectors/mod.rs`) rather than
+        // re-deriving dev/ino/mtime by hand, so this test proves the codec
+        // round-trips what production actually emits. `tool_revision` has
+        // no real-file source, so it's the one deliberately fabricated
+        // field — included to exercise that branch of the codec.
+        ResourceFingerprint {
+            dev_ino: crate::detectors::dev_ino_fingerprint(&path),
+            mtime: crate::detectors::probe_mtime(&path).observed().copied(),
+            tool_revision: Some("v1.2.3-real".to_string()),
+        }
+    }
+
+    /// AC 1: round-trip over a fingerprint derived from a real temp-dir
+    /// file, precise enough (explicit sub-second mtime) to expose a lossy
+    /// encoding.
+    #[test]
+    fn round_trip_preserves_real_file_fingerprint_exactly() {
+        let dir = unique_temp_dir("roundtrip");
+        let fp = real_file_fingerprint(&dir, "resource.bin", 123_456_789);
+        assert_ne!(
+            fp.mtime
+                .unwrap()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos(),
+            0,
+            "test fixture must carry real sub-second mtime precision"
+        );
+
+        let token = encode_fingerprint_token(&fp);
+        let decoded = decode_fingerprint_token(&token).expect("token should decode");
+
+        assert_eq!(
+            decoded, fp,
+            "decoded fingerprint must equal the original real-file fingerprint \
+             bit-for-bit, including sub-second mtime precision"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC 2: decoding then re-encoding a token must reproduce a
+    /// byte-identical token to encoding the original fingerprint directly.
+    #[test]
+    fn decode_then_reencode_matches_direct_encode() {
+        let dir = unique_temp_dir("stability");
+        let fp = real_file_fingerprint(&dir, "resource.bin", 555_555_555);
+
+        let token = encode_fingerprint_token(&fp);
+        let decoded = decode_fingerprint_token(&token).expect("token should decode");
+        let re_encoded = encode_fingerprint_token(&decoded);
+
+        assert_eq!(
+            re_encoded, token,
+            "re-encoding a decoded fingerprint must reproduce the original token exactly"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC 3 — the property that actually matters: `authorize()` must
+    /// behave identically whether given the original fingerprint or one
+    /// that went through encode -> decode, both when it matches consent
+    /// (authorizes) and when it doesn't (refuses). A token that is merely
+    /// "structurally similar" but not a true substitute would fail this.
+    #[test]
+    fn authorize_treats_decoded_fingerprint_as_real_substitute() {
+        let dir = unique_temp_dir("authorize");
+        let fp = real_file_fingerprint(&dir, "resource.bin", 987_654_321);
+        let other_fp = real_file_fingerprint(&dir, "other.bin", 111);
+
+        let token = encode_fingerprint_token(&fp);
+        let decoded = decode_fingerprint_token(&token).expect("token should decode");
+        assert_eq!(decoded, fp);
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(dir.join("resource.bin")),
+        );
+        let consent = UserConsent::new(resource.clone(), fp.clone(), SystemTime::UNIX_EPOCH);
+        let decision = || PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::EvidenceFreshAndComplete],
+            evidence_collected_at: SystemTime::UNIX_EPOCH,
+            evaluated_at: SystemTime::UNIX_EPOCH,
+            policy_version: 1,
+        };
+
+        // Matching case: original and decoded fingerprints must both
+        // authorize against the same consent.
+        let approval_with_original = authorize(decision(), fp.clone(), Some(&consent));
+        let approval_with_decoded = authorize(decision(), decoded, Some(&consent));
+        assert!(approval_with_original.is_some());
+        assert!(approval_with_decoded.is_some());
+
+        // Non-matching case: a decoded fingerprint for a *different* real
+        // file must refuse authorization exactly like the original
+        // `other_fp` would — proving the decoded value isn't just always
+        // "close enough" to pass.
+        let other_token = encode_fingerprint_token(&other_fp);
+        let other_decoded = decode_fingerprint_token(&other_token).expect("token should decode");
+        let approval_with_original_mismatch = authorize(decision(), other_fp, Some(&consent));
+        let approval_with_decoded_mismatch = authorize(decision(), other_decoded, Some(&consent));
+        assert!(approval_with_original_mismatch.is_none());
+        assert!(approval_with_decoded_mismatch.is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn all_none_fingerprint_round_trips_and_reports_no_token_worthy_data() {
+        let fp = ResourceFingerprint {
+            dev_ino: None,
+            mtime: None,
+            tool_revision: None,
+        };
+        let token = encode_fingerprint_token(&fp);
+        let decoded = decode_fingerprint_token(&token).expect("token should decode");
+        assert_eq!(decoded, fp);
+    }
+
+    #[test]
+    fn decode_rejects_malformed_tokens() {
+        assert!(decode_fingerprint_token("not-a-token").is_err());
+        assert!(decode_fingerprint_token("v1:zz").is_err());
+        assert!(decode_fingerprint_token("v1:0").is_err());
+        assert!(decode_fingerprint_token("v2:00").is_err());
+        assert!(decode_fingerprint_token("v1:").is_err());
     }
 }
