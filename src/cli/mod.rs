@@ -167,19 +167,38 @@ pub fn find_candidate<'a>(
 }
 
 /// Builds a [`DetectReport`] from already discovered-and-classified
-/// candidates.
-pub fn build_detect_report(candidates: &[(Evidence, PolicyDecision)]) -> DetectReport {
+/// candidates. `actions` is consulted only via [`resolve_action_for`]
+/// (HORO-1053) to populate each candidate's `executable`/
+/// `offered_actions`/`refusal_reason` fields — no policy logic is
+/// duplicated here.
+pub fn build_detect_report(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+) -> DetectReport {
     DetectReport {
         candidates: candidates
             .iter()
-            .map(|(ev, d)| DetectCandidateReport::from_evidence_and_decision(ev, d))
+            .map(|(ev, d)| {
+                DetectCandidateReport::from_evidence_and_decision(
+                    ev,
+                    d,
+                    resolve_action_for(ev, actions),
+                )
+            })
             .collect(),
     }
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
-pub fn build_explain_report(ev: &Evidence, decision: &PolicyDecision) -> ExplainReport {
-    ExplainReport::from_evidence_and_decision(ev, decision)
+/// `actions` is consulted only via [`resolve_action_for`] (HORO-1053) to
+/// populate `executable`/`offered_actions`/`refusal_reason` — no policy
+/// logic is duplicated here.
+pub fn build_explain_report(
+    ev: &Evidence,
+    decision: &PolicyDecision,
+    actions: &ActionRegistry,
+) -> ExplainReport {
+    ExplainReport::from_evidence_and_decision(ev, decision, resolve_action_for(ev, actions))
 }
 
 /// Resolves the [`Action`] to dry-run for `ev`: prefers
@@ -836,7 +855,8 @@ mod tests {
             (ev2.clone(), classify(&ev2, &cfg, now)),
         ];
 
-        let report = build_detect_report(&candidates);
+        let actions = ActionRegistry::builtin();
+        let report = build_detect_report(&candidates, &actions);
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -918,7 +938,8 @@ mod tests {
         let ev = evidence_from_truncated_estimate(&root);
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::now());
 
-        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())]);
+        let actions = ActionRegistry::builtin();
+        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())], &actions);
         let candidate = &detect_report.candidates[0];
         assert!(candidate.reclaimable_bytes_is_lower_bound);
         assert_eq!(
@@ -934,7 +955,7 @@ mod tests {
         let detect_json = serde_json::to_string(&detect_report).expect("serialize");
         assert!(detect_json.contains("\"reclaimable_bytes_is_lower_bound\":true"));
 
-        let explain_report = build_explain_report(&ev, &decision);
+        let explain_report = build_explain_report(&ev, &decision, &actions);
         assert!(explain_report.reclaimable_bytes_is_lower_bound);
         assert_eq!(
             format_size_field(
@@ -966,7 +987,8 @@ mod tests {
         assert!(!ev.reclaimable_bytes_is_lower_bound);
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
 
-        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())]);
+        let actions = ActionRegistry::builtin();
+        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())], &actions);
         let candidate = &detect_report.candidates[0];
         assert!(!candidate.reclaimable_bytes_is_lower_bound);
         assert_eq!(
@@ -979,7 +1001,7 @@ mod tests {
         let detect_json = serde_json::to_string(&detect_report).expect("serialize");
         assert!(detect_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
 
-        let explain_report = build_explain_report(&ev, &decision);
+        let explain_report = build_explain_report(&ev, &decision, &actions);
         assert!(!explain_report.reclaimable_bytes_is_lower_bound);
         let explain_json = serde_json::to_string(&explain_report).expect("serialize");
         assert!(explain_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
@@ -999,7 +1021,8 @@ mod tests {
             tool_revision: None,
         };
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
-        let report = build_explain_report(&ev, &decision);
+        let actions = ActionRegistry::builtin();
+        let report = build_explain_report(&ev, &decision, &actions);
         let token = report
             .fingerprint_token
             .expect("path resource with a real fingerprint must report a token");
@@ -1024,7 +1047,7 @@ mod tests {
             tool_revision: None,
         };
         let tool_decision = classify(&tool_ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
-        let tool_report = build_explain_report(&tool_ev, &tool_decision);
+        let tool_report = build_explain_report(&tool_ev, &tool_decision, &actions);
         assert!(
             tool_report.fingerprint_token.is_none(),
             "a resource with no real fingerprint fields must report no token"
@@ -1245,7 +1268,8 @@ mod tests {
         print_clean_dry_run_report(&CleanDryRunReport::default());
         let ev = evidence("/tmp/x/target", ResourceKind::CargoTargetDir, None);
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
-        print_explain_report(&build_explain_report(&ev, &decision));
+        let actions = ActionRegistry::builtin();
+        print_explain_report(&build_explain_report(&ev, &decision, &actions));
     }
 
     #[test]
