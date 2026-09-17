@@ -135,3 +135,62 @@ fn free_exits_via_the_busy_path_when_the_execution_lock_is_already_held() {
 
     std::fs::remove_dir_all(&home).ok();
 }
+
+/// HORO-1055: `glomeris execute` acquires the SAME shared execution lock
+/// as `free`/`emergency` — proven here by holding the lock externally and
+/// confirming `execute` exits via the busy path before ever reaching
+/// discovery/resolution. The `--action-id`/`--resource-id` values are
+/// deliberately nonsense: if the lock did not engage first, this
+/// invocation would instead fail with the "resource not found" exit code
+/// (5), never 75 — so observing 75 here is proof the lock check runs
+/// before candidate resolution, exactly mirroring `free`'s own wiring.
+#[test]
+fn execute_exits_via_the_busy_path_when_the_execution_lock_is_already_held() {
+    let home = make_temp_home("execute-contended");
+    let lock_path = home
+        .join("Library")
+        .join("Application Support")
+        .join("Glomeris")
+        .join("execution.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).expect("create lock parent dir");
+
+    // Same real `flock(2)` contention proof as the `free` test above.
+    let held = glomeris::executor::lock::acquire_execution_lock_at(&lock_path)
+        .expect("test process must be able to take the lock first");
+
+    let output = Command::new(glomeris_bin())
+        .arg("execute")
+        .arg("--action-id")
+        .arg("does.not.matter")
+        .arg("--resource-id")
+        .arg("does-not-matter")
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn glomeris binary");
+
+    drop(held);
+
+    assert!(
+        !output.status.success(),
+        "a `glomeris execute` invocation racing a held execution lock must not exit successfully"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "expected the dedicated execution-lock-busy exit code, got status: {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("execution lock busy") || stderr.contains("already in progress"),
+        "expected a clear busy-lock message, got: {stderr}"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "a busy-lock refusal must never print an execute report — nothing ran"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}

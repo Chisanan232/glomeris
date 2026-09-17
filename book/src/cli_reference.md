@@ -78,6 +78,68 @@ Exit codes for this subcommand specifically:
   missing live-mode environment configuration, or an `--api-key`/`--key`/
   `--token` flag.
 
+## `glomeris execute --action-id <id> --resource-id <id> [--project-root <path>]... [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]`
+
+macOS only (exits 1 with an error message on other platforms). The sole
+interactive destructive-execution subcommand (HORO-1055) — the only place
+in this CLI where a caller can trigger one specific, real destructive
+action against one specific, real resource. `--action-id` and
+`--resource-id` are both required; the caller supplies ONLY these
+selectors (plus, for `ASK`, an observed fingerprint token) — there is no
+flag to pass a `PolicyClass`, a raw filesystem path as a direct target, a
+shell string, or any `--force`/override.
+
+Internal flow, in one process:
+
+1. Acquires the same HORO-1054 execution lock `free`/`emergency` use —
+   held for the whole call, released on exit.
+2. Runs the same discovery-and-classification pipeline `detect`/`explain`
+   use (`--project-root <path>` is optional and repeatable, same meaning
+   as elsewhere).
+3. Resolves `--resource-id` against the discovered candidates and
+   `--action-id` against that resource's own registered action —
+   refusing if either does not resolve, or if the resolved action's id
+   differs from `--action-id`.
+4. For an `ASK`-classified resource, builds consent ONLY from decoding
+   `--observed-fingerprint` (via the same token format `explain --json`'s
+   `fingerprint_token` field emits) — never from a fingerprint freshly
+   observed by this same process, which would defeat the whole
+   fingerprint-pinning purpose. `--confirm-ask` and
+   `--observed-fingerprint` must be passed together or not at all.
+5. Calls the real, unmodified `policy::approval::authorize`, then — only
+   if it returns an approval — the real, unmodified `executor::execute`.
+   `PROTECTED` refuses unconditionally regardless of any flag
+   combination; `execute`'s own deletion-time revalidation can still
+   abort a plan that was authorized a moment earlier if the resource
+   changed in between.
+
+`--json` prints an `ExecuteReport` (action id, resource id, outcome,
+failure/abort detail, expected vs. actual reclaimed bytes — the latter is
+a real measurement, taken after execution, not an estimate).
+
+Exit codes for this subcommand specifically:
+
+- `0` — the action executed and succeeded.
+- `1` — the action executed but failed (a step of the plan errored).
+- `2` — usage error: an unrecognized/missing argument, `--confirm-ask`
+  without `--observed-fingerprint` (or vice versa), or a malformed
+  `--observed-fingerprint` token.
+- `3` — refused by policy: `PROTECTED` (unconditional), `ASK` with no
+  consent supplied, or `ASK` with a supplied consent that did not match
+  the freshly observed fingerprint.
+- `4` — aborted by `execute`'s own deletion-time revalidation (a TOCTOU-
+  style guard: the resource's identity or policy classification changed
+  between authorization and execution).
+- `5` — `--resource-id` matched no discovered candidate, the resource had
+  no registered action, or the resolved action's id did not match the
+  supplied `--action-id`.
+- `75` — the execution lock is already held by another `glomeris`
+  invocation (see `free`'s exit codes above; `execute` reuses the exact
+  same `EXIT_EXECUTION_LOCK_BUSY` constant — this ticket's own AC
+  described this case as exit `6`, but the already-established lock
+  convention from HORO-1054 is kept rather than introducing a second,
+  conflicting "busy" code).
+
 ## `glomeris emergency`
 
 macOS only (exits 1 with an error message on other platforms). Takes no
@@ -119,6 +181,14 @@ currently do end to end.
   missing/unrecognized `free` arguments, or (for `llm-plan` specifically)
   an unrecognized argument, a missing flag value, missing live-mode LLM
   environment configuration, or an `--api-key`/`--key`/`--token` flag.
+- `75` — (`free`/`emergency`/`execute` only) the HORO-1054 execution lock
+  is already held by another `glomeris` invocation.
+
+`glomeris execute` has its own, more specific set of exit codes (`0`–`5`
+plus `75`) — see its own section above for the full table; a couple of
+those codes (`1`, `2`) overlap this list's meanings but are worth reading
+in full since `execute` is the one subcommand with real destructive
+consequences.
 
 See `glomeris llm-plan`'s own section above for that subcommand's exit
 codes in full detail.

@@ -1,7 +1,7 @@
 //! Thin CLI orchestration (HORO-955) for `glomeris status|detect|explain|
-//! clean`. Every function here only calls already-existing evidence/
-//! policy/action APIs — no policy/evidence/execution logic is duplicated
-//! here, only wired together and projected into
+//! clean|execute`. Every function here only calls already-existing
+//! evidence/policy/action APIs — no policy/evidence/execution logic is
+//! duplicated here, only wired together and projected into
 //! [`crate::reporting`]'s report DTOs.
 //!
 //! `glomeris scan`/`free`/`emergency`/`daemon install`/`uninstall`/`run`
@@ -9,6 +9,14 @@
 //! scope. `daemon status --json` (HORO-1045) is the one `daemon`
 //! subcommand whose report-building lives here, matching every other
 //! `--json`-capable subcommand's shape.
+//!
+//! [`resolve_and_execute`] (HORO-1055) is `glomeris execute`'s enforcement
+//! core: it calls the real, completely unmodified
+//! [`crate::policy::approval::authorize`] and [`crate::executor::execute`]
+//! — this module never re-derives or short-circuits either decision — and
+//! is kept portable (no `std::process::exit`, no macOS gate) so it can be
+//! exercised directly by unit tests. The macOS-only, exit-code-mapping
+//! wiring (including the HORO-1054 execution lock) stays in `main.rs`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -17,13 +25,14 @@ use crate::actions::llm::{plan_with_llm, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
-use crate::evidence::model::{Evidence, NativeCleanup, ResourceLocator};
-use crate::executor::dry_run;
+use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
+use crate::executor::{dry_run, execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{FsUsage, Heartbeat, ThresholdConfig};
-use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision};
+use crate::policy::approval::authorize;
+use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExplainReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
+    ExecuteReport, ExplainReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -644,6 +653,199 @@ pub fn print_llm_plan_report(report: &LlmPlanReport) {
             (None, None) => println!("  (no plan rendered)"),
         }
     }
+}
+
+/// Outcome of resolving `glomeris execute`'s `--resource-id`/`--action-id`
+/// selectors and, when authorized, actually running
+/// [`crate::executor::execute`] (HORO-1055). `main.rs` maps each variant
+/// to this subcommand's own typed exit code; this type carries no exit
+/// code itself, keeping [`resolve_and_execute`] portable/testable.
+///
+/// `Debug` is implemented by hand rather than derived: `ExecutionReport`
+/// (the `Executed` payload) doesn't derive `Debug` itself, and adding
+/// that derive belongs to `executor/mod.rs` — deliberately kept at zero
+/// diff by this ticket (see the PR description's AC 6).
+pub enum ExecuteResolution {
+    /// No discovered candidate matches the supplied `--resource-id`.
+    ResourceNotFound,
+    /// The resolved resource has no registered action at all.
+    ActionNotFound,
+    /// A resource DID resolve to a registered action, but its id differs
+    /// from the caller's `--action-id` — the caller asked for a specific
+    /// action, not "whatever the system thinks is right", so this refuses
+    /// rather than silently substituting `resolved`.
+    ActionMismatch {
+        requested: String,
+        resolved: &'static str,
+    },
+    /// `policy::approval::authorize` returned `None` for a `Protected`
+    /// decision — refuses unconditionally, regardless of any flag
+    /// combination. This is `authorize`'s own logic; this variant only
+    /// labels which of its `None` cases fired.
+    RefusedProtected,
+    /// `authorize` returned `None` for an `Ask` decision because no
+    /// [`UserConsent`] was built at all — the caller never passed
+    /// `--confirm-ask`/`--observed-fingerprint`.
+    RefusedAskNoConsent,
+    /// `authorize` returned `None` for an `Ask` decision even though a
+    /// [`UserConsent`] was supplied — the observed fingerprint the caller
+    /// supplied did not match the freshly observed one (stale or for a
+    /// different resource instance).
+    RefusedAskConsentMismatch,
+    /// `authorize` returned `None` for an `AutoSafe` decision. Per
+    /// `authorize`'s own doc comment this never actually happens
+    /// (`AutoSafe` always authorizes) — this variant exists only as an
+    /// explicit, fail-closed label for that impossible case, never as an
+    /// expected outcome.
+    RefusedAutoSafeContractViolation,
+    /// Authorization succeeded and [`crate::executor::execute`] ran.
+    /// `report.outcome` still distinguishes success/failure/abort — see
+    /// [`build_execute_report`].
+    Executed(ExecutionReport),
+}
+
+impl std::fmt::Debug for ExecuteResolution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ResourceNotFound => write!(f, "ResourceNotFound"),
+            Self::ActionNotFound => write!(f, "ActionNotFound"),
+            Self::ActionMismatch {
+                requested,
+                resolved,
+            } => write!(
+                f,
+                "ActionMismatch {{ requested: {requested:?}, resolved: {resolved:?} }}"
+            ),
+            Self::RefusedProtected => write!(f, "RefusedProtected"),
+            Self::RefusedAskNoConsent => write!(f, "RefusedAskNoConsent"),
+            Self::RefusedAskConsentMismatch => write!(f, "RefusedAskConsentMismatch"),
+            Self::RefusedAutoSafeContractViolation => {
+                write!(f, "RefusedAutoSafeContractViolation")
+            }
+            // `ExecutionReport` doesn't derive `Debug` (see this enum's
+            // doc comment) — render its outcome tag via the already-hand-
+            // projected `ExecuteReport` DTO instead of duplicating that
+            // projection here.
+            Self::Executed(report) => {
+                write!(f, "Executed({:?})", build_execute_report(report))
+            }
+        }
+    }
+}
+
+/// Resolves `resource_id`/`action_id` against already discovered-and-
+/// classified `candidates`, then — only when authorization succeeds —
+/// calls the real, completely unmodified [`execute`]. HORO-1055's actual
+/// enforcement surface.
+///
+/// `observed_fingerprint_from_token` is the ONLY input a [`UserConsent`]
+/// is ever built from here, and it must already be the result of decoding
+/// the caller's own `--observed-fingerprint` token via
+/// [`crate::evidence::decode_fingerprint_token`] — see this function's
+/// only caller, `main.rs`'s `run_execute_command`, for that decoding (and
+/// the `--confirm-ask`/`--observed-fingerprint` usage validation) that
+/// must happen first. This function never substitutes the
+/// freshly-observed `ev.fingerprint` for a missing token — doing so would
+/// silently defeat the whole fingerprint-pinning purpose the ticket calls
+/// out, since it would let a caller "confirm" a resource without ever
+/// having been shown its actual identity.
+///
+/// `#[allow(clippy::too_many_arguments)]`: eight parameters, every one an
+/// independently fakeable seam (candidates/actions/collector/cfg/now are
+/// exactly what makes this function unit-testable without touching the
+/// real filesystem or clock) — precedented in this crate at
+/// `emergency::run_emergency` and `detectors::discovery_evidence`.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_and_execute(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    resource_id: &str,
+    action_id: &str,
+    observed_fingerprint_from_token: Option<ResourceFingerprint>,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+) -> ExecuteResolution {
+    let Some((ev, decision)) = find_candidate(resource_id, candidates) else {
+        return ExecuteResolution::ResourceNotFound;
+    };
+
+    let Some(action) = resolve_action_for(ev, actions) else {
+        return ExecuteResolution::ActionNotFound;
+    };
+    if action.id().0 != action_id {
+        return ExecuteResolution::ActionMismatch {
+            requested: action_id.to_string(),
+            resolved: action.id().0,
+        };
+    }
+
+    let consent =
+        observed_fingerprint_from_token.map(|fp| UserConsent::new(ev.resource.clone(), fp, now));
+
+    match authorize(decision.clone(), ev.fingerprint.clone(), consent.as_ref()) {
+        Some(approval) => {
+            let report = execute(action, &approval, collector, cfg, now);
+            ExecuteResolution::Executed(report)
+        }
+        None => match decision.class {
+            PolicyClass::Protected => ExecuteResolution::RefusedProtected,
+            PolicyClass::Ask if consent.is_none() => ExecuteResolution::RefusedAskNoConsent,
+            PolicyClass::Ask => ExecuteResolution::RefusedAskConsentMismatch,
+            PolicyClass::AutoSafe => ExecuteResolution::RefusedAutoSafeContractViolation,
+        },
+    }
+}
+
+/// Projects a real [`ExecutionReport`] into the [`ExecuteReport`] DTO.
+/// Only ever called for [`ExecuteResolution::Executed`] — never
+/// duplicates `execute`'s own outcome logic, only renders it.
+pub fn build_execute_report(report: &ExecutionReport) -> ExecuteReport {
+    let (outcome, failure_message, abort_reason) = match &report.outcome {
+        ExecutionOutcome::Succeeded => ("succeeded", None, None),
+        ExecutionOutcome::Failed(message) => ("failed", Some(message.clone()), None),
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            ("aborted_by_revalidation", None, Some(format!("{reason:?}")))
+        }
+        ExecutionOutcome::DryRun => ("dry_run", None, None),
+    };
+
+    ExecuteReport {
+        action_id: report.action.0,
+        resource_id: report.resource.to_string(),
+        outcome,
+        failure_message,
+        abort_reason,
+        expected_reclaimed_bytes: report.expected_reclaimed_bytes.observed().copied(),
+        actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
+    }
+}
+
+/// Prints an [`ExecuteReport`] as concise, human-readable text.
+pub fn print_execute_report(report: &ExecuteReport) {
+    println!("action:              {}", report.action_id);
+    println!("resource:            {}", report.resource_id);
+    println!("outcome:             {}", report.outcome);
+    if let Some(message) = &report.failure_message {
+        println!("failure:             {message}");
+    }
+    if let Some(reason) = &report.abort_reason {
+        println!("abort reason:        {reason}");
+    }
+    println!(
+        "expected reclaimed:  {}",
+        report
+            .expected_reclaimed_bytes
+            .map(crate::reporting::human_bytes)
+            .unwrap_or_else(|| "unavailable".to_string())
+    );
+    println!(
+        "actual reclaimed:    {}",
+        report
+            .actual_reclaimed_bytes
+            .map(crate::reporting::human_bytes)
+            .unwrap_or_else(|| "unavailable".to_string())
+    );
 }
 
 #[cfg(test)]
@@ -1528,5 +1730,429 @@ mod tests {
 
         assert!(report.items.is_empty());
         assert!(report.provider_error.is_some());
+    }
+}
+
+/// HORO-1055: `resolve_and_execute` tests. Real `classify`/`authorize`/
+/// `execute` throughout — never hand-written decisions/approvals — so
+/// these exercise the actual enforcement path an adversarial reviewer
+/// would poke at, not a mock of it.
+#[cfg(test)]
+mod execute_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    use super::*;
+    use crate::detectors::{dev_ino_fingerprint, probe_mtime, DetectorId};
+    use crate::evidence::correlate::CorrelationResult;
+    use crate::evidence::model::{
+        GitState, ProcessRef, Recoverability, ResourceFingerprint, ResourceId, ResourceKind,
+    };
+    use crate::evidence::{decode_fingerprint_token, encode_fingerprint_token};
+    use crate::evidence::{ProbeOutcome, ProbeReason};
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-cli-execute-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// A collector reporting no active use of any kind — pairs with a
+    /// clean fixture to reach `PolicyClass::AutoSafe`.
+    struct CleanCollector;
+    impl EvidenceCollector for CleanCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::<ProcessRef>::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
+    /// A collector reporting a live process holding the resource open —
+    /// pairs with an otherwise-clean fixture to reach
+    /// `PolicyClass::Ask{ResourceInActiveUse}`. Used on BOTH sides
+    /// (building the candidate and passed into `resolve_and_execute`) so
+    /// `execute`'s revalidation reproduces the identical decision rather
+    /// than tripping `PolicyReasonsWidened`.
+    struct ActiveUseCollector;
+    impl EvidenceCollector for ActiveUseCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(vec![ProcessRef {
+                    pid: 1,
+                    command: "node".to_string(),
+                }]),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+            }
+        }
+    }
+
+    /// Builds one discovered-and-classified candidate for `path`/`kind`
+    /// the same discover-refresh-classify way
+    /// `discover_and_classify_with_progress` does per resource: a raw
+    /// `Evidence` reflecting real on-disk fields, a real correlation pass
+    /// via `collector`, then the real `classify`. Never hand-writes a
+    /// `PolicyDecision`.
+    fn discover_one(
+        path: &Path,
+        kind: ResourceKind,
+        collector: &dyn EvidenceCollector,
+        now: SystemTime,
+    ) -> Vec<(Evidence, PolicyDecision)> {
+        let resource = ResourceId::new(kind, ResourceLocator::Path(path.to_path_buf()));
+        let mut ev = Evidence {
+            resource: resource.clone(),
+            fingerprint: ResourceFingerprint {
+                dev_ino: dev_ino_fingerprint(path),
+                mtime: probe_mtime(path).observed().copied(),
+                tool_revision: None,
+            },
+            detector: DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(4096),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Observed(4096),
+            reclaimable_bytes_is_lower_bound: false,
+            last_modified: ProbeOutcome::Observed(now),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: kind.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Unsupported,
+            open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            collected_at: now,
+            sources: Vec::new(),
+        };
+        let correlation = collector.collect(
+            &resource,
+            ProbeBudget {
+                timeout: Duration::from_secs(3),
+            },
+        );
+        merge_into(&mut ev, correlation);
+        ev.collected_at = now;
+        let decision = classify(&ev, &PolicyConfig::default(), now);
+        vec![(ev, decision)]
+    }
+
+    /// Round-trips `fingerprint` through the exact encode/decode pair a
+    /// real `--observed-fingerprint` token would go through (as if a UI
+    /// had captured it from a prior `explain --json` call) — the fixture
+    /// never hands `resolve_and_execute` a `ResourceFingerprint` value
+    /// directly.
+    fn token_for(fingerprint: &ResourceFingerprint) -> ResourceFingerprint {
+        let token = encode_fingerprint_token(fingerprint);
+        decode_fingerprint_token(&token).expect("a token this function just encoded must decode")
+    }
+
+    /// AC 1: a PROTECTED resource refuses `execute` unconditionally —
+    /// even with `--confirm-ask` and a genuinely matching
+    /// `--observed-fingerprint` token. Fixture mirrors the HORO-1008-style
+    /// golden protected pattern (`.ssh` path component), matched by the
+    /// real `policy::protected` matcher via the real `classify` call
+    /// inside `discover_one`.
+    #[test]
+    fn protected_resource_refuses_regardless_of_confirm_ask_and_matching_fingerprint() {
+        let root = make_temp_dir("protected");
+        let target = root.join(".ssh").join("node_modules");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("pkg.js"), vec![0u8; 16]).unwrap();
+
+        let now = SystemTime::now();
+        let collector = CleanCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(
+            decision.class,
+            PolicyClass::Protected,
+            "fixture must classify PROTECTED for this test to exercise the real refusal path"
+        );
+
+        let actions = ActionRegistry::builtin();
+        let action =
+            resolve_action_for(ev, &actions).expect("NodeModules kind must resolve an action");
+        let matching_fingerprint = token_for(&ev.fingerprint);
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            Some(matching_fingerprint),
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            matches!(resolution, ExecuteResolution::RefusedProtected),
+            "expected RefusedProtected, got {resolution:?}"
+        );
+        assert!(target.exists(), "PROTECTED must never mutate the resource");
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// AC 2: `Ask` without `--confirm-ask` (no consent at all) refuses.
+    #[test]
+    fn ask_without_confirm_ask_refuses() {
+        let root = make_temp_dir("ask-no-consent");
+        let target = root.join("node_modules");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("pkg.js"), vec![0u8; 16]).unwrap();
+
+        let now = SystemTime::now();
+        let collector = ActiveUseCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(decision.class, PolicyClass::Ask);
+
+        let actions = ActionRegistry::builtin();
+        let action = resolve_action_for(ev, &actions).unwrap();
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            None,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            matches!(resolution, ExecuteResolution::RefusedAskNoConsent),
+            "expected RefusedAskNoConsent, got {resolution:?}"
+        );
+        assert!(target.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// AC 3: `Ask` with `--confirm-ask` but a stale/mismatched
+    /// `--observed-fingerprint` refuses.
+    #[test]
+    fn ask_with_confirm_ask_but_mismatched_fingerprint_refuses() {
+        let root = make_temp_dir("ask-mismatch");
+        let target = root.join("node_modules");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("pkg.js"), vec![0u8; 16]).unwrap();
+
+        let now = SystemTime::now();
+        let collector = ActiveUseCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(decision.class, PolicyClass::Ask);
+
+        let actions = ActionRegistry::builtin();
+        let action = resolve_action_for(ev, &actions).unwrap();
+
+        // Deliberately NOT `ev.fingerprint` — a stale/wrong observation,
+        // exactly what a UI would carry if the resource changed after the
+        // user was shown its identity.
+        let stale_fingerprint = ResourceFingerprint {
+            dev_ino: None,
+            mtime: Some(SystemTime::UNIX_EPOCH),
+            tool_revision: None,
+        };
+        assert_ne!(stale_fingerprint, ev.fingerprint);
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            Some(stale_fingerprint),
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            matches!(resolution, ExecuteResolution::RefusedAskConsentMismatch),
+            "expected RefusedAskConsentMismatch, got {resolution:?}"
+        );
+        assert!(target.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// AC 4: `Ask` with `--confirm-ask` and a genuinely matching
+    /// `--observed-fingerprint` (obtained via the real encode/decode round
+    /// trip, mirroring what `explain --json`'s `fingerprint_token` would
+    /// hand a caller) reaches `execute` — asserts the `Executed(_)`
+    /// discriminant specifically, not `Succeeded`, since AC 4's contract
+    /// is "reaches execute", and this fixture's `ActiveUseCollector` is
+    /// reused unchanged at revalidation time so the fresh decision still
+    /// agrees with the approved one (no `PolicyReasonsWidened` abort).
+    #[test]
+    fn ask_with_confirm_ask_and_matching_fingerprint_reaches_execute() {
+        let root = make_temp_dir("ask-match");
+        let target = root.join("node_modules");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("pkg.js"), vec![0u8; 16]).unwrap();
+
+        let now = SystemTime::now();
+        let collector = ActiveUseCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(decision.class, PolicyClass::Ask);
+
+        let actions = ActionRegistry::builtin();
+        let action = resolve_action_for(ev, &actions).unwrap();
+        let matching_fingerprint = token_for(&ev.fingerprint);
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            Some(matching_fingerprint),
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            matches!(resolution, ExecuteResolution::Executed(_)),
+            "expected Executed(_), got {resolution:?}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// AC 5: a real `AUTO_SAFE` action executes end-to-end against a
+    /// disposable fixture and reports actual reclaimed bytes measured
+    /// after deletion — not an estimate. Uses `NodeCleanNodeModules`
+    /// specifically (a `DeletePath` action) rather than the cargo action,
+    /// because the cargo `RunTool` step's `actual_reclaimed_bytes` is
+    /// honestly `Unavailable` (see `executor::execute_plan`'s doc
+    /// comment) and would make "reports actual reclaimed bytes"
+    /// unassertable.
+    #[test]
+    fn auto_safe_action_executes_and_reports_real_reclaimed_bytes() {
+        let root = make_temp_dir("auto-safe-real");
+        let target = root.join("node_modules");
+        fs::create_dir_all(target.join("pkg")).unwrap();
+        fs::write(target.join("pkg/index.js"), vec![0u8; 4096]).unwrap();
+
+        let now = SystemTime::now();
+        let collector = CleanCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "fixture must classify AUTO_SAFE for this test to exercise the real happy path"
+        );
+
+        let actions = ActionRegistry::builtin();
+        let action = resolve_action_for(ev, &actions).unwrap();
+
+        // No `--confirm-ask`/`--observed-fingerprint` at all — AUTO_SAFE
+        // needs no consent, per `authorize`'s own contract.
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            None,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        let ExecuteResolution::Executed(report) = resolution else {
+            panic!("expected Executed(_), got {resolution:?}");
+        };
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        assert!(
+            !target.exists(),
+            "the real fixture must actually be deleted"
+        );
+
+        let execute_report = build_execute_report(&report);
+        assert_eq!(execute_report.outcome, "succeeded");
+        match execute_report.actual_reclaimed_bytes {
+            Some(bytes) => assert!(bytes > 0, "expected a real measured reclaim, got 0"),
+            None => panic!("expected Some(actual_reclaimed_bytes), got None"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A resource whose `--action-id` does not match what actually
+    /// resolves for it is refused before `authorize` is ever consulted —
+    /// the caller asked for a specific action, not "whatever resolves".
+    #[test]
+    fn mismatched_action_id_is_refused_before_authorize_runs() {
+        let root = make_temp_dir("action-mismatch");
+        let target = root.join("node_modules");
+        fs::create_dir_all(&target).unwrap();
+
+        let now = SystemTime::now();
+        let collector = CleanCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, _decision) = &candidates[0];
+        let actions = ActionRegistry::builtin();
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            "cargo.clean.target_dir",
+            None,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert!(
+            matches!(resolution, ExecuteResolution::ActionMismatch { .. }),
+            "expected ActionMismatch, got {resolution:?}"
+        );
+        assert!(target.exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A `--resource-id` matching nothing in the discovered candidate set
+    /// is refused outright.
+    #[test]
+    fn unknown_resource_id_is_not_found() {
+        let candidates: Vec<(Evidence, PolicyDecision)> = Vec::new();
+        let actions = ActionRegistry::builtin();
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            "does-not-exist",
+            "node.clean.node_modules",
+            None,
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::now(),
+        );
+
+        assert!(matches!(resolution, ExecuteResolution::ResourceNotFound));
     }
 }

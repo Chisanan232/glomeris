@@ -419,6 +419,46 @@ pub struct LlmPlanReport {
     pub provider_error: Option<String>,
 }
 
+/// `glomeris execute` report (HORO-1055): a thin projection of
+/// [`crate::executor::ExecutionReport`] — never duplicates its outcome
+/// logic, only renders the already-decided outcome. Built only for the
+/// `Executed(_)` branch of `crate::cli::ExecuteResolution`; every refusal
+/// or not-found branch is reported directly by `main.rs` and never
+/// reaches this DTO at all.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExecuteReport {
+    pub action_id: &'static str,
+    pub resource_id: String,
+    /// One of `"succeeded"`, `"failed"`, `"aborted_by_revalidation"`, or
+    /// `"dry_run"` — mirrors `crate::executor::ExecutionOutcome`'s
+    /// variants without deriving `Serialize` on that type directly.
+    pub outcome: &'static str,
+    /// Populated only when `outcome == "failed"`.
+    pub failure_message: Option<String>,
+    /// Populated only when `outcome == "aborted_by_revalidation"` — the
+    /// `Debug` rendering of `crate::executor::AbortReason`.
+    pub abort_reason: Option<String>,
+    pub expected_reclaimed_bytes: Option<u64>,
+    pub actual_reclaimed_bytes: Option<u64>,
+}
+
+/// Structured `--json` rendering for every non-`Executed` branch of
+/// `crate::cli::ExecuteResolution` (HORO-1055 nit: `--json` callers — the
+/// interactive UI this subcommand exists for — previously got empty
+/// stdout plus a bare exit code on every refusal/not-found path, which is
+/// exactly the case a UI most needs structured detail on). Never carries
+/// anything an `Approval` would — this is a report of a refusal that
+/// already happened, not a mechanism for causing one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExecuteRefusalReport {
+    /// One of `"resource_not_found"`, `"action_not_found"`,
+    /// `"action_mismatch"`, `"protected"`, `"ask_no_consent"`,
+    /// `"ask_consent_mismatch"`, `"auto_safe_contract_violation"` —
+    /// mirrors `crate::cli::ExecuteResolution`'s non-`Executed` variants.
+    pub reason: &'static str,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
