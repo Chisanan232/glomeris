@@ -10,6 +10,19 @@ stale.
 No arguments: prints `glomeris <version>` (from `CARGO_PKG_VERSION`) and
 exits.
 
+## `glomeris --help` / `-h` / `help`, and unrecognized-command usage
+
+`--help`/`-h`/`help` and the usage line printed on an unrecognized top-level
+command (exit 2) both render from the same `COMMANDS` table in `src/main.rs`
+(HORO-1050) — there is exactly one place to add or edit a subcommand's usage
+line, so the two surfaces cannot independently drift out of sync the way they
+once did (HORO-1034: the unrecognized-command usage omitted `llm-plan`).
+
+Every top-level subcommand also supports its own `glomeris <subcommand>
+--help` / `-h`, looked up in that same table, which prints just that
+subcommand's one-line usage and a short description instead of being
+rejected as an unrecognized argument.
+
 ## `glomeris daemon <subcommand>`
 
 macOS only (exits 1 with an error message on other platforms).
