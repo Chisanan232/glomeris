@@ -505,6 +505,32 @@ pub fn build_llm_plan_report(
     }
 }
 
+/// Renders an example, syntactically valid `LlmPlan` JSON document
+/// (HORO-1048) — `glomeris llm-plan --schema`'s entire stdout, and the
+/// literal text embedded in `book/src/byok.md`'s schema example. Built
+/// directly as a `serde_json::Value` rather than by serializing a real
+/// [`crate::actions::llm::LlmPlan`] — that type deliberately has no
+/// `Serialize` derive (see `actions::llm`'s module doc comment on why it
+/// and `LlmPlanItem` are the crate's only external-input parse targets),
+/// and this function must never need one. `llm_plan_schema_example_round_trips`
+/// below proves the string this returns parses back into a real
+/// `LlmPlan` unchanged, and `tests/llm_plan_schema_round_trip.rs` proves
+/// the same thing through the actual `glomeris llm-plan --plan-file`
+/// input surface.
+pub fn llm_plan_schema_example() -> String {
+    let value = serde_json::json!({
+        "items": [
+            {
+                "resource_id": "cargo_target_dir:/Users/you/project/target",
+                "action_id": "cargo.clean.target_dir",
+                "priority": 1,
+                "reason": "stale build artifacts, not modified in 30 days"
+            }
+        ]
+    });
+    serde_json::to_string_pretty(&value).expect("static example JSON value always serializes")
+}
+
 /// Builds an [`ActionListReport`] (HORO-1047) by enumerating every action
 /// [`ActionRegistry::actions`] actually returns — never a hand-maintained
 /// list — so registering a new action in [`ActionRegistry::builtin`]
@@ -1833,6 +1859,29 @@ mod tests {
 
         assert!(report.items.is_empty());
         assert!(report.provider_error.is_some());
+    }
+
+    #[test]
+    fn llm_plan_schema_example_round_trips() {
+        // Real deserialization through `LlmPlan`, not a hand-rolled
+        // shape check — proves the example `glomeris llm-plan --schema`
+        // emits is a genuine, valid `LlmPlan` document.
+        let text = llm_plan_schema_example();
+        let plan: crate::actions::llm::LlmPlan = serde_json::from_str(&text)
+            .expect("llm_plan_schema_example must produce valid LlmPlan JSON");
+        assert_eq!(plan.items.len(), 1);
+        let item = &plan.items[0];
+        assert_eq!(
+            item.resource_id,
+            "cargo_target_dir:/Users/you/project/target"
+        );
+        assert_eq!(item.action_id, "cargo.clean.target_dir");
+        assert_eq!(item.priority, Some(1));
+
+        // The example's action_id is a real, registered action — not a
+        // placeholder that would always drop as unknown.
+        let actions = ActionRegistry::builtin();
+        assert!(actions.get(&item.action_id).is_some());
     }
 }
 

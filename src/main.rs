@@ -63,9 +63,8 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "llm-plan",
-        usage:
-            "llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]",
-        description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion.",
+        usage: "llm-plan <--schema|[--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]>",
+        description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion. --schema emits an example LlmPlan document instead.",
     },
     CommandSpec {
         name: "execute",
@@ -534,6 +533,15 @@ fn run_clean_command(args: &[String]) {
 /// `GLOMERIS_LLM_API_KEY`/`GLOMERIS_LLM_BASE_URL`/`GLOMERIS_LLM_MODEL` via
 /// [`glomeris::actions::llm::provider_from_env`] — never accepted as a CLI
 /// argument, to keep a key out of `ps`/shell history.
+///
+/// `glomeris llm-plan --schema` (HORO-1048) is a distinct, self-contained
+/// mode: it prints [`glomeris::cli::llm_plan_schema_example`]'s example
+/// `LlmPlan` JSON document to stdout and returns immediately, before any
+/// discovery, `--plan-file` handling, or live-provider credential check
+/// runs — it never touches project roots, evidence, or the LLM
+/// configuration. The emitted document is that ticket's answer to the
+/// v0.2.0 founder-dogfood finding that constructing a valid `--plan-file`
+/// fixture required reading this module's `LlmPlanItem` struct directly.
 fn run_llm_plan_command(args: &[String]) {
     use glomeris::actions::llm::{provider_from_env, FilePlanProvider};
     use glomeris::actions::ActionRegistry;
@@ -557,6 +565,7 @@ fn run_llm_plan_command(args: &[String]) {
 
     let mut json = false;
     let mut progress_json = false;
+    let mut schema = false;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
@@ -566,6 +575,10 @@ fn run_llm_plan_command(args: &[String]) {
             }
             "--progress-json" => {
                 progress_json = true;
+                i += 1;
+            }
+            "--schema" => {
+                schema = true;
                 i += 1;
             }
             other => {
@@ -590,6 +603,11 @@ fn run_llm_plan_command(args: &[String]) {
                 std::process::exit(2);
             }
         }
+    }
+
+    if schema {
+        println!("{}", glomeris::cli::llm_plan_schema_example());
+        return;
     }
 
     let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);

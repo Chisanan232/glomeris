@@ -59,6 +59,53 @@ LLM SUGGESTION — advisory only, nothing is executed by this command
 
 See [CLI Reference](cli_reference.md) for the full flag/exit-code table.
 
+## `LlmPlan` schema — the concrete `--plan-file` example (HORO-1048)
+
+`glomeris llm-plan --schema` prints an example, syntactically valid
+`LlmPlan` JSON document to stdout — the canonical way to get a starting
+point for a `--plan-file` fixture without reading `src/actions/llm.rs`'s
+`LlmPlanItem` struct directly:
+
+```
+glomeris llm-plan --schema
+```
+
+```json
+{
+  "items": [
+    {
+      "resource_id": "cargo_target_dir:/Users/you/project/target",
+      "action_id": "cargo.clean.target_dir",
+      "priority": 1,
+      "reason": "stale build artifacts, not modified in 30 days"
+    }
+  ]
+}
+```
+
+Field meanings, all on `LlmPlanItem`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `resource_id` | `String`, required | Must match a `ResourceId::to_string()` from the evidence set `plan_with_llm` was called with — an unmatched value drops just that item (`dropped_unknown_resource`), never the whole plan. |
+| `action_id` | `String`, required | Must match a registered `ActionRegistry` action id — an unmatched value drops just that item (`dropped_unknown_action`). |
+| `priority` | `Option<u32>` | Informational ranking hint only. |
+| `reason` | `Option<String>` | Human-readable explanation. Never interpreted as an instruction, a path, or anything that reaches execution. |
+
+`#[serde(deny_unknown_fields)]` on `LlmPlanItem` means any extra field
+(e.g. a smuggled `"command"`) fails deserialization of the whole
+document, not just that item — see "Safety properties" below.
+
+This example is not a fixed, hand-maintained fixture: `--schema`'s output
+is proven, by a real subprocess round-trip test
+(`tests/llm_plan_schema_round_trip.rs`), to be accepted unchanged by
+`glomeris llm-plan --plan-file <path>` — i.e. it parses and validates
+through the exact pipeline above without a parse-error exit code. (The
+`resource_id` in the shipped example is deliberately one no real
+discovery run will ever produce, so a round trip against a real evidence
+set still drops it as an unknown resource — that is an expected,
+non-error validation outcome, not a parse failure.)
+
 ## Configuration
 
 Live mode (no `--plan-file`) reads three environment variables, all
