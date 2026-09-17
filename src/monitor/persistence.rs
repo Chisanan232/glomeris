@@ -153,6 +153,84 @@ pub fn read_heartbeat(path: &Path) -> Option<Heartbeat> {
     serde_json::from_str(&contents).ok()
 }
 
+/// One parsed line of `history.tsv`, as returned to a reader (e.g. `glomeris
+/// history --json`, HORO-1046). `from`/`to` are kept as the raw string tags
+/// written by [`FilePersistence::record`] (`PressureState::as_str()`'s
+/// output), not re-parsed back into [`PressureState`] — same reasoning as
+/// [`Heartbeat::state`]: a reader has no need to reconstruct the enum, and
+/// keeping it a string means an unrecognized/future tag still round-trips
+/// instead of forcing the line to be treated as malformed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryEntry {
+    pub unix_time_secs: u64,
+    pub from: String,
+    pub to: String,
+    pub used_percent: f64,
+    pub free_bytes: u64,
+}
+
+/// Reads up to `limit` of the most recent entries from `path` (a
+/// `history.tsv` written by [`FilePersistence::record`]), oldest-first —
+/// same ordering `record` appends in. A missing file is not an error: it
+/// means "no history recorded yet", so this returns an empty `Vec` rather
+/// than propagating `io::Error::NotFound`. A malformed line (wrong column
+/// count, or a column that fails to parse as its expected type) is skipped
+/// rather than treated as fatal — one corrupted line must never hide every
+/// other valid entry.
+///
+/// Bounded by keeping only the last `limit` valid entries seen while
+/// scanning the file forward, rather than collecting every entry first —
+/// `history.tsv` grows unboundedly over the life of the daemon (see this
+/// module's doc comment: SQLite/rotation is a later ticket's concern), so a
+/// `--limit` reader must not hold the whole file in memory to answer "give
+/// me the last 20".
+pub fn read_history_tail(path: &Path, limit: usize) -> Vec<HistoryEntry> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut tail: std::collections::VecDeque<HistoryEntry> =
+        std::collections::VecDeque::with_capacity(limit.min(1024));
+    for line in contents.lines() {
+        let Some(entry) = parse_history_line(line) else {
+            continue;
+        };
+        if limit == 0 {
+            continue;
+        }
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(entry);
+    }
+    tail.into_iter().collect()
+}
+
+/// Parses one tab-separated `history.tsv` line into a [`HistoryEntry`].
+/// Returns `None` for anything that doesn't match the exact shape
+/// [`FilePersistence::record`] writes — wrong field count, or any field
+/// that fails to parse as its expected numeric type — so a caller can skip
+/// it rather than fail the whole read.
+fn parse_history_line(line: &str) -> Option<HistoryEntry> {
+    let mut fields = line.split('\t');
+    let unix_time_secs = fields.next()?.parse().ok()?;
+    let from = fields.next()?.to_string();
+    let to = fields.next()?.to_string();
+    let used_percent = fields.next()?.parse().ok()?;
+    let free_bytes = fields.next()?.parse().ok()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(HistoryEntry {
+        unix_time_secs,
+        from,
+        to,
+        used_percent,
+        free_bytes,
+    })
+}
+
 /// A backend that always fails, used by the polling-loop tests to prove
 /// persistence failure never stops monitoring.
 #[cfg(test)]
@@ -247,6 +325,69 @@ mod tests {
         assert!(!path.exists());
 
         assert!(read_heartbeat(&path).is_none());
+    }
+
+    fn unique_history_test_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "glomeris-history-persistence-test-{tag}-{}-{}",
+            std::process::id(),
+            unix_now_secs()
+        ))
+    }
+
+    #[test]
+    fn read_history_tail_returns_at_most_limit_most_recent_entries() {
+        let path = unique_history_test_path("bounded-limit");
+        let backend = FilePersistence::new(&path);
+        for i in 0..5u64 {
+            let event = PressureEvent {
+                unix_time_secs: 1_700_000_000 + i,
+                from: PressureState::Healthy,
+                to: PressureState::Warn,
+                used_percent: 50.0 + i as f64,
+                free_bytes: 1_000 - i,
+            };
+            backend.record(&event).expect("record should succeed");
+        }
+
+        let tail = read_history_tail(&path, 2);
+
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].unix_time_secs, 1_700_000_003);
+        assert_eq!(tail[1].unix_time_secs, 1_700_000_004);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_history_tail_skips_malformed_lines() {
+        let path = unique_history_test_path("malformed-line");
+        std::fs::write(
+            &path,
+            "1700000000\tHEALTHY\tWARN\t50.00\t1000\n\
+             this is not a valid line at all\n\
+             1700000001\tWARN\tPRESSURED\tnot-a-number\t900\n\
+             1700000002\tWARN\tPRESSURED\t60.00\t900\n",
+        )
+        .unwrap();
+
+        let tail = read_history_tail(&path, 10);
+
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].unix_time_secs, 1_700_000_000);
+        assert_eq!(tail[1].unix_time_secs, 1_700_000_002);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_history_tail_returns_empty_for_missing_file() {
+        let path = unique_history_test_path("missing-file");
+        assert!(!path.exists());
+
+        let tail = read_history_tail(&path, 10);
+
+        assert!(tail.is_empty());
     }
 
     #[test]

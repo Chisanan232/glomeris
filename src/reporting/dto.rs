@@ -204,6 +204,32 @@ pub struct DaemonStatusReport {
     pub heartbeat_age_secs: Option<u64>,
 }
 
+/// One entry of a `glomeris history --json` report (HORO-1046) — a
+/// projection of [`crate::monitor::HistoryEntry`], hand-picked rather than
+/// derived on the domain type directly, same reasoning as this module's doc
+/// comment. `from`/`to` are the raw stable string tags already written to
+/// `history.tsv` (`PressureState::as_str()`'s output), not re-parsed back
+/// into `PressureState`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HistoryEventReport {
+    pub unix_time_secs: u64,
+    pub from: String,
+    pub to: String,
+    pub used_percent: f64,
+    pub free_bytes: u64,
+    pub free_human: String,
+}
+
+/// `glomeris history --json` report (HORO-1046): a bounded, oldest-first
+/// tail of `history.tsv`. `events.len()` is never more than the `--limit`
+/// the caller requested — see
+/// [`crate::monitor::read_history_tail`]'s doc comment for the bounding and
+/// malformed-line-skipping contract this projects.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HistoryReport {
+    pub events: Vec<HistoryEventReport>,
+}
+
 /// One candidate line of a `glomeris detect` report.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DetectCandidateReport {
