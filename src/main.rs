@@ -12,6 +12,8 @@ fn main() {
                  explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
                  clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
                  llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]|\
+                 execute --action-id <id> --resource-id <id> [--project-root <path>]... \
+                 [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]|\
                  emergency|\
                  free --target <N%|NB> [--project-root <path>]...>"
             );
@@ -23,6 +25,7 @@ fn main() {
         Some("explain") => run_explain_command(&args[1..]),
         Some("clean") => run_clean_command(&args[1..]),
         Some("llm-plan") => run_llm_plan_command(&args[1..]),
+        Some("execute") => run_execute_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -42,6 +45,8 @@ fn print_usage() {
          detect [--project-root <path>]... [--json] [--progress-json]|\
          explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
          clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
+         execute --action-id <id> --resource-id <id> [--project-root <path>]... \
+         [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]|\
          emergency|\
          free --target <N%|NB> [--project-root <path>]...>"
     );
@@ -515,6 +520,237 @@ fn run_llm_plan_command(args: &[String]) {
 
     if report.provider_error.is_some() {
         std::process::exit(1);
+    }
+}
+
+/// `glomeris execute --action-id <id> --resource-id <id> [--project-root
+/// <path>]... [--confirm-ask --observed-fingerprint <token>] [--json]
+/// [--progress-json]` — the sole interactive destructive-execution
+/// subcommand (HORO-1055).
+///
+/// The caller supplies ONLY selectors: a resource id, an action id, and
+/// (for `Ask`) a previously-observed fingerprint token — never a
+/// `PolicyClass`, a `PolicyDecision`, an `ActionPlan`, a raw path used as
+/// a direct target, or any `--force`/override. This function's entire
+/// job is argument parsing, the HORO-1054 execution lock, and mapping
+/// [`glomeris::cli::ExecuteResolution`] to a typed exit code — every
+/// actual enforcement decision happens in
+/// [`glomeris::cli::resolve_and_execute`], which calls the real,
+/// unmodified `policy::approval::authorize` and `executor::execute`.
+#[cfg(target_os = "macos")]
+fn run_execute_command(args: &[String]) {
+    use glomeris::actions::ActionRegistry;
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::policy::PolicyConfig;
+    use std::time::SystemTime;
+
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris execute: {e}");
+            print_usage();
+            std::process::exit(2);
+        }
+    };
+
+    let mut action_id: Option<&str> = None;
+    let mut resource_id: Option<&str> = None;
+    let mut confirm_ask = false;
+    let mut observed_fingerprint: Option<&str> = None;
+    let mut json = false;
+    let mut progress_json = false;
+
+    let mut i = 0;
+    while i < remaining.len() {
+        match remaining[i].as_str() {
+            "--action-id" => {
+                action_id = remaining.get(i + 1).map(String::as_str);
+                if action_id.is_none() {
+                    eprintln!("glomeris execute: --action-id requires a value");
+                    std::process::exit(2);
+                }
+                i += 2;
+            }
+            "--resource-id" => {
+                resource_id = remaining.get(i + 1).map(String::as_str);
+                if resource_id.is_none() {
+                    eprintln!("glomeris execute: --resource-id requires a value");
+                    std::process::exit(2);
+                }
+                i += 2;
+            }
+            "--confirm-ask" => {
+                confirm_ask = true;
+                i += 1;
+            }
+            "--observed-fingerprint" => {
+                observed_fingerprint = remaining.get(i + 1).map(String::as_str);
+                if observed_fingerprint.is_none() {
+                    eprintln!("glomeris execute: --observed-fingerprint requires a value");
+                    std::process::exit(2);
+                }
+                i += 2;
+            }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--progress-json" => {
+                progress_json = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("glomeris execute: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let Some(action_id) = action_id else {
+        eprintln!("glomeris execute: --action-id is required");
+        print_usage();
+        std::process::exit(2);
+    };
+    let Some(resource_id) = resource_id else {
+        eprintln!("glomeris execute: --resource-id is required");
+        print_usage();
+        std::process::exit(2);
+    };
+
+    // `--confirm-ask` and `--observed-fingerprint` are a single unit: an
+    // `Ask` approval always needs both together, never just one — passing
+    // only one is ambiguous (which did the caller actually mean?) and is
+    // rejected outright rather than guessed at.
+    if confirm_ask != observed_fingerprint.is_some() {
+        eprintln!(
+            "glomeris execute: --confirm-ask and --observed-fingerprint must be passed together"
+        );
+        print_usage();
+        std::process::exit(2);
+    }
+
+    // Decode the caller-supplied token BEFORE ever touching the execution
+    // lock or running discovery — a malformed token is a pure usage
+    // error. This is the ONLY place a fingerprint is ever accepted from
+    // the caller; there is no fallback to a freshly-observed fingerprint
+    // anywhere in this command.
+    let observed_fingerprint_from_token = match observed_fingerprint {
+        Some(token) => match glomeris::evidence::decode_fingerprint_token(token) {
+            Ok(fp) => Some(fp),
+            Err(e) => {
+                eprintln!("glomeris execute: invalid --observed-fingerprint token: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+
+    // HORO-1054: held for the duration of the real-execution portion
+    // below, released automatically (via `Drop`) when this function
+    // returns.
+    let _execution_lock = acquire_execution_lock_or_exit("execute");
+
+    let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
+    let actions = ActionRegistry::builtin();
+    let collector = DefaultEvidenceCollector::default();
+    let cfg = PolicyConfig::default();
+    let now = SystemTime::now();
+
+    let resolution = glomeris::cli::resolve_and_execute(
+        &candidates,
+        &actions,
+        resource_id,
+        action_id,
+        observed_fingerprint_from_token,
+        &collector,
+        &cfg,
+        now,
+    );
+
+    render_execute_resolution(resolution, json);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_execute_command(_args: &[String]) {
+    eprintln!("glomeris execute: only supported on macOS");
+    std::process::exit(1);
+}
+
+/// Maps one [`glomeris::cli::ExecuteResolution`] to `execute`'s typed exit
+/// code (see `book/src/cli_reference.md`'s `execute` section for the full
+/// table) and prints the corresponding report.
+#[cfg(target_os = "macos")]
+fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json: bool) {
+    use glomeris::cli::ExecuteResolution;
+    use glomeris::executor::ExecutionOutcome;
+
+    match resolution {
+        ExecuteResolution::ResourceNotFound => {
+            eprintln!(
+                "glomeris execute: no discoverable candidate matches the given --resource-id"
+            );
+            std::process::exit(5);
+        }
+        ExecuteResolution::ActionNotFound => {
+            eprintln!("glomeris execute: no registered action resolves for this resource");
+            std::process::exit(5);
+        }
+        ExecuteResolution::ActionMismatch {
+            requested,
+            resolved,
+        } => {
+            eprintln!(
+                "glomeris execute: --action-id '{requested}' does not match the action this \
+                 resource actually resolves to ('{resolved}') — refusing to substitute a \
+                 different action than the one requested"
+            );
+            std::process::exit(5);
+        }
+        ExecuteResolution::RefusedProtected => {
+            eprintln!(
+                "glomeris execute: refused — this resource is PROTECTED; no flag combination \
+                 can authorize executing against it"
+            );
+            std::process::exit(3);
+        }
+        ExecuteResolution::RefusedAskNoConsent => {
+            eprintln!(
+                "glomeris execute: refused — this resource requires confirmation \
+                 (--confirm-ask plus a matching --observed-fingerprint); none was supplied"
+            );
+            std::process::exit(3);
+        }
+        ExecuteResolution::RefusedAskConsentMismatch => {
+            eprintln!(
+                "glomeris execute: refused — the supplied --observed-fingerprint does not match \
+                 this resource's freshly observed identity (stale, or observed for a different \
+                 resource)"
+            );
+            std::process::exit(3);
+        }
+        ExecuteResolution::RefusedAutoSafeContractViolation => {
+            eprintln!(
+                "glomeris execute: refused — an AUTO_SAFE decision failed to authorize, which \
+                 contradicts policy::approval::authorize's documented contract; refusing rather \
+                 than proceeding"
+            );
+            std::process::exit(3);
+        }
+        ExecuteResolution::Executed(report) => {
+            let execute_report = glomeris::cli::build_execute_report(&report);
+            if json {
+                print_json_or_exit(&execute_report);
+            } else {
+                glomeris::cli::print_execute_report(&execute_report);
+            }
+            match &report.outcome {
+                ExecutionOutcome::Succeeded => std::process::exit(0),
+                ExecutionOutcome::Failed(_) => std::process::exit(1),
+                ExecutionOutcome::AbortedByRevalidation(_) => std::process::exit(4),
+                ExecutionOutcome::DryRun => std::process::exit(0),
+            }
+        }
     }
 }
 
