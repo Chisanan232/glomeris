@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::actions::llm::{plan_with_llm, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
-use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
+use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceLocator};
 use crate::executor::dry_run;
@@ -23,7 +23,7 @@ use crate::monitor::{FsUsage, Heartbeat, ThresholdConfig};
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision};
 use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExplainReport, LlmPlanItemReport, LlmPlanReport, StatusReport,
+    ExplainReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -90,8 +90,45 @@ pub fn discover_and_classify(
     policy_cfg: &PolicyConfig,
     now: SystemTime,
 ) -> Vec<(Evidence, PolicyDecision)> {
-    registry
-        .discover_all(ctx)
+    discover_and_classify_with_progress(registry, ctx, collector, policy_cfg, now, |_| {})
+}
+
+/// Same discover-refresh-classify pipeline as [`discover_and_classify`] —
+/// identical output for identical input — but additionally invokes
+/// `on_event` with a [`ProgressEvent`] immediately before and after each
+/// detector's probe (HORO-1052), by projecting
+/// [`DetectorRegistry::discover_all_with_progress`]'s
+/// [`crate::detectors::DetectorProgress`] callback into the
+/// presentation-layer `ProgressEvent` DTO. `detect`/`explain`/`llm-plan`
+/// are the three subcommands sharing this one discovery phase, so this is
+/// the single instrumentation point behind `--progress-json` for all
+/// three; [`discover_and_classify`] itself passes a no-op `on_event`, so
+/// this refactor changes no observable behavior for any existing caller.
+pub fn discover_and_classify_with_progress(
+    registry: &DetectorRegistry,
+    ctx: &DiscoveryContext,
+    collector: &dyn EvidenceCollector,
+    policy_cfg: &PolicyConfig,
+    now: SystemTime,
+    mut on_event: impl FnMut(ProgressEvent),
+) -> Vec<(Evidence, PolicyDecision)> {
+    let discovered = registry.discover_all_with_progress(ctx, |id, progress| match progress {
+        DetectorProgress::Started => {
+            on_event(ProgressEvent::DetectorStarted { detector: id.0 });
+        }
+        DetectorProgress::Finished(status) => {
+            let candidates_found = match status {
+                DetectorStatus::Found(evidences) => evidences.len(),
+                DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => 0,
+            };
+            on_event(ProgressEvent::DetectorFinished {
+                detector: id.0,
+                candidates_found,
+            });
+        }
+    });
+
+    discovered
         .into_iter()
         .filter_map(|(_, status)| match status {
             DetectorStatus::Found(evidences) => Some(evidences),
