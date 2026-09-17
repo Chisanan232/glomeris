@@ -442,6 +442,23 @@ pub struct ExecuteReport {
     pub actual_reclaimed_bytes: Option<u64>,
 }
 
+/// Structured `--json` rendering for every non-`Executed` branch of
+/// `crate::cli::ExecuteResolution` (HORO-1055 nit: `--json` callers — the
+/// interactive UI this subcommand exists for — previously got empty
+/// stdout plus a bare exit code on every refusal/not-found path, which is
+/// exactly the case a UI most needs structured detail on). Never carries
+/// anything an `Approval` would — this is a report of a refusal that
+/// already happened, not a mechanism for causing one.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExecuteRefusalReport {
+    /// One of `"resource_not_found"`, `"action_not_found"`,
+    /// `"action_mismatch"`, `"protected"`, `"ask_no_consent"`,
+    /// `"ask_consent_mismatch"`, `"auto_safe_contract_violation"` —
+    /// mirrors `crate::cli::ExecuteResolution`'s non-`Executed` variants.
+    pub reason: &'static str,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
