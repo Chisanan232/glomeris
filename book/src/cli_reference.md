@@ -145,6 +145,23 @@ Exit codes for this subcommand specifically:
 macOS only (exits 1 with an error message on other platforms). Takes no
 arguments. See [Emergency Mode](emergency_mode.md).
 
+## `glomeris history [--json] [--limit <N>]`
+
+Reads back a bounded, oldest-first tail of the monitor's `history.tsv`
+(HORO-1046) — the same append-only file `daemon run`'s poll loop already
+writes via `PersistenceBackend::record`. No new persistence format; this is
+a read path only.
+
+`--limit <N>` is optional and defaults to 20. It bounds how many of the
+most recent pressure transitions are returned — a malformed line in
+`history.tsv` is skipped rather than failing the whole read, and a missing
+history file (the daemon has never run, or never recorded a transition)
+renders as an empty list rather than an error.
+
+With `--json`, prints a `HistoryReport` (`{"events": [...]}`); each event
+has `unix_time_secs`, `from`, `to`, `used_percent`, `free_bytes`, and
+`free_human`. Without `--json`, prints one line per event as plain text.
+
 ## `glomeris free --target <N%|NB> [--project-root <path>]...`
 
 macOS only (exits 1 with an error message on other platforms). `--target` is
