@@ -46,7 +46,7 @@ project directory you want the cargo/node detectors to check for a
 `target/`/`node_modules/` dir. Without it, those two detectors have no
 project roots to scan and always report `tool_absent`.
 
-## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json]`
+## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--schema]`
 
 Not macOS-gated. ADVISORY, NON-EXECUTING (HORO-1008) — never constructs a
 `policy::Approval` and never calls `policy::approval::authorize` or
@@ -64,6 +64,12 @@ configuration and safety-property writeup.
 - `--api-key`/`--key`/`--token` are explicitly rejected (not accepted and
   ignored) — the error names `$GLOMERIS_LLM_API_KEY` instead.
 - `--json` prints the report as JSON.
+- `--schema` (HORO-1048) prints an example, syntactically valid `LlmPlan`
+  JSON document to stdout and exits — a distinct, self-contained mode
+  that never runs discovery, never reads `--plan-file`, and never checks
+  live-mode credentials, regardless of what else is passed alongside it.
+  See [BYOK LLM Planner](byok.md#llmplan-schema--the-concrete---plan-file-example-horo-1048)
+  for the full example and field table.
 
 Human-readable output always opens with `LLM SUGGESTION — advisory only,
 nothing is executed by this command`.
