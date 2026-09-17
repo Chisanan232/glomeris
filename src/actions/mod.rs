@@ -166,6 +166,14 @@ impl ActionRegistry {
         }
     }
 
+    /// Every registered action, in registration order — the read-only
+    /// enumeration primitive `glomeris actions list --json` (HORO-1047) is
+    /// built on, so registering a new action in [`ActionRegistry::builtin`]
+    /// requires no change to that command.
+    pub fn actions(&self) -> impl Iterator<Item = &dyn Action> {
+        self.actions.iter().map(|action| action.as_ref())
+    }
+
     /// Look up a registered action by its stable id string. Returns
     /// `None` for an unknown id — callers must hard-error on `None`,
     /// never silently skip the requested action.

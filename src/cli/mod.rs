@@ -31,9 +31,9 @@ use crate::monitor::{FsUsage, Heartbeat, HistoryEntry, ThresholdConfig};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
-    CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPlanItemReport,
-    LlmPlanReport, ProgressEvent, StatusReport,
+    ActionListItem, ActionListReport, CleanDryRunItem, CleanDryRunReport, DaemonStatusReport,
+    DetectCandidateReport, DetectReport, ExecuteReport, ExplainReport, HistoryEventReport,
+    HistoryReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -502,6 +502,38 @@ pub fn build_llm_plan_report(
         dropped_unknown_resource: result.dropped_unknown_resource,
         dropped_unknown_action: result.dropped_unknown_action,
         provider_error: result.provider_error.map(|e| format!("{e:?}")),
+    }
+}
+
+/// Builds an [`ActionListReport`] (HORO-1047) by enumerating every action
+/// [`ActionRegistry::actions`] actually returns — never a hand-maintained
+/// list — so registering a new action in [`ActionRegistry::builtin`]
+/// requires no change to this function, `glomeris actions list --json`, or
+/// this DTO's contents.
+pub fn build_action_list_report(actions: &ActionRegistry) -> ActionListReport {
+    ActionListReport {
+        actions: actions
+            .actions()
+            .map(|action| ActionListItem {
+                action_id: action.id().0,
+                applies_to: action.applies_to().iter().map(|kind| kind.tag()).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Prints an [`ActionListReport`] as concise, human-readable text.
+pub fn print_action_list_report(report: &ActionListReport) {
+    if report.actions.is_empty() {
+        println!("no actions registered");
+        return;
+    }
+    for item in &report.actions {
+        println!(
+            "{:<28} applies_to={}",
+            item.action_id,
+            item.applies_to.join(",")
+        );
     }
 }
 
@@ -2225,5 +2257,58 @@ mod execute_tests {
         );
 
         assert!(matches!(resolution, ExecuteResolution::ResourceNotFound));
+    }
+
+    /// HORO-1047 AC: `actions list --json`'s action-id set is derived
+    /// directly from `ActionRegistry::actions()`'s real iteration — never a
+    /// hand-typed expected list — so this test cannot silently desync from
+    /// the registry when a new action is added to `ActionRegistry::builtin`.
+    #[test]
+    fn build_action_list_report_enumerates_every_registered_action() {
+        let registry = ActionRegistry::builtin();
+
+        let expected: Vec<&'static str> = registry.actions().map(|action| action.id().0).collect();
+
+        let report = build_action_list_report(&registry);
+        let actual: Vec<&'static str> = report.actions.iter().map(|item| item.action_id).collect();
+
+        assert_eq!(actual, expected);
+        assert_eq!(report.actions.len(), registry.actions().count());
+    }
+
+    /// Each item's `applies_to` is a direct projection of the real
+    /// `Action::applies_to()` slice for that action — never hardcoded —
+    /// proven here against the one action currently registered for
+    /// `ResourceKind::CargoTargetDir`.
+    #[test]
+    fn build_action_list_report_applies_to_matches_the_real_action() {
+        let registry = ActionRegistry::builtin();
+        let report = build_action_list_report(&registry);
+
+        let cargo_action = registry
+            .get("cargo.clean.target_dir")
+            .expect("cargo.clean.target_dir must be registered");
+        let expected_applies_to: Vec<&'static str> = cargo_action
+            .applies_to()
+            .iter()
+            .map(|kind| kind.tag())
+            .collect();
+
+        let item = report
+            .actions
+            .iter()
+            .find(|item| item.action_id == "cargo.clean.target_dir")
+            .expect("cargo.clean.target_dir must appear in the report");
+        assert_eq!(item.applies_to, expected_applies_to);
+    }
+
+    /// `print_action_list_report` must not panic on a real, non-empty
+    /// registry — matches this module's existing `print_*_do_not_panic`
+    /// convention.
+    #[test]
+    fn print_action_list_report_does_not_panic() {
+        let registry = ActionRegistry::builtin();
+        let report = build_action_list_report(&registry);
+        print_action_list_report(&report);
     }
 }

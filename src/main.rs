@@ -7,7 +7,7 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") | Some("help") => {
             println!(
-                "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|scan|status [--json]|\
+                "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|actions list [--json]|scan|status [--json]|\
                  detect [--project-root <path>]... [--json] [--progress-json]|\
                  explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
                  clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
@@ -20,6 +20,7 @@ fn main() {
             );
         }
         Some("daemon") => run_daemon_command(&args[1..]),
+        Some("actions") => run_actions_command(&args[1..]),
         Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
         Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(&args[1..]),
@@ -43,7 +44,7 @@ fn main() {
 
 fn print_usage() {
     eprintln!(
-        "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|scan|status [--json]|\
+        "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|actions list [--json]|scan|status [--json]|\
          detect [--project-root <path>]... [--json] [--progress-json]|\
          explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
          clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
@@ -935,6 +936,40 @@ fn run_daemon_command(args: &[String]) {
             print_usage();
             std::process::exit(2);
         }
+    }
+}
+
+/// `glomeris actions <list [--json]>` (HORO-1047) — origin: v0.2.0
+/// founder-dogfood had to read `src/actions/homebrew.rs` source directly to
+/// find the real registered action id string (`homebrew.cleanup.cache`);
+/// no command exposed the registry. Pure enumeration of
+/// `ActionRegistry::builtin()` — no macOS gate, unlike `daemon`, since
+/// nothing here touches the filesystem or launchd.
+fn run_actions_command(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("list") => actions_list(&args[1..]),
+        Some(other) => {
+            eprintln!("glomeris actions: unknown subcommand '{other}'");
+            print_usage();
+            std::process::exit(2);
+        }
+        None => {
+            print_usage();
+            std::process::exit(2);
+        }
+    }
+}
+
+fn actions_list(args: &[String]) {
+    let (_positionals, flags) = split_flags(args, &["--json"]);
+
+    let registry = glomeris::actions::ActionRegistry::builtin();
+    let report = glomeris::cli::build_action_list_report(&registry);
+
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_action_list_report(&report);
     }
 }
 
