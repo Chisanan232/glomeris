@@ -41,6 +41,40 @@ fn confidence_tag(c: Confidence) -> &'static str {
     }
 }
 
+/// One line of the `--progress-json` NDJSON stream emitted on stderr
+/// (HORO-1052) while `detect`/`explain`/`llm-plan`'s shared discovery
+/// phase (`cli::discover_and_classify_with_progress`) runs — the phase
+/// v0.2.0 founder-dogfood measured at up to 3m40s on a contended host with
+/// no signal a spawning UI (HORO-1060) could use to distinguish "still
+/// working" from "hung".
+///
+/// Never emitted unless `--progress-json` is passed; stdout's report DTOs
+/// above are completely unaffected either way. `#[serde(tag = "phase")]`
+/// is deliberately used here (unlike every other enum in this module,
+/// which is projected to a plain `&'static str` tag by a free function)
+/// because this is the one DTO a consumer parses as structured NDJSON
+/// rather than reads as a report field, so serde's own internally-tagged
+/// shape is the simplest way to guarantee the exact
+/// `{"phase":"detector_started","detector":"..."}` shape HORO-1055 and the
+/// Swift UI tickets depend on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum ProgressEvent {
+    /// One detector (`detectors::DetectorRegistry::discover_all`'s
+    /// per-detector granularity — the natural boundary already in that
+    /// code) is about to run its bounded probe.
+    DetectorStarted { detector: &'static str },
+    /// The same detector's probe has returned. `candidates_found` is `0`
+    /// for `DetectorStatus::ToolAbsent`/`Failed` as well as a genuine
+    /// empty `Found(vec![])` — this event reports "how many candidates
+    /// came out", not detector health; a caller that needs to tell those
+    /// apart uses the final report, not this stream.
+    DetectorFinished {
+        detector: &'static str,
+        candidates_found: usize,
+    },
+}
+
 /// One action a caller (HORO-1053: the future SwiftUI menu-bar app) may
 /// offer to the user for a resource — never a raw policy label. This is
 /// the mechanism that keeps a second policy implementation out of that
