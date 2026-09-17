@@ -106,6 +106,25 @@ impl ResourceKind {
             | ResourceKind::Unknown => WITHOUT_TOOL_LIVENESS,
         }
     }
+
+    /// Stable, snake_case tag for this kind — the single source of truth
+    /// [`ResourceId::kind_tag`] delegates to, and that
+    /// `actions list --json` (HORO-1047) also uses directly to project an
+    /// [`crate::actions::Action::applies_to`] slice (which carries bare
+    /// [`ResourceKind`] values, not a full [`ResourceId`]).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            ResourceKind::XcodeDerivedData => "xcode_derived_data",
+            ResourceKind::HomebrewCache => "homebrew_cache",
+            ResourceKind::CargoTargetDir => "cargo_target_dir",
+            ResourceKind::CargoRegistryCache => "cargo_registry_cache",
+            ResourceKind::NodeModules => "node_modules",
+            ResourceKind::NodePackageManagerCache => "node_package_manager_cache",
+            ResourceKind::DockerBuildCache => "docker_build_cache",
+            ResourceKind::DockerImageCache => "docker_image_cache",
+            ResourceKind::Unknown => "unknown",
+        }
+    }
 }
 
 /// Tool that owns/manages a resource.
@@ -230,19 +249,10 @@ impl ResourceId {
     /// Stable, snake_case tag for `self.kind` — the same string
     /// [`ResourceId`]'s [`Display`](std::fmt::Display) impl uses before the locator. `pub`
     /// (HORO-954) so `actions::llm::LlmResourceView` can reuse this exact
-    /// mapping instead of re-deriving its own copy of this match.
+    /// mapping instead of re-deriving its own copy of this match. Delegates
+    /// to [`ResourceKind::tag`], the single source of truth.
     pub fn kind_tag(&self) -> &'static str {
-        match self.kind {
-            ResourceKind::XcodeDerivedData => "xcode_derived_data",
-            ResourceKind::HomebrewCache => "homebrew_cache",
-            ResourceKind::CargoTargetDir => "cargo_target_dir",
-            ResourceKind::CargoRegistryCache => "cargo_registry_cache",
-            ResourceKind::NodeModules => "node_modules",
-            ResourceKind::NodePackageManagerCache => "node_package_manager_cache",
-            ResourceKind::DockerBuildCache => "docker_build_cache",
-            ResourceKind::DockerImageCache => "docker_image_cache",
-            ResourceKind::Unknown => "unknown",
-        }
+        self.kind.tag()
     }
 }
 
