@@ -33,5 +33,13 @@ struct GlomerisMenuBarApp: App {
             GlomerisPopoverView()
         }
         .menuBarExtraStyle(.window)
+
+        // HORO-1067: the project-roots preference surface. A standard
+        // SwiftUI `Settings` scene (Cmd+, / app menu "Settings…") — pure
+        // presentation over ProjectRootsStore, no detect/explain/execute
+        // wiring.
+        Settings {
+            ProjectRootsPreferencesView()
+        }
     }
 }
