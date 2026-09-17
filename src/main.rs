@@ -1,23 +1,130 @@
 use glomeris::{monitor, platform};
 use std::path::PathBuf;
 
+/// One row of the single command table (HORO-1050) that both `print_usage()`
+/// and `--help`/`-h`/`help` read from, and that `glomeris <sub> --help`
+/// looks itself up in. Before this ticket, `--help` and `print_usage()` were
+/// two independently-maintained strings that had already drifted once
+/// (HORO-1034: `print_usage()` omitted `llm-plan`) — this table is the fix
+/// by construction: there is exactly one place to add a new subcommand.
+struct CommandSpec {
+    /// The literal first positional argument, e.g. `"llm-plan"`.
+    name: &'static str,
+    /// This subcommand's one-line usage fragment, without the leading
+    /// `usage: glomeris ` prefix — used both standalone (`glomeris <sub>
+    /// --help`) and joined with `|` inside the aggregate usage line.
+    usage: &'static str,
+    /// One-sentence description shown under the usage line in
+    /// `glomeris <sub> --help` output.
+    description: &'static str,
+}
+
+/// Every currently-registered top-level subcommand. Keep this in sync with
+/// the `match` arms in [`main`] — adding a subcommand there without a row
+/// here is a compile-time-silent but review-visible omission, not a
+/// runtime drift, since both `--help` and unknown-command usage now render
+/// from this one array.
+const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "daemon",
+        usage: "daemon <install [--force]|uninstall|status [--json]|run>",
+        description: "Manage the background disk-pressure monitor launch agent.",
+    },
+    CommandSpec {
+        name: "actions",
+        usage: "actions list [--json]",
+        description: "List the registered cleanup actions.",
+    },
+    CommandSpec {
+        name: "scan",
+        usage: "scan",
+        description: "Run a one-off disk usage scan.",
+    },
+    CommandSpec {
+        name: "status",
+        usage: "status [--json]",
+        description: "Show current disk pressure state.",
+    },
+    CommandSpec {
+        name: "detect",
+        usage: "detect [--project-root <path>]... [--json] [--progress-json]",
+        description: "Run detectors and report reclaimable candidates.",
+    },
+    CommandSpec {
+        name: "explain",
+        usage:
+            "explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]",
+        description: "Show the full evidence-and-policy picture for one resource.",
+    },
+    CommandSpec {
+        name: "clean",
+        usage: "clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...",
+        description: "Render what would be cleaned, without executing anything.",
+    },
+    CommandSpec {
+        name: "llm-plan",
+        usage:
+            "llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]",
+        description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion.",
+    },
+    CommandSpec {
+        name: "execute",
+        usage: "execute --action-id <id> --resource-id <id> [--project-root <path>]... \
+                 [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]",
+        description: "Execute one action against one resource under policy control.",
+    },
+    CommandSpec {
+        name: "emergency",
+        usage: "emergency",
+        description: "Degraded-path recovery: free disk space without network or LLM access.",
+    },
+    CommandSpec {
+        name: "history",
+        usage: "history [--json] [--limit <N>]",
+        description: "Show a bounded tail of recorded disk-pressure transitions.",
+    },
+    CommandSpec {
+        name: "free",
+        usage: "free --target <N%|NB> [--project-root <path>]...",
+        description: "Run the automated recovery loop until the target free space is reached.",
+    },
+];
+
+/// Looks up a top-level subcommand by its literal name in [`COMMANDS`].
+fn find_command(name: &str) -> Option<&'static CommandSpec> {
+    COMMANDS.iter().find(|c| c.name == name)
+}
+
+/// Builds the single aggregate `usage: glomeris <...>` line from
+/// [`COMMANDS`] — the one string both `--help` and `print_usage()` render.
+fn build_aggregate_usage() -> String {
+    let joined = COMMANDS
+        .iter()
+        .map(|c| c.usage)
+        .collect::<Vec<_>>()
+        .join("|\n ");
+    format!("usage: glomeris <{joined}>")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // `glomeris <sub> --help`/`-h` (HORO-1050): looked up in the same
+    // COMMANDS table before falling through to the subcommand's own
+    // dispatch/parsing, so every subcommand supports its own `--help`
+    // uniformly rather than as a one-off special case.
+    if let Some(name) = args.first() {
+        if let Some(spec) = find_command(name) {
+            if matches!(args.get(1).map(String::as_str), Some("--help") | Some("-h")) {
+                println!("usage: glomeris {}\n\n{}", spec.usage, spec.description);
+                return;
+            }
+        }
+    }
+
     match args.first().map(String::as_str) {
         Some("--help") | Some("-h") | Some("help") => {
-            println!(
-                "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|actions list [--json]|scan|status [--json]|\
-                 detect [--project-root <path>]... [--json] [--progress-json]|\
-                 explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
-                 clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
-                 llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]|\
-                 execute --action-id <id> --resource-id <id> [--project-root <path>]... \
-                 [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]|\
-                 emergency|\
-                 history [--json] [--limit <N>]|\
-                 free --target <N%|NB> [--project-root <path>]...>"
-            );
+            println!("{}", build_aggregate_usage());
         }
         Some("daemon") => run_daemon_command(&args[1..]),
         Some("actions") => run_actions_command(&args[1..]),
@@ -43,17 +150,7 @@ fn main() {
 }
 
 fn print_usage() {
-    eprintln!(
-        "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|actions list [--json]|scan|status [--json]|\
-         detect [--project-root <path>]... [--json] [--progress-json]|\
-         explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
-         clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
-         execute --action-id <id> --resource-id <id> [--project-root <path>]... \
-         [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]|\
-         emergency|\
-         history [--json] [--limit <N>]|\
-         free --target <N%|NB> [--project-root <path>]...>"
-    );
+    eprintln!("{}", build_aggregate_usage());
 }
 
 /// Parses a flat argument list into a positional-args list and a set of
