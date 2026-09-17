@@ -459,6 +459,28 @@ pub struct ExecuteRefusalReport {
     pub message: String,
 }
 
+/// One registered action from `ActionRegistry::builtin()`, as reported by
+/// `glomeris actions list --json` (HORO-1047). `applies_to` is a direct
+/// projection of [`crate::actions::Action::applies_to`] — never a
+/// hand-maintained list — which is what makes registering a new action
+/// require no change to this DTO or the command that builds it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActionListItem {
+    pub action_id: &'static str,
+    pub applies_to: Vec<&'static str>,
+}
+
+/// `glomeris actions list --json`'s top-level report (HORO-1047): every
+/// action currently registered in [`crate::actions::ActionRegistry::builtin`],
+/// enumerated via [`crate::actions::ActionRegistry::actions`] — origin:
+/// v0.2.0 founder-dogfood had to read `src/actions/homebrew.rs` source
+/// directly to find a real registered action id, because no command
+/// exposed the registry.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActionListReport {
+    pub actions: Vec<ActionListItem>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
