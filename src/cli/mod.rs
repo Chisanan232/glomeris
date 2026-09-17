@@ -27,12 +27,13 @@ use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, Disco
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
 use crate::executor::{dry_run, execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::{FsUsage, Heartbeat, ThresholdConfig};
+use crate::monitor::{FsUsage, Heartbeat, HistoryEntry, ThresholdConfig};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
+    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPlanItemReport,
+    LlmPlanReport, ProgressEvent, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -79,6 +80,27 @@ pub fn build_daemon_status_report(
         loaded,
         heartbeat_age_secs: heartbeat
             .map(|hb| now_unix_secs.saturating_sub(hb.last_poll_unix_secs)),
+    }
+}
+
+/// Builds a [`HistoryReport`] (HORO-1046) from whatever
+/// [`crate::monitor::read_history_tail`] already returned. Pure — no I/O;
+/// the bounding and malformed-line-skipping already happened in
+/// `read_history_tail`, so this only projects each [`HistoryEntry`] into
+/// its report DTO.
+pub fn build_history_report(entries: &[HistoryEntry]) -> HistoryReport {
+    HistoryReport {
+        events: entries
+            .iter()
+            .map(|entry| HistoryEventReport {
+                unix_time_secs: entry.unix_time_secs,
+                from: entry.from.clone(),
+                to: entry.to.clone(),
+                used_percent: entry.used_percent,
+                free_bytes: entry.free_bytes,
+                free_human: crate::reporting::human_bytes(entry.free_bytes),
+            })
+            .collect(),
     }
 }
 
@@ -507,6 +529,20 @@ pub fn print_daemon_status_report(report: &DaemonStatusReport) {
     match report.heartbeat_age_secs {
         Some(age) => println!("last poll: {age}s ago"),
         None => println!("last poll: never"),
+    }
+}
+
+/// Prints a [`HistoryReport`] as concise, human-readable text.
+pub fn print_history_report(report: &HistoryReport) {
+    if report.events.is_empty() {
+        println!("no pressure history recorded");
+        return;
+    }
+    for event in &report.events {
+        println!(
+            "{}\t{} -> {}\t{:.2}%\tfree {}",
+            event.unix_time_secs, event.from, event.to, event.used_percent, event.free_human
+        );
     }
 }
 
@@ -1029,6 +1065,41 @@ mod tests {
         );
         assert!(!obj.contains_key("healthy"));
         assert!(!obj.contains_key("ok"));
+    }
+
+    #[test]
+    fn build_history_report_projects_entries_in_order() {
+        let entries = vec![
+            HistoryEntry {
+                unix_time_secs: 1_700_000_000,
+                from: "HEALTHY".to_string(),
+                to: "WARN".to_string(),
+                used_percent: 76.5,
+                free_bytes: 1_000_000,
+            },
+            HistoryEntry {
+                unix_time_secs: 1_700_000_060,
+                from: "WARN".to_string(),
+                to: "PRESSURED".to_string(),
+                used_percent: 88.0,
+                free_bytes: 500_000,
+            },
+        ];
+
+        let report = build_history_report(&entries);
+
+        assert_eq!(report.events.len(), 2);
+        assert_eq!(report.events[0].unix_time_secs, 1_700_000_000);
+        assert_eq!(report.events[0].from, "HEALTHY");
+        assert_eq!(report.events[0].to, "WARN");
+        assert_eq!(report.events[1].to, "PRESSURED");
+    }
+
+    #[test]
+    fn build_history_report_empty_entries_produces_empty_events() {
+        let report = build_history_report(&[]);
+
+        assert!(report.events.is_empty());
     }
 
     #[test]
