@@ -31,8 +31,9 @@ use crate::monitor::{FsUsage, Heartbeat, ThresholdConfig};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
-    CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
+    ActionListItem, ActionListReport, CleanDryRunItem, CleanDryRunReport, DaemonStatusReport,
+    DetectCandidateReport, DetectReport, ExecuteReport, ExplainReport, LlmPlanItemReport,
+    LlmPlanReport, ProgressEvent, StatusReport,
 };
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -480,6 +481,38 @@ pub fn build_llm_plan_report(
         dropped_unknown_resource: result.dropped_unknown_resource,
         dropped_unknown_action: result.dropped_unknown_action,
         provider_error: result.provider_error.map(|e| format!("{e:?}")),
+    }
+}
+
+/// Builds an [`ActionListReport`] (HORO-1047) by enumerating every action
+/// [`ActionRegistry::actions`] actually returns — never a hand-maintained
+/// list — so registering a new action in [`ActionRegistry::builtin`]
+/// requires no change to this function, `glomeris actions list --json`, or
+/// this DTO's contents.
+pub fn build_action_list_report(actions: &ActionRegistry) -> ActionListReport {
+    ActionListReport {
+        actions: actions
+            .actions()
+            .map(|action| ActionListItem {
+                action_id: action.id().0,
+                applies_to: action.applies_to().iter().map(|kind| kind.tag()).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// Prints an [`ActionListReport`] as concise, human-readable text.
+pub fn print_action_list_report(report: &ActionListReport) {
+    if report.actions.is_empty() {
+        println!("no actions registered");
+        return;
+    }
+    for item in &report.actions {
+        println!(
+            "{:<28} applies_to={}",
+            item.action_id,
+            item.applies_to.join(",")
+        );
     }
 }
 
