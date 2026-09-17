@@ -8,10 +8,10 @@ fn main() {
         Some("--help") | Some("-h") | Some("help") => {
             println!(
                 "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|scan|status [--json]|\
-                 detect [--project-root <path>]... [--json]|\
-                 explain <resource_id_or_path> [--project-root <path>]... [--json]|\
+                 detect [--project-root <path>]... [--json] [--progress-json]|\
+                 explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
                  clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
-                 llm-plan [--project-root <path>]... [--plan-file <path>] [--json]|\
+                 llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]|\
                  emergency|\
                  free --target <N%|NB> [--project-root <path>]...>"
             );
@@ -39,8 +39,8 @@ fn main() {
 fn print_usage() {
     eprintln!(
         "usage: glomeris <daemon <install [--force]|uninstall|status [--json]|run>|scan|status [--json]|\
-         detect [--project-root <path>]... [--json]|\
-         explain <resource_id_or_path> [--project-root <path>]... [--json]|\
+         detect [--project-root <path>]... [--json] [--progress-json]|\
+         explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]|\
          clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...|\
          emergency|\
          free --target <N%|NB> [--project-root <path>]...>"
@@ -108,6 +108,51 @@ fn discover_and_classify_now(
     let now = SystemTime::now();
 
     glomeris::cli::discover_and_classify(&registry, &ctx, &collector, &cfg, now)
+}
+
+/// Same discovery pipeline as [`discover_and_classify_now`], but behind
+/// `--progress-json` (HORO-1052): emits one NDJSON-encoded
+/// [`glomeris::reporting::dto::ProgressEvent`] line to stderr per
+/// detector start/finish as `detect`/`explain`/`llm-plan`'s shared
+/// discovery phase runs. When `progress_json` is `false` this emits
+/// nothing at all — stdout and stderr stay byte-identical to
+/// [`discover_and_classify_now`]'s behavior, which is the ticket's
+/// explicit, testable AC.
+fn discover_and_classify_now_with_progress(
+    project_roots: Vec<PathBuf>,
+    progress_json: bool,
+) -> Vec<(
+    glomeris::evidence::Evidence,
+    glomeris::policy::PolicyDecision,
+)> {
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::policy::PolicyConfig;
+    use std::time::SystemTime;
+
+    let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots);
+    let registry = DetectorRegistry::builtin();
+    let collector = DefaultEvidenceCollector::default();
+    let cfg = PolicyConfig::default();
+    let now = SystemTime::now();
+
+    glomeris::cli::discover_and_classify_with_progress(
+        &registry,
+        &ctx,
+        &collector,
+        &cfg,
+        now,
+        |event| {
+            if progress_json {
+                match serde_json::to_string(&event) {
+                    Ok(line) => eprintln!("{line}"),
+                    Err(e) => {
+                        eprintln!("glomeris: failed to render progress event: {e}");
+                    }
+                }
+            }
+        },
+    )
 }
 
 /// `glomeris status` — current disk pressure state (HORO-955).
@@ -244,7 +289,8 @@ fn run_detect_command(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let (_positionals, flags) = split_flags(&remaining, &["--json"]);
+    let (_positionals, flags) = split_flags(&remaining, &["--json", "--progress-json"]);
+    let progress_json = flags.contains(&"--progress-json");
 
     let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots.clone());
     let registry = DetectorRegistry::builtin();
@@ -265,7 +311,7 @@ fn run_detect_command(args: &[String]) {
         }
     }
 
-    let candidates = discover_and_classify_now(project_roots);
+    let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = glomeris::actions::ActionRegistry::builtin();
     let report = glomeris::cli::build_detect_report(&candidates, &actions);
 
@@ -287,7 +333,8 @@ fn run_explain_command(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let (positionals, flags) = split_flags(&remaining, &["--json"]);
+    let (positionals, flags) = split_flags(&remaining, &["--json", "--progress-json"]);
+    let progress_json = flags.contains(&"--progress-json");
 
     let Some(query) = positionals.first() else {
         eprintln!("glomeris explain: a resource id or path argument is required");
@@ -295,7 +342,7 @@ fn run_explain_command(args: &[String]) {
         std::process::exit(2);
     };
 
-    let candidates = discover_and_classify_now(project_roots);
+    let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let Some((ev, decision)) = glomeris::cli::find_candidate(query, &candidates) else {
         eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
         std::process::exit(1);
@@ -403,11 +450,16 @@ fn run_llm_plan_command(args: &[String]) {
     };
 
     let mut json = false;
+    let mut progress_json = false;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
             "--json" => {
                 json = true;
+                i += 1;
+            }
+            "--progress-json" => {
+                progress_json = true;
                 i += 1;
             }
             other => {
@@ -434,7 +486,7 @@ fn run_llm_plan_command(args: &[String]) {
         }
     }
 
-    let candidates = discover_and_classify_now(project_roots);
+    let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = ActionRegistry::builtin();
 
     let report = match plan_file {

@@ -377,11 +377,48 @@ impl DetectorRegistry {
     }
 
     pub fn discover_all(&self, ctx: &DiscoveryContext) -> Vec<(DetectorId, DetectorStatus)> {
+        self.discover_all_with_progress(ctx, |_, _| {})
+    }
+
+    /// Same discovery loop as [`DetectorRegistry::discover_all`] — one
+    /// detector at a time, in registration order, identical
+    /// `DetectorStatus` results — but additionally invokes `on_progress`
+    /// immediately before and after each detector's `discover` call
+    /// (HORO-1052). This is the one place per-detector discovery
+    /// granularity is observable from outside this module; `detect`/
+    /// `explain`/`llm-plan`'s shared `cli::discover_and_classify_with_progress`
+    /// is the only caller that passes a non-no-op callback (to emit
+    /// `--progress-json` NDJSON lines on stderr) — `discover_all` itself
+    /// passes a no-op closure, so this refactor changes no observable
+    /// behavior for any existing caller.
+    pub fn discover_all_with_progress(
+        &self,
+        ctx: &DiscoveryContext,
+        mut on_progress: impl FnMut(DetectorId, DetectorProgress<'_>),
+    ) -> Vec<(DetectorId, DetectorStatus)> {
         self.detectors
             .iter()
-            .map(|detector| (detector.id(), detector.discover(ctx)))
+            .map(|detector| {
+                let id = detector.id();
+                on_progress(id, DetectorProgress::Started);
+                let status = detector.discover(ctx);
+                on_progress(id, DetectorProgress::Finished(&status));
+                (id, status)
+            })
             .collect()
     }
+}
+
+/// Per-detector lifecycle event reported by
+/// [`DetectorRegistry::discover_all_with_progress`] (HORO-1052). Kept
+/// crate-internal-shaped (borrows `&DetectorStatus` rather than owning a
+/// presentation DTO) so this module has no dependency on
+/// `crate::reporting` — the CLI layer, which already depends on both, is
+/// responsible for projecting this into `reporting::dto::ProgressEvent`.
+#[derive(Debug)]
+pub enum DetectorProgress<'a> {
+    Started,
+    Finished(&'a DetectorStatus),
 }
 
 #[cfg(test)]
