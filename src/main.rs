@@ -684,59 +684,74 @@ fn run_execute_command(_args: &[String]) {
 fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json: bool) {
     use glomeris::cli::ExecuteResolution;
     use glomeris::executor::ExecutionOutcome;
+    use glomeris::reporting::dto::ExecuteRefusalReport;
+
+    // Every refusal/not-found branch shares this shape: render as
+    // structured JSON when --json is passed, else the existing
+    // human-readable eprintln, then exit with `code`. --json callers
+    // (the interactive UI this subcommand exists for) previously got
+    // empty stdout plus a bare exit code here — exactly the cases a UI
+    // most needs structured detail on.
+    let refuse = |reason: &'static str, message: String, code: i32| -> ! {
+        if json {
+            print_json_or_exit(&ExecuteRefusalReport { reason, message });
+        } else {
+            eprintln!("glomeris execute: {message}");
+        }
+        std::process::exit(code);
+    };
 
     match resolution {
-        ExecuteResolution::ResourceNotFound => {
-            eprintln!(
-                "glomeris execute: no discoverable candidate matches the given --resource-id"
-            );
-            std::process::exit(5);
-        }
-        ExecuteResolution::ActionNotFound => {
-            eprintln!("glomeris execute: no registered action resolves for this resource");
-            std::process::exit(5);
-        }
+        ExecuteResolution::ResourceNotFound => refuse(
+            "resource_not_found",
+            "no discoverable candidate matches the given --resource-id".to_string(),
+            5,
+        ),
+        ExecuteResolution::ActionNotFound => refuse(
+            "action_not_found",
+            "no registered action resolves for this resource".to_string(),
+            5,
+        ),
         ExecuteResolution::ActionMismatch {
             requested,
             resolved,
-        } => {
-            eprintln!(
-                "glomeris execute: --action-id '{requested}' does not match the action this \
-                 resource actually resolves to ('{resolved}') — refusing to substitute a \
-                 different action than the one requested"
-            );
-            std::process::exit(5);
-        }
-        ExecuteResolution::RefusedProtected => {
-            eprintln!(
-                "glomeris execute: refused — this resource is PROTECTED; no flag combination \
-                 can authorize executing against it"
-            );
-            std::process::exit(3);
-        }
-        ExecuteResolution::RefusedAskNoConsent => {
-            eprintln!(
-                "glomeris execute: refused — this resource requires confirmation \
-                 (--confirm-ask plus a matching --observed-fingerprint); none was supplied"
-            );
-            std::process::exit(3);
-        }
-        ExecuteResolution::RefusedAskConsentMismatch => {
-            eprintln!(
-                "glomeris execute: refused — the supplied --observed-fingerprint does not match \
-                 this resource's freshly observed identity (stale, or observed for a different \
-                 resource)"
-            );
-            std::process::exit(3);
-        }
-        ExecuteResolution::RefusedAutoSafeContractViolation => {
-            eprintln!(
-                "glomeris execute: refused — an AUTO_SAFE decision failed to authorize, which \
-                 contradicts policy::approval::authorize's documented contract; refusing rather \
-                 than proceeding"
-            );
-            std::process::exit(3);
-        }
+        } => refuse(
+            "action_mismatch",
+            format!(
+                "--action-id '{requested}' does not match the action this resource actually \
+                 resolves to ('{resolved}') — refusing to substitute a different action than \
+                 the one requested"
+            ),
+            5,
+        ),
+        ExecuteResolution::RefusedProtected => refuse(
+            "protected",
+            "refused — this resource is PROTECTED; no flag combination can authorize executing \
+             against it"
+                .to_string(),
+            3,
+        ),
+        ExecuteResolution::RefusedAskNoConsent => refuse(
+            "ask_no_consent",
+            "refused — this resource requires confirmation (--confirm-ask plus a matching \
+             --observed-fingerprint); none was supplied"
+                .to_string(),
+            3,
+        ),
+        ExecuteResolution::RefusedAskConsentMismatch => refuse(
+            "ask_consent_mismatch",
+            "refused — the supplied --observed-fingerprint does not match this resource's \
+             freshly observed identity (stale, or observed for a different resource)"
+                .to_string(),
+            3,
+        ),
+        ExecuteResolution::RefusedAutoSafeContractViolation => refuse(
+            "auto_safe_contract_violation",
+            "refused — an AUTO_SAFE decision failed to authorize, which contradicts \
+             policy::approval::authorize's documented contract; refusing rather than proceeding"
+                .to_string(),
+            3,
+        ),
         ExecuteResolution::Executed(report) => {
             let execute_report = glomeris::cli::build_execute_report(&report);
             if json {
