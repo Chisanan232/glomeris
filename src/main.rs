@@ -15,6 +15,7 @@ fn main() {
                  execute --action-id <id> --resource-id <id> [--project-root <path>]... \
                  [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]|\
                  emergency|\
+                 history [--json] [--limit <N>]|\
                  free --target <N%|NB> [--project-root <path>]...>"
             );
         }
@@ -27,6 +28,7 @@ fn main() {
         Some("llm-plan") => run_llm_plan_command(&args[1..]),
         Some("execute") => run_execute_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
+        Some("history") => run_history_command(&args[1..]),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
@@ -48,6 +50,7 @@ fn print_usage() {
          execute --action-id <id> --resource-id <id> [--project-root <path>]... \
          [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]|\
          emergency|\
+         history [--json] [--limit <N>]|\
          free --target <N%|NB> [--project-root <path>]...>"
     );
 }
@@ -766,6 +769,68 @@ fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json:
                 ExecutionOutcome::DryRun => std::process::exit(0),
             }
         }
+    }
+}
+
+/// Default `--limit` for `glomeris history` (HORO-1046) when the caller
+/// doesn't pass one — small enough to stay a quick glance, large enough to
+/// span several recent transitions.
+const DEFAULT_HISTORY_LIMIT: usize = 20;
+
+/// Same `Library/Application Support/Glomeris/history.tsv` path
+/// `daemon_run` writes to — shared here so `glomeris history` reads back
+/// exactly what the poll loop recorded.
+fn history_path() -> PathBuf {
+    std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/history.tsv"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-history.tsv"))
+}
+
+/// `glomeris history [--json] [--limit N]` — a bounded, oldest-first tail
+/// of the monitor's `history.tsv` (HORO-1046). No new persistence format:
+/// this reads the exact same TSV `FilePersistence::record` already writes.
+/// A missing history file (daemon never ran, or never recorded a
+/// transition) is not an error — it renders as an empty list, matching
+/// `glomeris::monitor::read_history_tail`'s contract.
+fn run_history_command(args: &[String]) {
+    let mut limit = DEFAULT_HISTORY_LIMIT;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--limit" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("glomeris history: --limit requires a value");
+                    std::process::exit(2);
+                };
+                limit = match value.parse::<usize>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!("glomeris history: --limit must be a non-negative integer");
+                        std::process::exit(2);
+                    }
+                };
+                i += 2;
+            }
+            other => {
+                eprintln!("glomeris history: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let entries = glomeris::monitor::read_history_tail(&history_path(), limit);
+    let report = glomeris::cli::build_history_report(&entries);
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_history_report(&report);
     }
 }
 
