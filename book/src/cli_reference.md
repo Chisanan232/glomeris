@@ -37,6 +37,53 @@ macOS only (exits 1 with an error message on other platforms).
 No subcommand, or an unrecognized one, prints usage to stderr and exits 2.
 See [Daemon Lifecycle](daemon_lifecycle.md) for details.
 
+`daemon status --json` (HORO-1045) prints a `DaemonStatusReport`.
+`loaded` (launchd-reported) and `heartbeat_age_secs` (derived from the poll
+loop's own last-write) are deliberately kept as two separate fields, never
+collapsed into one `healthy` boolean — a loaded-but-wedged daemon and an
+actually-polling one must stay distinguishable:
+
+```sh
+glomeris daemon status --json
+```
+
+```json
+{
+  "plist_installed": true,
+  "plist_path": "/Users/dev/Library/LaunchAgents/dev.glomeris.daemon.plist",
+  "loaded": true,
+  "heartbeat_age_secs": 42
+}
+```
+
+`heartbeat_age_secs` is `null` when no heartbeat file exists yet (the
+daemon has never run).
+
+## `glomeris status [--json]`
+
+macOS only (exits 1 with an error message on other platforms). Not part of
+`daemon` — this is the same one-shot disk-pressure reading `daemon run`'s
+poll loop evaluates each tick, available on demand without needing the
+daemon installed at all (HORO-955).
+
+```sh
+glomeris status --json
+```
+
+```json
+{
+  "total_bytes": 500000000000,
+  "free_bytes": 125000000000,
+  "used_percent": 75.0,
+  "free_human": "116.4 GB",
+  "total_human": "465.7 GB",
+  "pressure_state": "WARN"
+}
+```
+
+`pressure_state` is one of `"OK"`, `"WARN"`, `"CRITICAL"` — see
+[Pressure Model](pressure_model.md).
+
 ## `glomeris scan [path] [top_k]`
 
 Not macOS-gated. Both arguments are positional and optional:
@@ -48,7 +95,7 @@ Not macOS-gated. Both arguments are positional and optional:
 Prints a summary line (files visited, stop reason, incomplete-entry count)
 followed by one line per candidate: size, depth, path.
 
-## `glomeris detect [--project-root <path>]...`
+## `glomeris detect [--project-root <path>]... [--json] [--progress-json]`
 
 Not macOS-gated. Runs `DetectorRegistry::builtin()`'s `discover_all` once and
 prints, per detector: `found (<N> evidence)`, `tool_absent`, or
@@ -58,6 +105,144 @@ prints, per detector: `found (<N> evidence)`, `tool_absent`, or
 project directory you want the cargo/node detectors to check for a
 `target/`/`node_modules/` dir. Without it, those two detectors have no
 project roots to scan and always report `tool_absent`.
+
+`--json` prints a `DetectReport` — one candidate line per discovered
+resource, including the already-computed
+`executable`/`offered_actions`/`refusal_reason` triple (HORO-1053) a caller
+(e.g. the menu-bar app) reads to decide what it can offer, without ever
+re-deriving that from `policy_label`/`reasons` itself:
+
+```sh
+glomeris detect --project-root ~/dev/myproject --json
+```
+
+```json
+{
+  "candidates": [
+    {
+      "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+      "kind": "cargo_target_dir",
+      "reclaimable_bytes": 2147483648,
+      "reclaimable_human": "2.0 GB",
+      "reclaimable_bytes_is_lower_bound": false,
+      "policy_label": "AUTO_SAFE",
+      "reasons": ["no_active_use_observed"],
+      "executable": true,
+      "offered_actions": [
+        {
+          "action_id": "cargo.clean.target_dir",
+          "requires_confirmation": false
+        }
+      ],
+      "refusal_reason": null
+    },
+    {
+      "resource_id": "docker_build_cache:docker",
+      "kind": "docker_build_cache",
+      "reclaimable_bytes": 10737418240,
+      "reclaimable_human": "10.0 GB",
+      "reclaimable_bytes_is_lower_bound": true,
+      "policy_label": "UNKNOWN_INCOMPLETE",
+      "reasons": ["evidence_incomplete"],
+      "executable": false,
+      "offered_actions": [],
+      "refusal_reason": "no registered cleanup action for this resource kind"
+    }
+  ]
+}
+```
+
+`--progress-json` (HORO-1052) emits one NDJSON-encoded `ProgressEvent` line
+to **stderr** per detector start/finish while discovery runs — a way for a
+spawning UI to distinguish "still working" from "hung" on a slow/contended
+host (v0.2.0 founder-dogfood measured a single discovery pass up to 3m40s).
+Stdout is completely unaffected either way, `--progress-json` output can be
+combined with `--json`, and nothing is emitted at all unless the flag is
+passed:
+
+```sh
+glomeris detect --progress-json 2>&1 1>/dev/null
+```
+
+```
+{"phase":"detector_started","detector":"cargo_target_dir"}
+{"phase":"detector_finished","detector":"cargo_target_dir","candidates_found":1}
+{"phase":"detector_started","detector":"node_modules"}
+{"phase":"detector_finished","detector":"node_modules","candidates_found":0}
+```
+
+`detect`, `explain`, `llm-plan`, and `execute` all share this same
+discovery phase and all support `--progress-json` identically.
+
+## `glomeris explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]`
+
+Not macOS-gated. Runs the same discovery-and-classification pipeline as
+`detect`, then prints the full evidence-and-policy picture for exactly the
+one resource matching `<resource_id_or_path>` (a `detect` report's
+`resource_id`, or a filesystem path) — evidence provenance, size (logical
+vs. reclaimable, explicitly labeled as different), active-use signals, and
+policy classification (HORO-955). Exits `1` if no discovered candidate
+matches the query.
+
+`--project-root <path>` and `--progress-json` mean exactly what they mean
+for `detect` above.
+
+```sh
+glomeris explain cargo_target_dir:/Users/dev/proj/target --json
+```
+
+```json
+{
+  "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+  "kind": "cargo_target_dir",
+  "detector": "cargo_target_dir",
+  "sources": ["cargo metadata: target-dir"],
+  "logical_bytes": 2147483648,
+  "logical_human": "2.0 GB",
+  "reclaimable_bytes": 2147483648,
+  "reclaimable_human": "2.0 GB",
+  "reclaimable_bytes_is_lower_bound": false,
+  "completeness": "complete",
+  "confidence": "high",
+  "active_use_signals": [],
+  "regenerability": "regenerable_by_rebuild",
+  "policy_label": "AUTO_SAFE",
+  "reasons": ["no_active_use_observed"],
+  "native_cleanup_available": true,
+  "native_cleanup_action_id": "cargo.clean.target_dir",
+  "fingerprint_token": "<opaque token — copy verbatim, never hand-construct>",
+  "executable": true,
+  "offered_actions": [
+    {
+      "action_id": "cargo.clean.target_dir",
+      "requires_confirmation": false
+    }
+  ],
+  "refusal_reason": null
+}
+```
+
+`fingerprint_token` (HORO-1051) is an opaque, wire-safe encoding of the
+resource's identity fingerprint — `null` for a resource with no dev/inode/
+mtime identity (e.g. Docker's build cache). This is the exact token
+`execute --observed-fingerprint` later expects back for an `ASK`-classified
+resource; see `execute`'s section below.
+
+## `glomeris clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...`
+
+Not macOS-gated. Renders what would be cleaned, without executing
+anything — `--dry-run` is required; there is no non-dry-run execution path
+on this subcommand (real destructive execution is `glomeris free --target`
+or `glomeris execute`'s job). Without `--target`, every discovered
+candidate is considered; with it, only the one matching resource is.
+
+```sh
+glomeris clean --dry-run
+```
+
+Human-readable output only — `clean --dry-run` has no `--json` mode. One
+line per considered resource, either its rendered `ActionPlan.explain` text
+or a `skip_reason` (e.g. `PROTECTED`, no registered action).
 
 ## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--schema]`
 
@@ -83,6 +268,27 @@ configuration and safety-property writeup.
   live-mode credentials, regardless of what else is passed alongside it.
   See [BYOK LLM Planner](byok.md#llmplan-schema--the-concrete---plan-file-example-horo-1048)
   for the full example and field table.
+
+```sh
+glomeris llm-plan --schema
+```
+
+```json
+{
+  "items": [
+    {
+      "resource_id": "cargo_target_dir:/Users/you/project/target",
+      "action_id": "cargo.clean.target_dir",
+      "priority": 1,
+      "reason": "stale build artifacts, not modified in 30 days"
+    }
+  ]
+}
+```
+
+This exact output round-trips unchanged through `glomeris llm-plan
+--plan-file <path>` — see the linked BYOK page for the full field table and
+the round-trip test that proves it.
 
 Human-readable output always opens with `LLM SUGGESTION — advisory only,
 nothing is executed by this command`.
@@ -146,6 +352,63 @@ that happens before discovery/resolution even runs) — each a distinct,
 machine-readable value naming exactly which refusal/abort path fired,
 never a generic error string.
 
+An `AUTO_SAFE` resource needs no confirmation flags at all:
+
+```sh
+glomeris execute --action-id cargo.clean.target_dir \
+  --resource-id cargo_target_dir:/Users/dev/proj/target --json
+```
+
+```json
+{
+  "action_id": "cargo.clean.target_dir",
+  "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+  "outcome": "succeeded",
+  "failure_message": null,
+  "abort_reason": null,
+  "expected_reclaimed_bytes": 2147483648,
+  "actual_reclaimed_bytes": 2147483648
+}
+```
+
+An `ASK`-classified resource requires `--confirm-ask` plus the exact
+`--observed-fingerprint` token captured from a prior `explain --json` call
+on that same resource (never a fingerprint freshly observed by `execute`
+itself) — `$FINGERPRINT_TOKEN` below is that call's `fingerprint_token`
+field, copied verbatim, never hand-constructed:
+
+```sh
+glomeris execute --action-id cargo.clean.target_dir \
+  --resource-id cargo_target_dir:/Users/dev/proj/target \
+  --confirm-ask --observed-fingerprint "$FINGERPRINT_TOKEN" \
+  --json --progress-json
+```
+
+If the resource's identity changed between the `explain` call and this
+`execute` call, revalidation aborts the plan rather than proceeding:
+
+```json
+{
+  "action_id": "cargo.clean.target_dir",
+  "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+  "outcome": "aborted_by_revalidation",
+  "failure_message": null,
+  "abort_reason": "ResourceIdentityChanged",
+  "expected_reclaimed_bytes": 2147483648,
+  "actual_reclaimed_bytes": null
+}
+```
+
+Every refusal path (e.g. `PROTECTED`, no consent supplied, a stale
+fingerprint) prints an `ExecuteRefusalReport` instead, with `--json`:
+
+```json
+{
+  "reason": "protected",
+  "message": "refused — this resource is PROTECTED; no flag combination can authorize executing against it"
+}
+```
+
 Exit codes for this subcommand specifically:
 
 - `0` — the action executed and succeeded.
@@ -193,7 +456,61 @@ With `--json`, prints a `HistoryReport` (`{"events": [...]}`); each event
 has `unix_time_secs`, `from`, `to`, `used_percent`, `free_bytes`, and
 `free_human`. Without `--json`, prints one line per event as plain text.
 
-## `glomeris actions history [--json] [--limit <N>]`
+```sh
+glomeris history --json --limit 2
+```
+
+```json
+{
+  "events": [
+    {
+      "unix_time_secs": 1700000000,
+      "from": "OK",
+      "to": "WARN",
+      "used_percent": 82.5,
+      "free_bytes": 80000000000,
+      "free_human": "74.5 GB"
+    },
+    {
+      "unix_time_secs": 1700000600,
+      "from": "WARN",
+      "to": "CRITICAL",
+      "used_percent": 95.1,
+      "free_bytes": 20000000000,
+      "free_human": "18.6 GB"
+    }
+  ]
+}
+```
+
+## `glomeris actions <list [--json]|history [--json] [--limit <N>]>`
+
+Neither subcommand is macOS-gated — `list` touches no filesystem/launchd
+state at all, and `history` only reads a plain file.
+
+### `glomeris actions list [--json]`
+
+Enumerates every action currently registered in `ActionRegistry::builtin()`
+(HORO-1047) — the read path that replaced having to read
+`src/actions/homebrew.rs` source directly to find a real action id string.
+`applies_to` is a direct projection of each action's own `Action::applies_to`,
+never a hand-maintained list.
+
+```sh
+glomeris actions list --json
+```
+
+```json
+{
+  "actions": [
+    { "action_id": "cargo.clean.target_dir", "applies_to": ["cargo_target_dir"] },
+    { "action_id": "node.clean.node_modules", "applies_to": ["node_modules"] },
+    { "action_id": "homebrew.cleanup.cache", "applies_to": ["homebrew_cache"] }
+  ]
+}
+```
+
+### `glomeris actions history [--json] [--limit <N>]`
 
 Reads back a bounded, oldest-first tail of `actions.jsonl` (HORO-1057) — the
 real-execution audit trail that `execute`, `free`, and `emergency` each
@@ -214,6 +531,39 @@ event has `timestamp`, `action_id`, `resource_id`, `policy_label`,
 `outcome`, `abort_reason`, `actual_reclaimed_bytes`, `actual_reclaimed_human`,
 and `source` (`"execute"`, `"free"`, or `"emergency"`). Without `--json`,
 prints one line per event as plain text.
+
+```sh
+glomeris actions history --json --limit 2
+```
+
+```json
+{
+  "events": [
+    {
+      "timestamp": 1700000000,
+      "action_id": "cargo.clean.target_dir",
+      "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+      "policy_label": "AUTO_SAFE",
+      "outcome": "succeeded",
+      "abort_reason": null,
+      "actual_reclaimed_bytes": 2147483648,
+      "actual_reclaimed_human": "2.0 GB",
+      "source": "execute"
+    },
+    {
+      "timestamp": 1700000600,
+      "action_id": "node.clean.node_modules",
+      "resource_id": "node_modules:/Users/dev/proj/node_modules",
+      "policy_label": "ASK",
+      "outcome": "aborted_by_revalidation",
+      "abort_reason": "ResourceIdentityChanged",
+      "actual_reclaimed_bytes": null,
+      "actual_reclaimed_human": null,
+      "source": "free"
+    }
+  ]
+}
+```
 
 ## `glomeris free --target <N%|NB> [--project-root <path>]...`
 

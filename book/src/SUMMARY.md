@@ -3,6 +3,7 @@
 [Introduction](introduction.md)
 
 - [Installation](installation.md)
+- [Menu Bar App](menu_bar_app.md)
 - [Quick Start](quick_start.md)
 - [CLI Reference](cli_reference.md)
 - [Pressure Model](pressure_model.md)
