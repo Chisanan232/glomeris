@@ -32,8 +32,9 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "actions",
-        usage: "actions list [--json]",
-        description: "List the registered cleanup actions.",
+        usage: "actions <list [--json]|history [--json] [--limit <N>]>",
+        description: "List the registered cleanup actions, or show a bounded tail of the \
+                       real-execution audit log.",
     },
     CommandSpec {
         name: "scan",
@@ -389,6 +390,7 @@ fn run_emergency_command() {
         &self_state_path,
         20,
         Duration::from_secs(30),
+        &actions_jsonl_path(),
     );
 
     print!("{report}");
@@ -805,6 +807,7 @@ fn run_execute_command(args: &[String]) {
         &collector,
         &cfg,
         now,
+        &actions_jsonl_path(),
     );
 
     render_execute_resolution(resolution, json);
@@ -920,6 +923,16 @@ fn history_path() -> PathBuf {
     std::env::var("HOME")
         .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/history.tsv"))
         .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-history.tsv"))
+}
+
+/// Same `Library/Application Support/Glomeris/` directory as
+/// `history_path`/`heartbeat_path` (HORO-1057) — where every real-
+/// execution call site (`execute`/`free`/`emergency`) appends its
+/// best-effort audit trail, and `glomeris actions history` reads it back.
+fn actions_jsonl_path() -> PathBuf {
+    std::env::var("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support/Glomeris/actions.jsonl"))
+        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-actions.jsonl"))
 }
 
 /// `glomeris history [--json] [--limit N]` — a bounded, oldest-first tail
@@ -1074,15 +1087,21 @@ fn run_daemon_command(args: &[String]) {
     }
 }
 
-/// `glomeris actions <list [--json]>` (HORO-1047) — origin: v0.2.0
-/// founder-dogfood had to read `src/actions/homebrew.rs` source directly to
-/// find the real registered action id string (`homebrew.cleanup.cache`);
-/// no command exposed the registry. Pure enumeration of
-/// `ActionRegistry::builtin()` — no macOS gate, unlike `daemon`, since
-/// nothing here touches the filesystem or launchd.
+/// `glomeris actions <list [--json]|history [--json] [--limit <N>]>`
+/// (HORO-1047, HORO-1057) — origin: v0.2.0 founder-dogfood had to read
+/// `src/actions/homebrew.rs` source directly to find the real registered
+/// action id string (`homebrew.cleanup.cache`); no command exposed the
+/// registry. `list` is pure enumeration of `ActionRegistry::builtin()`;
+/// `history` reads back `actions.jsonl`, the real-execution audit trail
+/// `execute`/`free`/`emergency` append to. Neither subcommand is gated to
+/// macOS, unlike `daemon` — `list` touches no filesystem/launchd state at
+/// all, and `history` only reads a plain file (missing is not an error,
+/// per `read_audit_tail`'s contract), same reasoning as `glomeris
+/// history`.
 fn run_actions_command(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("list") => actions_list(&args[1..]),
+        Some("history") => actions_history(&args[1..]),
         Some(other) => {
             eprintln!("glomeris actions: unknown subcommand '{other}'");
             print_usage();
@@ -1092,6 +1111,63 @@ fn run_actions_command(args: &[String]) {
             print_usage();
             std::process::exit(2);
         }
+    }
+}
+
+/// Default `--limit` for `glomeris actions history` (HORO-1057) — same
+/// value as `glomeris history`'s `DEFAULT_HISTORY_LIMIT`, for the same
+/// reasoning: small enough to stay a quick glance, large enough to span
+/// several recent actions.
+const DEFAULT_ACTION_HISTORY_LIMIT: usize = 20;
+
+/// `glomeris actions history [--json] [--limit N]` — a bounded,
+/// oldest-first tail of `actions.jsonl` (HORO-1057). No new persistence
+/// format beyond what `append_audit_record` already writes. A missing
+/// `actions.jsonl` (no real execution has ever run) is not an error — it
+/// renders as an empty list, matching
+/// `glomeris::monitor::read_audit_tail`'s contract, same as `glomeris
+/// history`'s handling of a missing `history.tsv`.
+fn actions_history(args: &[String]) {
+    let mut limit = DEFAULT_ACTION_HISTORY_LIMIT;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--limit" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("glomeris actions history: --limit requires a value");
+                    std::process::exit(2);
+                };
+                limit = match value.parse::<usize>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        eprintln!(
+                            "glomeris actions history: --limit must be a non-negative integer"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+                i += 2;
+            }
+            other => {
+                eprintln!("glomeris actions history: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let records = glomeris::monitor::read_audit_tail(&actions_jsonl_path(), limit);
+    let report = glomeris::cli::build_action_history_report(&records);
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_action_history_report(&report);
     }
 }
 
@@ -1300,6 +1376,7 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots
     let wall_clock = SystemWallClock;
     let policy_cfg = PolicyConfig::default();
 
+    let audit_log_path = actions_jsonl_path();
     let report = run_recovery_loop(
         &config,
         &fs_stat,
@@ -1311,6 +1388,7 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots
         &policy_cfg,
         std::path::Path::new("/"),
         &discovery_ctx,
+        &audit_log_path,
     );
 
     print_recovery_report(&report);

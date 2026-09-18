@@ -193,6 +193,28 @@ With `--json`, prints a `HistoryReport` (`{"events": [...]}`); each event
 has `unix_time_secs`, `from`, `to`, `used_percent`, `free_bytes`, and
 `free_human`. Without `--json`, prints one line per event as plain text.
 
+## `glomeris actions history [--json] [--limit <N>]`
+
+Reads back a bounded, oldest-first tail of `actions.jsonl` (HORO-1057) — the
+real-execution audit trail that `execute`, `free`, and `emergency` each
+append to, best-effort, after their own outcome is already decided. Unlike
+`history.tsv` (which records pressure transitions only), this is the audit
+trail of what was actually executed: action id, resource id, the policy
+label it was authorized under, outcome, abort reason (when applicable),
+actual reclaimed bytes, and which of the three real-execution paths
+produced it.
+
+`--limit <N>` is optional and defaults to 20, same bounding/malformed-line-
+skip/missing-file-empty contract as `glomeris history`. An audit-write
+failure never affects the execution it was trying to record — the write is
+best-effort and its result is never surfaced to the caller.
+
+With `--json`, prints an `ActionHistoryReport` (`{"events": [...]}`); each
+event has `timestamp`, `action_id`, `resource_id`, `policy_label`,
+`outcome`, `abort_reason`, `actual_reclaimed_bytes`, `actual_reclaimed_human`,
+and `source` (`"execute"`, `"free"`, or `"emergency"`). Without `--json`,
+prints one line per event as plain text.
+
 ## `glomeris free --target <N%|NB> [--project-root <path>]...`
 
 macOS only (exits 1 with an error message on other platforms). `--target` is

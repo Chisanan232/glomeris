@@ -231,6 +231,118 @@ fn parse_history_line(line: &str) -> Option<HistoryEntry> {
     })
 }
 
+/// One recorded real-execution attempt (HORO-1057) — the audit trail
+/// `history.tsv` never provided (that file records pressure transitions
+/// only, never what was actually executed, by what path, with what
+/// outcome). Appended, one JSON object per line, to `actions.jsonl` by
+/// every real-execution call site (`glomeris execute`, `glomeris free`,
+/// `glomeris emergency`) — never by `glomeris clean --dry-run` or
+/// `dry_run()`, which mutate nothing.
+///
+/// JSON Lines rather than TSV (unlike `history.tsv`): `resource_id` is a
+/// filesystem path, which can itself contain a literal tab byte, and
+/// `serde_json` is already a dependency — see this ticket's rationale.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub timestamp: u64,
+    pub action_id: String,
+    pub resource_id: String,
+    /// `crate::reporting::policy_label::PolicyLabel::as_str()`'s output
+    /// (`"AUTO_SAFE"`/`"ASK"`/`"PROTECTED"`/`"UNKNOWN_INCOMPLETE"`) at the
+    /// moment this action was authorized — not re-derived from `outcome`.
+    pub policy_label: String,
+    /// One of `"succeeded"`, `"failed"`, `"aborted_by_revalidation"` —
+    /// mirrors `crate::executor::ExecutionOutcome`'s variants without
+    /// deriving `Serialize` on that type directly, same reasoning as
+    /// `crate::reporting::dto::ExecuteReport::outcome`. Never `"dry_run"`:
+    /// no real-execution call site ever records a dry run here.
+    pub outcome: String,
+    /// Populated only when `outcome == "aborted_by_revalidation"`.
+    pub abort_reason: Option<String>,
+    pub actual_reclaimed_bytes: Option<u64>,
+    /// Which real-execution path produced this record: `"execute"`,
+    /// `"free"`, or `"emergency"`.
+    pub source: String,
+}
+
+/// Safety-valve size cap for `actions.jsonl` — this is a rotation trigger,
+/// not a log-management system (see this ticket's scope notes). 10 MiB is
+/// generous for a one-line-per-action JSONL file; ordinary use would take
+/// years to reach it.
+const MAX_AUDIT_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Appends one [`AuditRecord`] to `path` as a single JSON line, rotating
+/// `path` to `path` + `.1` first if it has grown past
+/// [`MAX_AUDIT_LOG_BYTES`] (overwriting any previous `.1` — at most one
+/// rotated backup is kept; see this ticket's scope notes for why this is
+/// intentionally not a full log-management scheme).
+///
+/// Best-effort by contract, matching [`PersistenceBackend::record`]'s
+/// failure philosophy exactly (see this module's doc comment): every
+/// caller in this crate is required to ignore this function's `Result`
+/// rather than propagate it — an audit-write failure must never change a
+/// real execution's own outcome or exit code. This function itself never
+/// panics.
+pub fn append_audit_record(path: &Path, record: &AuditRecord) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rotate_if_oversized(path)?;
+
+    let mut line = serde_json::to_string(record).map_err(io::Error::from)?;
+    line.push('\n');
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())
+}
+
+/// Renames `path` to `path` + `.1` when it exceeds [`MAX_AUDIT_LOG_BYTES`],
+/// replacing any previous `.1` file. A missing `path` is not an error —
+/// there is nothing to rotate yet.
+fn rotate_if_oversized(path: &Path) -> io::Result<()> {
+    let size = match std::fs::metadata(path) {
+        Ok(metadata) => metadata.len(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if size <= MAX_AUDIT_LOG_BYTES {
+        return Ok(());
+    }
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    std::fs::rename(path, PathBuf::from(rotated))
+}
+
+/// Reads up to `limit` of the most recent [`AuditRecord`]s from `path` (an
+/// `actions.jsonl` written by [`append_audit_record`]), oldest-first —
+/// same ordering, missing-file-is-empty, and malformed-line-skip contract
+/// as [`read_history_tail`] (see that function's doc comment); this reads
+/// only `path` itself, never a rotated `.1` backup, matching this
+/// ticket's "simplest reasonable scheme, not a log-management system"
+/// scope decision.
+pub fn read_audit_tail(path: &Path, limit: usize) -> Vec<AuditRecord> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut tail: std::collections::VecDeque<AuditRecord> =
+        std::collections::VecDeque::with_capacity(limit.min(1024));
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<AuditRecord>(line) else {
+            continue;
+        };
+        if limit == 0 {
+            continue;
+        }
+        if tail.len() == limit {
+            tail.pop_front();
+        }
+        tail.push_back(record);
+    }
+    tail.into_iter().collect()
+}
+
 /// A backend that always fails, used by the polling-loop tests to prove
 /// persistence failure never stops monitoring.
 #[cfg(test)]
@@ -400,5 +512,121 @@ mod tests {
         assert!(!path.with_extension("json.tmp").exists());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn unique_audit_test_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "glomeris-audit-persistence-test-{tag}-{}-{}.jsonl",
+            std::process::id(),
+            unix_now_secs()
+        ))
+    }
+
+    fn sample_audit_record(action_id: &str) -> AuditRecord {
+        AuditRecord {
+            timestamp: 1_700_000_000,
+            action_id: action_id.to_string(),
+            resource_id: "/tmp/some/target".to_string(),
+            policy_label: "AUTO_SAFE".to_string(),
+            outcome: "succeeded".to_string(),
+            abort_reason: None,
+            actual_reclaimed_bytes: Some(1_024),
+            source: "execute".to_string(),
+        }
+    }
+
+    #[test]
+    fn append_and_read_audit_records_round_trip_in_order() {
+        let path = unique_audit_test_path("round-trip");
+
+        append_audit_record(&path, &sample_audit_record("action.one"))
+            .expect("append should succeed");
+        append_audit_record(&path, &sample_audit_record("action.two"))
+            .expect("append should succeed");
+
+        let tail = read_audit_tail(&path, 10);
+
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].action_id, "action.one");
+        assert_eq!(tail[1].action_id, "action.two");
+        assert_eq!(tail[0], sample_audit_record("action.one"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_audit_tail_returns_empty_for_missing_file() {
+        let path = unique_audit_test_path("missing-file");
+        assert!(!path.exists());
+
+        assert!(read_audit_tail(&path, 10).is_empty());
+    }
+
+    #[test]
+    fn read_audit_tail_skips_malformed_lines() {
+        let path = unique_audit_test_path("malformed-line");
+        let good = serde_json::to_string(&sample_audit_record("action.good")).unwrap();
+        std::fs::write(
+            &path,
+            format!("{good}\nthis is not valid JSON at all\n{good}\n"),
+        )
+        .unwrap();
+
+        let tail = read_audit_tail(&path, 10);
+
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].action_id, "action.good");
+        assert_eq!(tail[1].action_id, "action.good");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_audit_tail_returns_at_most_limit_most_recent_records() {
+        let path = unique_audit_test_path("bounded-limit");
+        for i in 0..5 {
+            append_audit_record(&path, &sample_audit_record(&format!("action.{i}")))
+                .expect("append should succeed");
+        }
+
+        let tail = read_audit_tail(&path, 2);
+
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].action_id, "action.3");
+        assert_eq!(tail[1].action_id, "action.4");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn append_audit_record_rotates_oversized_file_to_dot_one() {
+        let path = unique_audit_test_path("rotation");
+        // Pre-seed a file already over the size cap so the very next
+        // append triggers rotation, without actually writing 10 MiB of
+        // real records.
+        std::fs::write(&path, vec![b'x'; (MAX_AUDIT_LOG_BYTES + 1) as usize]).unwrap();
+        let rotated_path = {
+            let mut s = path.as_os_str().to_os_string();
+            s.push(".1");
+            PathBuf::from(s)
+        };
+        let _ = std::fs::remove_file(&rotated_path);
+
+        append_audit_record(&path, &sample_audit_record("action.after-rotation"))
+            .expect("append should succeed");
+
+        assert!(
+            rotated_path.exists(),
+            "expected the oversized file to be rotated to .1"
+        );
+        let tail = read_audit_tail(&path, 10);
+        assert_eq!(
+            tail,
+            vec![sample_audit_record("action.after-rotation")],
+            "expected the fresh file to contain only the post-rotation record"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rotated_path);
     }
 }

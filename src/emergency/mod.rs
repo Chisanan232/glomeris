@@ -71,12 +71,15 @@ use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, ResourceKind};
 use crate::evidence::probe::ProbeOutcome;
-use crate::executor::{execute, ExecutionOutcome};
+use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::fs_stat::FsStat;
-use crate::monitor::persistence::{unix_now_secs, PersistenceBackend, PressureEvent};
+use crate::monitor::persistence::{
+    append_audit_record, unix_now_secs, AuditRecord, PersistenceBackend, PressureEvent,
+};
 use crate::monitor::pressure::PressureState;
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig};
+use crate::reporting::policy_label::label_for;
 
 /// Per-`collect()` probe timeout used while revalidating one emergency
 /// candidate. Kept short — unlike [`crate::executor`]'s own internal 5s
@@ -204,10 +207,12 @@ fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
 ///   real home directory contents in a test"). The real CLI wiring in
 ///   `main.rs` computes these the same way `daemon_run` does and passes
 ///   them in.
-/// - `#[allow(clippy::too_many_arguments)]`: nine parameters, every one
+/// - `#[allow(clippy::too_many_arguments)]`: ten parameters, every one
 ///   an independently fakeable seam — bundling them into a config struct
 ///   would only rename this list, not shrink it. Precedented in this
-///   crate at `detectors::discovery_evidence`.
+///   crate at `detectors::discovery_evidence`. `audit_log_path`
+///   (HORO-1057) is one more such seam: a plain `&Path`, matching
+///   `self_state_path`'s own shape, rather than an injected backend.
 #[allow(clippy::too_many_arguments)]
 pub fn run_emergency(
     fs_stat: &dyn FsStat,
@@ -219,6 +224,7 @@ pub fn run_emergency(
     self_state_path: &Path,
     max_actions: u32,
     max_duration: Duration,
+    audit_log_path: &Path,
 ) -> EmergencyReport {
     let start = Instant::now();
     let now = SystemTime::now();
@@ -253,6 +259,7 @@ pub fn run_emergency(
         start,
         max_duration,
         &mut report,
+        audit_log_path,
     );
 
     // Step 3: best-effort persistence, recorded LAST, deliberately AFTER
@@ -307,6 +314,45 @@ fn record_emergency_run(
     }
 }
 
+/// Builds an [`AuditRecord`] (HORO-1057, `source: "emergency"`) from a
+/// real [`ExecutionReport`] and appends it to `audit_log_path`,
+/// unconditionally discarding the `Result` — matching
+/// [`crate::monitor::persistence::append_audit_record`]'s best-effort
+/// contract, same reasoning as [`record_emergency_run`] above: an
+/// audit-write failure must never influence this module's own report
+/// bookkeeping. Never called for [`ExecutionOutcome::DryRun`]'s tag,
+/// since `execute()` never actually produces that variant (see this
+/// module's own comment on that arm below).
+fn append_emergency_audit_record(
+    report: &ExecutionReport,
+    policy_label: &'static str,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
+    let (outcome, abort_reason) = match &report.outcome {
+        ExecutionOutcome::Succeeded => ("succeeded", None),
+        ExecutionOutcome::Failed(_) => ("failed", None),
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            ("aborted_by_revalidation", Some(format!("{reason:?}")))
+        }
+        ExecutionOutcome::DryRun => ("dry_run", None),
+    };
+    let record = AuditRecord {
+        timestamp: now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: report.action.0.to_string(),
+        resource_id: report.resource.to_string(),
+        policy_label: policy_label.to_string(),
+        outcome: outcome.to_string(),
+        abort_reason,
+        actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
+        source: "emergency".to_string(),
+    };
+    let _ = append_audit_record(audit_log_path, &record);
+}
+
 /// Classifies and (only if `AutoSafe`) executes each candidate in
 /// `evidences`, bounded by `max_actions` and `max_duration` (measured
 /// from `loop_start`). One candidate's failure — at classification,
@@ -322,6 +368,7 @@ fn process_candidates(
     loop_start: Instant,
     max_duration: Duration,
     report: &mut EmergencyReport,
+    audit_log_path: &Path,
 ) {
     for evidence in evidences {
         if report.actions_attempted >= max_actions {
@@ -330,7 +377,7 @@ fn process_candidates(
         if loop_start.elapsed() >= max_duration {
             break;
         }
-        process_candidate(evidence, collector, actions, now, report);
+        process_candidate(evidence, collector, actions, now, report, audit_log_path);
     }
 }
 
@@ -349,6 +396,7 @@ fn process_candidate(
     actions: &ActionRegistry,
     now: SystemTime,
     report: &mut EmergencyReport,
+    audit_log_path: &Path,
 ) {
     let correlation = collector.collect(
         &evidence.resource,
@@ -393,6 +441,10 @@ fn process_candidate(
     };
 
     let fingerprint = evidence.fingerprint.clone();
+    // Captured before `decision` is moved into `authorize` below —
+    // HORO-1057's audit record needs the report-facing label for the
+    // decision this candidate was actually authorized under.
+    let policy_label = label_for(&decision).as_str();
     let Some(approval) = authorize(decision, fingerprint, None) else {
         // `authorize` never refuses an `AutoSafe` decision per its own
         // contract — defensive, not currently reachable.
@@ -402,6 +454,12 @@ fn process_candidate(
 
     report.actions_attempted += 1;
     let exec_report = execute(action, &approval, collector, &cfg, now);
+    // HORO-1057: best-effort audit-log append, AFTER the real outcome
+    // above is already known. `append_emergency_audit_record` never
+    // returns a `Result` its caller could (mis)handle — see that
+    // function's doc comment for why an audit-write failure must never
+    // influence this module's own bookkeeping below.
+    append_emergency_audit_record(&exec_report, policy_label, audit_log_path, now);
     match exec_report.outcome {
         ExecutionOutcome::Succeeded => {
             report.actions_succeeded += 1;
@@ -593,6 +651,7 @@ mod tests {
             Instant::now(),
             Duration::from_secs(30),
             &mut report,
+            &dir.join("actions.jsonl"),
         );
 
         assert_eq!(report.denied_candidates, 1);
@@ -622,6 +681,7 @@ mod tests {
             &ActionRegistry::builtin(),
             now,
             &mut report,
+            &dir.join("actions.jsonl"),
         );
 
         assert_eq!(report.denied_candidates, 1);
@@ -650,6 +710,7 @@ mod tests {
             &ActionRegistry::builtin(),
             now,
             &mut report,
+            &dir.join("actions.jsonl"),
         );
 
         assert_eq!(report.denied_candidates, 1);
@@ -683,12 +744,14 @@ mod tests {
 
         let evidence = autosafe_evidence(node_modules.clone(), ResourceKind::NodeModules, now);
         let mut report = EmergencyReport::default();
+        let audit_log_path = dir.join("actions.jsonl");
         process_candidate(
             evidence,
             &CleanCollector,
             &ActionRegistry::builtin(),
             now,
             &mut report,
+            &audit_log_path,
         );
 
         assert_eq!(report.actions_attempted, 1);
@@ -697,6 +760,14 @@ mod tests {
         assert!(report.errors.is_empty());
         // The real fixture was actually deleted.
         assert!(!node_modules.exists());
+
+        // HORO-1057 AC: `process_candidate` appends an audit record after
+        // the real outcome is known.
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(audit_tail.len(), 1, "expected exactly one audit record");
+        assert_eq!(audit_tail[0].source, "emergency");
+        assert_eq!(audit_tail[0].outcome, "succeeded");
+        assert_eq!(audit_tail[0].policy_label, "AUTO_SAFE");
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -846,6 +917,7 @@ mod tests {
         // valid.
         fs::remove_dir_all(&node_modules_b).unwrap();
 
+        let audit_log_path = dir.join("actions.jsonl");
         let mut report = EmergencyReport::default();
         process_candidates(
             vec![evidence_a, evidence_b],
@@ -856,6 +928,7 @@ mod tests {
             Instant::now(),
             Duration::from_secs(30),
             &mut report,
+            &audit_log_path,
         );
 
         // Both candidates were reached and individually attempted/
@@ -866,6 +939,77 @@ mod tests {
         assert_eq!(report.errors.len(), 1);
         assert!(report.errors[0].contains("aborted by revalidation"));
         assert!(!node_modules_a.exists());
+
+        // HORO-1057 AC: the `emergency` real-execution path appends one
+        // audit record per attempted candidate, both the succeeded one
+        // and the aborted one.
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(
+            audit_tail.len(),
+            2,
+            "expected one audit record per attempted candidate"
+        );
+        assert!(audit_tail.iter().all(|r| r.source == "emergency"));
+        assert_eq!(
+            audit_tail
+                .iter()
+                .filter(|r| r.outcome == "succeeded")
+                .count(),
+            1
+        );
+        assert_eq!(
+            audit_tail
+                .iter()
+                .filter(|r| r.outcome == "aborted_by_revalidation")
+                .count(),
+            1
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1057 AC, proven literally: an audit-write failure never
+    /// changes `process_candidate`'s own outcome bookkeeping. `audit_log_path`
+    /// is pointed at a path whose PARENT already exists as a plain file
+    /// (not a directory) — `append_audit_record`'s own
+    /// `create_dir_all(parent)` step is guaranteed to fail against that,
+    /// deterministically simulating an unwritable audit destination.
+    #[test]
+    fn audit_write_failure_does_not_change_process_candidate_outcome() {
+        let dir = make_temp_dir("audit-write-failure");
+        let node_modules = dir.join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        let now = SystemTime::now();
+        let evidence = autosafe_evidence(node_modules.clone(), ResourceKind::NodeModules, now);
+
+        let unwritable_parent = dir.join("not-a-directory");
+        fs::write(&unwritable_parent, b"blocking file").unwrap();
+        let audit_log_path = unwritable_parent.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        process_candidates(
+            vec![evidence],
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            u32::MAX,
+            Instant::now(),
+            Duration::from_secs(30),
+            &mut report,
+            &audit_log_path,
+        );
+
+        assert_eq!(
+            report.actions_succeeded, 1,
+            "the real execution outcome must be completely unaffected by the audit-write failure"
+        );
+        assert!(
+            !node_modules.exists(),
+            "the real fixture must still actually be deleted"
+        );
+        // Confirm the audit write genuinely did fail, rather than this
+        // test accidentally not exercising the failure path at all.
+        assert!(!audit_log_path.exists());
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -908,6 +1052,7 @@ mod tests {
             &self_state,
             10,
             Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
         );
 
         assert!(!self_state.exists());
@@ -951,6 +1096,7 @@ mod tests {
             &self_state,
             10,
             Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
         );
 
         assert!(!self_state.exists());
@@ -1001,6 +1147,7 @@ mod tests {
             &self_state,
             10,
             Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
         );
 
         assert!(!self_state.exists());

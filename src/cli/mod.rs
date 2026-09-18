@@ -27,14 +27,16 @@ use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, Disco
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
 use crate::executor::{dry_run, execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::{FsUsage, Heartbeat, HistoryEntry, ThresholdConfig};
+use crate::monitor::{AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
-    ActionListItem, ActionListReport, CleanDryRunItem, CleanDryRunReport, DaemonStatusReport,
-    DetectCandidateReport, DetectReport, ExecuteReport, ExplainReport, HistoryEventReport,
-    HistoryReport, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
+    ActionHistoryEventReport, ActionHistoryReport, ActionListItem, ActionListReport,
+    CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
+    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPlanItemReport,
+    LlmPlanReport, ProgressEvent, StatusReport,
 };
+use crate::reporting::policy_label::label_for;
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
 /// `executor::recovery_loop::CANDIDATE_CORRELATION_TIMEOUT`'s reasoning
@@ -99,6 +101,32 @@ pub fn build_history_report(entries: &[HistoryEntry]) -> HistoryReport {
                 used_percent: entry.used_percent,
                 free_bytes: entry.free_bytes,
                 free_human: crate::reporting::human_bytes(entry.free_bytes),
+            })
+            .collect(),
+    }
+}
+
+/// Builds an [`ActionHistoryReport`] (HORO-1057) from whatever
+/// [`crate::monitor::read_audit_tail`] already returned. Pure — no I/O;
+/// the bounding and malformed-line-skipping already happened in
+/// `read_audit_tail`, so this only projects each [`AuditRecord`] into its
+/// report DTO.
+pub fn build_action_history_report(records: &[AuditRecord]) -> ActionHistoryReport {
+    ActionHistoryReport {
+        events: records
+            .iter()
+            .map(|record| ActionHistoryEventReport {
+                timestamp: record.timestamp,
+                action_id: record.action_id.clone(),
+                resource_id: record.resource_id.clone(),
+                policy_label: record.policy_label.clone(),
+                outcome: record.outcome.clone(),
+                abort_reason: record.abort_reason.clone(),
+                actual_reclaimed_bytes: record.actual_reclaimed_bytes,
+                actual_reclaimed_human: record
+                    .actual_reclaimed_bytes
+                    .map(crate::reporting::human_bytes),
+                source: record.source.clone(),
             })
             .collect(),
     }
@@ -604,6 +632,34 @@ pub fn print_history_report(report: &HistoryReport) {
     }
 }
 
+/// Prints an [`ActionHistoryReport`] as concise, human-readable text.
+pub fn print_action_history_report(report: &ActionHistoryReport) {
+    if report.events.is_empty() {
+        println!("no action history recorded");
+        return;
+    }
+    for event in &report.events {
+        let reclaimed = event
+            .actual_reclaimed_human
+            .as_deref()
+            .unwrap_or("unavailable");
+        print!(
+            "{}\t{}\t{}\t{}\t{}\t{}\treclaimed {}",
+            event.timestamp,
+            event.source,
+            event.action_id,
+            event.resource_id,
+            event.policy_label,
+            event.outcome,
+            reclaimed
+        );
+        if let Some(reason) = &event.abort_reason {
+            print!("\tabort: {reason}");
+        }
+        println!();
+    }
+}
+
 /// Renders a human-readable byte-count string for text output, prefixing
 /// it with `≥` and an explicit "scan truncated" note when the underlying
 /// evidence marked it as a lower bound (HORO-1049) — `"unknown"` when no
@@ -844,11 +900,15 @@ impl std::fmt::Debug for ExecuteResolution {
 /// out, since it would let a caller "confirm" a resource without ever
 /// having been shown its actual identity.
 ///
-/// `#[allow(clippy::too_many_arguments)]`: eight parameters, every one an
+/// `#[allow(clippy::too_many_arguments)]`: nine parameters, every one an
 /// independently fakeable seam (candidates/actions/collector/cfg/now are
 /// exactly what makes this function unit-testable without touching the
 /// real filesystem or clock) — precedented in this crate at
 /// `emergency::run_emergency` and `detectors::discovery_evidence`.
+/// `audit_log_path` (HORO-1057) is one more such seam: a plain `&Path`
+/// rather than an injected backend, matching how `main.rs` already passes
+/// `self_state_path`/`history_path` around as plain paths for this same
+/// reason.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_and_execute(
     candidates: &[(Evidence, PolicyDecision)],
@@ -859,6 +919,7 @@ pub fn resolve_and_execute(
     collector: &dyn EvidenceCollector,
     cfg: &PolicyConfig,
     now: SystemTime,
+    audit_log_path: &Path,
 ) -> ExecuteResolution {
     let Some((ev, decision)) = find_candidate(resource_id, candidates) else {
         return ExecuteResolution::ResourceNotFound;
@@ -876,10 +937,18 @@ pub fn resolve_and_execute(
 
     let consent =
         observed_fingerprint_from_token.map(|fp| UserConsent::new(ev.resource.clone(), fp, now));
+    let policy_label = label_for(decision).as_str();
 
     match authorize(decision.clone(), ev.fingerprint.clone(), consent.as_ref()) {
         Some(approval) => {
             let report = execute(action, &approval, collector, cfg, now);
+            // HORO-1057: best-effort audit-log append, AFTER the real
+            // outcome is already known. `record_audit`'s `Result` is
+            // never inspected here — see that function's doc comment for
+            // why an audit-write failure must never change `report`'s
+            // own outcome, which is exactly what's returned below
+            // regardless of whether this line succeeded.
+            record_audit(&report, policy_label, "execute", audit_log_path, now);
             ExecuteResolution::Executed(report)
         }
         None => match decision.class {
@@ -889,6 +958,46 @@ pub fn resolve_and_execute(
             PolicyClass::AutoSafe => ExecuteResolution::RefusedAutoSafeContractViolation,
         },
     }
+}
+
+/// Builds an [`AuditRecord`] (HORO-1057) from a real [`ExecutionReport`]
+/// and appends it to `audit_log_path`, unconditionally discarding the
+/// `Result` — matching [`crate::monitor::append_audit_record`]'s
+/// best-effort contract: no caller of this function may ever propagate,
+/// log as a warning that changes control flow, or otherwise let an
+/// audit-write failure influence the real execution's already-decided
+/// outcome. Never called for [`ExecutionOutcome::DryRun`]'s tag, since no
+/// real-execution call site (`execute`/`free`/`emergency`) ever produces
+/// it — see [`build_execute_report`]'s own comment on that same variant.
+fn record_audit(
+    report: &ExecutionReport,
+    policy_label: &'static str,
+    source: &'static str,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
+    let (outcome, abort_reason) = match &report.outcome {
+        ExecutionOutcome::Succeeded => ("succeeded", None),
+        ExecutionOutcome::Failed(_) => ("failed", None),
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            ("aborted_by_revalidation", Some(format!("{reason:?}")))
+        }
+        ExecutionOutcome::DryRun => ("dry_run", None),
+    };
+    let record = AuditRecord {
+        timestamp: now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: report.action.0.to_string(),
+        resource_id: report.resource.to_string(),
+        policy_label: policy_label.to_string(),
+        outcome: outcome.to_string(),
+        abort_reason,
+        actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
+        source: source.to_string(),
+    };
+    let _ = crate::monitor::append_audit_record(audit_log_path, &record);
 }
 
 /// Projects a real [`ExecutionReport`] into the [`ExecuteReport`] DTO.
@@ -2053,6 +2162,7 @@ mod execute_tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            &root.join("actions.jsonl"),
         );
 
         assert!(
@@ -2090,6 +2200,7 @@ mod execute_tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            &root.join("actions.jsonl"),
         );
 
         assert!(
@@ -2138,6 +2249,7 @@ mod execute_tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            &root.join("actions.jsonl"),
         );
 
         assert!(
@@ -2183,6 +2295,7 @@ mod execute_tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            &root.join("actions.jsonl"),
         );
 
         assert!(
@@ -2223,6 +2336,7 @@ mod execute_tests {
 
         // No `--confirm-ask`/`--observed-fingerprint` at all — AUTO_SAFE
         // needs no consent, per `authorize`'s own contract.
+        let audit_log_path = root.join("actions.jsonl");
         let resolution = resolve_and_execute(
             &candidates,
             &actions,
@@ -2232,6 +2346,7 @@ mod execute_tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            &audit_log_path,
         );
 
         let ExecuteResolution::Executed(report) = resolution else {
@@ -2249,6 +2364,81 @@ mod execute_tests {
             Some(bytes) => assert!(bytes > 0, "expected a real measured reclaim, got 0"),
             None => panic!("expected Some(actual_reclaimed_bytes), got None"),
         }
+
+        // HORO-1057 AC: the real `execute` call site appends an audit
+        // record after the outcome is known.
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(audit_tail.len(), 1, "expected exactly one audit record");
+        let audit_record = &audit_tail[0];
+        assert_eq!(audit_record.source, "execute");
+        assert_eq!(audit_record.outcome, "succeeded");
+        assert_eq!(audit_record.policy_label, "AUTO_SAFE");
+        assert_eq!(audit_record.resource_id, ev.resource.to_string());
+        assert!(audit_record.actual_reclaimed_bytes.unwrap_or(0) > 0);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1057 AC, proven literally: an audit-write failure never
+    /// changes `resolve_and_execute`'s own returned outcome. `audit_log_path`
+    /// is pointed at a path whose PARENT already exists as a plain file
+    /// (not a directory) — `append_audit_record`'s own
+    /// `create_dir_all(parent)` step is guaranteed to fail against that,
+    /// deterministically simulating an unwritable audit destination
+    /// without relying on OS permission quirks. The real action still
+    /// executes and succeeds exactly as in
+    /// `auto_safe_action_executes_and_reports_real_reclaimed_bytes` above.
+    #[test]
+    fn audit_write_failure_does_not_change_execution_outcome() {
+        let root = make_temp_dir("audit-write-failure");
+        let target = root.join("node_modules");
+        fs::create_dir_all(target.join("pkg")).unwrap();
+        fs::write(target.join("pkg/index.js"), vec![0u8; 4096]).unwrap();
+
+        // A regular file, not a directory — `actions.jsonl`'s intended
+        // parent — so `create_dir_all` on it must fail.
+        let unwritable_parent = root.join("not-a-directory");
+        fs::write(&unwritable_parent, b"blocking file").unwrap();
+        let audit_log_path = unwritable_parent.join("actions.jsonl");
+
+        let now = SystemTime::now();
+        let collector = CleanCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+
+        let actions = ActionRegistry::builtin();
+        let action = resolve_action_for(ev, &actions).unwrap();
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            None,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+            &audit_log_path,
+        );
+
+        let ExecuteResolution::Executed(report) = resolution else {
+            panic!(
+                "expected Executed(_) regardless of the audit-write failure, got {resolution:?}"
+            );
+        };
+        assert_eq!(
+            report.outcome,
+            ExecutionOutcome::Succeeded,
+            "the real execution outcome must be completely unaffected by the audit-write failure"
+        );
+        assert!(
+            !target.exists(),
+            "the real fixture must still actually be deleted"
+        );
+        // Confirm the audit write genuinely did fail, rather than this
+        // test accidentally not exercising the failure path at all.
+        assert!(!audit_log_path.exists());
 
         fs::remove_dir_all(&root).ok();
     }
@@ -2361,6 +2551,7 @@ mod execute_tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            &root.join("actions.jsonl"),
         );
 
         assert!(
@@ -2387,6 +2578,7 @@ mod execute_tests {
             &CleanCollector,
             &PolicyConfig::default(),
             SystemTime::now(),
+            Path::new("/nonexistent-glomeris-audit-test-path/actions.jsonl"),
         );
 
         assert!(matches!(resolution, ExecuteResolution::ResourceNotFound));
