@@ -31,14 +31,38 @@
 //
 //  HORO-1064/HORO-1065 boundary: this view builds the detail UI, the
 //  field-driven Clean-button enablement, and the confirmation
-//  alert/flow up through "user confirmed". The actual `glomeris execute`
-//  subprocess invocation, its NDJSON streamed progress, and the measured
-//  (`actual_reclaimed_bytes`) success display are HORO-1065's scope —
-//  `performClean()` below is a deliberate stub with a TODO(HORO-1065)
-//  marker, not a real execution path. See the PR description for why
-//  this boundary was chosen over a minimal non-streaming `execute` call.
+//  alert/flow up through "user confirmed". HORO-1065 adds the real
+//  `glomeris execute` subprocess invocation from that point on: it
+//  streams `--progress-json` NDJSON via `GlomerisClient`'s existing
+//  `onProgress` mechanism (HORO-1063, unchanged here), and renders
+//  whatever `ExecuteReportDto`/`ExecuteRefusalReportDto` JSON comes back
+//  on stdout as a specific, outcome-unique message — see
+//  `describeExecuteOutcome` below.
+//
+//  Fingerprint pass-through (the security-sensitive part of this
+//  ticket): `--observed-fingerprint <token>` is passed ONLY the
+//  `fingerprintToken` this view already captured from the ONE `explain
+//  --json` call `loadExplain()` makes when the view first appears —
+//  carried in `CandidateDetailViewModel.fingerprintToken` below. There is
+//  no second call to `explain` anywhere in this file, and no other
+//  source for that token; `performClean()` reads
+//  `viewModel.fingerprintToken` directly, never a freshly-fetched value.
+//  See `CandidateDetailViewTests` for a mechanical proof (a fixture whose
+//  stored token differs from a hypothetical fresh one) that the stored
+//  value, not a refetched one, is what ends up in the constructed
+//  argument array.
+//
+//  Per the project's standing thin-client rule (GlomerisMenuBarApp.swift):
+//  this file constructs the `execute` command line, streams its
+//  progress, and renders its JSON response — it never decides whether an
+//  action is authorized. Every message this view shows for a
+//  refusal/abort/failure is built directly from the `message`/
+//  `failure_message`/`abort_reason` text the Rust binary itself already
+//  decided and returned; this layer adds no new policy wording of its
+//  own.
 //
 
+import Foundation
 import SwiftUI
 
 /// Pure, directly-testable mapping step from one `ExplainReportDto` to
@@ -67,10 +91,21 @@ struct CandidateDetailViewModel: Equatable {
     let policyLabel: String
     let reasons: [String]
     let refusalReason: String?
+    /// The matching offered action's `action_id`, captured here so
+    /// `performClean()` never has to re-derive or guess it. `nil` for a
+    /// non-executable resource (no offered action exists).
+    let actionId: String?
+    /// Opaque fingerprint-pinning token, captured verbatim from the SAME
+    /// `explain --json` call that produced this view model — never
+    /// refetched. See file header. `nil` when `explain` didn't return one
+    /// (e.g. the resource isn't `ASK`-classified).
+    let fingerprintToken: String?
 
     init(_ report: ExplainReportDto) {
         isCleanEnabled = report.executable
         requiresConfirmation = report.offeredActions.first?.requiresConfirmation ?? false
+        actionId = report.offeredActions.first?.actionId
+        fingerprintToken = report.fingerprintToken
 
         resourceId = report.resourceId
         kind = report.kind
@@ -104,6 +139,16 @@ struct CandidateDetailView: View {
     @State private var isLoading = true
     @State private var errorMessage: String?
     @State private var showConfirmationAlert = false
+    /// HORO-1065: `execute` state. `isExecuting`/`executeProgressText`
+    /// mirror `CandidatesSectionView`'s `isScanning`/`progressStatusText`
+    /// pattern for `detect`. `executeOutcomeText`/`executeSucceeded`
+    /// together carry the single rendered outcome message — see
+    /// `describeExecuteOutcome` below for how every distinct outcome
+    /// produces a distinct string.
+    @State private var isExecuting = false
+    @State private var executeProgressText: String?
+    @State private var executeOutcomeText: String?
+    @State private var executeSucceeded = false
 
     init(
         resourceId: String,
@@ -129,10 +174,29 @@ struct CandidateDetailView: View {
                     if viewModel.requiresConfirmation {
                         showConfirmationAlert = true
                     } else {
-                        performClean()
+                        Task { await performClean() }
                     }
                 }
                 .disabled(!viewModel.isCleanEnabled)
+                .disabled(isExecuting)
+
+                if isExecuting {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        if let executeProgressText {
+                            Text(executeProgressText)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if let executeOutcomeText {
+                    Text(executeOutcomeText)
+                        .font(.caption2)
+                        .foregroundStyle(executeSucceeded ? .green : .red)
+                }
             }
 
             if let errorMessage {
@@ -149,7 +213,7 @@ struct CandidateDetailView: View {
         .alert("Confirm cleanup", isPresented: $showConfirmationAlert) {
             Button("Cancel", role: .cancel) {}
             Button("Confirm") {
-                performClean()
+                Task { await performClean() }
             }
         } message: {
             Text("This action requires explicit confirmation before it runs.")
@@ -213,14 +277,147 @@ struct CandidateDetailView: View {
         isLoading = false
     }
 
-    /// TODO(HORO-1065): replace this stub with the real
-    /// `glomeris execute --action-id <id> --resource-id <resourceId>
-    /// [--confirm-ask --observed-fingerprint <fingerprintToken>]
-    /// --progress-json` invocation, streamed NDJSON progress, and a
-    /// display of the measured `actual_reclaimed_bytes` on success. This
-    /// ticket (HORO-1064) intentionally stops here, at "user confirmed
-    /// (or confirmation not required) — do nothing destructive yet".
-    private func performClean() {}
+    /// HORO-1065: the one and only call site for `execute`, run after the
+    /// user confirmed (or confirmation wasn't required). Constructs the
+    /// command from `viewModel`'s already-captured fields only — see
+    /// `buildExecuteArguments` and the file header's fingerprint
+    /// pass-through note.
+    private func performClean() async {
+        guard let viewModel, let actionId = viewModel.actionId else { return }
+
+        isExecuting = true
+        executeProgressText = nil
+        executeOutcomeText = nil
+        executeSucceeded = false
+
+        let arguments = buildExecuteArguments(
+            actionId: actionId,
+            resourceId: resourceId,
+            projectRootsArguments: projectRootsStore.commandLineArguments,
+            requiresConfirmation: viewModel.requiresConfirmation,
+            fingerprintToken: viewModel.fingerprintToken
+        )
+
+        do {
+            let raw = try await client.runRaw(
+                arguments,
+                progressType: ProgressEventDto.self,
+                onProgress: { event in
+                    Task { @MainActor in
+                        executeProgressText = ProgressStatusText.text(for: event)
+                    }
+                }
+            )
+            let outcome = describeExecuteOutcome(
+                exitCode: raw.exitCode,
+                stdout: raw.stdout,
+                stderrText: String(data: raw.stderr, encoding: .utf8) ?? ""
+            )
+            switch outcome {
+            case .succeeded(_, let human):
+                executeSucceeded = true
+                executeOutcomeText = "Cleaned — reclaimed \(human)."
+            case .message(let text):
+                executeSucceeded = false
+                executeOutcomeText = text
+            }
+        } catch {
+            executeSucceeded = false
+            executeOutcomeText = "execute could not be started: \(String(describing: error))"
+        }
+
+        executeProgressText = nil
+        isExecuting = false
+    }
+}
+
+/// Pure builder for the `glomeris execute` argument array (HORO-1065).
+/// `fingerprintToken` must always be the value already captured from the
+/// view's one `explain --json` call — see `CandidateDetailView`'s file
+/// header — never a value obtained by calling `explain` again here or
+/// anywhere else. `--confirm-ask`/`--observed-fingerprint` are added
+/// together, only when `requiresConfirmation` is `true` and a token is
+/// present, matching `execute`'s own requirement that the two flags are
+/// passed together or not at all (`book/src/cli_reference.md`).
+func buildExecuteArguments(
+    actionId: String,
+    resourceId: String,
+    projectRootsArguments: [String],
+    requiresConfirmation: Bool,
+    fingerprintToken: String?
+) -> [String] {
+    var arguments = ["execute", "--action-id", actionId, "--resource-id", resourceId]
+    arguments += projectRootsArguments
+    arguments += ["--json", "--progress-json"]
+    if requiresConfirmation, let fingerprintToken {
+        arguments += ["--confirm-ask", "--observed-fingerprint", fingerprintToken]
+    }
+    return arguments
+}
+
+/// One `glomeris execute` invocation's outcome, mapped from its raw exit
+/// code and stdout bytes to what the view shows.
+enum ExecuteOutcomeDisplay: Equatable {
+    /// `human` is built from the real, measured `actual_reclaimed_bytes`
+    /// — never from the pre-execute `reclaimable_bytes` estimate, which
+    /// this type never even carries.
+    case succeeded(actualReclaimedBytes: UInt64?, human: String)
+    case message(String)
+}
+
+/// Maps one `execute --json --progress-json` invocation's raw exit code
+/// and stdout bytes to a single outcome message (HORO-1065's core AC:
+/// every distinct outcome/refusal renders its own specific message,
+/// never a generic error). This performs no authorization/policy
+/// judgment — every refusal/failure/abort string here is read directly
+/// from a field (`message`/`failure_message`/`abort_reason`) the Rust
+/// binary already decided; this function only assembles display text
+/// around values Rust already produced, per the project's thin-client
+/// rule.
+func describeExecuteOutcome(exitCode: Int32, stdout: Data, stderrText: String) -> ExecuteOutcomeDisplay {
+    let decoder = JSONDecoder()
+
+    if let report = try? decoder.decode(ExecuteReportDto.self, from: stdout) {
+        switch report.outcome {
+        case "succeeded":
+            let bytes = report.actualReclaimedBytes
+            return .succeeded(actualReclaimedBytes: bytes, human: humanByteCount(bytes))
+        case "failed":
+            return .message("Execution failed: \(report.failureMessage ?? "no failure detail was reported")")
+        case "aborted_by_revalidation":
+            return .message(
+                "Aborted before making any changes (revalidation): " +
+                    "\(report.abortReason ?? "no abort reason was reported")"
+            )
+        case "dry_run":
+            return .message("Dry run only — nothing was changed.")
+        default:
+            return .message("execute finished with an unrecognized outcome: \(report.outcome)")
+        }
+    }
+
+    if let refusal = try? decoder.decode(ExecuteRefusalReportDto.self, from: stdout) {
+        return .message(refusal.message)
+    }
+
+    // No decodable JSON body on stdout at all — the usage-error exit
+    // code (2: bad/missing argument, or a malformed
+    // --observed-fingerprint token), or a genuinely unexpected failure.
+    // Never crash on unparseable output; fall back to a message built
+    // from the exit code and whatever stderr text is available.
+    let detail = stderrText.trimmingCharacters(in: .whitespacesAndNewlines)
+    return .message("execute did not complete (exit \(exitCode))" + (detail.isEmpty ? "." : ": \(detail)"))
+}
+
+/// Human-readable byte count for the measured `actual_reclaimed_bytes`
+/// — Rust supplies only the raw byte count for this field (unlike the
+/// pre-execute estimate, which already carries a `*_human` string), so
+/// this view formats it itself.
+func humanByteCount(_ bytes: UInt64?) -> String {
+    guard let bytes else { return "unknown" }
+    let formatter = ByteCountFormatter()
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: Int64(bytes))
 }
 
 #Preview {
