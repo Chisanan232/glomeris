@@ -134,7 +134,17 @@ Internal flow, in one process:
 
 `--json` prints an `ExecuteReport` (action id, resource id, outcome,
 failure/abort detail, expected vs. actual reclaimed bytes — the latter is
-a real measurement, taken after execution, not an estimate).
+a real measurement, taken after execution, not an estimate) on the
+`Executed` path. Every refusal/not-found/busy path instead prints an
+`ExecuteRefusalReport` (`{"reason": "...", "message": "..."}`) to stdout
+before exiting with the matching code below, so a `--json` caller never
+gets silent stdout on a non-`Executed` outcome. `reason` is one of
+`resource_not_found`, `action_not_found`, `action_mismatch`, `protected`,
+`ask_no_consent`, `ask_consent_mismatch`, `auto_safe_contract_violation`,
+or `busy` (HORO-1056: the lock-contention case below, the one refusal
+that happens before discovery/resolution even runs) — each a distinct,
+machine-readable value naming exactly which refusal/abort path fired,
+never a generic error string.
 
 Exit codes for this subcommand specifically:
 
@@ -157,7 +167,9 @@ Exit codes for this subcommand specifically:
   same `EXIT_EXECUTION_LOCK_BUSY` constant — this ticket's own AC
   described this case as exit `6`, but the already-established lock
   convention from HORO-1054 is kept rather than introducing a second,
-  conflicting "busy" code).
+  conflicting "busy" code). With `--json`, this prints an
+  `ExecuteRefusalReport` with `reason: "busy"` to stdout (HORO-1056) —
+  previously this path was silent on stdout even under `--json`.
 
 ## `glomeris emergency`
 
