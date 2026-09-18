@@ -31,6 +31,13 @@
 //  "can this be cleaned" from `policy_label` or `reasons` — those two
 //  fields are shown only as human-readable context, never branched on.
 //
+//  HORO-1064: tapping a row opens `CandidateDetailView`, the SOLE host
+//  of the Clean button — see that file's header for why. There is no
+//  "Clean" button, and no button of any kind that triggers cleanup,
+//  anywhere in this file's row rendering; see
+//  CandidatesSectionViewTests.testNoCleanButtonExistsInRowRendering,
+//  which mechanically greps this file for exactly that invariant.
+//
 
 import SwiftUI
 
@@ -78,6 +85,10 @@ struct CandidatesSectionView: View {
     @State private var isScanning = false
     @State private var progressStatusText: String?
     @State private var lastErrorMessage: String?
+    /// HORO-1064: which candidate's detail view is open, if any. Detail
+    /// view (and its Clean button) are the ONLY thing a row tap ever
+    /// opens — no inline action runs from this list.
+    @State private var selectedCandidate: DetectCandidateReportDto?
 
     init(
         client: GlomerisClient = GlomerisClient(),
@@ -115,14 +126,20 @@ struct CandidatesSectionView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(candidates.map(CandidateRowViewModel.init)) { row in
-                    HStack {
-                        Text(row.kindText)
-                            .font(.caption)
-                        Spacer()
-                        Text(row.reclaimableText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    Button {
+                        selectedCandidate = candidates.first { $0.resourceId == row.id }
+                    } label: {
+                        HStack {
+                            Text(row.kindText)
+                                .font(.caption)
+                            Spacer()
+                            Text(row.reclaimableText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 }
             }
 
@@ -133,6 +150,13 @@ struct CandidatesSectionView: View {
             }
         }
         .padding(.vertical, 4)
+        .sheet(item: $selectedCandidate) { candidate in
+            CandidateDetailView(
+                resourceId: candidate.resourceId,
+                client: client,
+                projectRootsStore: projectRootsStore
+            )
+        }
     }
 
     private var lastScannedText: String {
