@@ -323,6 +323,286 @@ final class CandidateDetailViewTests: XCTestCase {
         XCTAssertFalse(source.contains("\"execute\""), "the list view must never construct an execute argument")
     }
 
+    // MARK: - HORO-1065: fingerprint pass-through — never refetched
+
+    /// The core security-sensitive proof for this ticket: the token
+    /// `buildExecuteArguments` receives must be exactly the one already
+    /// captured on the view model from the ORIGINAL `explain` call, never
+    /// a value obtained from a hypothetical second `explain` call. This
+    /// is proven with a fixture where a "stale" (already-shown) token
+    /// deliberately differs from what a fresh `explain` call would
+    /// return — the constructed argument array must contain only the
+    /// stale one.
+    func testExecuteArgumentsCarryTheStoredFingerprintTokenNeverARefreshedOne() {
+        let staleToken = "stale-token-shown-to-user"
+        let hypotheticalFreshToken = "fresh-token-a-refetch-would-return"
+
+        let report = explainReport(
+            executable: true,
+            offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: true)]
+        )
+        // `explainReport(...)` always sets `fingerprintToken: "opaque-token"`;
+        // rebuild with the deliberately distinguishable stale token so this
+        // test does not rely on that default coincidentally matching.
+        let staleReport = ExplainReportDto(
+            resourceId: report.resourceId,
+            kind: report.kind,
+            detector: report.detector,
+            sources: report.sources,
+            logicalBytes: report.logicalBytes,
+            logicalHuman: report.logicalHuman,
+            reclaimableBytes: report.reclaimableBytes,
+            reclaimableHuman: report.reclaimableHuman,
+            reclaimableBytesIsLowerBound: report.reclaimableBytesIsLowerBound,
+            completeness: report.completeness,
+            confidence: report.confidence,
+            activeUseSignals: report.activeUseSignals,
+            regenerability: report.regenerability,
+            policyLabel: report.policyLabel,
+            reasons: report.reasons,
+            nativeCleanupAvailable: report.nativeCleanupAvailable,
+            nativeCleanupActionId: report.nativeCleanupActionId,
+            fingerprintToken: staleToken,
+            executable: report.executable,
+            offeredActions: report.offeredActions,
+            refusalReason: report.refusalReason
+        )
+        let viewModel = CandidateDetailViewModel(staleReport)
+        XCTAssertEqual(viewModel.fingerprintToken, staleToken)
+
+        let arguments = buildExecuteArguments(
+            actionId: viewModel.actionId!,
+            resourceId: viewModel.resourceId,
+            projectRootsArguments: [],
+            requiresConfirmation: viewModel.requiresConfirmation,
+            fingerprintToken: viewModel.fingerprintToken
+        )
+
+        XCTAssertTrue(arguments.contains(staleToken), "the stored (stale) token must be passed verbatim")
+        XCTAssertFalse(
+            arguments.contains(hypotheticalFreshToken),
+            "a token from a hypothetical fresh explain call must never appear"
+        )
+    }
+
+    /// Mechanical proof at the source level: `explain` is invoked exactly
+    /// once in this whole file (inside `loadExplain()`) — there is no
+    /// second call site anywhere, including inside `performClean()`.
+    func testExplainIsInvokedExactlyOnceInCandidateDetailView() throws {
+        let code = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        let explainCallSites = code.components(separatedBy: "\"explain\"").count - 1
+        XCTAssertEqual(explainCallSites, 1, "explain must be called from exactly one place — loadExplain()")
+    }
+
+    func testBuildExecuteArgumentsOmitsConfirmationFlagsWhenNotRequired() {
+        let arguments = buildExecuteArguments(
+            actionId: "cargo.clean.target_dir",
+            resourceId: "/tmp/example/target",
+            projectRootsArguments: ["--project-root", "/tmp/proj"],
+            requiresConfirmation: false,
+            fingerprintToken: "opaque-token"
+        )
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "execute", "--action-id", "cargo.clean.target_dir",
+                "--resource-id", "/tmp/example/target",
+                "--project-root", "/tmp/proj",
+                "--json", "--progress-json",
+            ]
+        )
+        XCTAssertFalse(arguments.contains("--confirm-ask"))
+        XCTAssertFalse(arguments.contains("--observed-fingerprint"))
+    }
+
+    func testBuildExecuteArgumentsIncludesConfirmationFlagsTogetherWhenRequired() {
+        let arguments = buildExecuteArguments(
+            actionId: "node.clean.node_modules",
+            resourceId: "/tmp/example/app",
+            projectRootsArguments: [],
+            requiresConfirmation: true,
+            fingerprintToken: "opaque-token-xyz"
+        )
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "execute", "--action-id", "node.clean.node_modules",
+                "--resource-id", "/tmp/example/app",
+                "--json", "--progress-json",
+                "--confirm-ask", "--observed-fingerprint", "opaque-token-xyz",
+            ]
+        )
+    }
+
+    func testBuildExecuteArgumentsOmitsConfirmationFlagsWhenTokenMissingEvenIfRequired() {
+        // Defensive: requiresConfirmation with no token must never emit a
+        // half-formed --confirm-ask with no --observed-fingerprint.
+        let arguments = buildExecuteArguments(
+            actionId: "cargo.clean.target_dir",
+            resourceId: "/tmp/example/target",
+            projectRootsArguments: [],
+            requiresConfirmation: true,
+            fingerprintToken: nil
+        )
+
+        XCTAssertFalse(arguments.contains("--confirm-ask"))
+        XCTAssertFalse(arguments.contains("--observed-fingerprint"))
+    }
+
+    // MARK: - HORO-1065: every distinct execute outcome renders its own
+    // specific message (the ticket's core AC)
+
+    private func executeReportJSON(
+        outcome: String,
+        failureMessage: String? = nil,
+        abortReason: String? = nil,
+        actualReclaimedBytes: UInt64? = nil
+    ) -> Data {
+        let failure = failureMessage.map { "\"\($0)\"" } ?? "null"
+        let abort = abortReason.map { "\"\($0)\"" } ?? "null"
+        let actual = actualReclaimedBytes.map(String.init) ?? "null"
+        let json = """
+        {
+          "action_id": "cargo.clean.target_dir",
+          "resource_id": "/tmp/example/target",
+          "outcome": "\(outcome)",
+          "failure_message": \(failure),
+          "abort_reason": \(abort),
+          "expected_reclaimed_bytes": 1048576,
+          "actual_reclaimed_bytes": \(actual)
+        }
+        """
+        return Data(json.utf8)
+    }
+
+    private func refusalReportJSON(reason: String, message: String) -> Data {
+        let json = """
+        {"reason": "\(reason)", "message": "\(message)"}
+        """
+        return Data(json.utf8)
+    }
+
+    func testDescribeExecuteOutcomeSucceededUsesMeasuredActualBytesNotEstimate() {
+        let stdout = executeReportJSON(outcome: "succeeded", actualReclaimedBytes: 987_654)
+        let outcome = describeExecuteOutcome(exitCode: 0, stdout: stdout, stderrText: "")
+        guard case .succeeded(let actualBytes, let human) = outcome else {
+            return XCTFail("expected .succeeded")
+        }
+        XCTAssertEqual(actualBytes, 987_654)
+        XCTAssertFalse(human.isEmpty)
+    }
+
+    /// Every one of the ~9+ distinct non-succeeded outcome/refusal values
+    /// listed in the ticket must render a message unique among all of
+    /// them — this is the mechanical proof.
+    func testEveryDistinctExecuteOutcomeRendersAUniqueMessage() {
+        let cases: [(String, Int32, Data)] = [
+            ("failed", 1, executeReportJSON(outcome: "failed", failureMessage: "disk write error")),
+            (
+                "aborted_by_revalidation:ResourceIdentityChanged", 4,
+                executeReportJSON(outcome: "aborted_by_revalidation", abortReason: "ResourceIdentityChanged")
+            ),
+            (
+                "aborted_by_revalidation:PolicyClassDowngraded", 4,
+                executeReportJSON(outcome: "aborted_by_revalidation", abortReason: "PolicyClassDowngraded")
+            ),
+            (
+                "aborted_by_revalidation:PolicyReasonsWidened", 4,
+                executeReportJSON(outcome: "aborted_by_revalidation", abortReason: "PolicyReasonsWidened")
+            ),
+            (
+                "aborted_by_revalidation:EvidenceDegraded", 4,
+                executeReportJSON(outcome: "aborted_by_revalidation", abortReason: "EvidenceDegraded")
+            ),
+            (
+                "resource_not_found", 5,
+                refusalReportJSON(reason: "resource_not_found", message: "no discoverable candidate matches")
+            ),
+            (
+                "action_not_found", 5,
+                refusalReportJSON(reason: "action_not_found", message: "no registered action resolves")
+            ),
+            (
+                "action_mismatch", 5,
+                refusalReportJSON(reason: "action_mismatch", message: "does not match the action this resource resolves to")
+            ),
+            ("protected", 3, refusalReportJSON(reason: "protected", message: "refused — this resource is PROTECTED")),
+            (
+                "ask_no_consent", 3,
+                refusalReportJSON(reason: "ask_no_consent", message: "refused — this resource requires confirmation")
+            ),
+            (
+                "ask_consent_mismatch", 3,
+                refusalReportJSON(
+                    reason: "ask_consent_mismatch",
+                    message: "refused — the supplied --observed-fingerprint does not match"
+                )
+            ),
+            (
+                "auto_safe_contract_violation", 3,
+                refusalReportJSON(reason: "auto_safe_contract_violation", message: "refused — an AUTO_SAFE decision failed")
+            ),
+            (
+                "busy", 75,
+                refusalReportJSON(reason: "busy", message: "another glomeris execution is already in progress")
+            ),
+            ("usage_error_exit_2", 2, Data()),
+        ]
+
+        var messages: [String: String] = [:]
+        for (label, exitCode, stdout) in cases {
+            let outcome = describeExecuteOutcome(
+                exitCode: exitCode,
+                stdout: stdout,
+                stderrText: label == "usage_error_exit_2" ? "glomeris execute: --action-id is required" : ""
+            )
+            guard case .message(let text) = outcome else {
+                return XCTFail("\(label) unexpectedly decoded as .succeeded")
+            }
+            messages[label] = text
+        }
+
+        XCTAssertEqual(messages.count, cases.count, "every case must produce a message")
+        let uniqueMessages = Set(messages.values)
+        XCTAssertEqual(
+            uniqueMessages.count, cases.count,
+            "every distinct outcome/refusal must render a UNIQUE message — collisions: \(messages)"
+        )
+    }
+
+    func testDescribeExecuteOutcomeFallsBackGracefullyOnUnparseableStdout() {
+        // A real subprocess can still fail unpredictably (e.g. a token
+        // encoding edge case) even though the UI constructs the command
+        // correctly — this must never crash, only render a message.
+        let outcome = describeExecuteOutcome(
+            exitCode: 2,
+            stdout: Data("not json at all".utf8),
+            stderrText: "glomeris execute: invalid --observed-fingerprint token: bad encoding"
+        )
+        guard case .message(let text) = outcome else {
+            return XCTFail("expected .message")
+        }
+        XCTAssertTrue(text.contains("2"))
+        XCTAssertTrue(text.contains("bad encoding"))
+    }
+
+    func testExecuteRefusalReportDtoDecodes() throws {
+        let json = """
+        {"reason": "protected", "message": "refused — this resource is PROTECTED"}
+        """
+        let dto = try JSONDecoder().decode(ExecuteRefusalReportDto.self, from: Data(json.utf8))
+        XCTAssertEqual(dto.reason, "protected")
+        XCTAssertEqual(dto.message, "refused — this resource is PROTECTED")
+    }
+
+    func testHumanByteCountFormatsRealBytesAndHandlesNil() {
+        XCTAssertEqual(humanByteCount(nil), "unknown")
+        XCTAssertFalse(humanByteCount(987_654).isEmpty)
+        XCTAssertNotEqual(humanByteCount(987_654), "unknown")
+    }
+
     // MARK: - Helpers
 
     private static func readSource(_ fileName: String) throws -> String {
