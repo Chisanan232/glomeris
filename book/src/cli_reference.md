@@ -552,8 +552,8 @@ glomeris actions history --json --limit 2
     },
     {
       "timestamp": 1700000600,
-      "action_id": "docker.clean.build_cache",
-      "resource_id": "docker_build_cache:docker",
+      "action_id": "node.clean.node_modules",
+      "resource_id": "node_modules:/Users/dev/proj/node_modules",
       "policy_label": "ASK",
       "outcome": "aborted_by_revalidation",
       "abort_reason": "ResourceIdentityChanged",
