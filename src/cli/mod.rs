@@ -2253,6 +2253,90 @@ mod execute_tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// HORO-1056: proves `build_execute_report` actually renders every
+    /// [`ExecutionOutcome`] variant — including the two `AbortReason`
+    /// cases already exercised at the `executor::execute` level by
+    /// `execute_aborts_when_resource_identity_changed_between_approval_and_execution`
+    /// and `execute_aborts_when_fresh_reasons_widen_beyond_planned_ask_bucket`
+    /// in `src/executor/mod.rs` — as a distinct, machine-readable
+    /// `outcome`/`abort_reason` pair, never collapsed into one generic
+    /// string. `"succeeded"` is already covered by
+    /// `auto_safe_action_executes_and_reports_real_reclaimed_bytes` above;
+    /// this test rounds out `"failed"`, `"aborted_by_revalidation"` (both
+    /// `AbortReason` variants that matter — `ResourceIdentityChanged` vs.
+    /// `PolicyReasonsWidened`, which the AC's "FingerprintMismatch" name
+    /// maps to), and `"dry_run"`.
+    #[test]
+    fn build_execute_report_distinguishes_every_execution_outcome() {
+        use crate::executor::AbortReason;
+
+        fn report_for(outcome: ExecutionOutcome) -> ExecutionReport {
+            ExecutionReport {
+                action: crate::evidence::model::ActionId("test.action"),
+                resource: ResourceId::new(
+                    ResourceKind::NodeModules,
+                    ResourceLocator::Path(PathBuf::from("/tmp/does-not-matter")),
+                ),
+                outcome,
+                expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+                actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            }
+        }
+
+        let failed = build_execute_report(&report_for(ExecutionOutcome::Failed(
+            "disk full".to_string(),
+        )));
+        assert_eq!(failed.outcome, "failed");
+        assert_eq!(failed.failure_message.as_deref(), Some("disk full"));
+        assert_eq!(failed.abort_reason, None);
+
+        let identity_changed = build_execute_report(&report_for(
+            ExecutionOutcome::AbortedByRevalidation(AbortReason::ResourceIdentityChanged),
+        ));
+        assert_eq!(identity_changed.outcome, "aborted_by_revalidation");
+        assert_eq!(identity_changed.failure_message, None);
+        assert_eq!(
+            identity_changed.abort_reason.as_deref(),
+            Some("ResourceIdentityChanged")
+        );
+
+        let reasons_widened = build_execute_report(&report_for(
+            ExecutionOutcome::AbortedByRevalidation(AbortReason::PolicyReasonsWidened),
+        ));
+        assert_eq!(reasons_widened.outcome, "aborted_by_revalidation");
+        assert_eq!(
+            reasons_widened.abort_reason.as_deref(),
+            Some("PolicyReasonsWidened"),
+            "distinct AbortReason variants must render as distinct strings, never collapsed"
+        );
+        assert_ne!(
+            identity_changed.abort_reason, reasons_widened.abort_reason,
+            "two different AbortReason variants must not render identically"
+        );
+
+        let dry_run_report = build_execute_report(&report_for(ExecutionOutcome::DryRun));
+        assert_eq!(dry_run_report.outcome, "dry_run");
+        assert_eq!(dry_run_report.failure_message, None);
+        assert_eq!(dry_run_report.abort_reason, None);
+
+        // Every outcome string above, plus "succeeded" (covered by
+        // `auto_safe_action_executes_and_reports_real_reclaimed_bytes`),
+        // must be pairwise distinct.
+        let outcomes = [
+            "succeeded",
+            failed.outcome,
+            identity_changed.outcome,
+            dry_run_report.outcome,
+        ];
+        for (i, a) in outcomes.iter().enumerate() {
+            for (j, b) in outcomes.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "outcome strings must be pairwise distinct");
+                }
+            }
+        }
+    }
+
     /// A resource whose `--action-id` does not match what actually
     /// resolves for it is refused before `authorize` is ever consulted —
     /// the caller asked for a specific action, not "whatever resolves".

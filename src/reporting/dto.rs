@@ -475,12 +475,20 @@ pub struct ExecuteReport {
 /// exactly the case a UI most needs structured detail on). Never carries
 /// anything an `Approval` would — this is a report of a refusal that
 /// already happened, not a mechanism for causing one.
+///
+/// Also reused (HORO-1056) for the one `execute` refusal that happens
+/// BEFORE an `ExecuteResolution` exists at all: `reason: "busy"`, emitted
+/// by `main.rs`'s `acquire_execution_lock_or_exit` when the HORO-1054
+/// execution lock is already held by another invocation. Same shape,
+/// same `--json` contract, deliberately not a new DTO.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExecuteRefusalReport {
     /// One of `"resource_not_found"`, `"action_not_found"`,
     /// `"action_mismatch"`, `"protected"`, `"ask_no_consent"`,
     /// `"ask_consent_mismatch"`, `"auto_safe_contract_violation"` —
-    /// mirrors `crate::cli::ExecuteResolution`'s non-`Executed` variants.
+    /// mirrors `crate::cli::ExecuteResolution`'s non-`Executed` variants —
+    /// or `"busy"`, emitted before that enum exists at all (see this
+    /// struct's doc comment).
     pub reason: &'static str,
     pub message: String,
 }

@@ -300,23 +300,43 @@ const EXIT_EXECUTION_LOCK_BUSY: i32 = 75;
 
 /// Acquires the standalone HORO-1054 execution lock or exits with
 /// [`EXIT_EXECUTION_LOCK_BUSY`]/a generic failure, printing `command_name`
-/// in the error message. Shared by `run_emergency_command` and
-/// `free_run` — the two existing real-execution entry points; a future
-/// `execute` subcommand (HORO-1055) reuses the same
-/// `glomeris::executor::lock::acquire_execution_lock` primitive.
+/// in the error message. Shared by `run_emergency_command`, `free_run`,
+/// and `run_execute_command` — the three real-execution entry points.
+///
+/// `json`: HORO-1056 gap fix. `emergency`/`free` have no `--json` mode at
+/// all, so they always pass `false` here and this behaves exactly as
+/// before. `execute` DOES have `--json` (HORO-1055) and parses it before
+/// ever reaching this call site (see `run_execute_command`) — passing it
+/// through here means a `--json` caller gets a structured `"busy"` report
+/// on stdout instead of silence plus a bare exit code, matching every
+/// other refusal path `render_execute_resolution` already renders. This
+/// is the one refusal/abort path in `execute` that happens BEFORE
+/// `glomeris::cli::ExecuteResolution` exists at all, which is why it is
+/// not one of that enum's variants and is rendered here instead.
 #[cfg(target_os = "macos")]
 fn acquire_execution_lock_or_exit(
     command_name: &str,
+    json: bool,
 ) -> glomeris::executor::lock::ExecutionLockGuard {
     use glomeris::executor::lock::{acquire_execution_lock, LockError};
+    use glomeris::reporting::dto::ExecuteRefusalReport;
 
     match acquire_execution_lock() {
         Ok(guard) => guard,
         Err(LockError::AlreadyHeld) => {
-            eprintln!(
-                "glomeris {command_name}: another glomeris execution is already in progress \
-                 (execution lock busy) — try again shortly"
-            );
+            if json {
+                print_json_or_exit(&ExecuteRefusalReport {
+                    reason: "busy",
+                    message: "another glomeris execution is already in progress (execution \
+                              lock busy) — try again shortly"
+                        .to_string(),
+                });
+            } else {
+                eprintln!(
+                    "glomeris {command_name}: another glomeris execution is already in progress \
+                     (execution lock busy) — try again shortly"
+                );
+            }
             std::process::exit(EXIT_EXECUTION_LOCK_BUSY);
         }
         Err(LockError::Io(e)) => {
@@ -342,7 +362,7 @@ fn run_emergency_command() {
     // HORO-1054: held for the duration of the real-execution portion
     // below, released automatically (via `Drop`) when this function
     // returns.
-    let _execution_lock = acquire_execution_lock_or_exit("emergency");
+    let _execution_lock = acquire_execution_lock_or_exit("emergency", false);
 
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
@@ -768,7 +788,7 @@ fn run_execute_command(args: &[String]) {
     // HORO-1054: held for the duration of the real-execution portion
     // below, released automatically (via `Drop`) when this function
     // returns.
-    let _execution_lock = acquire_execution_lock_or_exit("execute");
+    let _execution_lock = acquire_execution_lock_or_exit("execute", json);
 
     let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = ActionRegistry::builtin();
@@ -1254,7 +1274,7 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots
     // HORO-1054: held for the duration of the real-execution portion
     // below, released automatically (via `Drop`) when this function
     // returns.
-    let _execution_lock = acquire_execution_lock_or_exit("free");
+    let _execution_lock = acquire_execution_lock_or_exit("free", false);
 
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)

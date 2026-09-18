@@ -194,3 +194,69 @@ fn execute_exits_via_the_busy_path_when_the_execution_lock_is_already_held() {
 
     std::fs::remove_dir_all(&home).ok();
 }
+
+/// HORO-1056: the busy-lock path is the one `execute` refusal that fires
+/// BEFORE `glomeris::cli::ExecuteResolution` exists at all (the lock is
+/// acquired before discovery/resolution ever runs — see
+/// `execute_exits_via_the_busy_path_when_the_execution_lock_is_already_held`
+/// above), so it was never covered by HORO-1055's `ExecuteRefusalReport`
+/// rendering. Previously `--json` callers got the exact same silent
+/// stdout as the non-`--json` case on this path — the real gap this
+/// ticket closes. Proves a `--json` caller now gets a structured
+/// `{"reason": "busy", ...}` report instead of silence.
+#[test]
+fn execute_json_renders_structured_busy_report_when_the_execution_lock_is_already_held() {
+    let home = make_temp_home("execute-json-contended");
+    let lock_path = home
+        .join("Library")
+        .join("Application Support")
+        .join("Glomeris")
+        .join("execution.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).expect("create lock parent dir");
+
+    let held = glomeris::executor::lock::acquire_execution_lock_at(&lock_path)
+        .expect("test process must be able to take the lock first");
+
+    let output = Command::new(glomeris_bin())
+        .arg("execute")
+        .arg("--action-id")
+        .arg("does.not.matter")
+        .arg("--resource-id")
+        .arg("does-not-matter")
+        .arg("--json")
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn glomeris binary");
+
+    drop(held);
+
+    assert_eq!(
+        output.status.code(),
+        Some(75),
+        "expected the dedicated execution-lock-busy exit code even under --json, got status: \
+         {:?}, stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| {
+        panic!(
+            "--json must render a structured busy report on stdout, not silence; parse error \
+             {e}; stdout: {stdout}"
+        )
+    });
+    assert_eq!(
+        parsed["reason"], "busy",
+        "expected the busy refusal reason, got: {parsed}"
+    );
+    assert!(
+        parsed["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already in progress"),
+        "busy message should explain why, got: {parsed}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
