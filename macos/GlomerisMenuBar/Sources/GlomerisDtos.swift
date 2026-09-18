@@ -120,6 +120,45 @@ struct DetectReportDto: Decodable, Equatable {
     let candidates: [DetectCandidateReportDto]
 }
 
+/// Mirrors `reporting::dto::ProgressEvent` (HORO-1052) — one line of the
+/// `--progress-json` NDJSON stream emitted on stderr while `detect`'s
+/// discovery phase runs. The Rust side uses `#[serde(tag = "phase",
+/// rename_all = "snake_case")]`, an internally-tagged enum
+/// (`{"phase":"detector_started","detector":"..."}` /
+/// `{"phase":"detector_finished","detector":"...","candidates_found":N}`),
+/// so this mirror needs a hand-written `init(from:)` rather than the
+/// simple per-field `CodingKeys` used elsewhere in this file.
+enum ProgressEventDto: Decodable, Equatable {
+    case detectorStarted(detector: String)
+    case detectorFinished(detector: String, candidatesFound: Int)
+
+    private enum CodingKeys: String, CodingKey {
+        case phase
+        case detector
+        case candidatesFound = "candidates_found"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let phase = try container.decode(String.self, forKey: .phase)
+        switch phase {
+        case "detector_started":
+            let detector = try container.decode(String.self, forKey: .detector)
+            self = .detectorStarted(detector: detector)
+        case "detector_finished":
+            let detector = try container.decode(String.self, forKey: .detector)
+            let candidatesFound = try container.decode(Int.self, forKey: .candidatesFound)
+            self = .detectorFinished(detector: detector, candidatesFound: candidatesFound)
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .phase,
+                in: container,
+                debugDescription: "Unknown ProgressEvent phase: \(phase)"
+            )
+        }
+    }
+}
+
 /// Mirrors `reporting::dto::ExecuteReport`. `outcome` is deliberately kept
 /// as a plain `String` rather than a Swift `enum` — decoding an
 /// unrecognized value must never fail the whole document (a new Rust
