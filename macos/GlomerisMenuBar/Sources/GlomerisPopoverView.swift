@@ -2,9 +2,9 @@
 //  GlomerisPopoverView.swift
 //  GlomerisMenuBar
 //
-//  Empty popover content for the menu-bar item. HORO-1059 scope is limited
-//  to "renders and opens" — no data, no candidate list, no Process spawning.
-//  See the standing project rule in GlomerisMenuBarApp.swift before adding
+//  HORO-1059 introduced this as an empty popover skeleton; HORO-1062 adds
+//  the status + daemon-health section (StatusHealthSectionView). See the
+//  standing project rule in GlomerisMenuBarApp.swift before adding
 //  anything here beyond presentation.
 //
 
@@ -12,15 +12,13 @@ import SwiftUI
 
 struct GlomerisPopoverView: View {
     var body: some View {
-        VStack {
+        VStack(alignment: .leading) {
             Text("Glomeris")
-                .font(.headline)
-            Text("Menu-bar skeleton — no functionality yet.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.title3)
+            StatusHealthSectionView()
         }
         .padding()
-        .frame(width: 240, height: 120)
+        .frame(width: 260)
     }
 }
 
