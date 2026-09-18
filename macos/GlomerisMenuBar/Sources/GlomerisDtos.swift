@@ -89,7 +89,7 @@ struct OfferedActionDto: Decodable, Equatable {
 }
 
 /// Mirrors `reporting::dto::DetectCandidateReport`.
-struct DetectCandidateReportDto: Decodable, Equatable {
+struct DetectCandidateReportDto: Decodable, Equatable, Identifiable {
     let resourceId: String
     let kind: String
     let reclaimableBytes: UInt64?
@@ -113,6 +113,11 @@ struct DetectCandidateReportDto: Decodable, Equatable {
         case offeredActions = "offered_actions"
         case refusalReason = "refusal_reason"
     }
+
+    /// `Identifiable` conformance for `CandidatesSectionView`'s
+    /// `.sheet(item:)` (HORO-1064) — `resourceId` is already the stable,
+    /// unique identity Rust assigns each candidate.
+    var id: String { resourceId }
 }
 
 /// Mirrors `reporting::dto::DetectReport`.
@@ -156,6 +161,73 @@ enum ProgressEventDto: Decodable, Equatable {
                 debugDescription: "Unknown ProgressEvent phase: \(phase)"
             )
         }
+    }
+}
+
+/// Mirrors `reporting::dto::ExplainReport` (HORO-1051/HORO-1053). Backs
+/// HORO-1064's candidate detail view — the sole host of the Clean
+/// button. `executable` and `offeredActions[].requiresConfirmation` are
+/// the two fields that view's button enablement and confirmation-sheet
+/// gating read directly; `policyLabel`/`reasons` are shown only as
+/// human-readable context and must never be branched on for either
+/// decision (see the standing project rule in GlomerisMenuBarApp.swift).
+struct ExplainReportDto: Decodable, Equatable {
+    let resourceId: String
+    let kind: String
+    let detector: String
+    let sources: [String]
+    /// Logical size as reported by the filesystem — explicitly distinct
+    /// from `reclaimableBytes`/`reclaimableHuman` below; the detail view
+    /// must label the two separately rather than conflate them.
+    let logicalBytes: UInt64?
+    let logicalHuman: String?
+    let reclaimableBytes: UInt64?
+    let reclaimableHuman: String?
+    let reclaimableBytesIsLowerBound: Bool
+    let completeness: String
+    let confidence: String
+    let activeUseSignals: [String]
+    let regenerability: String
+    let policyLabel: String
+    let reasons: [String]
+    let nativeCleanupAvailable: Bool
+    let nativeCleanupActionId: String?
+    /// Opaque fingerprint-pinning token (HORO-1051) — carried, not
+    /// interpreted, by this Swift layer. HORO-1065 will forward it
+    /// verbatim as `execute --observed-fingerprint <token>`.
+    let fingerprintToken: String?
+    /// `true` only when a real registered action exists for this
+    /// resource and its policy class doesn't unconditionally forbid it.
+    /// This is the single field the Clean button's enablement reads.
+    let executable: Bool
+    /// Empty for a non-executable resource; one entry otherwise. The
+    /// matching entry's `requiresConfirmation` is the single field the
+    /// confirmation sheet's visibility reads.
+    let offeredActions: [OfferedActionDto]
+    let refusalReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case resourceId = "resource_id"
+        case kind
+        case detector
+        case sources
+        case logicalBytes = "logical_bytes"
+        case logicalHuman = "logical_human"
+        case reclaimableBytes = "reclaimable_bytes"
+        case reclaimableHuman = "reclaimable_human"
+        case reclaimableBytesIsLowerBound = "reclaimable_bytes_is_lower_bound"
+        case completeness
+        case confidence
+        case activeUseSignals = "active_use_signals"
+        case regenerability
+        case policyLabel = "policy_label"
+        case reasons
+        case nativeCleanupAvailable = "native_cleanup_available"
+        case nativeCleanupActionId = "native_cleanup_action_id"
+        case fingerprintToken = "fingerprint_token"
+        case executable
+        case offeredActions = "offered_actions"
+        case refusalReason = "refusal_reason"
     }
 }
 

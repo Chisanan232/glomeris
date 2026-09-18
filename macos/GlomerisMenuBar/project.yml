@@ -44,6 +44,7 @@ targets:
       - path: Sources/GlomerisDtos.swift
       - path: Sources/StatusHealthSectionView.swift
       - path: Sources/CandidatesSectionView.swift
+      - path: Sources/CandidateDetailView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
