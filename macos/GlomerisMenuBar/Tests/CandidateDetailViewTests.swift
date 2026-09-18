@@ -262,6 +262,67 @@ final class CandidateDetailViewTests: XCTestCase {
         XCTAssertFalse(listSource.contains("Button(\"Clean\")"))
     }
 
+    // MARK: - Wiring invariants (the view actually reads the view model's
+    // fields, not just "the view model's fields are correct in isolation")
+
+    /// The view-model-level tests above prove `isCleanEnabled`/
+    /// `requiresConfirmation` are field reads. This proves
+    /// `CandidateDetailView` actually gates the button and the
+    /// confirmation alert on THOSE two view-model properties — not on
+    /// some other property (e.g. `policyLabel`) that a future edit could
+    /// swap in without any of the view-model tests noticing.
+    func testCleanButtonDisabledModifierReadsIsCleanEnabled() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        XCTAssertTrue(
+            source.contains(".disabled(!viewModel.isCleanEnabled)"),
+            "the Clean button's .disabled(...) must read viewModel.isCleanEnabled directly"
+        )
+    }
+
+    func testConfirmationAlertGatedOnRequiresConfirmation() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        XCTAssertTrue(
+            source.contains("if viewModel.requiresConfirmation {"),
+            "the confirmation alert must be triggered by reading viewModel.requiresConfirmation directly"
+        )
+        // Exactly one place ever flips the alert-presented flag to true —
+        // the branch above. A second, unconditional call site would mean
+        // the alert can show regardless of requiresConfirmation.
+        let trueAssignments = source.components(separatedBy: "showConfirmationAlert = true").count - 1
+        XCTAssertEqual(trueAssignments, 1)
+    }
+
+    /// The strongest single proof of "never inferred from policy_label":
+    /// after stripping `//` doc-comment lines (which legitimately
+    /// mention the policy-label field as prose — see the caution this
+    /// ticket calls out about comment/grep collisions), neither
+    /// `CandidateDetailView.swift` nor `CandidateDetailViewModel`'s own
+    /// code contains a comparison against the `policyLabel` property.
+    func testNoCodeBranchesOnPolicyLabelText() throws {
+        let code = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        XCTAssertFalse(code.contains("policyLabel =="), "no code path may branch on policyLabel's text")
+        XCTAssertFalse(code.contains("== report.policyLabel"), "no code path may branch on policyLabel's text")
+    }
+
+    /// Closes the hole a label-specific check like `Button("Clean"`
+    /// leaves open: the candidates list must contain exactly the two
+    /// known, non-cleanup `Button` constructions (Refresh, and row-tap
+    /// navigation to the detail view) — no more — and it must never
+    /// construct an `execute` argument. This makes "no cleanup-triggering
+    /// control in the list view" mechanical rather than tied to any one
+    /// button label like "Clean".
+    func testCandidatesSectionViewHasOnlyTheTwoKnownButtonsAndNeverConstructsExecute() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidatesSectionView.swift"))
+        let buttonConstructions = source.components(separatedBy: "Button(").count - 1
+            + source.components(separatedBy: "Button {").count - 1
+        XCTAssertEqual(
+            buttonConstructions, 2,
+            "expected exactly the Refresh button and the row-tap navigation button — any other count means a " +
+                "button was added or removed without updating this invariant"
+        )
+        XCTAssertFalse(source.contains("\"execute\""), "the list view must never construct an execute argument")
+    }
+
     // MARK: - Helpers
 
     private static func readSource(_ fileName: String) throws -> String {
@@ -270,5 +331,20 @@ final class CandidateDetailViewTests: XCTestCase {
             .deletingLastPathComponent() // GlomerisMenuBar
             .appendingPathComponent("Sources/\(fileName)")
         return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    /// Strips full-line `//` comments (including doc comments) so
+    /// mechanical greps for code patterns aren't tripped up by prose
+    /// that legitimately mentions the same words/symbols as context —
+    /// this file's own headers do exactly that for "policyLabel" and
+    /// "Clean button". Only whole-line comments are stripped (every
+    /// comment in this codebase's style starts a line), so this is a
+    /// conservative, easy-to-reason-about filter rather than a full
+    /// Swift-comment parser.
+    private static func strippedOfComments(_ source: String) -> String {
+        source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
     }
 }
