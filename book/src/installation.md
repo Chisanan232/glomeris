@@ -1,5 +1,37 @@
 # Installation
 
+## Homebrew tap (recommended)
+
+Every tagged release is built and published automatically by
+[`cargo-dist`](https://github.com/axodotdev/cargo-dist)
+(`.github/workflows/release.yml`), which also generates and pushes a
+Homebrew formula to the
+[`Chisanan232/homebrew-tap`](https://github.com/Chisanan232/homebrew-tap)
+repository (HORO-1069). This is the simplest way to install and update the
+`glomeris` CLI:
+
+```sh
+brew tap chisanan232/tap
+brew install glomeris
+```
+
+`brew upgrade glomeris` picks up new releases the same way. The formula
+installs the `glomeris` binary onto your `PATH` — no separate `cargo
+build` step needed.
+
+Two macOS targets are built for every release: `aarch64-apple-darwin`
+(Apple Silicon) and `x86_64-apple-darwin` (Intel, cross-compiled) — see
+`dist-workspace.toml`. Homebrew selects the right one automatically.
+
+## Prebuilt release archives
+
+If you'd rather not use Homebrew, the same `aarch64-apple-darwin`/
+`x86_64-apple-darwin` tarballs `cargo-dist` builds for the formula above
+are also attached directly to each [GitHub
+Release](https://github.com/Chisanan232/glomeris/releases) — download the
+one matching your Mac's architecture, extract it, and copy the `glomeris`
+binary onto your `PATH` (e.g. `/usr/local/bin`).
+
 ## Build from source
 
 Glomeris requires Rust/Cargo (2021 edition). There is no other runtime
@@ -14,15 +46,10 @@ cargo build --release
 The resulting binary is at `target/release/glomeris`. Copy it onto your
 `PATH` (e.g. `/usr/local/bin`) if you want to run it as `glomeris` directly.
 
-## Prebuilt releases
-
-There is no prebuilt release binary today. Prebuilt macOS release artifacts
-will be published under [GitHub
-Releases](https://github.com/Chisanan232/glomeris/releases) once the
-packaging/release ticket (HORO-957) lands — check the Releases page directly
-for current status.
-
 ## Installing the menu-bar app
+
+See [Menu Bar App](menu_bar_app.md) for what `GlomerisMenuBar.app` actually
+shows and lets you do once it's installed.
 
 `GlomerisMenuBar.app.zip` is published as an extra asset on each [GitHub
 Release](https://github.com/Chisanan232/glomeris/releases) alongside the CLI
