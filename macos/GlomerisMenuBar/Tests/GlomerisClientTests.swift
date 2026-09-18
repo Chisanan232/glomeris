@@ -164,6 +164,53 @@ final class GlomerisClientTests: XCTestCase {
         }
     }
 
+    // MARK: - runRaw (HORO-1065): no exit-code interpretation at all
+
+    /// `execute`'s JSON body appears on stdout for most non-zero exit
+    /// codes too (see `book/src/cli_reference.md`) — `runRaw` must hand
+    /// that back rather than throwing it away, unlike `run` above.
+    func testRunRawReturnsStdoutAndExitCodeForNonZeroExit() async throws {
+        let result = try await fixtureClient().runRaw(
+            ["5", #"{"reason": "resource_not_found", "message": "no candidate"}"#, "diagnostic text"],
+            progressType: EmptyProgress.self
+        )
+
+        XCTAssertEqual(result.exitCode, 5)
+        XCTAssertEqual(String(data: result.stdout, encoding: .utf8), #"{"reason": "resource_not_found", "message": "no candidate"}"#)
+        XCTAssertEqual(String(data: result.stderr, encoding: .utf8), "diagnostic text")
+    }
+
+    func testRunRawNeverThrowsForAnyExitCode() async throws {
+        for exitCode in [0, 1, 2, 3, 4, 5, 75, 17] {
+            let result = try await fixtureClient().runRaw(
+                [String(exitCode), "", ""],
+                progressType: EmptyProgress.self
+            )
+            XCTAssertEqual(result.exitCode, Int32(exitCode))
+        }
+    }
+
+    func testRunRawStillThrowsWhenBinaryCannotBeSpawned() async throws {
+        let client = GlomerisClient(executableURL: URL(fileURLWithPath: "/no/such/glomeris-binary"))
+        do {
+            _ = try await client.runRaw([], progressType: EmptyProgress.self)
+            XCTFail("expected GlomerisClientError.executionFailed")
+        } catch GlomerisClientError.executionFailed {
+            // expected
+        }
+    }
+
+    func testRunRawStreamsLiveProgressSameAsRun() async throws {
+        let result = try await fixtureClient().runRaw(
+            ["0", "", "{\"percent\": 10}\n{\"percent\": 50}\n"],
+            progressType: PercentProgress.self,
+            onProgress: { _ in }
+        )
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.progressLines.map(\.percent), [10, 50])
+    }
+
     // MARK: - Real binary integration
 
     /// Spawns the actual `glomeris` binary (built from this same worktree
