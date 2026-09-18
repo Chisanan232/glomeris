@@ -1,0 +1,8 @@
+{
+  "total_bytes": 500000000000,
+  "free_bytes": 125000000000,
+  "used_percent": 75.0,
+  "free_human": "116.4 GB",
+  "total_human": "465.7 GB",
+  "pressure_state": "WARN"
+}

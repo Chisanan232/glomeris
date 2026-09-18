@@ -41,6 +41,7 @@ targets:
           - "Fixtures/**"
       - path: Sources/GlomerisClient.swift
       - path: Sources/ProjectRootsStore.swift
+      - path: Sources/GlomerisDtos.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
