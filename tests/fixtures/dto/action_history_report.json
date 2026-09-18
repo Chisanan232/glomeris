@@ -1,0 +1,26 @@
+{
+  "events": [
+    {
+      "timestamp": 1700000000,
+      "action_id": "cargo.clean.target_dir",
+      "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+      "policy_label": "AUTO_SAFE",
+      "outcome": "succeeded",
+      "abort_reason": null,
+      "actual_reclaimed_bytes": 2147483648,
+      "actual_reclaimed_human": "2.0 GB",
+      "source": "execute"
+    },
+    {
+      "timestamp": 1700000600,
+      "action_id": "docker.clean.build_cache",
+      "resource_id": "docker_build_cache:docker",
+      "policy_label": "ASK",
+      "outcome": "aborted_by_revalidation",
+      "abort_reason": "ResourceIdentityChanged",
+      "actual_reclaimed_bytes": null,
+      "actual_reclaimed_human": null,
+      "source": "free"
+    }
+  ]
+}

@@ -26,19 +26,18 @@
 //! array of a DTO with the `executable`/`offered_actions`/`refusal_reason`
 //! triple, mixing populated and empty/null variants), and `ExecuteReport`
 //! (the `outcome` enum-as-`&'static str` field plus several optionals).
-//! `ExplainReport`, `ActionListReport`, `ActionHistoryReport`,
-//! `LlmPlanReport`, `CleanDryRunReport`, and `ProgressEvent` are
-//! deliberately out of scope for this ticket — none of them back a
-//! currently-planned C4-C8 screen yet, and the five covered here already
-//! exercise every structurally distinct shape (flat scalars, optional
-//! scalars, nested arrays, nested optional arrays, enum-as-string) that a
-//! sixth DTO would only repeat.
+//! `ExplainReport`, `ActionListReport`, `LlmPlanReport`,
+//! `CleanDryRunReport`, and `ProgressEvent` remain out of scope for this
+//! ticket — none of them back a currently-planned screen yet.
+//! `ActionHistoryReport` was added in HORO-1066, when the recent-history +
+//! action-audit popover section actually needed it — see that ticket's
+//! `HistoryAuditSectionView.swift`.
 
 use std::path::PathBuf;
 
 use glomeris::reporting::dto::{
-    DaemonStatusReport, DetectCandidateReport, DetectReport, ExecuteReport, HistoryEventReport,
-    HistoryReport, OfferedAction, StatusReport,
+    ActionHistoryEventReport, ActionHistoryReport, DaemonStatusReport, DetectCandidateReport,
+    DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, OfferedAction, StatusReport,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -197,4 +196,35 @@ fn execute_report_aborted_by_revalidation_matches_golden_fixture() {
         actual_reclaimed_bytes: None,
     };
     assert_matches_fixture(&report, "execute_report_aborted.json");
+}
+
+#[test]
+fn action_history_report_matches_golden_fixture() {
+    let report = ActionHistoryReport {
+        events: vec![
+            ActionHistoryEventReport {
+                timestamp: 1_700_000_000,
+                action_id: "cargo.clean.target_dir".to_string(),
+                resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                policy_label: "AUTO_SAFE".to_string(),
+                outcome: "succeeded".to_string(),
+                abort_reason: None,
+                actual_reclaimed_bytes: Some(2_147_483_648),
+                actual_reclaimed_human: Some("2.0 GB".to_string()),
+                source: "execute".to_string(),
+            },
+            ActionHistoryEventReport {
+                timestamp: 1_700_000_600,
+                action_id: "docker.clean.build_cache".to_string(),
+                resource_id: "docker_build_cache:docker".to_string(),
+                policy_label: "ASK".to_string(),
+                outcome: "aborted_by_revalidation".to_string(),
+                abort_reason: Some("ResourceIdentityChanged".to_string()),
+                actual_reclaimed_bytes: None,
+                actual_reclaimed_human: None,
+                source: "free".to_string(),
+            },
+        ],
+    };
+    assert_matches_fixture(&report, "action_history_report.json");
 }
