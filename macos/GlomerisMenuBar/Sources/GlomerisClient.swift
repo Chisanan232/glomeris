@@ -28,6 +28,29 @@ struct GlomerisClientResult<Output: Decodable, Progress: Decodable> {
     let progressLines: [Progress]
 }
 
+/// Result of invoking `glomeris` with no exit-code interpretation at all
+/// — every byte of stdout/stderr and the raw exit code, verbatim.
+///
+/// `run(_:outputType:progressType:onProgress:)` below assumes exactly one
+/// JSON shape appears on stdout only when the process exits `0`, which is
+/// true for `detect`/`explain`/`status`/etc. but not for `execute`
+/// (HORO-1065): `execute` prints a distinct, still-meaningful JSON body
+/// (`ExecuteReport` or `ExecuteRefusalReport`) to stdout on MOST of its
+/// non-zero exit codes too (see `book/src/cli_reference.md`'s `execute`
+/// section) — throwing that body away, as `run` does, would lose exactly
+/// the structured detail a UI needs to render a specific message per
+/// outcome. `runRaw` hands back everything uninterpreted so a subcommand-
+/// aware caller (the view layer, which already knows its own outcome
+/// shapes) can decode and branch on it directly — this type itself
+/// performs no decoding and no exit-code-specific judgment, staying pure
+/// plumbing.
+struct GlomerisRawResult<Progress: Decodable> {
+    let exitCode: Int32
+    let stdout: Data
+    let stderr: Data
+    let progressLines: [Progress]
+}
+
 /// Typed exit-code errors, matching (not 1:1) the exit-code conventions
 /// documented in `book/src/cli_reference.md`'s "Exit codes" section:
 /// 0 success, 1 execution/runtime failure, 2 usage error.
@@ -89,6 +112,40 @@ struct GlomerisClient {
         progressType: Progress.Type = Progress.self,
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> GlomerisClientResult<Output, Progress> {
+        let raw = try await runRaw(arguments, progressType: Progress.self, onProgress: onProgress)
+
+        switch raw.exitCode {
+        case 0:
+            break
+        case 1:
+            throw GlomerisClientError.executionFailed(Self.trimmedText(raw.stderr))
+        case 2:
+            throw GlomerisClientError.usage(Self.trimmedText(raw.stderr))
+        case let other:
+            throw GlomerisClientError.unexpectedExitCode(other)
+        }
+
+        let output: Output
+        do {
+            output = try JSONDecoder().decode(Output.self, from: raw.stdout)
+        } catch {
+            throw GlomerisClientError.outputDecodingFailed(String(describing: error))
+        }
+
+        return GlomerisClientResult(output: output, progressLines: raw.progressLines)
+    }
+
+    /// Runs `glomeris` and hands back its raw exit code, stdout, stderr,
+    /// and decoded progress lines with no exit-code-specific
+    /// interpretation — see `GlomerisRawResult`'s doc comment for why
+    /// this exists alongside `run` above. Only throws if the process
+    /// could not be spawned at all; every other outcome, including any
+    /// non-zero exit code, is returned rather than thrown.
+    func runRaw<Progress: Decodable>(
+        _ arguments: [String],
+        progressType: Progress.Type = Progress.self,
+        onProgress: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> GlomerisRawResult<Progress> {
         let process = Process()
         process.executableURL = executableURL
         process.arguments = arguments
@@ -130,25 +187,12 @@ struct GlomerisClient {
 
         process.waitUntilExit()
 
-        switch process.terminationStatus {
-        case 0:
-            break
-        case 1:
-            throw GlomerisClientError.executionFailed(Self.trimmedText(errData))
-        case 2:
-            throw GlomerisClientError.usage(Self.trimmedText(errData))
-        case let other:
-            throw GlomerisClientError.unexpectedExitCode(other)
-        }
-
-        let output: Output
-        do {
-            output = try decoder.decode(Output.self, from: outData)
-        } catch {
-            throw GlomerisClientError.outputDecodingFailed(String(describing: error))
-        }
-
-        return GlomerisClientResult(output: output, progressLines: liveProgressLines)
+        return GlomerisRawResult(
+            exitCode: process.terminationStatus,
+            stdout: outData,
+            stderr: errData,
+            progressLines: liveProgressLines
+        )
     }
 
     private static func readAll(_ handle: FileHandle) async -> Data {

@@ -256,3 +256,14 @@ struct ExecuteReportDto: Decodable, Equatable {
         case actualReclaimedBytes = "actual_reclaimed_bytes"
     }
 }
+
+/// Mirrors `reporting::dto::ExecuteRefusalReport` — printed to stdout on
+/// every non-`Executed` `execute` outcome (HORO-1056): resource/action
+/// resolution failures, every policy refusal, and the pre-resolution
+/// `"busy"` lock-contention case. `reason` is deliberately kept as a
+/// plain `String` rather than an enum for the same forward-compatibility
+/// reason as `ExecuteReportDto.outcome` above.
+struct ExecuteRefusalReportDto: Decodable, Equatable {
+    let reason: String
+    let message: String
+}
