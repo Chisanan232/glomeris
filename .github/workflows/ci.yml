@@ -26,3 +26,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  no-policy-in-swift:
+    # HORO-1068: mechanical guard — GlomerisMenuBar (the macOS thin client)
+    # must never branch UI behavior on `policyLabel`/`policy_label`'s string
+    # content, only on structured fields like `executable`. See
+    # docs/internal/HORO-1068-no-policy-in-swift-review.md.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check no policy_label branching in Swift
+        run: bash scripts/check-no-policy-label-branching.sh
