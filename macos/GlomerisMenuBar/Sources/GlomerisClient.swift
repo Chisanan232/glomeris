@@ -72,10 +72,22 @@ struct GlomerisClient {
 
     /// Runs `glomeris` with `arguments`, decodes stdout as `Output`, and
     /// decodes stderr as zero or more NDJSON `Progress` lines.
+    ///
+    /// When `onProgress` is `nil` (the default, and every call site prior
+    /// to HORO-1063), stderr is drained in bulk after the process exits,
+    /// same as always. When `onProgress` is supplied, stderr is instead
+    /// read incrementally while the process is still running, and
+    /// `onProgress` is invoked once per decoded NDJSON line as it arrives
+    /// — this is what lets a caller (HORO-1063's Refresh flow) show live
+    /// per-detector progress instead of a single "done" update after the
+    /// whole scan finishes. Either way, `GlomerisClientResult.progressLines`
+    /// ends up holding every decoded line, so existing callers that never
+    /// pass `onProgress` see no behavior change.
     func run<Output: Decodable, Progress: Decodable>(
         _ arguments: [String],
         outputType: Output.Type = Output.self,
-        progressType: Progress.Type = Progress.self
+        progressType: Progress.Type = Progress.self,
+        onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> GlomerisClientResult<Output, Progress> {
         let process = Process()
         process.executableURL = executableURL
@@ -95,12 +107,26 @@ struct GlomerisClient {
             throw GlomerisClientError.executionFailed(error.localizedDescription)
         }
 
+        let decoder = JSONDecoder()
+
         // Drain both pipes concurrently with the process running, so a
         // chatty subcommand can never deadlock on a full pipe buffer
         // while we wait for it to exit.
         async let stdoutData = Self.readAll(stdoutPipe.fileHandleForReading)
-        async let stderrData = Self.readAll(stderrPipe.fileHandleForReading)
-        let (outData, errData) = await (stdoutData, stderrData)
+        async let stderrOutcome: (Data, [Progress]) = {
+            if let onProgress {
+                return await Self.readAllWithLiveProgress(
+                    stderrPipe.fileHandleForReading,
+                    progressType: Progress.self,
+                    decoder: decoder,
+                    onProgress: onProgress
+                )
+            } else {
+                let data = await Self.readAll(stderrPipe.fileHandleForReading)
+                return (data, Self.parseNDJSON(data, as: Progress.self, decoder: decoder))
+            }
+        }()
+        let (outData, (errData, liveProgressLines)) = await (stdoutData, stderrOutcome)
 
         process.waitUntilExit()
 
@@ -115,7 +141,6 @@ struct GlomerisClient {
             throw GlomerisClientError.unexpectedExitCode(other)
         }
 
-        let decoder = JSONDecoder()
         let output: Output
         do {
             output = try decoder.decode(Output.self, from: outData)
@@ -123,8 +148,7 @@ struct GlomerisClient {
             throw GlomerisClientError.outputDecodingFailed(String(describing: error))
         }
 
-        let progressLines = Self.parseNDJSON(errData, as: Progress.self, decoder: decoder)
-        return GlomerisClientResult(output: output, progressLines: progressLines)
+        return GlomerisClientResult(output: output, progressLines: liveProgressLines)
     }
 
     private static func readAll(_ handle: FileHandle) async -> Data {
@@ -138,6 +162,51 @@ struct GlomerisClient {
     private static func trimmedText(_ data: Data) -> String {
         (String(data: data, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Reads stderr byte-by-byte while the process is still running,
+    /// decoding and emitting each complete NDJSON line as soon as its
+    /// trailing newline arrives, instead of waiting for the pipe to close.
+    /// A line that's empty or doesn't decode as `Progress` is skipped, same
+    /// tolerance as `parseNDJSON` below. Returns the full raw bytes read
+    /// (needed for the non-zero-exit-code error paths above) plus every
+    /// decoded line, in arrival order.
+    private static func readAllWithLiveProgress<Progress: Decodable>(
+        _ handle: FileHandle,
+        progressType: Progress.Type,
+        decoder: JSONDecoder,
+        onProgress: @Sendable (Progress) -> Void
+    ) async -> (Data, [Progress]) {
+        var fullData = Data()
+        var lineBuffer = Data()
+        var progressLines: [Progress] = []
+
+        do {
+            for try await byte in handle.bytes {
+                fullData.append(byte)
+                if byte == UInt8(ascii: "\n") {
+                    if !lineBuffer.isEmpty, let event = try? decoder.decode(Progress.self, from: lineBuffer) {
+                        progressLines.append(event)
+                        onProgress(event)
+                    }
+                    lineBuffer.removeAll(keepingCapacity: true)
+                } else {
+                    lineBuffer.append(byte)
+                }
+            }
+        } catch {
+            // Reading stderr failed partway through (e.g. the handle was
+            // closed unexpectedly). Fall through and decode whatever was
+            // captured so far, same tolerance as a clean EOF.
+        }
+        // A final line with no trailing newline (or the whole stream, if
+        // it never contained one) is still decoded rather than dropped.
+        if !lineBuffer.isEmpty, let event = try? decoder.decode(Progress.self, from: lineBuffer) {
+            progressLines.append(event)
+            onProgress(event)
+        }
+
+        return (fullData, progressLines)
     }
 
     /// Parses stderr as newline-delimited JSON progress lines. A line

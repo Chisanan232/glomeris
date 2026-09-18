@@ -43,6 +43,7 @@ targets:
       - path: Sources/ProjectRootsStore.swift
       - path: Sources/GlomerisDtos.swift
       - path: Sources/StatusHealthSectionView.swift
+      - path: Sources/CandidatesSectionView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
