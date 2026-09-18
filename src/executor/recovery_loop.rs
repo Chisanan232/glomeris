@@ -31,10 +31,11 @@ use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{ActionId, Evidence, NativeCleanup, ResourceId};
 use crate::evidence::probe::ProbeOutcome;
-use crate::executor::{execute, ExecutionOutcome};
-use crate::monitor::{Clock, FsStat, FsUsage};
+use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
+use crate::monitor::{append_audit_record, AuditRecord, Clock, FsStat, FsUsage};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
+use crate::reporting::policy_label::label_for;
 
 /// Time budget applied to each candidate's correlation refresh pass
 /// (step 5 of the loop). Mirrors `executor::REVALIDATION_TIMEOUT`'s
@@ -466,6 +467,44 @@ mod select_candidate_tests {
     }
 }
 
+/// Builds an [`AuditRecord`] (HORO-1057, `source: "free"`) from a real
+/// [`ExecutionReport`] and appends it to `audit_log_path`, unconditionally
+/// discarding the `Result` — matching
+/// [`crate::monitor::append_audit_record`]'s best-effort contract: an
+/// audit-write failure must never influence this loop's own outcome
+/// bookkeeping. Never called for [`ExecutionOutcome::DryRun`]'s tag,
+/// since [`run`] never produces it (see `cli::record_audit`'s equivalent
+/// comment for the `execute` path).
+fn append_recovery_audit_record(
+    report: &ExecutionReport,
+    policy_label: &'static str,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
+    let (outcome, abort_reason) = match &report.outcome {
+        ExecutionOutcome::Succeeded => ("succeeded", None),
+        ExecutionOutcome::Failed(_) => ("failed", None),
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            ("aborted_by_revalidation", Some(format!("{reason:?}")))
+        }
+        ExecutionOutcome::DryRun => ("dry_run", None),
+    };
+    let record = AuditRecord {
+        timestamp: now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: report.action.0.to_string(),
+        resource_id: report.resource.to_string(),
+        policy_label: policy_label.to_string(),
+        outcome: outcome.to_string(),
+        abort_reason,
+        actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
+        source: "free".to_string(),
+    };
+    let _ = append_audit_record(audit_log_path, &record);
+}
+
 fn build_report(
     stop_reason: StopReason,
     iterations_run: u32,
@@ -517,6 +556,7 @@ pub fn run(
     policy_cfg: &PolicyConfig,
     target_mount: &Path,
     discovery_ctx: &DiscoveryContext,
+    audit_log_path: &Path,
 ) -> RecoveryReport {
     let start_instant = clock.now();
 
@@ -626,6 +666,11 @@ pub fn run(
         let fingerprint = candidate.evidence.fingerprint.clone();
         let action_id = candidate.action_id;
         let decision_class = candidate.decision.class;
+        // Captured before `candidate.decision` is moved into `authorize`
+        // below — HORO-1057's audit record needs the report-facing label
+        // for whatever decision this candidate was actually authorized
+        // under.
+        let policy_label = label_for(&candidate.decision).as_str();
 
         // 7. Authorize. AutoSafe needs no consent; Ask needs a
         // UserConsent built from the exact evidence/fingerprint just
@@ -665,6 +710,13 @@ pub fn run(
         // 8-9. Execute for real, reusing HORO-951's fully-hardened
         // revalidate-then-mutate path exactly as-is.
         let report = execute(action, &approval, collector, policy_cfg, now);
+
+        // HORO-1057: best-effort audit-log append, AFTER the real outcome
+        // above is already known. `append_recovery_audit_record` never
+        // returns a `Result` its caller could (mis)handle — see that
+        // function's doc comment for why an audit-write failure must
+        // never influence this loop's own bookkeeping below.
+        append_recovery_audit_record(&report, policy_label, audit_log_path, now);
 
         match report.outcome {
             ExecutionOutcome::Succeeded => {
@@ -950,6 +1002,7 @@ mod run_tests {
             &PolicyConfig::default(),
             Path::new("/"),
             &ctx,
+            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
         );
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -980,6 +1033,7 @@ mod run_tests {
             &PolicyConfig::default(),
             Path::new("/"),
             &ctx,
+            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
         );
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
@@ -1011,6 +1065,7 @@ mod run_tests {
             &PolicyConfig::default(),
             Path::new("/"),
             &ctx,
+            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
         );
 
         assert_eq!(report.stop_reason, StopReason::BudgetExceeded);
@@ -1037,6 +1092,7 @@ mod run_tests {
             &PolicyConfig::default(),
             Path::new("/"),
             &ctx,
+            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
         );
 
         match report.stop_reason {
@@ -1078,6 +1134,7 @@ mod run_tests {
         let action_registry = ActionRegistry::builtin();
         let detector_registry = fake_registry(vec![ev_a, ev_b]);
         let ctx = empty_discovery_ctx();
+        let audit_log_path = root_a.join("actions.jsonl");
 
         let report = run(
             &config,
@@ -1090,6 +1147,7 @@ mod run_tests {
             &PolicyConfig::default(),
             Path::new("/"),
             &ctx,
+            &audit_log_path,
         );
 
         assert_eq!(report.stop_reason, StopReason::NoProgress);
@@ -1098,6 +1156,17 @@ mod run_tests {
         assert_eq!(report.total_bytes_freed, 0);
         assert!(!node_modules_a.exists());
         assert!(!node_modules_b.exists());
+
+        // HORO-1057 AC: the `free` real-execution path appends one audit
+        // record per executed candidate.
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(
+            audit_tail.len(),
+            2,
+            "expected one audit record per executed action"
+        );
+        assert!(audit_tail.iter().all(|r| r.source == "free"));
+        assert!(audit_tail.iter().all(|r| r.outcome == "succeeded"));
 
         fs::remove_dir_all(&root_a).ok();
         fs::remove_dir_all(&root_b).ok();

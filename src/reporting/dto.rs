@@ -230,6 +230,33 @@ pub struct HistoryReport {
     pub events: Vec<HistoryEventReport>,
 }
 
+/// One entry of a `glomeris actions history --json` report (HORO-1057) —
+/// a direct projection of [`crate::monitor::AuditRecord`], hand-picked
+/// rather than derived on that type directly, same reasoning as this
+/// module's doc comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActionHistoryEventReport {
+    pub timestamp: u64,
+    pub action_id: String,
+    pub resource_id: String,
+    pub policy_label: String,
+    pub outcome: String,
+    pub abort_reason: Option<String>,
+    pub actual_reclaimed_bytes: Option<u64>,
+    pub actual_reclaimed_human: Option<String>,
+    pub source: String,
+}
+
+/// `glomeris actions history --json` report (HORO-1057): a bounded,
+/// oldest-first tail of `actions.jsonl`. `events.len()` is never more
+/// than the `--limit` the caller requested — see
+/// [`crate::monitor::read_audit_tail`]'s doc comment for the bounding and
+/// malformed-line-skipping contract this projects.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActionHistoryReport {
+    pub events: Vec<ActionHistoryEventReport>,
+}
+
 /// One candidate line of a `glomeris detect` report.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DetectCandidateReport {

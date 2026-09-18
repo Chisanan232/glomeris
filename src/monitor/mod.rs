@@ -17,8 +17,8 @@ pub use config::ThresholdConfig;
 pub use fs_stat::{FsStat, FsUsage};
 pub use notifier::Notifier;
 pub use persistence::{
-    read_heartbeat, read_history_tail, write_heartbeat, FilePersistence, Heartbeat, HistoryEntry,
-    PersistenceBackend, PressureEvent,
+    append_audit_record, read_audit_tail, read_heartbeat, read_history_tail, write_heartbeat,
+    AuditRecord, FilePersistence, Heartbeat, HistoryEntry, PersistenceBackend, PressureEvent,
 };
 pub use poller::{poll_once, run, PollConfig, PollOutcome};
 pub use pressure::PressureState;
