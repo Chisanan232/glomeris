@@ -13,19 +13,25 @@
 //  built. See CandidatesSectionViewTests for the mechanical proof that no
 //  "Clean"/button exists anywhere in that file's row rendering.
 //
-//  Button enablement and confirmation-sheet visibility are FIELD READS
+//  Button enablement and confirmation-alert visibility are FIELD READS
 //  of `ExplainReportDto.executable` / `OfferedActionDto
 //  .requiresConfirmation` — see `CandidateDetailViewModel` below, which
 //  is the pure, directly-testable mapping step this view renders from
 //  (same pattern as `CandidateRowViewModel` in CandidatesSectionView.swift
 //  and `DaemonHealthViewModel` in StatusHealthSectionView.swift). Neither
-//  decision ever consults `policyLabel` or `reasons` — those two fields
-//  are shown only as human-readable context. See the standing project
-//  rule in GlomerisMenuBarApp.swift.
+//  decision ever consults the policy-label field or the reasons field —
+//  those two are shown only as human-readable context. See the standing
+//  project rule in GlomerisMenuBarApp.swift.
+//
+//  The confirmation prompt is a SwiftUI `.alert`, not a second `.sheet`
+//  — this view is itself already presented as a `.sheet` from a
+//  `MenuBarExtra(.window)` popover, and a sheet-on-a-sheet inside that
+//  host is the riskiest presentation shape available; `.alert` avoids it
+//  entirely.
 //
 //  HORO-1064/HORO-1065 boundary: this view builds the detail UI, the
 //  field-driven Clean-button enablement, and the confirmation
-//  sheet/flow up through "user confirmed". The actual `glomeris execute`
+//  alert/flow up through "user confirmed". The actual `glomeris execute`
 //  subprocess invocation, its NDJSON streamed progress, and the measured
 //  (`actual_reclaimed_bytes`) success display are HORO-1065's scope —
 //  `performClean()` below is a deliberate stub with a TODO(HORO-1065)
@@ -37,14 +43,15 @@ import SwiftUI
 
 /// Pure, directly-testable mapping step from one `ExplainReportDto` to
 /// the two decisions `CandidateDetailView`'s Clean button and
-/// confirmation sheet need. Both are field reads only — see file header.
+/// confirmation alert need. Both are field reads only — see file header.
 struct CandidateDetailViewModel: Equatable {
-    /// Field read of `executable` — never inferred from `policyLabel`.
+    /// Field read of `executable` — never inferred from the policy-label
+    /// field.
     let isCleanEnabled: Bool
     /// Field read of the matching offered action's `requiresConfirmation`
-    /// — never inferred from `policyLabel` (e.g. never
-    /// `policyLabel == "ASK"`). `false` when there is no offered action
-    /// at all (a non-executable resource has none).
+    /// — never inferred from the policy-label field's text (e.g. never a
+    /// comparison against a literal like "ASK"). `false` when there is no
+    /// offered action at all (a non-executable resource has none).
     let requiresConfirmation: Bool
 
     let resourceId: String
@@ -96,7 +103,7 @@ struct CandidateDetailView: View {
     @State private var viewModel: CandidateDetailViewModel?
     @State private var isLoading = true
     @State private var errorMessage: String?
-    @State private var showConfirmationSheet = false
+    @State private var showConfirmationAlert = false
 
     init(
         resourceId: String,
@@ -120,7 +127,7 @@ struct CandidateDetailView: View {
 
                 Button("Clean") {
                     if viewModel.requiresConfirmation {
-                        showConfirmationSheet = true
+                        showConfirmationAlert = true
                     } else {
                         performClean()
                     }
@@ -139,8 +146,13 @@ struct CandidateDetailView: View {
         .task {
             await loadExplain()
         }
-        .sheet(isPresented: $showConfirmationSheet) {
-            confirmationSheet
+        .alert("Confirm cleanup", isPresented: $showConfirmationAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Confirm") {
+                performClean()
+            }
+        } message: {
+            Text("This action requires explicit confirmation before it runs.")
         }
     }
 
@@ -181,27 +193,6 @@ struct CandidateDetailView: View {
                 .font(.caption)
             Spacer()
         }
-    }
-
-    private var confirmationSheet: some View {
-        VStack(spacing: 12) {
-            Text("Confirm cleanup")
-                .font(.headline)
-            Text("This action requires explicit confirmation before it runs.")
-                .font(.caption)
-                .multilineTextAlignment(.center)
-            HStack {
-                Button("Cancel", role: .cancel) {
-                    showConfirmationSheet = false
-                }
-                Button("Confirm") {
-                    showConfirmationSheet = false
-                    performClean()
-                }
-            }
-        }
-        .padding()
-        .frame(minWidth: 240)
     }
 
     /// The one and only call site for `explain`, run once when the view
