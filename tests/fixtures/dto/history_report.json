@@ -1,0 +1,20 @@
+{
+  "events": [
+    {
+      "unix_time_secs": 1700000000,
+      "from": "OK",
+      "to": "WARN",
+      "used_percent": 82.5,
+      "free_bytes": 80000000000,
+      "free_human": "74.5 GB"
+    },
+    {
+      "unix_time_secs": 1700000600,
+      "from": "WARN",
+      "to": "CRITICAL",
+      "used_percent": 95.1,
+      "free_bytes": 20000000000,
+      "free_human": "18.6 GB"
+    }
+  ]
+}

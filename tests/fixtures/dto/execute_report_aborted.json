@@ -1,0 +1,9 @@
+{
+  "action_id": "cargo.clean.target_dir",
+  "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+  "outcome": "aborted_by_revalidation",
+  "failure_message": null,
+  "abort_reason": "ResourceIdentityChanged",
+  "expected_reclaimed_bytes": 2147483648,
+  "actual_reclaimed_bytes": null
+}
