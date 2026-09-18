@@ -132,4 +132,29 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(dto.actualReclaimedBytes)
         XCTAssertEqual(dto.expectedReclaimedBytes, 2_147_483_648)
     }
+
+    // MARK: - ActionHistoryReport
+
+    func testDecodesActionHistoryReport() throws {
+        let dto = try decodeFixture("action_history_report.json", as: ActionHistoryReportDto.self)
+
+        XCTAssertEqual(dto.events.count, 2)
+
+        let succeeded = dto.events[0]
+        XCTAssertEqual(succeeded.actionId, "cargo.clean.target_dir")
+        XCTAssertEqual(succeeded.policyLabel, "AUTO_SAFE")
+        XCTAssertEqual(succeeded.outcome, "succeeded")
+        XCTAssertNil(succeeded.abortReason)
+        XCTAssertEqual(succeeded.actualReclaimedBytes, 2_147_483_648)
+        XCTAssertEqual(succeeded.actualReclaimedHuman, "2.0 GB")
+        XCTAssertEqual(succeeded.source, "execute")
+
+        let aborted = dto.events[1]
+        XCTAssertEqual(aborted.policyLabel, "ASK")
+        XCTAssertEqual(aborted.outcome, "aborted_by_revalidation")
+        XCTAssertEqual(aborted.abortReason, "ResourceIdentityChanged")
+        XCTAssertNil(aborted.actualReclaimedBytes)
+        XCTAssertNil(aborted.actualReclaimedHuman)
+        XCTAssertEqual(aborted.source, "free")
+    }
 }

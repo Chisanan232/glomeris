@@ -77,6 +77,36 @@ struct HistoryReportDto: Decodable, Equatable {
     let events: [HistoryEventReportDto]
 }
 
+/// Mirrors `reporting::dto::ActionHistoryEventReport`.
+struct ActionHistoryEventReportDto: Decodable, Equatable {
+    let timestamp: UInt64
+    let actionId: String
+    let resourceId: String
+    let policyLabel: String
+    let outcome: String
+    let abortReason: String?
+    let actualReclaimedBytes: UInt64?
+    let actualReclaimedHuman: String?
+    let source: String
+
+    enum CodingKeys: String, CodingKey {
+        case timestamp
+        case actionId = "action_id"
+        case resourceId = "resource_id"
+        case policyLabel = "policy_label"
+        case outcome
+        case abortReason = "abort_reason"
+        case actualReclaimedBytes = "actual_reclaimed_bytes"
+        case actualReclaimedHuman = "actual_reclaimed_human"
+        case source
+    }
+}
+
+/// Mirrors `reporting::dto::ActionHistoryReport`.
+struct ActionHistoryReportDto: Decodable, Equatable {
+    let events: [ActionHistoryEventReportDto]
+}
+
 /// Mirrors `reporting::dto::OfferedAction`.
 struct OfferedActionDto: Decodable, Equatable {
     let actionId: String
