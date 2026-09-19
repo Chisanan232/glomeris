@@ -29,7 +29,7 @@ import SwiftUI
 @main
 struct GlomerisMenuBarApp: App {
     var body: some Scene {
-        MenuBarExtra("Glomeris", systemImage: "externaldrive.badge.gearshape") {
+        MenuBarExtra(MenuBarAppearance.title, systemImage: MenuBarAppearance.systemImageName) {
             GlomerisPopoverView()
         }
         .menuBarExtraStyle(.window)
