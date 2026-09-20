@@ -10,8 +10,8 @@
 //  standing project rule in GlomerisMenuBarApp.swift: `policyLabel` below
 //  is DISPLAY TEXT ONLY, never branched on; the "AUTO_SAFE vs.
 //  refused/aborted" visual distinction this ticket's AC asks for reads
-//  `outcome`/`abortReason` directly (same pattern as
-//  `describeExecuteOutcome` in CandidateDetailView.swift), never
+//  `outcome` directly (via `GlomerisVocabulary.outcome`, the same table
+//  `CandidateDetailView` uses for a live execute result), never
 //  `policyLabel`'s text.
 //
 //  Neither `glomeris history` nor `glomeris actions history` accepts a
@@ -35,6 +35,31 @@
 //  either ticket's AC restricts polling these two reads, so the cheaper
 //  read's precedent applies here, not `detect`'s.
 //
+//  ---------------------------------------------------------------------
+//  HORO-1306: two separate questions, two cards, and one error each
+//  ---------------------------------------------------------------------
+//  This was one undifferentiated column of `.caption2` text with a divider
+//  in the middle, and it answered its two questions in the CLI's own
+//  vocabulary: "OK → WARN", "AUTO_SAFE, execute". Three things changed.
+//
+//  1. It is two cards, because they answer two unrelated questions — what
+//     has been happening to the disk, and what Glomeris has actually done
+//     to it. The second is the audit trail a user checks when deciding
+//     whether to trust the thing, so it now says who triggered each action
+//     in words rather than leaving `free` and `emergency` to be guessed at.
+//
+//  2. Every raw token goes through `GlomerisVocabulary`. Notably that makes
+//     `aborted_by_revalidation` read as "Stopped safely" in caution rather
+//     than as a red failure — it is the revalidation guard doing its job,
+//     and painting it as a fault would teach a user that Glomeris breaks
+//     whenever it protects them. The raw token stays on every term.
+//
+//  3. Each list owns its own error message. Before, both fetches wrote one
+//     shared `lastErrorMessage` and each cleared it on success, so a
+//     healthy `history` read silently erased a failing `actions history`
+//     one — the audit trail could be unreadable and the popover would say
+//     nothing about it.
+//
 
 import SwiftUI
 
@@ -43,16 +68,41 @@ import SwiftUI
 struct HistoryEventRowViewModel: Equatable, Identifiable {
     let id: String
     let timeText: String
-    let transitionText: String
     let usedPercentText: String
     let freeText: String
+
+    /// The two ends of the transition, as terms. `from`/`to` are
+    /// `PressureState::as_str()` output (see `HistoryEventReport`'s Rust doc
+    /// comment), which is the same vocabulary `status --json`'s
+    /// `pressure_state` uses — so the popover's history and its status card
+    /// name the same state the same way instead of inventing two wordings.
+    let fromTerm: GlomerisTerm
+    let toTerm: GlomerisTerm
+
+    /// "Plenty of room → Filling up".
+    var transitionText: String {
+        "\(fromTerm.title) \u{2192} \(toTerm.title)"
+    }
+
+    /// The same transition in the CLI's own tokens. This is a log, and a log
+    /// whose entries have been paraphrased is harder to quote in a bug
+    /// report than one that shows both.
+    var rawTransitionText: String {
+        "\(fromTerm.token) \u{2192} \(toTerm.token)"
+    }
+
+    var accessibilityLabel: String {
+        "\(timeText). \(GlomerisVocabulary.pressureAxis) went from "
+            + "\(fromTerm.title) to \(toTerm.title). \(usedPercentText), \(freeText)."
+    }
 
     init(_ dto: HistoryEventReportDto) {
         id = "\(dto.unixTimeSecs)-\(dto.from)-\(dto.to)"
         timeText = Self.formatTimestamp(dto.unixTimeSecs)
-        transitionText = "\(dto.from) \u{2192} \(dto.to)"
         usedPercentText = String(format: "%.1f%% used", dto.usedPercent)
         freeText = "\(dto.freeHuman) free"
+        fromTerm = GlomerisVocabulary.pressure(dto.from)
+        toTerm = GlomerisVocabulary.pressure(dto.to)
     }
 
     private static func formatTimestamp(_ unixTimeSecs: UInt64) -> String {
@@ -65,49 +115,67 @@ struct HistoryEventRowViewModel: Equatable, Identifiable {
 }
 
 /// Pure, directly-testable formatting step from one
-/// `ActionHistoryEventReportDto` to display strings. `isSuccess` is a
-/// field read of `outcome` — never `policyLabel` — so the AC's "AUTO_SAFE
-/// vs. refused/aborted must be visually distinguishable" requirement is
-/// satisfied without inventing new policy logic in this layer.
+/// `ActionHistoryEventReportDto` to display strings.
+///
+/// `outcomeTerm` is built from `outcome` — never from `policyLabel` — so the
+/// AC's "AUTO_SAFE vs. refused/aborted must be visually distinguishable"
+/// requirement is carried by the field that actually records what happened,
+/// without inventing any policy logic in this layer.
 struct ActionHistoryRowViewModel: Equatable, Identifiable {
     let id: String
     let timeText: String
-    let actionText: String
-    let policyLabelText: String
-    let outcomeText: String
+
+    /// What ran, e.g. `cargo.clean.target_dir`. Shown verbatim: action ids
+    /// are stable identifiers a user may need to quote, and there is no
+    /// vocabulary for them because the action registry is open-ended.
+    let actionId: String
+
+    /// What it ran on. Rendered as a path rather than folded into a
+    /// sentence, so middle truncation keeps both ends of it legible.
+    let resourceId: String
+
+    /// What happened. This is what tones the row.
+    let outcomeTerm: GlomerisTerm
+
+    /// Who triggered it — you, the recovery loop, or the emergency path.
+    let sourceTerm: GlomerisTerm
+
+    /// What the policy said about the resource at the time. Context only.
+    let safetyTerm: GlomerisTerm
+
+    /// How much space came back, when the record reports it.
+    let reclaimedText: String?
+
+    /// Why it stopped, verbatim from `abort_reason`.
     let detailText: String?
-    let source: String
-    /// `true` only for `outcome == "succeeded"` — a direct field read, the
-    /// same pattern `describeExecuteOutcome` in CandidateDetailView.swift
-    /// uses for its own outcome switch. Drives the outcome text's color in
-    /// `HistoryAuditSectionView`, never `policyLabelText`'s.
-    let isSuccess: Bool
+
+    var accessibilityLabel: String {
+        var parts = [
+            "\(timeText). \(actionId).",
+            "\(outcomeTerm.axis): \(outcomeTerm.title).",
+        ]
+        if let reclaimedText {
+            parts.append("\(reclaimedText).")
+        }
+        if let detailText {
+            parts.append("\(detailText).")
+        }
+        parts.append("\(sourceTerm.axis): \(sourceTerm.title).")
+        parts.append("\(safetyTerm.axis): \(safetyTerm.title).")
+        parts.append("Path: \(resourceId).")
+        return parts.joined(separator: " ")
+    }
 
     init(_ dto: ActionHistoryEventReportDto) {
         id = "\(dto.timestamp)-\(dto.actionId)-\(dto.resourceId)"
         timeText = Self.formatTimestamp(dto.timestamp)
-        actionText = "\(dto.actionId) on \(dto.resourceId)"
-        policyLabelText = dto.policyLabel
-        source = dto.source
-
-        switch dto.outcome {
-        case "succeeded":
-            isSuccess = true
-            outcomeText = "Succeeded (\(dto.actualReclaimedHuman ?? "unknown reclaimed"))"
-            detailText = nil
-        case "failed":
-            isSuccess = false
-            outcomeText = "Failed"
-            detailText = dto.abortReason
-        case "aborted_by_revalidation":
-            isSuccess = false
-            outcomeText = "Aborted"
-            detailText = dto.abortReason
-        default:
-            isSuccess = false
-            outcomeText = "Unrecognized outcome: \(dto.outcome)"
-            detailText = dto.abortReason
-        }
+        actionId = dto.actionId
+        resourceId = dto.resourceId
+        outcomeTerm = GlomerisVocabulary.outcome(dto.outcome)
+        sourceTerm = GlomerisVocabulary.actionSource(dto.source)
+        safetyTerm = GlomerisVocabulary.safety(dto.policyLabel)
+        reclaimedText = dto.actualReclaimedHuman.map { "reclaimed \($0)" }
+        detailText = dto.abortReason
     }
 
     private static func formatTimestamp(_ timestamp: UInt64) -> String {
@@ -131,14 +199,13 @@ struct HistoryAuditSectionView: View {
 
     @State private var historyEvents: [HistoryEventReportDto] = []
     @State private var actionHistoryEvents: [ActionHistoryEventReportDto] = []
-    /// One error per list, not one shared between them. The two fetches run
-    /// concurrently and each clears its own message on success; sharing one
-    /// meant a healthy `history` read erased a failing `actions history` one,
-    /// so an unreadable audit trail was presented as an empty one — the exact
-    /// "silence is not the same as nothing to report" defect HORO-1297 fixed
-    /// for the status panel.
+    /// One error per list — see the file header: a shared one let a healthy
+    /// read erase a broken one.
     @State private var historyErrorMessage: String?
     @State private var actionHistoryErrorMessage: String?
+    /// Until the first poll returns, "nothing recorded yet" would be a claim
+    /// about two files nobody has read.
+    @State private var hasLoadedOnce = false
     @State private var pollTask: Task<Void, Never>?
 
     init(
@@ -154,73 +221,10 @@ struct HistoryAuditSectionView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Recent History")
-                .font(.headline)
-
-            if historyEvents.isEmpty {
-                Text("No pressure transitions recorded yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(historyEvents.map(HistoryEventRowViewModel.init)) { row in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(row.transitionText)
-                            .font(.caption)
-                        Text("\(row.timeText) — \(row.usedPercentText), \(row.freeText)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            if let historyErrorMessage {
-                Text(historyErrorMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
-
-            Divider()
-
-            Text("Action Audit")
-                .font(.headline)
-
-            if actionHistoryEvents.isEmpty {
-                Text("No actions recorded yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach(actionHistoryEvents.map(ActionHistoryRowViewModel.init)) { row in
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(row.actionText)
-                            .font(.caption)
-                        HStack(spacing: 4) {
-                            Text(row.outcomeText)
-                                .font(.caption2)
-                                .foregroundStyle(row.isSuccess ? .green : .red)
-                            Text("(\(row.policyLabelText), \(row.source))")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        if let detailText = row.detailText {
-                            Text(detailText)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                        Text(row.timeText)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            if let actionHistoryErrorMessage {
-                Text(actionHistoryErrorMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
+        VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
+            diskHistoryCard
+            actionHistoryCard
         }
-        .padding(.vertical, 4)
         .task {
             await refresh()
             pollTask = Task {
@@ -237,6 +241,151 @@ struct HistoryAuditSectionView: View {
         }
     }
 
+    // MARK: - Disk space history
+
+    private var diskHistoryCard: some View {
+        GlomerisCard(title: "Disk space history") {
+            if let message = stateMessage(
+                isEmpty: historyEvents.isEmpty,
+                errorMessage: historyErrorMessage,
+                loadingSubject: "Reading the disk-space log…",
+                emptyTitle: "No changes recorded yet",
+                emptyDetail: "A line is logged here each time free space crosses a threshold."
+            ) {
+                GlomerisStateMessageView(message: message)
+            } else {
+                ForEach(
+                    Array(historyEvents.map(HistoryEventRowViewModel.init).enumerated()),
+                    id: \.element.id
+                ) { index, row in
+                    if index > 0 {
+                        Divider()
+                    }
+                    historyRow(row)
+                }
+            }
+
+            // Additive, never a replacement: a failed poll leaves the last
+            // good list on screen, but must say that it is the last good one.
+            if let historyErrorMessage {
+                GlomerisStateMessageView(message: .failure(historyErrorMessage))
+            }
+        }
+    }
+
+    private func historyRow(_ row: HistoryEventRowViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
+                GlomerisBadgeView(term: row.fromTerm, filled: false)
+                Image(systemName: "arrow.right")
+                    .imageScale(.small)
+                    .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
+                // The state it moved TO is the one that matters, so only that
+                // end is filled.
+                GlomerisBadgeView(term: row.toTerm)
+                Spacer(minLength: 0)
+            }
+            Text("\(row.timeText) — \(row.usedPercentText), \(row.freeText)")
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    // MARK: - What Glomeris has done
+
+    private var actionHistoryCard: some View {
+        GlomerisCard(title: "What Glomeris has done") {
+            if let message = stateMessage(
+                isEmpty: actionHistoryEvents.isEmpty,
+                errorMessage: actionHistoryErrorMessage,
+                loadingSubject: "Reading the action log…",
+                emptyTitle: "Nothing has been cleaned yet",
+                emptyDetail: "Every action is recorded here, including the ones Glomeris refuses."
+            ) {
+                GlomerisStateMessageView(message: message)
+            } else {
+                ForEach(
+                    Array(actionHistoryEvents.map(ActionHistoryRowViewModel.init).enumerated()),
+                    id: \.element.id
+                ) { index, row in
+                    if index > 0 {
+                        Divider()
+                    }
+                    actionRow(row)
+                }
+            }
+
+            if let actionHistoryErrorMessage {
+                GlomerisStateMessageView(message: .failure(actionHistoryErrorMessage))
+            }
+        }
+    }
+
+    private func actionRow(_ row: ActionHistoryRowViewModel) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
+                GlomerisBadgeView(term: row.outcomeTerm)
+                if let reclaimedText = row.reclaimedText {
+                    Text(reclaimedText)
+                        .font(GlomerisDesign.captionFont)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+
+            Text(row.actionId)
+                .font(GlomerisDesign.secondaryFont)
+                .lineLimit(1)
+            GlomerisPathText(path: row.resourceId)
+
+            if let detailText = row.detailText {
+                Text(detailText)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Who asked for it and what the policy said, unfilled so they
+            // read as provenance rather than competing with the outcome.
+            HStack(spacing: GlomerisDesign.inlineSpacing) {
+                GlomerisBadgeView(term: row.sourceTerm, filled: false)
+                GlomerisBadgeView(term: row.safetyTerm, filled: false)
+                Spacer(minLength: 0)
+                Text(row.timeText)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    // MARK: - Body states
+
+    /// The one place both lists decide what to show instead of rows, so the
+    /// two cannot drift apart. `nil` means "render the rows".
+    ///
+    /// A failure returns `nil` deliberately: the error is rendered additively
+    /// below the list, and an "all clear" sitting beside it would contradict
+    /// it — the same rule the candidates and status cards follow.
+    private func stateMessage(
+        isEmpty: Bool,
+        errorMessage: String?,
+        loadingSubject: String,
+        emptyTitle: String,
+        emptyDetail: String
+    ) -> GlomerisStateMessage? {
+        guard isEmpty else { return nil }
+        if !hasLoadedOnce { return .loading(loadingSubject) }
+        if errorMessage != nil { return nil }
+        return .nothingRecorded(emptyTitle, detail: emptyDetail)
+    }
+
+    // MARK: - Fetching
+
     private func refresh() async {
         async let history = fetchHistory()
         async let actionHistory = fetchActionHistory()
@@ -248,6 +397,7 @@ struct HistoryAuditSectionView: View {
         if let actionHistoryResult {
             actionHistoryEvents = actionHistoryResult
         }
+        hasLoadedOnce = true
     }
 
     private func fetchHistory() async -> [HistoryEventReportDto]? {
@@ -275,7 +425,10 @@ struct HistoryAuditSectionView: View {
             actionHistoryErrorMessage = nil
             return result.output.events
         } catch {
-            actionHistoryErrorMessage = SectionFetchErrors.shortMessage(error, subject: "actions history")
+            actionHistoryErrorMessage = SectionFetchErrors.shortMessage(
+                error,
+                subject: "actions history"
+            )
             return nil
         }
     }
@@ -283,5 +436,6 @@ struct HistoryAuditSectionView: View {
 
 #Preview {
     HistoryAuditSectionView()
-        .frame(width: 260)
+        .padding(GlomerisDesign.outerPadding)
+        .frame(width: GlomerisDesign.popoverWidth)
 }
