@@ -188,4 +188,71 @@ final class StatusHealthSectionViewTests: XCTestCase {
         XCTAssertTrue(message.hasPrefix("status: failed —"))
         XCTAssertGreaterThan(message.count, "status: failed —".count)
     }
+
+    // MARK: - Missing CLI (HORO-1295)
+
+    /// HORO-1295's user was someone who had already installed the CLI, at a
+    /// path the app never consulted. So "not found" on its own is the one
+    /// unhelpful thing this message could say: it must name the places that
+    /// were searched, so a mismatch between where the binary is and where the
+    /// app looked is visible from the popover rather than only from the
+    /// source.
+    func testMissingCliMessageNamesWhereTheAppLooked() {
+        let searched = GlomerisExecutableLocator(
+            bundledExecutableURL: nil,
+            pathVariable: "/usr/bin:/bin:/usr/sbin:/sbin"
+        ).searchedLocations
+
+        let message = SectionFetchErrors.shortMessage(
+            GlomerisClientError.executableNotFound(searched: searched),
+            subject: "status"
+        )
+
+        XCTAssertEqual(
+            message,
+            "status: the glomeris CLI was not found. Looked in: "
+                + "the app bundle, PATH, /opt/homebrew/bin, /usr/local/bin."
+        )
+        XCTAssertFalse(message.contains("\n"))
+    }
+
+    /// Mechanical cross-view guard, in the style of
+    /// `GlomerisClientTests.testSourceContainsNoShellExecution`: every view
+    /// that runs the CLI routes its failures through `shortMessage`. Before
+    /// HORO-1295 four of the five call sites interpolated the raw Swift error
+    /// instead, which is how a missing binary reached the popover as a
+    /// `DecodingError`-shaped dump. Asserted on the source because the
+    /// property is absolute — there is no view for which a raw dump is the
+    /// right thing to show.
+    func testNoViewRendersARawSwiftErrorDescription() throws {
+        let sourcesDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // GlomerisMenuBar
+            .appendingPathComponent("Sources")
+
+        for name in [
+            "StatusHealthSectionView.swift",
+            "CandidatesSectionView.swift",
+            "CandidateDetailView.swift",
+            "HistoryAuditSectionView.swift",
+        ] {
+            let source = try String(
+                contentsOf: sourcesDirectory.appendingPathComponent(name),
+                encoding: .utf8
+            )
+            let code = source
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
+
+            XCTAssertFalse(
+                code.contains("String(describing: error)"),
+                """
+                \(name) must not put a raw Swift error into a user-facing \
+                string; route it through SectionFetchErrors.shortMessage \
+                (HORO-1295).
+                """
+            )
+        }
+    }
 }
