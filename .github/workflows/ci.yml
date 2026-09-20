@@ -46,14 +46,29 @@ jobs:
     # let it merge unchecked. Guarding that cross-language contract is most of
     # this job's value, so it runs on every PR.
     #
-    # Runner pinned to `macos-14`, not `macos-latest`:
+    # Runner and Xcode are both pinned, not left to the image default:
     # MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS asserts an SF
-    # Symbol resolves on the *running* OS, so the OS version is part of what
-    # this job asserts. `macos-latest` would silently re-point that assertion
-    # at a new OS during some unrelated PR.
-    runs-on: macos-14
+    # Symbol resolves on the *running* OS, so the OS and toolchain are part of
+    # what this job asserts. `macos-latest` would silently re-point that
+    # assertion at a new OS during some unrelated PR.
+    #
+    # It must also be an Xcode that can open the committed project at all.
+    # XcodeGen 2.46.0 emits `objectVersion = 77`, and macos-14's default Xcode
+    # 15.4 refuses it outright:
+    #   error: Unable to read project 'GlomerisMenuBar.xcodeproj'
+    #   Reason: ... in a future Xcode project file format (77)
+    # (observed on this job's first run, exit 74). Xcode 26.2 is picked because
+    # it is the exact version — build 17C52 — the app is developed and
+    # dogfooded against, so CI asserts against the same toolchain a developer
+    # sees rather than an approximation of it.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Select the pinned Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.2.app
+          xcodebuild -version
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build the glomeris CLI
@@ -92,7 +107,14 @@ jobs:
     # A separate job from `macos-app` on purpose: a stale project and a
     # failing test are different problems, and neither should be able to mask
     # the other by short-circuiting a shared job.
-    runs-on: macos-14
+    #
+    # No Xcode pin here, unlike `macos-app`: this job never runs xcodebuild,
+    # and XcodeGen's output turned out not to depend on the installed Xcode —
+    # its first run, on macos-14 with Xcode 15.4, regenerated a project
+    # byte-identical to one committed from Xcode 26.2 (including
+    # `objectVersion = 77`, which that Xcode cannot even open). So the XcodeGen
+    # pin in .xcodegen-version is what makes this check reproducible.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned XcodeGen

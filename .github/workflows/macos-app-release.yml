@@ -38,12 +38,26 @@ concurrency:
 
 jobs:
   build-and-upload:
-    runs-on: macos-14
+    # HORO-1296: runner and Xcode pinned to match ci.yml's `macos-app` job.
+    # This workflow has never actually run (it triggers only on a published
+    # release, and there has not been one), and on macos-14's default Xcode
+    # 15.4 its build step could not have succeeded: XcodeGen emits
+    # `objectVersion = 77` and that Xcode rejects the project unopened —
+    # "a future Xcode project file format (77)", exit 74. That was measured on
+    # ci.yml's new job, which runs the same xcodebuild against the same
+    # project, so the failure here was latent rather than hypothetical.
+    runs-on: macos-15
     env:
       GH_TOKEN: ${{ github.token }}
       ASSET_NAME: glomeris-aarch64-apple-darwin.tar.xz
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select the pinned Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.2.app
+          xcodebuild -version
 
       - name: Resolve release tag
         id: tag
