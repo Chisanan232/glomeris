@@ -25,7 +25,7 @@
 #
 # COVERAGE — deliberately partial, and it says so in the PASS line
 # ----------------------------------------------------------------
-# Seven of the ten vocabularies are checked. The other three cannot be,
+# Eight of the eleven vocabularies are checked. The other three cannot be,
 # honestly, because they have no single canonical producer to diff
 # against: `ExecuteReport::outcome`, `ExecuteRefusalReport::reason` and
 # `AuditRecord::source` are built from string literals at their call
@@ -35,10 +35,10 @@
 # temp-lock filename in src/executor/lock.rs — so a set-equality check
 # built on it would produce false failures and, worse, invite someone to
 # loosen it until it passed. Those three stay covered by the transcribed
-# Swift tests only, and this script reports 7/10 rather than printing a
-# bare PASS that reads as "all ten verified".
+# Swift tests only, and this script reports 8/11 rather than printing a
+# bare PASS that reads as "all eleven verified".
 #
-# Exit 0 = the seven checked vocabularies match. Exit 1 = drift, or an
+# Exit 0 = the eight checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -67,6 +67,10 @@ VOCABULARIES=(
   'regenerability;;src/reporting/dto.rs;;regenerability_tag;;Regenerability'
   'reason;;src/policy/class.rs;;as_str;;ReasonCode'
   'kind;;src/evidence/model.rs;;tag;;ResourceKind'
+  # HORO-1307. Note the Swift side takes `String?` rather than `String`,
+  # which is why the anchor below stops at `_ token:` instead of spelling
+  # out the parameter type.
+  'impactTier;;src/reporting/impact.rs;;as_str;;StorageImpactTier'
 )
 
 # Print the body of a function, from its `fn <name>` line to the line
@@ -88,7 +92,11 @@ function_body() {
   if [[ "$lang" == "rust" ]]; then
     anchor="fn ${fn_name}("
   else
-    anchor="static func ${fn_name}(_ token: String)"
+    # Stops at the parameter NAME, not its type: `impactTier` takes a
+    # `String?`, so an anchor ending in `String)` silently matched nothing
+    # for it — and a non-matching anchor here produces an empty extraction,
+    # which this script reports as a failure rather than a pass.
+    anchor="static func ${fn_name}(_ token:"
   fi
 
   awk -v anchor="$anchor" '
@@ -197,7 +205,7 @@ if [[ "$failures" -gt 0 ]]; then
 fi
 
 echo ""
-echo "PASS: ${checked} of 10 vocabularies verified against their Rust producer."
+echo "PASS: ${checked} of 11 vocabularies verified against their Rust producer."
 echo "Not verified here (no single canonical producer to diff — see this script's header):"
 echo "  outcome, refusal, source — covered by the transcribed Swift tests only."
 exit 0
