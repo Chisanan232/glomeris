@@ -25,7 +25,7 @@
 #
 # COVERAGE — deliberately partial, and it says so in the PASS line
 # ----------------------------------------------------------------
-# Eight of the eleven vocabularies are checked. The other three cannot be,
+# Nine of the twelve vocabularies are checked. The other three cannot be,
 # honestly, because they have no single canonical producer to diff
 # against: `ExecuteReport::outcome`, `ExecuteRefusalReport::reason` and
 # `AuditRecord::source` are built from string literals at their call
@@ -35,10 +35,10 @@
 # temp-lock filename in src/executor/lock.rs — so a set-equality check
 # built on it would produce false failures and, worse, invite someone to
 # loosen it until it passed. Those three stay covered by the transcribed
-# Swift tests only, and this script reports 8/11 rather than printing a
-# bare PASS that reads as "all eleven verified".
+# Swift tests only, and this script reports 9/12 rather than printing a
+# bare PASS that reads as "all twelve verified".
 #
-# Exit 0 = the eight checked vocabularies match. Exit 1 = drift, or an
+# Exit 0 = the nine checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -71,6 +71,11 @@ VOCABULARIES=(
   # which is why the anchor below stops at `_ token:` instead of spelling
   # out the parameter type.
   'impactTier;;src/reporting/impact.rs;;as_str;;StorageImpactTier'
+  # HORO-1309. `llm_check_outcome` exists precisely so these five strings
+  # have one producer to diff against: they were originally inline in
+  # `build_llm_check_report`, where `"ok"` came from a function call rather
+  # than a match arm and so would have been invisible here.
+  'llmCheckOutcome;;src/actions/llm.rs;;llm_check_outcome;;LlmCheckOutcome'
 )
 
 # Print the body of a function, from its `fn <name>` line to the line
@@ -205,7 +210,7 @@ if [[ "$failures" -gt 0 ]]; then
 fi
 
 echo ""
-echo "PASS: ${checked} of 11 vocabularies verified against their Rust producer."
+echo "PASS: ${checked} of 12 vocabularies verified against their Rust producer."
 echo "Not verified here (no single canonical producer to diff — see this script's header):"
 echo "  outcome, refusal, source — covered by the transcribed Swift tests only."
 exit 0
