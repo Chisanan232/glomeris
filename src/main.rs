@@ -1,118 +1,18 @@
+use glomeris::cli::help;
 use glomeris::{monitor, platform};
 use std::path::PathBuf;
 
-/// One row of the single command table (HORO-1050) that both `print_usage()`
-/// and `--help`/`-h`/`help` read from, and that `glomeris <sub> --help`
-/// looks itself up in. Before this ticket, `--help` and `print_usage()` were
-/// two independently-maintained strings that had already drifted once
-/// (HORO-1034: `print_usage()` omitted `llm-plan`) — this table is the fix
-/// by construction: there is exactly one place to add a new subcommand.
-struct CommandSpec {
-    /// The literal first positional argument, e.g. `"llm-plan"`.
-    name: &'static str,
-    /// This subcommand's one-line usage fragment, without the leading
-    /// `usage: glomeris ` prefix — used both standalone (`glomeris <sub>
-    /// --help`) and joined with `|` inside the aggregate usage line.
-    usage: &'static str,
-    /// One-sentence description shown under the usage line in
-    /// `glomeris <sub> --help` output.
-    description: &'static str,
-}
-
-/// Every currently-registered top-level subcommand. Keep this in sync with
-/// the `match` arms in [`main`] — adding a subcommand there without a row
-/// here is a compile-time-silent but review-visible omission, not a
-/// runtime drift, since both `--help` and unknown-command usage now render
-/// from this one array.
-const COMMANDS: &[CommandSpec] = &[
-    CommandSpec {
-        name: "daemon",
-        usage: "daemon <install [--force]|uninstall|status [--json]|run>",
-        description: "Manage the background disk-pressure monitor launch agent.",
-    },
-    CommandSpec {
-        name: "actions",
-        usage: "actions <list [--json]|history [--json] [--limit <N>]>",
-        description: "List the registered cleanup actions, or show a bounded tail of the \
-                       real-execution audit log.",
-    },
-    CommandSpec {
-        name: "scan",
-        usage: "scan",
-        description: "Run a one-off disk usage scan.",
-    },
-    CommandSpec {
-        name: "status",
-        usage: "status [--json]",
-        description: "Show current disk pressure state.",
-    },
-    CommandSpec {
-        name: "detect",
-        usage: "detect [--project-root <path>]... [--json] [--progress-json]",
-        description: "Run detectors and report reclaimable candidates.",
-    },
-    CommandSpec {
-        name: "explain",
-        usage:
-            "explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]",
-        description: "Show the full evidence-and-policy picture for one resource.",
-    },
-    CommandSpec {
-        name: "clean",
-        usage: "clean --dry-run [--target <resource_id_or_path>] [--project-root <path>]...",
-        description: "Render what would be cleaned, without executing anything.",
-    },
-    CommandSpec {
-        name: "llm-plan",
-        usage: "llm-plan <--schema|--print-payload|[--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]>",
-        description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion. --schema emits an example LlmPlan document instead; --print-payload shows the exact request that would be sent, without sending it.",
-    },
-    CommandSpec {
-        name: "llm-check",
-        usage: "llm-check [--json]",
-        description: "Test the configured BYOK LLM setup with one trivial request that describes \
-                       nothing about this machine, and report whether the endpoint, credential \
-                       and model work. Sends no evidence and runs no detectors.",
-    },
-    CommandSpec {
-        name: "execute",
-        usage: "execute --action-id <id> --resource-id <id> [--project-root <path>]... \
-                 [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]",
-        description: "Execute one action against one resource under policy control.",
-    },
-    CommandSpec {
-        name: "emergency",
-        usage: "emergency",
-        description: "Degraded-path recovery: free disk space without network or LLM access.",
-    },
-    CommandSpec {
-        name: "history",
-        usage: "history [--json] [--limit <N>]",
-        description: "Show a bounded tail of recorded disk-pressure transitions.",
-    },
-    CommandSpec {
-        name: "free",
-        usage: "free --target <N%|NB> [--project-root <path>]...",
-        description: "Run the automated recovery loop until the target free space is reached.",
-    },
-];
-
-/// Looks up a top-level subcommand by its literal name in [`COMMANDS`].
-fn find_command(name: &str) -> Option<&'static CommandSpec> {
-    COMMANDS.iter().find(|c| c.name == name)
-}
-
-/// Builds the single aggregate `usage: glomeris <...>` line from
-/// [`COMMANDS`] — the one string both `--help` and `print_usage()` render.
-fn build_aggregate_usage() -> String {
-    let joined = COMMANDS
-        .iter()
-        .map(|c| c.usage)
-        .collect::<Vec<_>>()
-        .join("|\n ");
-    format!("usage: glomeris <{joined}>")
-}
-
+/// The command table that both `--help` and the unknown-command usage render
+/// from lives in [`glomeris::cli::help`], not here (HORO-1311).
+///
+/// It started here in HORO-1050, which fixed the original drift (HORO-1034:
+/// `print_usage()` had silently omitted `llm-plan`) by making both paths read
+/// one array. Keeping that array in the binary crate meant nothing but a
+/// spawned-process test could see it, and the test that checked it kept a
+/// hand-written mirror of the subcommand list — a mirror which had itself
+/// drifted by the time HORO-1311 started, missing `llm-check`. Moving the
+/// table into the library removes the need for any mirror: tests read
+/// `help::COMMANDS` directly.
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -121,17 +21,25 @@ fn main() {
     // dispatch/parsing, so every subcommand supports its own `--help`
     // uniformly rather than as a one-off special case.
     if let Some(name) = args.first() {
-        if let Some(spec) = find_command(name) {
+        if let Some(spec) = help::find_command(name) {
             if matches!(args.get(1).map(String::as_str), Some("--help") | Some("-h")) {
-                println!("usage: glomeris {}\n\n{}", spec.usage, spec.description);
+                print_help(&help::render_command_help(spec));
                 return;
             }
         }
     }
 
     match args.first().map(String::as_str) {
-        Some("--help") | Some("-h") | Some("help") => {
-            println!("{}", build_aggregate_usage());
+        Some("--help") | Some("-h") => {
+            print_help(&help::render_top_level_help(env!("CARGO_PKG_VERSION")));
+        }
+        // `help` with no topic is the same request as `--help`; `help <topic>`
+        // is AC 7's progressive disclosure, where the reference material a
+        // reader wants on their second day lives without crowding the help
+        // they need on their first.
+        Some("help") => run_help_command(&args[1..]),
+        Some("--version") | Some("-V") => {
+            println!("glomeris {}", env!("CARGO_PKG_VERSION"));
         }
         Some("daemon") => run_daemon_command(&args[1..]),
         Some("actions") => run_actions_command(&args[1..]),
@@ -148,17 +56,90 @@ fn main() {
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
-            print_usage();
+            eprintln!("{}", help::render_unknown_command_hint());
             std::process::exit(2);
         }
         None => {
+            // A bare invocation used to print only the version, which told a
+            // first-time reader the binary exists and nothing about how to use
+            // it. The version line stays — scripts and bug reports rely on it —
+            // with one line added pointing at the help that now has something
+            // worth reading.
             println!("glomeris {}", env!("CARGO_PKG_VERSION"));
+            println!("Run `glomeris --help` to see what it can do.");
         }
     }
 }
 
-fn print_usage() {
-    eprintln!("{}", build_aggregate_usage());
+/// `glomeris help [topic]`.
+///
+/// No topic is the same request as `--help`. An unknown topic lists the topics
+/// that exist rather than guessing, and exits 2 like every other usage error.
+fn run_help_command(args: &[String]) {
+    match args.first().map(String::as_str) {
+        None => print_help(&help::render_top_level_help(env!("CARGO_PKG_VERSION"))),
+        Some("exit-codes") => print_help(&help::render_exit_codes()),
+        // A command name here is what someone means by `glomeris help detect`,
+        // and refusing it on a technicality when the answer is one function
+        // call away would be pedantry rather than a safety property.
+        Some(name) if help::find_command(name).is_some() => {
+            let spec = help::find_command(name).expect("checked by the guard above");
+            print_help(&help::render_command_help(spec));
+        }
+        Some(other) => {
+            eprintln!("glomeris: no help topic '{other}'");
+            eprintln!("{}", help::render_topic_list());
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Writes help text to stdout, treating a closed pipe as a normal ending.
+///
+/// `println!` panics on `EPIPE`, which used to be nearly unobservable: help was
+/// thirteen lines, so nobody piped it anywhere. Now that it is a screenful,
+/// `glomeris --help | head` is an ordinary thing to type, and a panic message
+/// is the wrong answer to it — the reader got the lines they asked for and
+/// stopped reading, which is not an error. Only the help paths need this; a
+/// report cut short by a closed pipe is genuinely incomplete output and keeps
+/// the default behaviour.
+fn print_help(text: &str) {
+    use std::io::Write;
+
+    let mut stdout = std::io::stdout().lock();
+    match stdout
+        .write_all(text.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        Err(e) => {
+            eprintln!("glomeris: failed writing help to stdout: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Prints one subcommand's own usage line on a usage error in that
+/// subcommand, plus where to read more.
+///
+/// Before HORO-1311 every usage error in every subcommand printed the
+/// aggregate usage for all thirteen — so mistyping one `free` flag produced a
+/// 13-line, 146-column wall in which the reader had to locate their own
+/// command before they could find their mistake. The answer to "you got
+/// `free`'s flags wrong" is `free`'s flags.
+fn print_command_usage(name: &str) {
+    match help::find_command(name) {
+        Some(spec) => {
+            eprint!("{}", help::render_command_usage(spec));
+            eprintln!("Run `glomeris {name} --help` for options and examples.");
+        }
+        // Unreachable while every caller passes a literal that is in the
+        // table, and asserted as such by test. Falling back to the general
+        // usage line rather than panicking, because a help path is the worst
+        // possible place to abort a process.
+        None => eprintln!("{}", help::render_unknown_command_hint()),
+    }
 }
 
 /// Parses a flat argument list into a positional-args list and a set of
@@ -449,7 +430,7 @@ fn run_detect_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris detect: {e}");
-            print_usage();
+            print_command_usage("detect");
             std::process::exit(2);
         }
     };
@@ -493,7 +474,7 @@ fn run_explain_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris explain: {e}");
-            print_usage();
+            print_command_usage("explain");
             std::process::exit(2);
         }
     };
@@ -502,7 +483,7 @@ fn run_explain_command(args: &[String]) {
 
     let Some(query) = positionals.first() else {
         eprintln!("glomeris explain: a resource id or path argument is required");
-        print_usage();
+        print_command_usage("explain");
         std::process::exit(2);
     };
 
@@ -530,7 +511,7 @@ fn run_clean_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris clean: {e}");
-            print_usage();
+            print_command_usage("clean");
             std::process::exit(2);
         }
     };
@@ -554,7 +535,7 @@ fn run_clean_command(args: &[String]) {
             }
             other => {
                 eprintln!("glomeris clean: unrecognized argument '{other}'");
-                print_usage();
+                print_command_usage("clean");
                 std::process::exit(2);
             }
         }
@@ -609,7 +590,7 @@ fn run_llm_plan_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris llm-plan: {e}");
-            print_usage();
+            print_command_usage("llm-plan");
             std::process::exit(2);
         }
     };
@@ -617,7 +598,7 @@ fn run_llm_plan_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris llm-plan: {e}");
-            print_usage();
+            print_command_usage("llm-plan");
             std::process::exit(2);
         }
     };
@@ -663,7 +644,7 @@ fn run_llm_plan_command(args: &[String]) {
                     std::process::exit(2);
                 }
                 eprintln!("glomeris llm-plan: unrecognized argument '{other}'");
-                print_usage();
+                print_command_usage("llm-plan");
                 std::process::exit(2);
             }
         }
@@ -786,7 +767,7 @@ fn run_llm_check_command(args: &[String]) {
                     std::process::exit(2);
                 }
                 eprintln!("glomeris llm-check: unrecognized argument '{other}'");
-                print_usage();
+                print_command_usage("llm-check");
                 std::process::exit(2);
             }
         }
@@ -854,7 +835,7 @@ fn run_execute_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris execute: {e}");
-            print_usage();
+            print_command_usage("execute");
             std::process::exit(2);
         }
     };
@@ -907,7 +888,7 @@ fn run_execute_command(args: &[String]) {
             }
             other => {
                 eprintln!("glomeris execute: unrecognized argument '{other}'");
-                print_usage();
+                print_command_usage("execute");
                 std::process::exit(2);
             }
         }
@@ -915,12 +896,12 @@ fn run_execute_command(args: &[String]) {
 
     let Some(action_id) = action_id else {
         eprintln!("glomeris execute: --action-id is required");
-        print_usage();
+        print_command_usage("execute");
         std::process::exit(2);
     };
     let Some(resource_id) = resource_id else {
         eprintln!("glomeris execute: --resource-id is required");
-        print_usage();
+        print_command_usage("execute");
         std::process::exit(2);
     };
 
@@ -932,7 +913,7 @@ fn run_execute_command(args: &[String]) {
         eprintln!(
             "glomeris execute: --confirm-ask and --observed-fingerprint must be passed together"
         );
-        print_usage();
+        print_command_usage("execute");
         std::process::exit(2);
     }
 
@@ -1132,7 +1113,7 @@ fn run_history_command(args: &[String]) {
             }
             other => {
                 eprintln!("glomeris history: unrecognized argument '{other}'");
-                print_usage();
+                print_command_usage("history");
                 std::process::exit(2);
             }
         }
@@ -1153,7 +1134,7 @@ fn run_free_command(args: &[String]) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("glomeris free: {e}");
-            print_usage();
+            print_command_usage("free");
             std::process::exit(2);
         }
     };
@@ -1166,7 +1147,7 @@ fn run_free_command(args: &[String]) {
             i += 2;
         } else {
             eprintln!("glomeris free: unrecognized argument '{}'", remaining[i]);
-            print_usage();
+            print_command_usage("free");
             std::process::exit(2);
         }
     }
@@ -1175,7 +1156,7 @@ fn run_free_command(args: &[String]) {
         Some(t) => t,
         None => {
             eprintln!("glomeris free: --target is required");
-            print_usage();
+            print_command_usage("free");
             std::process::exit(2);
         }
     };
@@ -1242,11 +1223,11 @@ fn run_daemon_command(args: &[String]) {
         Some("run") => daemon_run(),
         Some(other) => {
             eprintln!("glomeris daemon: unknown subcommand '{other}'");
-            print_usage();
+            print_command_usage("daemon");
             std::process::exit(2);
         }
         None => {
-            print_usage();
+            print_command_usage("daemon");
             std::process::exit(2);
         }
     }
@@ -1269,11 +1250,11 @@ fn run_actions_command(args: &[String]) {
         Some("history") => actions_history(&args[1..]),
         Some(other) => {
             eprintln!("glomeris actions: unknown subcommand '{other}'");
-            print_usage();
+            print_command_usage("actions");
             std::process::exit(2);
         }
         None => {
-            print_usage();
+            print_command_usage("actions");
             std::process::exit(2);
         }
     }
@@ -1320,7 +1301,7 @@ fn actions_history(args: &[String]) {
             }
             other => {
                 eprintln!("glomeris actions history: unrecognized argument '{other}'");
-                print_usage();
+                print_command_usage("actions");
                 std::process::exit(2);
             }
         }
