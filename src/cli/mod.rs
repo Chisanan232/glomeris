@@ -735,12 +735,14 @@ pub fn build_llm_check_report(
                 LlmError::NetworkError(_) => "unreachable",
                 LlmError::ProviderStatus { .. } => "rejected",
                 LlmError::InvalidResponse(_) => "unusable_response",
-                // Unreachable via this function: the caller cannot obtain a
-                // provider to pass in without being configured. Reported as a
-                // rejection rather than papered over with a panic, because a
-                // connection test that crashes is worse than one that is
-                // merely wrong about the category.
+                // Both unreachable via this function — the caller cannot
+                // obtain a provider to pass in without being configured, and
+                // `provider_from_env` refuses an invalid base URL before
+                // returning one. Mapped rather than papered over with a panic,
+                // because a connection test that crashes is worse than one
+                // that is merely wrong about the category.
                 LlmError::NotConfigured => "rejected",
+                LlmError::InvalidConfiguration(_) => "misconfigured",
             };
             report(outcome, Some(e.to_string()), None)
         }

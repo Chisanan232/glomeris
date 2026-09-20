@@ -603,10 +603,12 @@ pub struct LlmPayloadReport {
 /// comment.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LlmCheckReport {
-    /// One of `"ok"`, `"unreachable"`, `"rejected"`, or
+    /// One of `"ok"`, `"misconfigured"`, `"unreachable"`, `"rejected"`, or
     /// `"unusable_response"` — a stable token for a UI to branch on, so it
     /// never has to pattern-match on the prose in `error`.
     ///
+    /// `"misconfigured"` means nothing was sent, because the settings
+    /// themselves cannot work — the user has something to fix locally.
     /// `"rejected"` means the provider answered and refused: a wrong key, a
     /// wrong path, a model the account cannot use. `"unreachable"` means
     /// there was no answer at all. Keeping those apart is the whole of
