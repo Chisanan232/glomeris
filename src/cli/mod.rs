@@ -374,12 +374,15 @@ pub fn build_clean_dry_run_item(
                 explain: Some(plan.explain),
                 skip_reason: None,
             },
+            // `Display`, not `Debug`: this string is printed to a user by
+            // `clean --dry-run`, and `{:?}` showed them the literal text
+            // `ResourceMismatch`.
             Err(e) => CleanDryRunItem {
                 resource_id,
                 policy_label,
                 action_id: Some(action.id().0),
                 explain: None,
-                skip_reason: Some(format!("{e:?}")),
+                skip_reason: Some(e.to_string()),
             },
         },
         None => CleanDryRunItem {
@@ -564,6 +567,11 @@ pub fn build_llm_plan_report(
                     completeness,
                     confidence,
                 },
+                // `Display`, not `Debug`. This is the commonest way a model's
+                // suggestion gets refused — it named a registered action that
+                // does not apply to the resource it named — so it is the one
+                // sentence on the row that has to explain itself. `{:?}`
+                // rendered it as the literal text `ResourceMismatch`.
                 Err(e) => LlmPlanItemReport {
                     resource_id,
                     policy_label,
@@ -571,7 +579,7 @@ pub fn build_llm_plan_report(
                     priority,
                     model_reason,
                     explain: None,
-                    skip_reason: Some(format!("{e:?}")),
+                    skip_reason: Some(e.to_string()),
                     candidate,
                     completeness,
                     confidence,
@@ -2078,6 +2086,52 @@ mod tests {
         assert!(item.requested_action_id.is_none());
         assert!(item.explain.is_none());
         assert!(item.skip_reason.is_some());
+    }
+
+    /// A model naming a real action that does not apply to the resource it
+    /// named is the commonest way a suggestion gets refused, and the
+    /// `skip_reason` on that row is the only place a user learns why. It
+    /// used to read `ResourceMismatch`.
+    ///
+    /// Asserted here rather than in `actions`' own `Display` tests because
+    /// this is the path that reaches a screen: the row is built, refused,
+    /// and its refusal sentence read back through the report a surface
+    /// actually renders.
+    #[test]
+    fn build_llm_plan_report_explains_a_mismatched_action_in_words() {
+        let ev = evidence(
+            "/Users/x/proj/node_modules",
+            ResourceKind::NodeModules,
+            Some(2048),
+        );
+        let cfg = PolicyConfig::default();
+        let decision = classify(&ev, &cfg, SystemTime::UNIX_EPOCH);
+        assert_ne!(decision.class, PolicyClass::Protected);
+
+        // A registered action, asked for against the wrong kind of resource.
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": "same thing really"}}]}}"#
+        );
+        let provider = FakeLlmPlanProvider { response: Ok(text) };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
+
+        assert_eq!(report.items.len(), 1);
+        let item = &report.items[0];
+        assert!(
+            item.explain.is_none(),
+            "nothing was planned, so nothing to explain"
+        );
+        let skip = item.skip_reason.as_deref().unwrap();
+        assert_eq!(skip, "that action does not apply to this kind of resource");
+        assert!(
+            !skip.contains("ResourceMismatch"),
+            "a Rust variant name must never reach a user: {skip}"
+        );
     }
 
     #[test]
