@@ -703,6 +703,16 @@ fn run_llm_plan_command(args: &[String]) {
             Ok(provider) => {
                 glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider, impact)
             }
+            // "You have not set this up" and "you set it up wrongly, here is
+            // what to change" need different messages, and a user in the
+            // second case is being actively misled by the first: they *did*
+            // set all three variables. `Display` for
+            // `InvalidConfiguration` carries only Glomeris's own guidance,
+            // never the offending value.
+            Err(glomeris::actions::llm::LlmError::InvalidConfiguration(detail)) => {
+                eprintln!("glomeris llm-plan: {detail}");
+                std::process::exit(2);
+            }
             Err(_) => {
                 eprintln!(
                     "glomeris llm-plan: missing LLM configuration — set GLOMERIS_LLM_API_KEY, \
