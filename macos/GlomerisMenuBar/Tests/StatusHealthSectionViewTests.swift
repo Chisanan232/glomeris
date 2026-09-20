@@ -202,13 +202,13 @@ final class StatusHealthSectionViewTests: XCTestCase {
     /// 260pt popover is technically visible and practically useless; the
     /// message must be one line that names the subcommand and says the
     /// output was not the expected JSON.
-    func testDecodeFailureMessageIsOneActionableLineNotADecodingErrorDump() {
-        let message = SectionFetchErrors.shortMessage(
+    func testDecodeFailureMessageIsOneActionableLineNotADecodingErrorDump() throws {
+        let message = try XCTUnwrap(SectionFetchErrors.shortMessage(
             GlomerisClientError.outputDecodingFailed(
                 "typeMismatch(Swift.Bool, Swift.DecodingError.Context(codingPath: [], debugDescription: \"…\"))"
             ),
             subject: "daemon status"
-        )
+        ))
 
         XCTAssertEqual(message, "daemon status: the CLI's output was not the expected JSON.")
         XCTAssertFalse(message.contains("\n"))
@@ -236,11 +236,49 @@ final class StatusHealthSectionViewTests: XCTestCase {
 
     /// A non-`GlomerisClientError` (anything thrown from outside the
     /// client's own typed set) must not fall through to an empty string.
-    func testUnknownErrorTypeStillProducesAMessage() {
+    func testUnknownErrorTypeStillProducesAMessage() throws {
         struct Weird: Error {}
-        let message = SectionFetchErrors.shortMessage(Weird(), subject: "status")
+        let message = try XCTUnwrap(
+            SectionFetchErrors.shortMessage(Weird(), subject: "status")
+        )
         XCTAssertTrue(message.hasPrefix("status: failed —"))
         XCTAssertGreaterThan(message.count, "status: failed —".count)
+    }
+
+    // MARK: - Cancellation (HORO-1308)
+
+    /// The one case that must produce no message at all. Pressing Stop on the
+    /// AI Plan, or closing the popover mid-poll, is a user decision — rendering
+    /// it as a red failure line would teach the user to distrust a panel whose
+    /// entire job is to be trusted about failures (HORO-1297).
+    func testCancellationProducesNoMessageAtAll() {
+        XCTAssertNil(
+            SectionFetchErrors.shortMessage(
+                GlomerisClientError.cancelled,
+                subject: "AI plan"
+            )
+        )
+    }
+
+    /// …and it is the ONLY case that does. A future `GlomerisClientError` case
+    /// added without a `shortMessage` arm would be caught by Swift's exhaustive
+    /// `switch`, but a case added and then mapped to `nil` out of convenience
+    /// would not be — so every other constructible case is asserted non-nil
+    /// here.
+    func testEveryNonCancellationCaseStillProducesAMessage() {
+        let others: [GlomerisClientError] = [
+            .executableNotFound(searched: ["PATH"]),
+            .executionFailed("boom"),
+            .outputDecodingFailed("boom"),
+            .unexpectedExitCode(7),
+            .usage("bad flag"),
+        ]
+        for error in others {
+            XCTAssertNotNil(
+                SectionFetchErrors.shortMessage(error, subject: "status"),
+                "\(error) must still produce a sentence"
+            )
+        }
     }
 
     // MARK: - Missing CLI (HORO-1295)
@@ -251,16 +289,16 @@ final class StatusHealthSectionViewTests: XCTestCase {
     /// were searched, so a mismatch between where the binary is and where the
     /// app looked is visible from the popover rather than only from the
     /// source.
-    func testMissingCliMessageNamesWhereTheAppLooked() {
+    func testMissingCliMessageNamesWhereTheAppLooked() throws {
         let searched = GlomerisExecutableLocator(
             bundledExecutableURL: nil,
             pathVariable: "/usr/bin:/bin:/usr/sbin:/sbin"
         ).searchedLocations
 
-        let message = SectionFetchErrors.shortMessage(
+        let message = try XCTUnwrap(SectionFetchErrors.shortMessage(
             GlomerisClientError.executableNotFound(searched: searched),
             subject: "status"
-        )
+        ))
 
         XCTAssertEqual(
             message,

@@ -66,6 +66,7 @@ targets:
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateDetailView.swift
       - path: Sources/HistoryAuditSectionView.swift
+      - path: Sources/AiPlanSectionView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests

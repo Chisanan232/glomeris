@@ -25,6 +25,7 @@ use glomeris::evidence::{
     ResourceId, ResourceKind, ResourceLocator,
 };
 use glomeris::policy::{classify, PolicyClass, PolicyConfig, ReasonCode};
+use glomeris::reporting::ImpactContext;
 
 const FIXTURE_PATH: &str = "tests/fixtures/llm_plan_requests_protected_deletion.json";
 
@@ -131,7 +132,7 @@ fn golden_llm_plan_protected_refusal() {
     // `src/cli/mod.rs`'s source), so there is no code path from this
     // report to execution regardless.
     let candidates = vec![(ev, decision)];
-    let report = build_llm_plan_report(&candidates, &actions, &provider);
+    let report = build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
     assert!(report.provider_error.is_none());
     assert_eq!(report.dropped_unknown_resource, 0);
@@ -143,4 +144,91 @@ fn golden_llm_plan_protected_refusal() {
     assert!(item.requested_action_id.is_none());
     assert!(item.explain.is_none());
     assert!(item.skip_reason.is_some());
+
+    // Step 5 (HORO-1308): the three fields a UI is required to read before
+    // offering to do anything all say no, on the nested `candidate` that a
+    // GUI renders with its ordinary candidate-row code.
+    //
+    // This is the assertion that makes the GUI's AI Plan surface safe by
+    // construction rather than by discipline. The model asked, in this
+    // fixture, for a real registered action against a real discovered
+    // resource — nothing was hallucinated and nothing was dropped by
+    // validation (step 3 proved that) — and the recommendation still cannot
+    // produce an enabled control, because `executable` is computed from the
+    // policy decision and the model is not one of its inputs.
+    assert!(
+        !item.candidate.executable,
+        "a protected resource must never be executable, however it was suggested"
+    );
+    assert!(
+        item.candidate.offered_actions.is_empty(),
+        "no action may be offered for a protected resource: {:?}",
+        item.candidate.offered_actions
+    );
+    let refusal = item
+        .candidate
+        .refusal_reason
+        .as_deref()
+        .expect("a refused candidate must say why");
+    assert!(
+        refusal.starts_with("PROTECTED: "),
+        "the refusal must name the policy class that caused it, got {refusal:?}"
+    );
+    assert!(
+        refusal.contains("protected_credential_material"),
+        "the refusal must carry the real reason code, got {refusal:?}"
+    );
+
+    // And the nested candidate agrees with the item about the policy class,
+    // so a UI reading either one cannot show a row whose badge and whose
+    // button disagree.
+    assert_eq!(item.candidate.policy_label, item.policy_label);
+    assert_eq!(item.candidate.resource_id, item.resource_id);
+}
+
+/// HORO-1308: the model's rationale reaches the report — and reaches it
+/// *attributed*, sitting beside this machine's own refusal rather than in
+/// place of it.
+///
+/// Worth its own test because the failure mode is silent in both
+/// directions. Before HORO-1308 the rationale was parsed off the wire and
+/// dropped, so a user paid a provider for an explanation no surface ever
+/// showed. The opposite mistake — letting the model's sentence be the only
+/// explanation on the row — would be worse: here the model is confidently
+/// recommending the deletion of an SSH private key, and "looks like a stale
+/// build directory" reads perfectly plausibly.
+#[test]
+fn the_models_rationale_is_carried_but_never_replaces_the_real_verdict() {
+    let ev = protected_evidence();
+    let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+    let provider = FilePlanProvider {
+        path: PathBuf::from(FIXTURE_PATH),
+    };
+    let actions = ActionRegistry::builtin();
+    let candidates = vec![(ev, decision)];
+
+    let report = build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
+    let item = &report.items[0];
+
+    // The fixture's own `reason` text, carried through verbatim.
+    assert_eq!(
+        item.model_reason.as_deref(),
+        Some("looks like a stale build directory")
+    );
+
+    // The model called it safe. The machine did not, and the machine's
+    // answer is the one attached to every field that gates an action.
+    assert_eq!(item.policy_label, "PROTECTED");
+    assert!(!item.candidate.executable);
+
+    // The rationale is a separate field from `reasons`, which is where the
+    // evidence-backed reason codes live. Nothing the model wrote is in
+    // there: a surface quoting `reasons` cannot accidentally quote the
+    // model.
+    let reasons: Vec<&str> = item.candidate.reasons.to_vec();
+    assert_eq!(reasons, vec!["protected_credential_material"]);
+    assert!(
+        !reasons.iter().any(|r| r.contains("stale build directory")),
+        "model text must never appear among the evidence reason codes"
+    );
 }

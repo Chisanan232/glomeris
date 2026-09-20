@@ -374,12 +374,15 @@ pub fn build_clean_dry_run_item(
                 explain: Some(plan.explain),
                 skip_reason: None,
             },
+            // `Display`, not `Debug`: this string is printed to a user by
+            // `clean --dry-run`, and `{:?}` showed them the literal text
+            // `ResourceMismatch`.
             Err(e) => CleanDryRunItem {
                 resource_id,
                 policy_label,
                 action_id: Some(action.id().0),
                 explain: None,
-                skip_reason: Some(format!("{e:?}")),
+                skip_reason: Some(e.to_string()),
             },
         },
         None => CleanDryRunItem {
@@ -472,22 +475,42 @@ pub fn credential_flag_name(arg: &str) -> &str {
 /// for why an LLM-proposed plan must never reach execution directly.
 ///
 /// SAFETY-CRITICAL: a [`PolicyClass::Protected`] decision short-circuits
-/// here, BEFORE `actions.get`/`dry_run` are ever called for that item —
-/// this is what makes it structurally impossible for a hallucinating (or
-/// adversarial) LLM response to cause a protected resource's action to be
-/// resolved, let alone rendered. See `tests/golden_llm_plan_protected_refusal.rs`
-/// for an end-to-end proof.
+/// here, BEFORE `dry_run` is ever called for that item — this is what makes
+/// it structurally impossible for a hallucinating (or adversarial) LLM
+/// response to cause a protected resource's action to be *planned*, let
+/// alone rendered. See `tests/golden_llm_plan_protected_refusal.rs` for an
+/// end-to-end proof.
+///
+/// HORO-1308 narrowed that sentence by one word, deliberately and with no
+/// loss: it used to say "before `actions.get`/`dry_run`". Every item now
+/// also carries the same [`DetectCandidateReport`] projection `glomeris
+/// detect` prints, and building it calls [`resolve_action_for`] — a registry
+/// lookup — for protected resources too, exactly as `detect` already does
+/// for them. That lookup plans nothing, touches no filesystem, and its
+/// result is *discarded unused* for a protected decision:
+/// `executable_fields` tests `PolicyClass::Protected` first and returns
+/// `(false, [], Some("PROTECTED: …"))` whatever action was resolved. The
+/// property that matters — no action is ever planned or offered for a
+/// protected resource, however insistently a model asks — is unchanged, and
+/// is asserted directly in the golden test.
+///
+/// `impact` is the free-space context for the nested candidates' impact
+/// tiers; pass [`ImpactContext::default`] where it is genuinely unknown.
 pub fn build_llm_plan_report(
     candidates: &[(Evidence, PolicyDecision)],
     actions: &ActionRegistry,
     provider: &dyn LlmProvider,
+    impact: ImpactContext,
 ) -> LlmPlanReport {
     let evidences: Vec<Evidence> = candidates.iter().map(|(ev, _)| ev.clone()).collect();
     let result = plan_with_llm(provider, &evidences, actions);
 
     let mut items = Vec::with_capacity(result.validated_items.len());
-    for (resource, action_id, priority) in result.validated_items {
-        let Some((ev, decision)) = candidates.iter().find(|(ev, _)| ev.resource == resource) else {
+    for validated in result.validated_items {
+        let Some((ev, decision)) = candidates
+            .iter()
+            .find(|(ev, _)| ev.resource == validated.resource)
+        else {
             // Unreachable in practice: `resource` came from `evidences`,
             // which is itself derived from `candidates` — but never panic
             // on a defensive fallback, matching this module's style.
@@ -496,6 +519,21 @@ pub fn build_llm_plan_report(
 
         let resource_id = ev.resource.to_string();
         let policy_label = crate::reporting::label_for(decision).as_str();
+        let priority = validated.priority;
+        let model_reason = validated.model_reason;
+        // Built from `ev` and `decision` only — the local evidence and the
+        // real policy verdict. Note what is NOT an input: anything from
+        // `validated`. The model cannot influence `executable`,
+        // `offered_actions` or `refusal_reason` even by naming a different
+        // action than the one policy would resolve.
+        let candidate = DetectCandidateReport::from_evidence_and_decision(
+            ev,
+            decision,
+            resolve_action_for(ev, actions),
+            impact,
+        );
+        let completeness = crate::reporting::dto::completeness_tag(&ev.completeness());
+        let confidence = crate::reporting::dto::confidence_tag(ev.confidence());
 
         if decision.class == PolicyClass::Protected {
             items.push(LlmPlanItemReport {
@@ -503,31 +541,48 @@ pub fn build_llm_plan_report(
                 policy_label,
                 requested_action_id: None,
                 priority,
+                model_reason,
                 explain: None,
                 skip_reason: Some(
                     "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
                 ),
+                candidate,
+                completeness,
+                confidence,
             });
             continue;
         }
 
-        items.push(match actions.get(action_id.0) {
+        items.push(match actions.get(validated.action_id.0) {
             Some(action) => match dry_run(action, ev) {
                 Ok(plan) => LlmPlanItemReport {
                     resource_id,
                     policy_label,
                     requested_action_id: Some(action.id().0),
                     priority,
+                    model_reason,
                     explain: Some(plan.explain),
                     skip_reason: None,
+                    candidate,
+                    completeness,
+                    confidence,
                 },
+                // `Display`, not `Debug`. This is the commonest way a model's
+                // suggestion gets refused — it named a registered action that
+                // does not apply to the resource it named — so it is the one
+                // sentence on the row that has to explain itself. `{:?}`
+                // rendered it as the literal text `ResourceMismatch`.
                 Err(e) => LlmPlanItemReport {
                     resource_id,
                     policy_label,
                     requested_action_id: Some(action.id().0),
                     priority,
+                    model_reason,
                     explain: None,
-                    skip_reason: Some(format!("{e:?}")),
+                    skip_reason: Some(e.to_string()),
+                    candidate,
+                    completeness,
+                    confidence,
                 },
             },
             None => LlmPlanItemReport {
@@ -535,8 +590,12 @@ pub fn build_llm_plan_report(
                 policy_label,
                 requested_action_id: None,
                 priority,
+                model_reason,
                 explain: None,
                 skip_reason: Some("no registered action for this action id".to_string()),
+                candidate,
+                completeness,
+                confidence,
             },
         });
     }
@@ -887,6 +946,15 @@ pub fn print_llm_plan_report(report: &LlmPlanReport) {
             "[{}] {} action={} priority={}",
             item.policy_label, item.resource_id, action, priority
         );
+        // Attributed, and printed before the explain line rather than after
+        // it: "the model says" has to arrive before the sentence it
+        // qualifies, or the reader has already taken the claim as ours. The
+        // `model says:` prefix is not decoration — it is the only thing
+        // distinguishing a provider's assertion from this machine's finding
+        // on the line below (HORO-1308).
+        if let Some(reason) = &item.model_reason {
+            println!("  model says: {reason}");
+        }
         match (&item.explain, &item.skip_reason) {
             (Some(explain), _) => println!("  {explain}"),
             (None, Some(reason)) => println!("  skipped: {reason}"),
@@ -2008,7 +2076,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.provider_error.is_none());
         assert_eq!(report.items.len(), 1);
@@ -2017,6 +2086,52 @@ mod tests {
         assert!(item.requested_action_id.is_none());
         assert!(item.explain.is_none());
         assert!(item.skip_reason.is_some());
+    }
+
+    /// A model naming a real action that does not apply to the resource it
+    /// named is the commonest way a suggestion gets refused, and the
+    /// `skip_reason` on that row is the only place a user learns why. It
+    /// used to read `ResourceMismatch`.
+    ///
+    /// Asserted here rather than in `actions`' own `Display` tests because
+    /// this is the path that reaches a screen: the row is built, refused,
+    /// and its refusal sentence read back through the report a surface
+    /// actually renders.
+    #[test]
+    fn build_llm_plan_report_explains_a_mismatched_action_in_words() {
+        let ev = evidence(
+            "/Users/x/proj/node_modules",
+            ResourceKind::NodeModules,
+            Some(2048),
+        );
+        let cfg = PolicyConfig::default();
+        let decision = classify(&ev, &cfg, SystemTime::UNIX_EPOCH);
+        assert_ne!(decision.class, PolicyClass::Protected);
+
+        // A registered action, asked for against the wrong kind of resource.
+        let resource_id = ev.resource.to_string();
+        let text = format!(
+            r#"{{"items": [{{"resource_id": "{resource_id}", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": "same thing really"}}]}}"#
+        );
+        let provider = FakeLlmPlanProvider { response: Ok(text) };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
+
+        assert_eq!(report.items.len(), 1);
+        let item = &report.items[0];
+        assert!(
+            item.explain.is_none(),
+            "nothing was planned, so nothing to explain"
+        );
+        let skip = item.skip_reason.as_deref().unwrap();
+        assert_eq!(skip, "that action does not apply to this kind of resource");
+        assert!(
+            !skip.contains("ResourceMismatch"),
+            "a Rust variant name must never reach a user: {skip}"
+        );
     }
 
     #[test]
@@ -2060,7 +2175,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.provider_error.is_none());
         assert_eq!(report.items.len(), 1);
@@ -2088,7 +2204,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.items.is_empty());
         assert_eq!(report.dropped_unknown_resource, 1);
@@ -2107,7 +2224,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.items.is_empty());
         assert!(report.provider_error.is_some());
@@ -2132,7 +2250,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
         let rendered = report.provider_error.expect("provider error is set");
 
         assert!(rendered.contains("HTTP 401"), "got: {rendered}");

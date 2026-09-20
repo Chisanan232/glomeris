@@ -26,18 +26,20 @@
 //! array of a DTO with the `executable`/`offered_actions`/`refusal_reason`
 //! triple, mixing populated and empty/null variants), and `ExecuteReport`
 //! (the `outcome` enum-as-`&'static str` field plus several optionals).
-//! `ExplainReport`, `ActionListReport`, `LlmPlanReport`,
-//! `CleanDryRunReport`, and `ProgressEvent` remain out of scope for this
-//! ticket — none of them back a currently-planned screen yet.
+//! `ExplainReport`, `ActionListReport`, `CleanDryRunReport`, and
+//! `ProgressEvent` remain out of scope for this ticket — none of them back a
+//! currently-planned screen yet.
 //! `ActionHistoryReport` was added in HORO-1066, when the recent-history +
 //! action-audit popover section actually needed it — see that ticket's
-//! `HistoryAuditSectionView.swift`.
+//! `HistoryAuditSectionView.swift`. `LlmPlanReport` was added in HORO-1308,
+//! for the same reason: `AiPlanSectionView.swift` decodes it.
 
 use std::path::PathBuf;
 
 use glomeris::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, DaemonStatusReport, DetectCandidateReport,
-    DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, OfferedAction, StatusReport,
+    DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, LlmPlanItemReport,
+    LlmPlanReport, OfferedAction, StatusReport,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -203,6 +205,125 @@ fn execute_report_aborted_by_revalidation_matches_golden_fixture() {
         actual_reclaimed_bytes: None,
     };
     assert_matches_fixture(&report, "execute_report_aborted.json");
+}
+
+/// HORO-1308. The fixture deliberately holds all three shapes the AI Plan
+/// card has to render, and pairs them the awkward way round:
+///
+/// 1. an AUTO_SAFE item the model explained and that really is executable;
+/// 2. an ASK item the model gave NO rationale for, whose offered action
+///    still requires confirmation — so the card cannot use "the model
+///    explained it" as a proxy for "this is fine";
+/// 3. a PROTECTED item the model confidently recommended deleting, with a
+///    plausible-sounding rationale, no `requested_action_id`, an empty
+///    `offered_actions` and `executable: false`.
+///
+/// Item 3 is the one that matters: it is the wire-level form of the
+/// end-to-end proof in `tests/golden_llm_plan_protected_refusal.rs`, and it
+/// is what `DtoGoldenFixturesTests` asserts the Swift mirror decodes without
+/// losing the refusal. A Swift model that dropped `refusal_reason`, or typed
+/// `executable` as an Optional defaulting to `true`, fails there.
+///
+/// The `dropped_*` counts are non-zero on purpose: they are the only record
+/// that the model asked for things that do not exist, and a surface that
+/// silently ignores them tells the user a plan was complete when it was not.
+#[test]
+fn llm_plan_report_matches_golden_fixture() {
+    let report = LlmPlanReport {
+        items: vec![
+            LlmPlanItemReport {
+                resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                policy_label: "AUTO_SAFE",
+                requested_action_id: Some("cargo.clean.target_dir"),
+                priority: Some(1),
+                model_reason: Some("Largest build output and nothing is using it.".to_string()),
+                explain: Some("remove the Cargo target directory for this project".to_string()),
+                skip_reason: None,
+                candidate: DetectCandidateReport {
+                    resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                    kind: "cargo_target_dir",
+                    reclaimable_bytes: Some(2_147_483_648),
+                    reclaimable_human: Some("2.0 GB".to_string()),
+                    reclaimable_bytes_is_lower_bound: false,
+                    impact_tier: "notable",
+                    policy_label: "AUTO_SAFE",
+                    reasons: vec!["no_active_use_observed"],
+                    executable: true,
+                    offered_actions: vec![OfferedAction {
+                        action_id: "cargo.clean.target_dir".to_string(),
+                        requires_confirmation: false,
+                    }],
+                    refusal_reason: None,
+                },
+                completeness: "complete",
+                confidence: "high",
+            },
+            LlmPlanItemReport {
+                resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                policy_label: "ASK",
+                requested_action_id: Some("node.remove.node_modules"),
+                priority: Some(2),
+                model_reason: None,
+                explain: Some("remove node_modules for this project".to_string()),
+                skip_reason: None,
+                candidate: DetectCandidateReport {
+                    resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                    kind: "node_modules",
+                    reclaimable_bytes: Some(536_870_912),
+                    reclaimable_human: Some("512.0 MB".to_string()),
+                    reclaimable_bytes_is_lower_bound: false,
+                    impact_tier: "normal",
+                    policy_label: "ASK",
+                    reasons: vec!["regenerable_by_tool"],
+                    executable: true,
+                    offered_actions: vec![OfferedAction {
+                        action_id: "node.remove.node_modules".to_string(),
+                        requires_confirmation: true,
+                    }],
+                    refusal_reason: None,
+                },
+                completeness: "partial",
+                confidence: "medium",
+            },
+            LlmPlanItemReport {
+                resource_id: "cargo_target_dir:/Users/dev/.ssh/id_ed25519".to_string(),
+                policy_label: "PROTECTED",
+                requested_action_id: None,
+                priority: Some(3),
+                model_reason: Some("looks like a stale build directory".to_string()),
+                explain: None,
+                // The item-level sentence `build_llm_plan_report` actually
+                // emits for a PROTECTED resource, verbatim — distinct from the
+                // candidate's own `refusal_reason` below, which is
+                // `executable_fields`' `PROTECTED: <reason code>` form. A
+                // fixture holding a string its producer cannot produce is not a
+                // contract, so both are quoted from the source rather than
+                // paraphrased.
+                skip_reason: Some(
+                    "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
+                ),
+                candidate: DetectCandidateReport {
+                    resource_id: "cargo_target_dir:/Users/dev/.ssh/id_ed25519".to_string(),
+                    kind: "cargo_target_dir",
+                    reclaimable_bytes: Some(1024),
+                    reclaimable_human: Some("1.0 KB".to_string()),
+                    reclaimable_bytes_is_lower_bound: false,
+                    impact_tier: "normal",
+                    policy_label: "PROTECTED",
+                    reasons: vec!["protected_credential_material"],
+                    executable: false,
+                    offered_actions: vec![],
+                    refusal_reason: Some("PROTECTED: protected_credential_material".to_string()),
+                },
+                completeness: "complete",
+                confidence: "high",
+            },
+        ],
+        dropped_unknown_resource: 1,
+        dropped_unknown_action: 2,
+        provider_error: None,
+    };
+    assert_matches_fixture(&report, "llm_plan_report.json");
 }
 
 #[test]

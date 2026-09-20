@@ -101,11 +101,20 @@ struct SectionFetchErrors: Equatable {
     /// Bool, Swift.DecodingError.Context(...))` dump they cannot act on.
     /// The underlying detail is not invented or hidden, just summarised;
     /// `GlomerisClientError` already carries it for anyone logging.
-    static func shortMessage(_ error: Error, subject: String) -> String {
+    ///
+    /// Returns `nil` for exactly one case: the call was cancelled (HORO-1308).
+    /// A user who pressed Stop, or who closed the popover while a poll was
+    /// mid-flight, has not encountered an error and must not be shown one —
+    /// and since every error slot in every section is already a `String?`,
+    /// "no message" is the one honest value for it. Every other outcome still
+    /// produces a sentence.
+    static func shortMessage(_ error: Error, subject: String) -> String? {
         guard let clientError = error as? GlomerisClientError else {
             return "\(subject): failed — \(error.localizedDescription)"
         }
         switch clientError {
+        case .cancelled:
+            return nil
         case .outputDecodingFailed:
             return "\(subject): the CLI's output was not the expected JSON."
         case .executionFailed(let detail):

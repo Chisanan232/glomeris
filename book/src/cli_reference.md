@@ -271,7 +271,7 @@ Human-readable output only — `clean --dry-run` has no `--json` mode. One
 line per considered resource, either its rendered `ActionPlan.explain` text
 or a `skip_reason` (e.g. `PROTECTED`, no registered action).
 
-## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--schema] [--print-payload]`
+## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json] [--schema] [--print-payload]`
 
 Not macOS-gated. ADVISORY, NON-EXECUTING (HORO-1008) — never constructs a
 `policy::Approval` and never calls `policy::approval::authorize` or
@@ -297,7 +297,21 @@ configuration and safety-property writeup.
   `detect`'s flag above.
 - `--api-key`/`--key`/`--token` are explicitly rejected (not accepted and
   ignored) — the error names `$GLOMERIS_LLM_API_KEY` instead.
-- `--json` prints the report as JSON.
+- `--json` prints the report as JSON. Each item carries the model's own
+  `priority`/`model_reason` alongside the machine's `policy_label`,
+  `requested_action_id`, `explain`, `skip_reason`, `completeness`,
+  `confidence`, and a nested `candidate` — the byte-for-byte same projection
+  `detect --json` prints for that resource, including
+  `executable`/`offered_actions`/`refusal_reason` (HORO-1308). A consumer
+  deciding what may be done reads `candidate`; `priority`/`model_reason` are
+  the only two fields a provider chose, and the **order of `items` is the
+  provider's too** — `plan_with_llm` never sorts, it only drops. `--json`
+  output is printed *before* a `provider_error` exit, so an exit `1` report is
+  still complete and readable.
+- `--progress-json` streams the same NDJSON discovery progress as `detect`,
+  on stderr, leaving stdout a single clean JSON document. This is the exact
+  pair (`--json --progress-json`) the menu-bar app's AI Plan card spawns; see
+  [Menu Bar App](menu_bar_app.md#ai-plan).
 - `--print-payload` (HORO-1298) runs discovery, prints the exact request a
   live run would send — the system prompt, the user prompt, and the local
   wire-id-to-real-resource table under a heading marking it as *not* sent —

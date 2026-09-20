@@ -79,9 +79,16 @@ final class GlomerisClientTests: XCTestCase {
     /// shared compiled fixture sidesteps it. It's still an ordinary
     /// executable spawned via `Process.executableURL` + `arguments`,
     /// exactly like the real `glomeris` binary would be.
+    ///
+    /// The cached filename carries a revision suffix because the build below
+    /// is skipped whenever the file already exists: a developer who edits the
+    /// `.c` source without bumping it would keep silently running the previous
+    /// binary, and a fixture that lies about its own arguments is worse than
+    /// one that fails to build. Bump it whenever the source changes
+    /// (`-v2`: `linger-ms`, HORO-1308).
     private static let fixtureURL: URL = {
         let binaryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glomeris-client-fixture-helper")
+            .appendingPathComponent("glomeris-client-fixture-helper-v2")
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests
             .appendingPathComponent("Fixtures/glomeris_fixture_helper.c")
@@ -632,6 +639,279 @@ final class GlomerisClientTests: XCTestCase {
 
         XCTAssertEqual(first, 3, "the first completion wins")
         XCTAssertEqual(second, 3)
+    }
+
+    // MARK: - Cancellation (HORO-1308)
+
+    /// A long-lived fixture child that has already flushed a complete, valid
+    /// JSON body and is now just lingering — the awkward case, because there
+    /// is a perfectly decodable document sitting in the pipe and returning it
+    /// would look like success.
+    private func lingeringFixtureArguments(
+        stdout: String = #"{"candidates":[]}"#,
+        lingerMilliseconds: Int = 10_000
+    ) -> [String] {
+        ["0", stdout, "", String(lingerMilliseconds)]
+    }
+
+    /// Cancelling the calling task must kill the child and throw, promptly.
+    /// "Promptly" is the whole point: the reason `llm-plan` needs a Stop
+    /// button is that a provider call can sit there for tens of seconds, and a
+    /// Stop that waits for the thing it is stopping is not a Stop button.
+    func testCancellingARunRawTaskTerminatesTheChildAndThrowsCancelled() async throws {
+        let client = fixtureClient()
+        let started = Date()
+
+        let task = Task { () -> Result<Int32, Error> in
+            do {
+                let raw = try await client.runRaw(
+                    self.lingeringFixtureArguments(),
+                    progressType: EmptyProgress.self
+                )
+                return .success(raw.exitCode)
+            } catch {
+                return .failure(error)
+            }
+        }
+
+        // Long enough for the child to be spawned, adopted and to have flushed
+        // its body; far shorter than the 10s it would otherwise linger for.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        task.cancel()
+
+        let outcome = await task.value
+        let elapsed = Date().timeIntervalSince(started)
+
+        switch outcome {
+        case .success(let exitCode):
+            XCTFail("""
+            cancellation returned a result (exit \(exitCode)) instead of \
+            throwing. The child's stdout at that moment is whatever happened to \
+            have been flushed — at best a truncated JSON document, at worst one \
+            that decodes and is wrong.
+            """)
+        case .failure(let error):
+            XCTAssertEqual(error as? GlomerisClientError, .cancelled)
+        }
+
+        XCTAssertLessThan(
+            elapsed, 5,
+            "cancellation must not wait for the child's own lifetime (10s here)"
+        )
+    }
+
+    /// The reversed ordering, through the real code path rather than the gate
+    /// in isolation: the task is cancelled around the same moment `runRaw`
+    /// starts, so `withTaskCancellationHandler` may fire `onCancel` before
+    /// `Process.run()` has even returned. Whichever way that race lands, the
+    /// outcome must be the same — which is exactly why `ProcessTerminationGate`
+    /// remembers a request that arrives before adoption.
+    func testCancellingAroundTheSpawnItselfStillThrowsCancelled() async throws {
+        let client = fixtureClient()
+        let task = Task { () -> Result<Int32, Error> in
+            do {
+                let raw = try await client.runRaw(
+                    self.lingeringFixtureArguments(),
+                    progressType: EmptyProgress.self
+                )
+                return .success(raw.exitCode)
+            } catch {
+                return .failure(error)
+            }
+        }
+        task.cancel()
+
+        guard case .failure(let error) = await task.value else {
+            return XCTFail("a cancelled call must not return a body")
+        }
+        XCTAssertEqual(error as? GlomerisClientError, .cancelled)
+    }
+
+    /// An ordinary uncancelled call is unaffected: it still returns its body,
+    /// and nothing was ever signalled. Stated explicitly because the cheapest
+    /// way to pass the two tests above would be to throw `.cancelled` more
+    /// often than warranted.
+    func testAnUncancelledRunStillReturnsItsBody() async throws {
+        let raw = try await fixtureClient().runRaw(
+            ["0", #"{"ok":true}"#, "", "0"],
+            progressType: EmptyProgress.self
+        )
+
+        XCTAssertEqual(raw.exitCode, 0)
+        XCTAssertEqual(String(data: raw.stdout, encoding: .utf8), #"{"ok":true}"#)
+    }
+
+    // MARK: - ProcessTerminationGate orderings (HORO-1308)
+
+    /// Spawns a fixture child that lingers for `lingerMilliseconds`, with both
+    /// streams piped so its output never reaches the test log.
+    private func spawnLingeringChild(lingerMilliseconds: Int = 30_000) throws -> Process {
+        let process = Process()
+        process.executableURL = Self.fixtureURL
+        process.arguments = ["0", "", "", String(lingerMilliseconds)]
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        try process.run()
+        return process
+    }
+
+    /// Blocking wait is fine *here* — this is a test thread, not the Swift
+    /// concurrency cooperative pool that HORO-1304's hang was about, and
+    /// `testSourceNeverBlocksAThreadWaitingForProcessExit` guards the shipping
+    /// source rather than this file. Bounded so a gate that never signals
+    /// fails the test instead of hanging the suite.
+    private func waitForExit(_ process: Process, timeout: TimeInterval = 5) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning, Date() < deadline {
+            usleep(10_000)
+        }
+    }
+
+    private func assertKilledBySIGTERM(_ process: Process) {
+        XCTAssertFalse(process.isRunning, "the child outlived the termination request")
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(process.terminationStatus, SIGTERM)
+    }
+
+    /// The ordinary ordering: adopted first, signalled later.
+    func testGateTerminatesAChildAdoptedBeforeTheRequest() throws {
+        let gate = ProcessTerminationGate()
+        let process = try spawnLingeringChild()
+        defer { if process.isRunning { process.terminate() } }
+
+        gate.adopt(process)
+        XCTAssertFalse(gate.wasTerminationRequested)
+        gate.requestTermination()
+
+        waitForExit(process)
+        assertKilledBySIGTERM(process)
+        XCTAssertTrue(gate.wasTerminationRequested)
+    }
+
+    /// The ordering that would otherwise leak a process: the request arrives
+    /// while `Process.run()` is still in flight, so there is nothing to signal
+    /// yet. Dropping it would leave an orphaned `glomeris` scanning a
+    /// developer's disk after the popover that started it had closed.
+    func testGateTerminatesAChildAdoptedAfterTheRequest() throws {
+        let gate = ProcessTerminationGate()
+        gate.requestTermination()
+        XCTAssertTrue(gate.wasTerminationRequested, "the request must be remembered")
+
+        let process = try spawnLingeringChild()
+        defer { if process.isRunning { process.terminate() } }
+        gate.adopt(process)
+
+        waitForExit(process)
+        assertKilledBySIGTERM(process)
+    }
+
+    /// `requestTermination` is documented as safe any number of times, from
+    /// any thread, including after the child has already gone. Asserted because
+    /// `Process.terminate()` on a reaped process is the kind of call that is
+    /// either harmless or fatal depending on Foundation's mood, and the whole
+    /// reason the gate holds only launched processes is to keep it in the
+    /// harmless half.
+    func testRepeatedAndPostMortemTerminationRequestsAreHarmless() throws {
+        let gate = ProcessTerminationGate()
+        let process = try spawnLingeringChild(lingerMilliseconds: 0)
+        gate.adopt(process)
+        waitForExit(process)
+        XCTAssertFalse(process.isRunning)
+
+        gate.requestTermination()
+        gate.requestTermination()
+
+        XCTAssertTrue(gate.wasTerminationRequested)
+        XCTAssertEqual(process.terminationStatus, 0, "the child's own exit status stands")
+    }
+
+    /// A gate that was never given a process must not crash when asked to
+    /// terminate — the path taken when `Process.run()` throws and nothing was
+    /// ever adopted.
+    func testGateWithNoAdoptedProcessIgnoresATerminationRequest() {
+        let gate = ProcessTerminationGate()
+        gate.requestTermination()
+        XCTAssertTrue(gate.wasTerminationRequested)
+    }
+
+    // MARK: - Cancellation must never reach `execute`
+
+    /// The safety half of HORO-1308's cancellation work, and the guard
+    /// `GlomerisClient.runRaw`'s doc comment names.
+    ///
+    /// Cancelling a read is free; cancelling a deletion is not. `SIGTERM`
+    /// partway through `execute` would leave the filesystem in a state neither
+    /// the app nor the audit log could describe, and the call would surface as
+    /// "cancelled" whether or not the removal had already happened. SwiftUI
+    /// cancels a `.task {}` modifier's task when the view disappears — so the
+    /// mechanical property to hold is that `performClean()` is only ever
+    /// awaited inside a detached `Task {}` started by an explicit button
+    /// action, never from a `.task {}` body.
+    ///
+    /// Asserted on the source because the property is absolute rather than
+    /// situational, in the same style as
+    /// `testSourceContainsNoShellExecution`.
+    func testNoCancellableTaskModifierCanReachExecute() throws {
+        let sourcesDirectory = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // GlomerisMenuBar
+            .appendingPathComponent("Sources")
+
+        var sawPerformCleanCallSite = false
+
+        for name in try FileManager.default
+            .contentsOfDirectory(atPath: sourcesDirectory.path)
+            .filter({ $0.hasSuffix(".swift") })
+            .sorted()
+        {
+            let source = try String(
+                contentsOf: sourcesDirectory.appendingPathComponent(name),
+                encoding: .utf8
+            )
+            let lines = source
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+
+            for (index, line) in lines.enumerated() {
+                let code = line.trimmingCharacters(in: .whitespaces)
+                guard !code.hasPrefix("//") else { continue }
+
+                if code.contains("performClean()") && code.contains("await") {
+                    sawPerformCleanCallSite = true
+                    XCTAssertTrue(
+                        code.contains("Task {"),
+                        """
+                        \(name):\(index + 1) awaits performClean() outside a \
+                        detached Task {}. A cancellable task must never reach \
+                        `execute` — SIGTERM mid-deletion is unreportable \
+                        (HORO-1308).
+                        """
+                    )
+                }
+
+                // …and the converse: no `.task {}` body may start with a
+                // cleanup. Checked on the following non-blank line, which is
+                // how both of the app's `.task {}` modifiers are written.
+                if code == ".task {" {
+                    let next = lines[(index + 1)...]
+                        .first { !$0.trimmingCharacters(in: .whitespaces).isEmpty }?
+                        .trimmingCharacters(in: .whitespaces) ?? ""
+                    XCTAssertFalse(
+                        next.contains("performClean") || next.contains("\"execute\""),
+                        "\(name):\(index + 1): a .task {} modifier must not run execute"
+                    )
+                }
+            }
+        }
+
+        XCTAssertTrue(
+            sawPerformCleanCallSite,
+            """
+            found no `await performClean()` call site at all — this guard has \
+            been silently defeated by a rename; update it rather than deleting \
+            it.
+            """
+        )
     }
 
     // MARK: - Real binary integration

@@ -6,7 +6,8 @@
 //  the status + daemon-health section (StatusHealthSectionView); HORO-1063
 //  adds the candidates list section (CandidatesSectionView); HORO-1066
 //  adds the recent history + action audit section
-//  (HistoryAuditSectionView). See the standing project rule in
+//  (HistoryAuditSectionView); HORO-1308 adds the advisory AI Plan section
+//  (AiPlanSectionView). See the standing project rule in
 //  GlomerisMenuBarApp.swift before adding anything here beyond
 //  presentation.
 //
@@ -82,12 +83,24 @@ struct GlomerisPopoverView: View {
 
     // MARK: - Body
 
-    /// Status → candidates → history. Also the VoiceOver reading order.
+    /// Status → candidates → AI plan → history. Also the VoiceOver reading
+    /// order.
+    ///
+    /// HORO-1308 puts the AI Plan card *after* the candidates list rather
+    /// than above it, on purpose and not for lack of prominence: Glomeris's
+    /// own ranking is the default answer to "what should I clean", and a
+    /// provider's advice is a second opinion on it. Leading with the advice
+    /// would invert that, and the AI Plan card's own "Glomeris's own ranking
+    /// is the list above" line would stop being true. It also keeps the
+    /// unconfigured case out of the way: a user with no provider sees an
+    /// opt-in prompt below a panel that already works, not a dead card at the
+    /// top of one.
     private var sections: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
                 StatusHealthSectionView()
                 CandidatesSectionView()
+                AiPlanSectionView()
                 HistoryAuditSectionView()
             }
             .padding(GlomerisDesign.outerPadding)

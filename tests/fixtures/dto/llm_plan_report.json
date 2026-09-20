@@ -1,0 +1,89 @@
+{
+  "items": [
+    {
+      "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+      "policy_label": "AUTO_SAFE",
+      "requested_action_id": "cargo.clean.target_dir",
+      "priority": 1,
+      "model_reason": "Largest build output and nothing is using it.",
+      "explain": "remove the Cargo target directory for this project",
+      "skip_reason": null,
+      "candidate": {
+        "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+        "kind": "cargo_target_dir",
+        "reclaimable_bytes": 2147483648,
+        "reclaimable_human": "2.0 GB",
+        "reclaimable_bytes_is_lower_bound": false,
+        "impact_tier": "notable",
+        "policy_label": "AUTO_SAFE",
+        "reasons": ["no_active_use_observed"],
+        "executable": true,
+        "offered_actions": [
+          {
+            "action_id": "cargo.clean.target_dir",
+            "requires_confirmation": false
+          }
+        ],
+        "refusal_reason": null
+      },
+      "completeness": "complete",
+      "confidence": "high"
+    },
+    {
+      "resource_id": "node_modules:/Users/dev/proj/node_modules",
+      "policy_label": "ASK",
+      "requested_action_id": "node.remove.node_modules",
+      "priority": 2,
+      "model_reason": null,
+      "explain": "remove node_modules for this project",
+      "skip_reason": null,
+      "candidate": {
+        "resource_id": "node_modules:/Users/dev/proj/node_modules",
+        "kind": "node_modules",
+        "reclaimable_bytes": 536870912,
+        "reclaimable_human": "512.0 MB",
+        "reclaimable_bytes_is_lower_bound": false,
+        "impact_tier": "normal",
+        "policy_label": "ASK",
+        "reasons": ["regenerable_by_tool"],
+        "executable": true,
+        "offered_actions": [
+          {
+            "action_id": "node.remove.node_modules",
+            "requires_confirmation": true
+          }
+        ],
+        "refusal_reason": null
+      },
+      "completeness": "partial",
+      "confidence": "medium"
+    },
+    {
+      "resource_id": "cargo_target_dir:/Users/dev/.ssh/id_ed25519",
+      "policy_label": "PROTECTED",
+      "requested_action_id": null,
+      "priority": 3,
+      "model_reason": "looks like a stale build directory",
+      "explain": null,
+      "skip_reason": "PROTECTED — no cleanup action is ever rendered for this resource",
+      "candidate": {
+        "resource_id": "cargo_target_dir:/Users/dev/.ssh/id_ed25519",
+        "kind": "cargo_target_dir",
+        "reclaimable_bytes": 1024,
+        "reclaimable_human": "1.0 KB",
+        "reclaimable_bytes_is_lower_bound": false,
+        "impact_tier": "normal",
+        "policy_label": "PROTECTED",
+        "reasons": ["protected_credential_material"],
+        "executable": false,
+        "offered_actions": [],
+        "refusal_reason": "PROTECTED: protected_credential_material"
+      },
+      "completeness": "complete",
+      "confidence": "high"
+    }
+  ],
+  "dropped_unknown_resource": 1,
+  "dropped_unknown_action": 2,
+  "provider_error": null
+}

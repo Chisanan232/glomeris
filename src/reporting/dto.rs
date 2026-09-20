@@ -26,7 +26,11 @@ fn regenerability_tag(r: Regenerability) -> &'static str {
     }
 }
 
-fn completeness_tag(c: &Completeness) -> &'static str {
+/// `pub(crate)` rather than private since HORO-1308: `cli::build_llm_plan_report`
+/// needs the same two tags for `LlmPlanItemReport`, and one mapping shared
+/// with `ExplainReport` beats a second copy that could disagree with it
+/// about what `Partial` is called.
+pub(crate) fn completeness_tag(c: &Completeness) -> &'static str {
     match c {
         Completeness::Complete => "complete",
         Completeness::Partial { .. } => "partial",
@@ -34,7 +38,8 @@ fn completeness_tag(c: &Completeness) -> &'static str {
     }
 }
 
-fn confidence_tag(c: Confidence) -> &'static str {
+/// See [`completeness_tag`] for why this is `pub(crate)`.
+pub(crate) fn confidence_tag(c: Confidence) -> &'static str {
     match c {
         Confidence::High => "high",
         Confidence::Medium => "medium",
@@ -465,17 +470,72 @@ pub struct CleanDryRunReport {
 /// ever derives `Deserialize`. Those two remain the crate's only two
 /// `#[serde(deny_unknown_fields)]` `Deserialize` types; this DTO must never
 /// change that.
+///
+/// ## Which fields are the model's, and which are the machine's
+///
+/// HORO-1308 gave this DTO a GUI consumer, which makes the distinction
+/// load-bearing rather than editorial. Exactly two fields carry anything
+/// the provider chose:
+///
+/// - `priority` — the model's claimed ordering hint.
+/// - `model_reason` — the model's own words, already bounded and stripped
+///   by `crate::actions::llm::sanitize_model_reason`.
+///
+/// Everything else is this machine's own finding, computed from local
+/// evidence and the real policy engine, and would read identically if no
+/// provider had ever been contacted: `resource_id`, `policy_label`,
+/// `completeness`, `confidence`, `explain`, `skip_reason`, and every field
+/// of the nested `candidate`. In particular `candidate.executable`,
+/// `candidate.offered_actions` and `candidate.refusal_reason` — the three
+/// fields any UI is required to read to decide what may be done — are
+/// produced by [`executable_fields`] from the [`PolicyDecision`], and there
+/// is no input path from the model's bytes to any of them.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LlmPlanItemReport {
     pub resource_id: String,
     pub policy_label: &'static str,
     pub requested_action_id: Option<&'static str>,
     pub priority: Option<u32>,
+    /// The model's own rationale for suggesting this item (HORO-1308),
+    /// bounded and control-character-stripped upstream by
+    /// `crate::actions::llm::sanitize_model_reason`.
+    ///
+    /// `None` when the model gave none, or gave only whitespace. Display
+    /// only, and a surface showing it MUST attribute it to the model rather
+    /// than presenting it as Glomeris's own finding — it is a claim, not
+    /// evidence, and it sits beside `reasons`/`explain`, which are evidence.
+    pub model_reason: Option<String>,
     /// Rendered from the typed `ActionPlan.explain` — `None` for a
     /// `PROTECTED` item (never resolved) or a resolution/dry-run failure
     /// (see `skip_reason` in that case).
     pub explain: Option<String>,
     pub skip_reason: Option<String>,
+    /// The same evidence-and-policy projection `glomeris detect` prints for
+    /// this resource (HORO-1308), nested verbatim rather than re-derived.
+    ///
+    /// Nested — not flattened, and not a second hand-rolled set of fields —
+    /// for one specific reason: it lets a UI render an AI-suggested row with
+    /// the exact same code that renders a plain `detect` row, so there is no
+    /// second enablement path for a model recommendation to travel down. A
+    /// flattened copy would be a place for the two to drift.
+    ///
+    /// Deliberately NOT [`ExplainReport`], which carries
+    /// `fingerprint_token`. A plan report must not hand out the token that
+    /// pins consent: cleaning something suggested here still goes through
+    /// its own `explain` call first, exactly as cleaning something from the
+    /// candidates list does.
+    pub candidate: DetectCandidateReport,
+    /// Evidence completeness for this resource (HORO-1308) — `"complete"`,
+    /// `"partial"` or `"failed"`, straight from [`completeness_tag`], the
+    /// same mapping `explain` reports go through.
+    ///
+    /// Present here and not in [`DetectCandidateReport`] because this is the
+    /// surface where it matters most: a ranked *recommendation* invites
+    /// action, so how good the underlying evidence is belongs next to it.
+    pub completeness: &'static str,
+    /// Evidence confidence for this resource (HORO-1308) — see
+    /// `completeness` above for why both are here.
+    pub confidence: &'static str,
 }
 
 /// `glomeris llm-plan` report (HORO-1008): advisory ranking suggestion
