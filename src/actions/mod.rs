@@ -14,6 +14,7 @@ mod homebrew;
 pub mod llm;
 mod node;
 
+use std::fmt;
 use std::path::PathBuf;
 
 pub use cargo::CargoCleanTargetDir;
@@ -53,6 +54,33 @@ pub enum ActionError {
     ResourceMismatch,
     MissingRequiredEvidence(EvidenceField),
     Unsupported(String),
+}
+
+/// A sentence a user can read, because this is a user-facing refusal.
+///
+/// Every one of these reaches a person: `build_clean_dry_run_item` and
+/// `build_llm_plan_report` both put it in a `skip_reason`, which `clean
+/// --dry-run` prints in a terminal and the menu-bar app's AI Plan card
+/// renders as a machine verdict on a row. Both used `{:?}` before, so a
+/// user was shown the literal text `ResourceMismatch` — and in the AI Plan
+/// case that is the row explaining why a model's suggestion was refused,
+/// which is exactly the moment the refusal needs to be legible.
+///
+/// `Debug` is kept derived and unchanged for assertion messages and logs.
+impl fmt::Display for ActionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResourceMismatch => {
+                write!(f, "that action does not apply to this kind of resource")
+            }
+            Self::MissingRequiredEvidence(field) => {
+                write!(f, "a measurement this action needs is missing: {field}")
+            }
+            // Already a sentence written for a human by the action that
+            // refused, so it is passed through rather than wrapped.
+            Self::Unsupported(reason) => write!(f, "{reason}"),
+        }
+    }
 }
 
 /// SAFETY-CRITICAL: never add `#[derive(serde::Deserialize)]` (or any
@@ -275,5 +303,87 @@ mod tests {
     fn builtin_registry_registers_three_actions() {
         let registry = ActionRegistry::builtin();
         assert_eq!(registry.actions.len(), 3);
+    }
+
+    /// Every variant's `Display` has to be a sentence, because all three
+    /// reach a user as a `skip_reason` — printed by `clean --dry-run` and
+    /// rendered as a refusal on a row of the menu-bar app's AI Plan card.
+    #[test]
+    fn display_never_leaks_a_rust_variant_name() {
+        let cases = [
+            ActionError::ResourceMismatch,
+            ActionError::MissingRequiredEvidence(EvidenceField::OpenByProcess),
+            ActionError::Unsupported("brew is not installed".to_string()),
+        ];
+
+        for error in cases {
+            let rendered = error.to_string();
+            assert!(
+                !rendered.is_empty(),
+                "every refusal must say something: {error:?}"
+            );
+            for variant in ["ResourceMismatch", "MissingRequiredEvidence", "Unsupported"] {
+                assert!(
+                    !rendered.contains(variant),
+                    "`{rendered}` shows a Rust variant name to a user"
+                );
+            }
+            // Starts lowercase and carries no Rust punctuation, so it reads
+            // as a clause in the sentence that embeds it.
+            assert!(!rendered.contains('('), "`{rendered}` reads as Rust syntax");
+        }
+    }
+
+    /// The missing-measurement case names the measurement in the user's
+    /// terms. `Debug` would have said `OpenByProcess`.
+    #[test]
+    fn display_names_the_missing_measurement_in_plain_words() {
+        let rendered =
+            ActionError::MissingRequiredEvidence(EvidenceField::OpenByProcess).to_string();
+        assert_eq!(
+            rendered,
+            "a measurement this action needs is missing: whether a running process has it open"
+        );
+    }
+
+    /// An action that refused with its own sentence has already written for a
+    /// human, so wrapping it would only add a second voice.
+    #[test]
+    fn display_passes_an_unsupported_reason_through_unchanged() {
+        let reason = "brew is not on PATH, so its cache cannot be cleaned";
+        assert_eq!(
+            ActionError::Unsupported(reason.to_string()).to_string(),
+            reason
+        );
+    }
+
+    /// Nothing here is allowed to be silent, in either direction: a field
+    /// added to `EvidenceField` without wording would otherwise surface as
+    /// an empty clause inside an otherwise complete sentence.
+    #[test]
+    fn every_evidence_field_has_wording_and_no_two_share_it() {
+        let fields = [
+            EvidenceField::LogicalBytes,
+            EvidenceField::ReclaimableBytes,
+            EvidenceField::LastModified,
+            EvidenceField::OpenByProcess,
+            EvidenceField::ProcessCwdMatch,
+            EvidenceField::GitState,
+            EvidenceField::ToolLiveness,
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for field in fields {
+            let rendered = field.to_string();
+            assert!(!rendered.is_empty(), "{field:?} has no wording");
+            assert!(
+                !rendered.chars().next().unwrap().is_uppercase(),
+                "`{rendered}` is meant to read mid-sentence"
+            );
+            assert!(
+                seen.insert(rendered.clone()),
+                "`{rendered}` is used for two different fields"
+            );
+        }
     }
 }
