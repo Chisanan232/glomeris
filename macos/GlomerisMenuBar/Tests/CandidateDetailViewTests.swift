@@ -389,9 +389,20 @@ final class CandidateDetailViewTests: XCTestCase {
     /// once in this whole file (inside `loadExplain()`) — there is no
     /// second call site anywhere, including inside `performClean()`.
     func testExplainIsInvokedExactlyOnceInCandidateDetailView() throws {
+        // Occurrences as an error-message subject are excluded (HORO-1295
+        // routes this view's failures through `SectionFetchErrors
+        // .shortMessage(_:subject:)`, which names the subcommand): naming a
+        // subcommand in a message is not invoking it. Every other occurrence
+        // still counts, so a second call site constructed any other way trips
+        // this just as before.
         let code = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
-        let explainCallSites = code.components(separatedBy: "\"explain\"").count - 1
-        XCTAssertEqual(explainCallSites, 1, "explain must be called from exactly one place — loadExplain()")
+        let explainOccurrences = code.components(separatedBy: "\"explain\"").count - 1
+        let explainSubjects = code.components(separatedBy: "subject: \"explain\"").count - 1
+        XCTAssertEqual(
+            explainOccurrences - explainSubjects,
+            1,
+            "explain must be called from exactly one place — loadExplain()"
+        )
     }
 
     func testBuildExecuteArgumentsOmitsConfirmationFlagsWhenNotRequired() {

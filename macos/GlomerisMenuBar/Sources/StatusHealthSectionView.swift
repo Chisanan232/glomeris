@@ -75,6 +75,12 @@ struct SectionFetchErrors: Equatable {
     /// One short sentence fit for a ~260pt popover, naming the subcommand
     /// and what kind of failure it was.
     ///
+    /// Shared by every popover section that runs the CLI — candidates,
+    /// candidate detail, and history/audit all route their failures through
+    /// here too (HORO-1295), so one install problem reads the same wherever
+    /// it shows up instead of once as a sentence and four times as a Swift
+    /// error dump.
+    ///
     /// `String(describing:)` on a `DecodingError` renders several lines of
     /// Swift type and coding-path detail. That is exactly the wrong thing
     /// to put here: HORO-1297's symptom was malformed CLI stdout, and the

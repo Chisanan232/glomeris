@@ -247,7 +247,7 @@ struct HistoryAuditSectionView: View {
             lastErrorMessage = nil
             return result.output.events
         } catch {
-            lastErrorMessage = "history: \(String(describing: error))"
+            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "history")
             return nil
         }
     }
@@ -262,7 +262,7 @@ struct HistoryAuditSectionView: View {
             lastErrorMessage = nil
             return result.output.events
         } catch {
-            lastErrorMessage = "actions history: \(String(describing: error))"
+            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "actions history")
             return nil
         }
     }
