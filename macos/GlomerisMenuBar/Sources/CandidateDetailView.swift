@@ -83,7 +83,13 @@ struct CandidateDetailViewModel: Equatable {
     let detector: String
     let sources: [String]
     let logicalSizeText: String
-    let reclaimableText: String
+    /// The reclaimable estimate's own wording, including the leading `≥`
+    /// when the measurement was partial. Derived from `impactTerm` so the
+    /// row in the candidates list and this sheet cannot word the same
+    /// number two different ways.
+    var reclaimableText: String { impactTerm.title }
+    let reclaimableHuman: String?
+    let reclaimableIsLowerBound: Bool
     let completeness: String
     let confidence: String
     let activeUseSignals: [String]
@@ -101,6 +107,38 @@ struct CandidateDetailViewModel: Equatable {
     /// (e.g. the resource isn't `ASK`-classified).
     let fingerprintToken: String?
 
+    // MARK: - HORO-1306: plain-language wording for the raw tokens above
+    //
+    // Every one of these is `GlomerisVocabulary` handed a token this view
+    // model already received from `explain --json`. They add no judgment:
+    // the raw tokens stay stored, unchanged, right above, and are still
+    // rendered verbatim in the sheet's "Raw CLI values" section so anyone
+    // comparing the popover against `--json` output can see exactly what
+    // the CLI said.
+
+    var kindTerm: GlomerisTerm { GlomerisVocabulary.kind(kind) }
+
+    /// Display copy for the safety verdict Rust already reached. Not a
+    /// verdict: the Clean button's enablement reads `isCleanEnabled` (a
+    /// field read of `executable`) and nothing here.
+    var safetyTerm: GlomerisTerm { GlomerisVocabulary.safety(policyLabel) }
+
+    var impactTerm: GlomerisTerm {
+        GlomerisVocabulary.storageImpact(
+            human: reclaimableHuman,
+            isLowerBound: reclaimableIsLowerBound
+        )
+    }
+
+    var completenessTerm: GlomerisTerm { GlomerisVocabulary.completeness(completeness) }
+    var confidenceTerm: GlomerisTerm { GlomerisVocabulary.confidence(confidence) }
+    var regenerabilityTerm: GlomerisTerm { GlomerisVocabulary.regenerability(regenerability) }
+
+    /// The policy reason codes, in plain language. Rendered as prose rather
+    /// than chips — they explain the verdict, they are not a fourth axis to
+    /// scan.
+    var reasonTerms: [GlomerisTerm] { reasons.map(GlomerisVocabulary.reason) }
+
     init(_ report: ExplainReportDto) {
         isCleanEnabled = report.executable
         requiresConfirmation = report.offeredActions.first?.requiresConfirmation ?? false
@@ -112,11 +150,8 @@ struct CandidateDetailViewModel: Equatable {
         detector = report.detector
         sources = report.sources
         logicalSizeText = report.logicalHuman ?? "unknown"
-        if let human = report.reclaimableHuman {
-            reclaimableText = report.reclaimableBytesIsLowerBound ? "\u{2265} \(human)" : human
-        } else {
-            reclaimableText = "unknown"
-        }
+        reclaimableHuman = report.reclaimableHuman
+        reclaimableIsLowerBound = report.reclaimableBytesIsLowerBound
         completeness = report.completeness
         confidence = report.confidence
         activeUseSignals = report.activeUseSignals
@@ -161,14 +196,23 @@ struct CandidateDetailView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Candidate detail")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
+            header
 
             if isLoading {
-                ProgressView()
+                GlomerisStateMessageView(
+                    message: .loading("Gathering the evidence for this resource…")
+                )
             } else if let viewModel {
-                detailContent(for: viewModel)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
+                        safetyCard(viewModel)
+                        impactCard(viewModel)
+                        evidenceCard(viewModel)
+                        rawValuesCard(viewModel)
+                    }
+                }
+                .frame(maxHeight: GlomerisDesign.maxBodyHeight)
 
                 Button("Clean") {
                     if viewModel.requiresConfirmation {
@@ -181,32 +225,36 @@ struct CandidateDetailView: View {
                 .disabled(isExecuting)
 
                 if isExecuting {
-                    HStack(spacing: 6) {
+                    HStack(spacing: GlomerisDesign.inlineSpacing) {
                         ProgressView()
                             .controlSize(.small)
                         if let executeProgressText {
                             Text(executeProgressText)
-                                .font(.caption2)
+                                .font(GlomerisDesign.captionFont)
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
 
                 if let executeOutcomeText {
-                    Text(executeOutcomeText)
-                        .font(.caption2)
-                        .foregroundStyle(executeSucceeded ? .green : .red)
+                    // The outcome text itself comes from Rust (see
+                    // `describeExecuteOutcome`); only its presentation is
+                    // chosen here, and it always carries a glyph and a
+                    // sentence, never a bare colour.
+                    GlomerisStateMessageView(
+                        message: executeSucceeded
+                            ? .success(executeOutcomeText)
+                            : .failure(executeOutcomeText)
+                    )
                 }
             }
 
             if let errorMessage {
-                Text(errorMessage)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
+                GlomerisStateMessageView(message: .failure(errorMessage))
             }
         }
-        .padding()
-        .frame(minWidth: 280)
+        .padding(GlomerisDesign.outerPadding)
+        .frame(width: GlomerisDesign.popoverWidth)
         .task {
             await loadExplain()
         }
@@ -220,42 +268,166 @@ struct CandidateDetailView: View {
         }
     }
 
+    // MARK: - Header
+    //
+    // The sheet used to open on "Candidate detail" — a title that says
+    // nothing about which candidate, followed by a `Resource` row buried
+    // eleven key/value rows down. It now leads with what the thing IS and
+    // where it lives, because those are the two questions someone opening
+    // this sheet already has.
+
     @ViewBuilder
-    private func detailContent(for viewModel: CandidateDetailViewModel) -> some View {
-        Group {
-            labeledRow("Resource", viewModel.resourceId)
-            labeledRow("Kind", viewModel.kind)
-            labeledRow("Detected by", viewModel.detector)
-            if !viewModel.sources.isEmpty {
-                labeledRow("Sources", viewModel.sources.joined(separator: ", "))
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(viewModel?.kindTerm.title ?? "Candidate detail")
+                .font(GlomerisDesign.titleFont)
+            GlomerisPathText(path: viewModel?.resourceId ?? resourceId)
+        }
+    }
+
+    // MARK: - Cards
+
+    /// Safety comes first, because it is what decides whether anything else
+    /// on this sheet matters. A refusal is rendered as a plain explanation
+    /// rather than an error: PROTECTED is Glomeris working correctly, and
+    /// the user has nothing to fix.
+    @ViewBuilder
+    private func safetyCard(_ viewModel: CandidateDetailViewModel) -> some View {
+        GlomerisCard(title: GlomerisVocabulary.safetyAxis) {
+            GlomerisBadgeView(term: viewModel.safetyTerm)
+            Text(viewModel.safetyTerm.explanation)
+                .font(GlomerisDesign.secondaryFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if !viewModel.reasonTerms.isEmpty {
+                Divider()
+                ForEach(Array(viewModel.reasonTerms.enumerated()), id: \.offset) { _, term in
+                    reasonLine(term)
+                }
             }
-            labeledRow("Logical size", viewModel.logicalSizeText)
-            labeledRow("Reclaimable (estimate)", viewModel.reclaimableText)
-            labeledRow("Completeness", viewModel.completeness)
-            labeledRow("Confidence", viewModel.confidence)
-            if !viewModel.activeUseSignals.isEmpty {
-                labeledRow("Active-use signals", viewModel.activeUseSignals.joined(separator: ", "))
-            }
-            labeledRow("Regenerability", viewModel.regenerability)
-            labeledRow("Policy", viewModel.policyLabel)
-            if !viewModel.reasons.isEmpty {
-                labeledRow("Reasons", viewModel.reasons.joined(separator: ", "))
-            }
+
             if let refusalReason = viewModel.refusalReason {
-                labeledRow("Refusal reason", refusalReason)
+                Divider()
+                // Verbatim from Rust — this layer never rewords a refusal.
+                GlomerisDetailRow(label: "Why not") {
+                    Text(refusalReason)
+                        .font(GlomerisDesign.captionFont)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
 
-    private func labeledRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .top) {
-            Text(label)
-                .font(.caption)
+    /// One policy reason: the plain sentence, with the raw code beneath it
+    /// in a monospaced caption so it stays greppable against `--json`.
+    @ViewBuilder
+    private func reasonLine(_ term: GlomerisTerm) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(term.title)
+                .font(GlomerisDesign.secondaryFont)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(term.explanation)
+                .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.secondary)
-                .frame(width: 130, alignment: .leading)
-            Text(value)
-                .font(.caption)
-            Spacer()
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Two sizes that are easy to confuse, so they are labelled by what
+    /// they mean rather than by the field name: what cleaning would free
+    /// versus how big the thing is on disk.
+    @ViewBuilder
+    private func impactCard(_ viewModel: CandidateDetailViewModel) -> some View {
+        GlomerisCard(title: GlomerisVocabulary.impactAxis) {
+            GlomerisDetailRow(label: "Cleaning would free") {
+                GlomerisBadgeView(term: viewModel.impactTerm)
+            }
+            GlomerisDetailRow(label: "Total size on disk") {
+                Text(viewModel.logicalSizeText)
+                    .font(GlomerisDesign.secondaryFont)
+            }
+            Text(viewModel.impactTerm.explanation)
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// How well Glomeris actually knows what it just claimed — the third
+    /// axis, kept in its own card so it is never read as part of the safety
+    /// verdict. High confidence in a PROTECTED classification does not make
+    /// anything cleanable, and low confidence does not make it dangerous.
+    @ViewBuilder
+    private func evidenceCard(_ viewModel: CandidateDetailViewModel) -> some View {
+        GlomerisCard(title: GlomerisVocabulary.completenessAxis) {
+            GlomerisDetailRow(label: "Measurement") {
+                GlomerisBadgeView(term: viewModel.completenessTerm)
+            }
+            GlomerisDetailRow(label: GlomerisVocabulary.confidenceAxis) {
+                GlomerisBadgeView(term: viewModel.confidenceTerm)
+            }
+            GlomerisDetailRow(label: GlomerisVocabulary.regenerabilityAxis) {
+                GlomerisBadgeView(term: viewModel.regenerabilityTerm)
+            }
+            GlomerisDetailRow(label: "Found by") {
+                Text(viewModel.detector)
+                    .font(GlomerisDesign.secondaryFont)
+            }
+            if !viewModel.sources.isEmpty {
+                GlomerisDetailRow(label: "Evidence sources") {
+                    Text(viewModel.sources.joined(separator: ", "))
+                        .font(GlomerisDesign.captionFont)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !viewModel.activeUseSignals.isEmpty {
+                GlomerisDetailRow(label: "Signs of active use") {
+                    Text(viewModel.activeUseSignals.joined(separator: ", "))
+                        .font(GlomerisDesign.captionFont)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// The tokens exactly as `explain --json` emitted them.
+    ///
+    /// Collapsed by default, and deliberately kept rather than dropped:
+    /// plain language is for reading, but anyone filing a bug, comparing
+    /// the popover against the CLI, or writing a Jira comment needs the
+    /// verbatim value. Hiding it would make the humanised copy the only
+    /// account of what the CLI said, which is worse than an enum tag.
+    @ViewBuilder
+    private func rawValuesCard(_ viewModel: CandidateDetailViewModel) -> some View {
+        GlomerisCard(title: "Raw CLI values") {
+            DisclosureGroup("Show what `explain --json` returned") {
+                VStack(alignment: .leading, spacing: 2) {
+                    rawValue("resource_id", viewModel.resourceId)
+                    rawValue("kind", viewModel.kind)
+                    rawValue("policy_label", viewModel.policyLabel)
+                    rawValue("reasons", viewModel.reasons.joined(separator: ", "))
+                    rawValue("completeness", viewModel.completeness)
+                    rawValue("confidence", viewModel.confidence)
+                    rawValue("regenerability", viewModel.regenerability)
+                }
+                .padding(.top, 2)
+            }
+            .font(GlomerisDesign.captionFont)
+        }
+    }
+
+    @ViewBuilder
+    private func rawValue(_ field: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
+            Text(field)
+                .font(GlomerisDesign.monospacedFont)
+                .foregroundStyle(.secondary)
+            Text(value.isEmpty ? "—" : value)
+                .font(GlomerisDesign.monospacedFont)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
         }
     }
 
