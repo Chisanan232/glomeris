@@ -42,6 +42,7 @@ targets:
       - path: Sources/GlomerisClient.swift
       - path: Sources/GlomerisExecutableLocator.swift
       - path: Sources/MenuBarAppearance.swift
+      - path: Sources/GlomerisMark.swift
       - path: Sources/ProjectRootsStore.swift
       - path: Sources/GlomerisDtos.swift
       - path: Sources/StatusHealthSectionView.swift
