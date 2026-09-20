@@ -140,14 +140,20 @@ final class CandidatesSectionViewTests: XCTestCase {
 
     // MARK: - Lower-bound marker rendering
 
-    private func candidate(isLowerBound: Bool) -> DetectCandidateReportDto {
+    private func candidate(
+        isLowerBound: Bool,
+        kind: String = "cargo_target",
+        human: String? = "1.0 MB",
+        policyLabel: String = "AUTO_SAFE",
+        resourceId: String = "/tmp/example/target"
+    ) -> DetectCandidateReportDto {
         DetectCandidateReportDto(
-            resourceId: "/tmp/example/target",
-            kind: "cargo_target",
+            resourceId: resourceId,
+            kind: kind,
             reclaimableBytes: 1_048_576,
-            reclaimableHuman: "1.0 MB",
+            reclaimableHuman: human,
             reclaimableBytesIsLowerBound: isLowerBound,
-            policyLabel: "AUTO_SAFE",
+            policyLabel: policyLabel,
             reasons: ["regenerable by cargo build"],
             executable: true,
             offeredActions: [],
@@ -165,6 +171,124 @@ final class CandidatesSectionViewTests: XCTestCase {
         let row = CandidateRowViewModel(candidate(isLowerBound: false))
         XCTAssertFalse(row.reclaimableText.contains("\u{2265}"))
         XCTAssertEqual(row.reclaimableText, "1.0 MB")
+    }
+
+    // MARK: - HORO-1306: what a row says
+
+    /// The row's primary line was the raw Rust enum tag. It is now the
+    /// plain-language kind, with the tag still available verbatim on the
+    /// term for anyone reading `--json` alongside the popover.
+    func testRowLeadsWithPlainLanguageNotTheRustEnumTag() {
+        let row = CandidateRowViewModel(candidate(isLowerBound: false, kind: "xcode_derived_data"))
+
+        XCTAssertEqual(row.kindTerm.title, "Xcode derived data")
+        XCTAssertFalse(row.kindTerm.title.contains("_"), "an enum tag leaked into the primary line")
+        XCTAssertEqual(row.kindTerm.token, "xcode_derived_data", "the raw tag must stay available")
+    }
+
+    /// The safety verdict is the most important thing about a candidate and
+    /// used to be invisible until you opened the detail sheet. It is now on
+    /// the row, in words, and it is display copy for a verdict the CLI
+    /// reached — the term carries the token it was handed, unchanged.
+    func testRowCarriesTheSafetyVerdictInWords() {
+        let safe = CandidateRowViewModel(candidate(isLowerBound: false, policyLabel: "AUTO_SAFE"))
+        let protected = CandidateRowViewModel(candidate(isLowerBound: false, policyLabel: "PROTECTED"))
+
+        XCTAssertEqual(safe.safetyTerm.token, "AUTO_SAFE")
+        XCTAssertEqual(protected.safetyTerm.token, "PROTECTED")
+        XCTAssertNotEqual(safe.safetyTerm.title, protected.safetyTerm.title)
+        XCTAssertNotEqual(safe.safetyTerm.symbolName, protected.safetyTerm.symbolName)
+        XCTAssertFalse(safe.safetyTerm.title.contains("_"))
+        XCTAssertFalse(protected.safetyTerm.title.contains("_"))
+    }
+
+    /// This ticket's central semantic rule, asserted at the row level where
+    /// a user actually compares candidates: size and safety are separate
+    /// axes. A large AUTO_SAFE row is the best thing on the list and a small
+    /// PROTECTED row is still untouchable, so the impact badge must be
+    /// toned identically in both cases while the safety badge differs.
+    func testSizeAndSafetyAreSeparateAxesOnTheRow() {
+        let bigAndSafe = CandidateRowViewModel(
+            candidate(isLowerBound: false, human: "48.2 GB", policyLabel: "AUTO_SAFE")
+        )
+        let smallAndProtected = CandidateRowViewModel(
+            candidate(isLowerBound: false, human: "2 KB", policyLabel: "PROTECTED")
+        )
+
+        XCTAssertEqual(
+            bigAndSafe.impactTerm.tone,
+            smallAndProtected.impactTerm.tone,
+            "a size changed its tone, which makes a number look like a safety claim"
+        )
+        XCTAssertEqual(bigAndSafe.impactTerm.tone, .neutral)
+        XCTAssertNotEqual(bigAndSafe.safetyTerm.tone, smallAndProtected.safetyTerm.tone)
+
+        // And the two axes never render as the same chip.
+        XCTAssertNotEqual(bigAndSafe.impactTerm.axis, bigAndSafe.safetyTerm.axis)
+        XCTAssertNotEqual(bigAndSafe.impactTerm.symbolName, bigAndSafe.safetyTerm.symbolName)
+    }
+
+    /// The row is one button, so VoiceOver reads one label. All three facts
+    /// plus the path have to be in it — a row that reads only "Rust build
+    /// output" tells a screen-reader user nothing they could act on.
+    func testAccessibilityLabelCarriesEveryFactOnTheRow() {
+        let row = CandidateRowViewModel(
+            candidate(
+                isLowerBound: true,
+                kind: "node_modules",
+                human: "310 MB",
+                policyLabel: "ASK",
+                resourceId: "/Users/dev/proj/node_modules"
+            )
+        )
+
+        let label = row.accessibilityLabel
+        XCTAssertTrue(label.contains(row.kindTerm.title), label)
+        XCTAssertTrue(label.contains(row.safetyTerm.title), label)
+        XCTAssertTrue(label.contains("310 MB"), label)
+        XCTAssertTrue(label.contains("/Users/dev/proj/node_modules"), label)
+        // The axis names are what stop the chips reading as a list of bare
+        // adjectives with no subject.
+        XCTAssertTrue(label.contains(GlomerisVocabulary.safetyAxis), label)
+        XCTAssertTrue(label.contains(GlomerisVocabulary.impactAxis), label)
+    }
+
+    /// `detect --json` carries no `completeness`/`confidence` per candidate —
+    /// those fields exist on the `explain` report only, which is what the
+    /// detail sheet shows. So the row must not render an evidence-confidence
+    /// badge: there is no evidence for it, and a chip built from something
+    /// else would be a classification invented in Swift.
+    ///
+    /// Asserted on the source because the property is about what the view
+    /// may not do, not about what one view-model instance happens to hold.
+    func testRowInventsNoEvidenceConfidenceItWasNotGiven() throws {
+        let source = try Self.readSource("CandidatesSectionView.swift")
+        let code = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertFalse(
+            code.contains("GlomerisVocabulary.confidence"),
+            "detect does not emit a per-candidate confidence; a row may not invent one"
+        )
+        XCTAssertFalse(
+            code.contains("GlomerisVocabulary.completeness"),
+            "detect does not emit a per-candidate completeness; a row may not invent one"
+        )
+    }
+
+    /// Row order is the CLI's. Ranking is a judgment about what matters
+    /// most and HORO-1307 owns it; sorting here would put that judgment in
+    /// the thin client and then have to be undone.
+    func testRowsAreNotReorderedInSwift() throws {
+        let source = try Self.readSource("CandidatesSectionView.swift")
+        let code = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertFalse(code.contains(".sorted"), "candidate order is the CLI's to decide")
     }
 
     // MARK: - Helpers
