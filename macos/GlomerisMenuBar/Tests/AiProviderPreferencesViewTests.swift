@@ -456,6 +456,63 @@ final class AiProviderPreferencesViewTests: XCTestCase {
         }
     }
 
+    // MARK: - GlomerisLlmKeyRemovalWording
+
+    /// The case this type exists for. Per the precedence rule the stored key
+    /// beats an inherited `GLOMERIS_LLM_API_KEY`, so deleting the stored one can
+    /// *promote* the inherited one into use — and someone pressing a button
+    /// labelled "Remove key" is more likely revoking access than tidying a
+    /// field. An unqualified "Key removed" would be true about the keychain and
+    /// wrong about the product.
+    func testRemovingTheKeyWhileOneIsInheritedSaysSoAndNamesTheVariable() {
+        let message = GlomerisLlmKeyRemovalWording.message(
+            removed: true, remainingSource: .environment)
+
+        XCTAssertEqual(message.kind, .success, "the removal did happen")
+        XCTAssertTrue(
+            message.title.contains("GLOMERIS_LLM_API_KEY"),
+            "the user cannot unset what the app will not name: \(message.title)")
+        XCTAssertTrue(
+            message.title.lowercased().contains("instead"),
+            "must say the inherited key takes over, not merely that one exists")
+    }
+
+    func testRemovingTheOnlyKeyIsReportedWithoutACaveat() {
+        let message = GlomerisLlmKeyRemovalWording.message(
+            removed: true, remainingSource: .absent)
+
+        XCTAssertEqual(message.kind, .success)
+        XCTAssertFalse(
+            message.title.contains("GLOMERIS_LLM_API_KEY"),
+            "there is nothing left to warn about; a caveat here would teach the user to ignore it")
+    }
+
+    /// A keychain refusal is not a removal. Reporting it as one would leave the
+    /// user believing a credential is gone while it is still stored and still
+    /// being used.
+    func testAKeychainRefusalIsAFailureNotASuccess() {
+        let message = GlomerisLlmKeyRemovalWording.message(
+            removed: false, remainingSource: .settings)
+
+        XCTAssertEqual(message.kind, .failure)
+        XCTAssertFalse(
+            message.title.lowercased().contains("removed from your keychain"),
+            "nothing was removed")
+    }
+
+    /// All three outcomes are materially different situations, so all three must
+    /// read differently — including the two successes, which differ only in
+    /// whether access was actually revoked.
+    func testTheThreeRemovalOutcomesAreDistinguishable() {
+        let titles = [
+            GlomerisLlmKeyRemovalWording.message(removed: true, remainingSource: .environment),
+            GlomerisLlmKeyRemovalWording.message(removed: true, remainingSource: .absent),
+            GlomerisLlmKeyRemovalWording.message(removed: false, remainingSource: .settings),
+        ].map(\.title)
+
+        XCTAssertEqual(Set(titles).count, titles.count, "shared wording: \(titles)")
+    }
+
     // MARK: - Source-level guards
 
     /// A run that throws must not leave the previous run's verdict on screen.

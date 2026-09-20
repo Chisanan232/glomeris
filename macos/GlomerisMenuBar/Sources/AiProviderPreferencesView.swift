@@ -349,6 +349,40 @@ enum GlomerisLlmSettingSourceWording {
     }
 }
 
+// MARK: - Revoking the key
+
+/// What to say after a **Remove key** press (AC 8).
+///
+/// A pure function, and a separate one, because the case worth getting right is
+/// not the removal working. Per this app's precedence rule the stored key
+/// overrides an inherited `GLOMERIS_LLM_API_KEY`, so deleting it can *promote*
+/// an inherited key into use — and someone pressing a destructive button
+/// labelled "Remove key" is far more likely to be revoking access than tidying
+/// a field. Reporting that as an unqualified "Key removed" would be true about
+/// the keychain and misleading about the product: the user would believe
+/// Glomeris can no longer reach a provider when it still can.
+///
+/// The field's own source row says `From the environment` afterwards, but a row
+/// changing state is corroboration, not notification.
+enum GlomerisLlmKeyRemovalWording {
+    static func message(
+        removed: Bool,
+        remainingSource: GlomerisLlmSettingSource
+    ) -> GlomerisStateMessage {
+        guard removed else {
+            return .failure("macOS refused to remove the key from the keychain.")
+        }
+        if remainingSource == .environment {
+            return .success(
+                "Key removed from your keychain — but GLOMERIS_LLM_API_KEY is set in the "
+                    + "environment this app was launched with, and Glomeris will use that key "
+                    + "instead. Unset it too if you meant to stop using this provider."
+            )
+        }
+        return .success("Key removed from your keychain.")
+    }
+}
+
 // MARK: - Opening this screen from elsewhere
 
 /// A button that opens the Settings scene.
@@ -582,10 +616,10 @@ struct AiProviderPreferencesView: View {
     private func removeKey() {
         let removed = store.deleteApiKey()
         status = store.status()
-        keyActionMessage =
-            removed
-            ? .success("Key removed from your keychain.")
-            : .failure("macOS refused to remove the key from the keychain.")
+        keyActionMessage = GlomerisLlmKeyRemovalWording.message(
+            removed: removed,
+            remainingSource: status.apiKey
+        )
     }
 
     // MARK: Connection test
