@@ -118,6 +118,38 @@ edits the stored list and does not itself call `detect`/`explain`/
 `execute`; the roots are appended as `--project-root` arguments the next
 time another section (Status, Candidates, …) spawns the CLI.
 
+## How the app finds the `glomeris` CLI
+
+Every screen spawns the CLI, so the app has to decide which binary that is.
+It checks these locations in order, and uses the first one that exists and
+is executable:
+
+1. **Inside the app bundle**, at `Contents/MacOS/glomeris`. Release builds
+   ship the CLI here, and it wins because it is version-matched to the app
+   and covered by the bundle's signature. Debug builds contain no embedded
+   CLI, so development is unaffected.
+2. **Each absolute directory in `PATH`**, in order. Relative entries —
+   including the empty entry that shells read as "the current directory" —
+   are ignored, so nothing can substitute a binary by writing a file named
+   `glomeris` next to the running process.
+3. **`/opt/homebrew/bin`, then `/usr/local/bin`** — the Homebrew prefix on
+   Apple Silicon and on Intel respectively, and where
+   [Installation](installation.md) tells you to put a binary from a release
+   tarball or a source build.
+
+Step 3 is not redundant with step 2: a GUI app does not inherit your
+shell's `PATH`. An app launched from Finder gets
+`PATH=/usr/bin:/bin:/usr/sbin:/sbin`, which contains neither Homebrew
+prefix — so `PATH` alone would not find a `brew install`ed CLI, even though
+running `glomeris` in a terminal works fine.
+
+Resolution happens on every invocation, not once at launch, so installing
+the CLI while the app is already running takes effect at the next poll
+without a restart.
+
+If no binary is found, each section says so and lists the locations it
+searched, rather than failing silently or naming a path it only assumed.
+
 ## Every screen maps back to a CLI command
 
 | Section | CLI command(s) |

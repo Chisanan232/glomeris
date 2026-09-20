@@ -244,6 +244,133 @@ final class GlomerisClientTests: XCTestCase {
         }
     }
 
+    // MARK: - Executable resolution (HORO-1295)
+
+    /// A directory containing a copy of the fixture helper named exactly
+    /// `glomeris`, so a locator pointed at it resolves a genuinely spawnable
+    /// binary using the real filesystem predicate. Returns the directory and
+    /// a cleanup closure.
+    private func installDirectoryContainingFixture() throws -> (String, () -> Void) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glomeris-resolve-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: Self.fixtureURL,
+            to: directory.appendingPathComponent("glomeris")
+        )
+        return (directory.path, { try? FileManager.default.removeItem(at: directory) })
+    }
+
+    /// The whole point of the resolution change: the binary the locator picks
+    /// is the binary that actually gets spawned. Asserted by round-tripping
+    /// output through it rather than by reading a property back, so a client
+    /// that resolved correctly but spawned something else would still fail.
+    func testResolvedBinaryIsTheOneSpawned() async throws {
+        let (directory, cleanup) = try installDirectoryContainingFixture()
+        defer { cleanup() }
+
+        let client = GlomerisClient(
+            locator: GlomerisExecutableLocator(
+                bundledExecutableURL: nil,
+                pathVariable: nil,
+                knownInstallDirectories: [directory]
+            )
+        )
+
+        let result = try await client.run(
+            ["0", "{\"value\":7}", ""],
+            outputType: ValueOutput.self,
+            progressType: EmptyProgress.self
+        )
+
+        XCTAssertEqual(result.output.value, 7)
+    }
+
+    /// Nothing installed anywhere must surface as its own error naming the
+    /// searched locations — not as `executionFailed` with whatever text
+    /// Foundation produces for a path the app invented.
+    func testUnresolvableBinaryMapsToExecutableNotFound() async throws {
+        let client = GlomerisClient(
+            locator: GlomerisExecutableLocator(
+                bundledExecutableURL: nil,
+                pathVariable: "/usr/bin:/bin:/usr/sbin:/sbin",
+                knownInstallDirectories: ["/no/such/prefix/bin"],
+                isExecutableFile: { _ in false }
+            )
+        )
+
+        do {
+            _ = try await client.run([], outputType: ValueOutput.self, progressType: EmptyProgress.self)
+            XCTFail("expected GlomerisClientError.executableNotFound")
+        } catch GlomerisClientError.executableNotFound(let searched) {
+            XCTAssertEqual(searched, ["the app bundle", "PATH", "/no/such/prefix/bin"])
+        }
+    }
+
+    /// A pinned URL must bypass resolution even when it does not exist.
+    /// Without this, the suite's missing-binary tests above would quietly
+    /// start finding a real CLI on any host that has one installed, and
+    /// would assert nothing.
+    func testPinnedExecutableBypassesResolution() async throws {
+        let (directory, cleanup) = try installDirectoryContainingFixture()
+        defer { cleanup() }
+
+        // Proves the fallback was available and still not taken: the same
+        // directory resolves fine for a client that is not pinned.
+        let locator = GlomerisExecutableLocator(
+            bundledExecutableURL: nil,
+            pathVariable: nil,
+            knownInstallDirectories: [directory]
+        )
+        XCTAssertNotNil(locator.locate())
+
+        let client = GlomerisClient(executableURL: URL(fileURLWithPath: "/no/such/glomeris-binary"))
+        do {
+            _ = try await client.run([], outputType: ValueOutput.self, progressType: EmptyProgress.self)
+            XCTFail("expected GlomerisClientError.executionFailed")
+        } catch GlomerisClientError.executionFailed {
+            // expected — the pin was honoured, not replaced by a fallback
+        }
+    }
+
+    /// Resolution happens per invocation, so a CLI installed while the app is
+    /// already running is picked up at the next poll instead of after a
+    /// restart. The client is built before the binary exists here, which is
+    /// exactly the sequence a user performs.
+    func testResolutionHappensPerInvocationNotAtConstruction() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glomeris-late-install-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let client = GlomerisClient(
+            locator: GlomerisExecutableLocator(
+                bundledExecutableURL: nil,
+                pathVariable: nil,
+                knownInstallDirectories: [directory.path]
+            )
+        )
+
+        do {
+            _ = try await client.run([], outputType: ValueOutput.self, progressType: EmptyProgress.self)
+            XCTFail("expected GlomerisClientError.executableNotFound before the CLI is installed")
+        } catch GlomerisClientError.executableNotFound {
+            // expected
+        }
+
+        try FileManager.default.copyItem(
+            at: Self.fixtureURL,
+            to: directory.appendingPathComponent("glomeris")
+        )
+
+        let result = try await client.run(
+            ["0", "{\"value\":11}", ""],
+            outputType: ValueOutput.self,
+            progressType: EmptyProgress.self
+        )
+        XCTAssertEqual(result.output.value, 11)
+    }
+
     func testMalformedStdoutMapsToOutputDecodingFailed() async throws {
         do {
             _ = try await fixtureClient().run(

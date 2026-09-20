@@ -272,7 +272,7 @@ struct CandidateDetailView: View {
             )
             viewModel = CandidateDetailViewModel(result.output)
         } catch {
-            errorMessage = "explain: \(String(describing: error))"
+            errorMessage = SectionFetchErrors.shortMessage(error, subject: "explain")
         }
         isLoading = false
     }
@@ -323,7 +323,10 @@ struct CandidateDetailView: View {
             }
         } catch {
             executeSucceeded = false
-            executeOutcomeText = "execute could not be started: \(String(describing: error))"
+            executeOutcomeText = SectionFetchErrors.shortMessage(
+                error,
+                subject: "execute could not be started"
+            )
         }
 
         executeProgressText = nil

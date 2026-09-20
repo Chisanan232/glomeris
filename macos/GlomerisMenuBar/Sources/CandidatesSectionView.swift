@@ -190,7 +190,7 @@ struct CandidatesSectionView: View {
             candidates = result.output.candidates
             lastScannedAt = Date()
         } catch {
-            lastErrorMessage = "detect: \(String(describing: error))"
+            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")
         }
 
         isScanning = false

@@ -51,6 +51,14 @@ The resulting binary is at `target/release/glomeris`. Copy it onto your
 See [Menu Bar App](menu_bar_app.md) for what `GlomerisMenuBar.app` actually
 shows and lets you do once it's installed.
 
+The app runs the `glomeris` CLI for everything it displays. A release build
+ships its own copy inside the bundle, so it works with no separate CLI
+install; otherwise it looks along `PATH` and then in `/opt/homebrew/bin` and
+`/usr/local/bin`, which covers both Homebrew prefixes and the manual-copy
+instructions above. [Menu Bar
+App](menu_bar_app.md#how-the-app-finds-the-glomeris-cli) documents the exact
+order and why `PATH` alone is not enough for a GUI app.
+
 `GlomerisMenuBar.app.zip` is published as an extra asset on each [GitHub
 Release](https://github.com/Chisanan232/glomeris/releases) alongside the CLI
 tarball. It's built and ad-hoc signed automatically

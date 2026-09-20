@@ -21,8 +21,19 @@ final class CandidatesSectionViewTests: XCTestCase {
     func testDetectIsOnlyCalledWithProgressJSONAndNeverOnATimer() throws {
         let source = try Self.readSource("CandidatesSectionView.swift")
 
+        // Occurrences as an error-message subject are excluded (HORO-1295
+        // routes this view's failures through `SectionFetchErrors
+        // .shortMessage(_:subject:)`, which names the subcommand): naming a
+        // subcommand in a message is not invoking it. Every other occurrence
+        // still counts, so a second call site constructed any other way trips
+        // this just as before.
         let detectOccurrences = source.components(separatedBy: "\"detect\"").count - 1
-        XCTAssertEqual(detectOccurrences, 1, "detect must be constructed in exactly one place")
+        let detectSubjects = source.components(separatedBy: "subject: \"detect\"").count - 1
+        XCTAssertEqual(
+            detectOccurrences - detectSubjects,
+            1,
+            "detect must be constructed in exactly one place"
+        )
         XCTAssertTrue(source.contains("--progress-json"), "the one detect invocation must pass --progress-json")
 
         XCTAssertFalse(source.contains("Timer("), "no code path may re-scan on a Timer")

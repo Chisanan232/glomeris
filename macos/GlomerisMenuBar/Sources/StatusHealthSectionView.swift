@@ -75,6 +75,12 @@ struct SectionFetchErrors: Equatable {
     /// One short sentence fit for a ~260pt popover, naming the subcommand
     /// and what kind of failure it was.
     ///
+    /// Shared by every popover section that runs the CLI — candidates,
+    /// candidate detail, and history/audit all route their failures through
+    /// here too (HORO-1295), so one install problem reads the same wherever
+    /// it shows up instead of once as a sentence and four times as a Swift
+    /// error dump.
+    ///
     /// `String(describing:)` on a `DecodingError` renders several lines of
     /// Swift type and coding-path detail. That is exactly the wrong thing
     /// to put here: HORO-1297's symptom was malformed CLI stdout, and the
@@ -101,6 +107,14 @@ struct SectionFetchErrors: Equatable {
                 : "\(subject): \(trimmed)"
         case .unexpectedExitCode(let code):
             return "\(subject): the CLI exited with code \(code)."
+        case .executableNotFound(let searched):
+            // Names the places that were actually searched rather than
+            // telling the user to install "somewhere", because HORO-1295 was
+            // precisely a case of the binary being installed and the app
+            // looking in the wrong place. Someone who already ran
+            // `brew install glomeris` needs to be able to see that.
+            return "\(subject): the glomeris CLI was not found. Looked in: "
+                + searched.joined(separator: ", ") + "."
         }
     }
 }
