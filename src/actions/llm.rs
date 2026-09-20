@@ -466,6 +466,19 @@ pub fn chat_completions_endpoint_path(base_url: &str) -> String {
     diagnostic_endpoint_path(&chat_completions_url(base_url))
 }
 
+/// The two prompts `glomeris llm-check` sends (HORO-1309).
+///
+/// Fixed literals, and deliberately about nothing: a connection test must
+/// prove the credential, the route and the model name are right without
+/// describing the machine it runs on. There is no interpolation here and
+/// there must never be — `connection_test_prompts_describe_nothing_local`
+/// pins that they contain no path, no home directory and no account name,
+/// which is only meaningfully assertable because they are constants.
+pub const CONNECTION_TEST_SYSTEM_PROMPT: &str =
+    "You are a connection test. Reply with the single word: ok.";
+/// See [`CONNECTION_TEST_SYSTEM_PROMPT`].
+pub const CONNECTION_TEST_USER_PROMPT: &str = "ok";
+
 impl LlmProvider for OpenAiCompatibleProvider {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
         let url = chat_completions_url(&self.base_url);
@@ -2015,6 +2028,26 @@ mod tests {
             chat_completions_endpoint_path("https://gateway.example.com/v1"),
             "/v1/chat/completions"
         );
+    }
+
+    /// A connection test must prove the credential, the route and the model
+    /// without describing the machine it runs on. Asserted against the real
+    /// environment's own values, so this cannot pass by testing a fiction.
+    #[test]
+    fn connection_test_prompts_describe_nothing_local() {
+        let both = format!("{CONNECTION_TEST_SYSTEM_PROMPT} {CONNECTION_TEST_USER_PROMPT}");
+
+        assert!(!both.contains('/'), "a path separator is in {both:?}");
+        if let Ok(home) = std::env::var("HOME") {
+            assert!(!home.is_empty());
+            assert!(!both.contains(&home));
+            if let Some(account) = home.rsplit('/').next() {
+                assert!(
+                    !account.is_empty() && !both.to_lowercase().contains(&account.to_lowercase()),
+                    "the account name appears in {both:?}"
+                );
+            }
+        }
     }
 
     #[test]
