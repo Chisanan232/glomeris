@@ -291,6 +291,35 @@ fn run_status_command(_args: &[String]) {
     std::process::exit(1);
 }
 
+/// Free space on the root filesystem, for HORO-1307's relative
+/// storage-impact thresholds ("this cache is a quarter of everything you
+/// have left").
+///
+/// Returns [`ImpactContext::default`] — i.e. no disk context at all — when
+/// the reading is unavailable, which is the correct behaviour rather than a
+/// swallowed error: `detect` is cross-platform and the impact model is
+/// explicitly designed to fall back to its absolute thresholds. A failed
+/// `statfs` must not make `detect` exit non-zero, because the candidate list
+/// is still completely valid without it. Guessing a capacity instead would
+/// produce confidently wrong tiers.
+#[cfg(target_os = "macos")]
+fn impact_context() -> glomeris::reporting::ImpactContext {
+    use glomeris::monitor::FsStat;
+    use glomeris::platform::macos::MacosFsStat;
+
+    match MacosFsStat.stat(std::path::Path::new("/")) {
+        Ok(usage) => glomeris::reporting::ImpactContext::with_free_bytes(usage.free_bytes),
+        Err(_) => glomeris::reporting::ImpactContext::default(),
+    }
+}
+
+/// Non-macOS builds have no `FsStat` implementation, so the impact model
+/// runs on its absolute thresholds alone. See the macOS variant above.
+#[cfg(not(target_os = "macos"))]
+fn impact_context() -> glomeris::reporting::ImpactContext {
+    glomeris::reporting::ImpactContext::default()
+}
+
 /// Exit code used when [`glomeris::executor::lock::acquire_execution_lock`]
 /// reports [`glomeris::executor::lock::LockError::AlreadyHeld`] — a
 /// distinct "busy" signal (loosely following `sysexits.h`'s `EX_TEMPFAIL`)
@@ -440,7 +469,7 @@ fn run_detect_command(args: &[String]) {
 
     let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = glomeris::actions::ActionRegistry::builtin();
-    let report = glomeris::cli::build_detect_report(&candidates, &actions);
+    let report = glomeris::cli::build_detect_report(&candidates, &actions, impact_context());
 
     if flags.contains(&"--json") {
         print_json_or_exit(&report);
