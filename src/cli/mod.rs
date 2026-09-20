@@ -18,6 +18,8 @@
 //! exercised directly by unit tests. The macOS-only, exit-code-mapping
 //! wiring (including the HORO-1054 execution lock) stays in `main.rs`.
 
+pub mod help;
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
