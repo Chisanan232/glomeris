@@ -478,6 +478,37 @@ pub fn chat_completions_endpoint_path(base_url: &str) -> String {
     diagnostic_endpoint_path(&chat_completions_url(base_url))
 }
 
+/// The stable outcome token for one connection-test result (HORO-1309):
+/// `None` for a provider that answered usably, otherwise the class of failure.
+///
+/// The SOLE producer of these five strings, which is what lets
+/// `scripts/check-vocabulary-covers-cli-tokens.sh` diff them against the
+/// macOS app's wording. A second `match` somewhere that also emitted
+/// `"rejected"` would make that check misleading rather than merely
+/// incomplete — see that script's own note on the three vocabularies it
+/// cannot honestly verify for the same reason.
+///
+/// Why these boundaries: `unreachable` means no answer arrived at all,
+/// `rejected` means the provider answered and refused, and conflating those
+/// two is precisely what made a BYOK 401 undiagnosable in HORO-1299.
+/// `unusable_response` keeps a working endpoint and credential from being
+/// reported as a credential problem. `misconfigured` means nothing was sent
+/// and the fix is local.
+pub fn llm_check_outcome(error: Option<&LlmError>) -> &'static str {
+    match error {
+        None => "ok",
+        Some(LlmError::NetworkError(_)) => "unreachable",
+        Some(LlmError::ProviderStatus { .. }) => "rejected",
+        Some(LlmError::InvalidResponse(_)) => "unusable_response",
+        Some(LlmError::InvalidConfiguration(_)) => "misconfigured",
+        // Unreachable from the connection test — a caller cannot obtain a
+        // provider without being configured — but mapped rather than
+        // panicking, because a connection test that crashes is worse than one
+        // that is merely wrong about the category.
+        Some(LlmError::NotConfigured) => "misconfigured",
+    }
+}
+
 /// Rejects base URLs that [`chat_completions_url`] cannot correctly append to
 /// (HORO-1309).
 ///
@@ -2141,6 +2172,46 @@ mod tests {
             chat_completions_endpoint_path("https://gateway.example.com/v1"),
             "/v1/chat/completions"
         );
+    }
+
+    /// Every state gets its own token, and the set is exactly what the macOS
+    /// app has wording for — `scripts/check-vocabulary-covers-cli-tokens.sh`
+    /// checks that second half mechanically, and this checks the first: a
+    /// mapping that collapsed two states into one token would make the drift
+    /// check pass while the GUI lost the distinction.
+    #[test]
+    fn llm_check_outcome_gives_each_state_its_own_token() {
+        let tokens = [
+            llm_check_outcome(None),
+            llm_check_outcome(Some(&LlmError::NetworkError("x".into()))),
+            llm_check_outcome(Some(&LlmError::ProviderStatus {
+                status: 401,
+                api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+                endpoint_path: "/v1/chat/completions".to_string(),
+                request_id: None,
+                body_excerpt: String::new(),
+            })),
+            llm_check_outcome(Some(&LlmError::InvalidResponse("x".into()))),
+            llm_check_outcome(Some(&LlmError::InvalidConfiguration("x".into()))),
+        ];
+
+        let mut unique = tokens.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            tokens.len(),
+            "tokens must be distinct: {tokens:?}"
+        );
+        assert_eq!(llm_check_outcome(None), "ok");
+
+        // A local problem is never reported as something the provider did.
+        for local in [
+            LlmError::NotConfigured,
+            LlmError::InvalidConfiguration("x".into()),
+        ] {
+            assert_eq!(llm_check_outcome(Some(&local)), "misconfigured");
+        }
     }
 
     /// The shapes a BYOK user legitimately configures. Includes `http://` on

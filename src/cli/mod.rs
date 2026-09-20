@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::actions::llm::{build_request_payload, plan_with_llm, LlmError, LlmProvider};
+use crate::actions::llm::{build_request_payload, plan_with_llm, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
@@ -709,7 +709,7 @@ pub fn build_llm_check_report(
     endpoint_path: &str,
 ) -> LlmCheckReport {
     use crate::actions::llm::{
-        excerpt, CONNECTION_TEST_SYSTEM_PROMPT, CONNECTION_TEST_USER_PROMPT,
+        excerpt, llm_check_outcome, CONNECTION_TEST_SYSTEM_PROMPT, CONNECTION_TEST_USER_PROMPT,
     };
 
     let report = |outcome, error, response_excerpt| LlmCheckReport {
@@ -722,30 +722,16 @@ pub fn build_llm_check_report(
 
     match provider.complete(CONNECTION_TEST_SYSTEM_PROMPT, CONNECTION_TEST_USER_PROMPT) {
         Ok(reply) => report(
-            "ok",
+            llm_check_outcome(None),
             None,
             Some(excerpt(&reply, CHECK_RESPONSE_EXCERPT_LIMIT)),
         ),
-        // Mapped to a stable token so no UI has to read the prose to find out
-        // what happened, while the prose itself — already secret-free, and
+        // The token comes from `llm_check_outcome`, the sole producer, so the
+        // macOS app's wording for these five states can be diffed against it
+        // mechanically. The prose alongside it — already secret-free, and
         // asserted so per variant in `actions::llm`'s tests — carries the
         // detail a human needs to fix it.
-        Err(e) => {
-            let outcome = match &e {
-                LlmError::NetworkError(_) => "unreachable",
-                LlmError::ProviderStatus { .. } => "rejected",
-                LlmError::InvalidResponse(_) => "unusable_response",
-                // Both unreachable via this function — the caller cannot
-                // obtain a provider to pass in without being configured, and
-                // `provider_from_env` refuses an invalid base URL before
-                // returning one. Mapped rather than papered over with a panic,
-                // because a connection test that crashes is worse than one
-                // that is merely wrong about the category.
-                LlmError::NotConfigured => "rejected",
-                LlmError::InvalidConfiguration(_) => "misconfigured",
-            };
-            report(outcome, Some(e.to_string()), None)
-        }
+        Err(e) => report(llm_check_outcome(Some(&e)), Some(e.to_string()), None),
     }
 }
 
@@ -1311,6 +1297,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::actions::llm::LlmError;
     use crate::detectors::{Detector, DetectorId};
     use crate::evidence::correlate::CorrelationResult;
     use crate::evidence::model::{
