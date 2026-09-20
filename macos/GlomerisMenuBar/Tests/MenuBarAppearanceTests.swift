@@ -6,11 +6,18 @@
 //
 //  This is the regression test for a defect that shipped silently.
 //  `MenuBarExtra` renders the icon only — the title is accessibility text,
-//  not visible chrome — so an icon that fails to draw yields an empty,
-//  zero-width status item. The app still launches, stays alive and registers
-//  in the Aqua session; it simply has no reachable entrypoint, and emits no
-//  error, no crash and no log output. Nothing but a human looking at the
-//  menu bar caught it.
+//  not visible chrome — so an icon that fails to draw yields a status item
+//  that is present but blank. The app still launches, stays alive and
+//  registers in the Aqua session; it simply has no entrypoint a human can
+//  aim at, and emits no error, no crash and no log output. Nothing but a
+//  human looking at the menu bar caught it.
+//
+//  Measured on HORO-1294, and the reason these tests count pixels rather
+//  than checking that an item or an image exists: the broken build's status
+//  item was still in the accessibility tree at 18x24pt, enabled, with a
+//  working AXPress action, versus 36x24pt once a real glyph filled it. The
+//  item reserves its padding and draws nothing, so neither its presence nor
+//  a non-zero size is evidence that anything rendered.
 //
 //  HORO-1305 replaced the stock `externaldrive` SF Symbol with the Glomeris
 //  mark drawn from `GlomerisMark`, and the guard got stronger as a result.
@@ -102,9 +109,10 @@ final class MenuBarAppearanceTests: XCTestCase {
             0.06,
             """
             The menu-bar image is blank or near-blank (\(coverage) of pixels \
-            inked). MenuBarExtra renders the icon only, so this ships an \
-            invisible, zero-width status item with no reachable entrypoint and \
-            no error of any kind — see HORO-1294.
+            inked). MenuBarExtra renders the icon only, so this ships a status \
+            item that is present in the accessibility tree but draws nothing: \
+            no entrypoint a human can aim at, and no error of any kind — see \
+            HORO-1294.
             """
         )
     }
