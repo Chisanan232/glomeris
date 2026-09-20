@@ -42,6 +42,20 @@ succeeding but reporting a path this process can't `canonicalize`. This is
 deliberately never coerced into a safe default; treat it the same as "we
 don't know," not "nothing to clean up."
 
+## "The menu-bar app says the `glomeris` CLI was not found, but I installed it"
+
+The app lists the locations it searched in the same message. If your binary
+is not in one of them, that is the mismatch — move or symlink it into
+`/opt/homebrew/bin` or `/usr/local/bin`, or launch the app from a shell
+whose `PATH` contains its directory. A GUI app launched from Finder gets
+only `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, so a `PATH` that works in your
+terminal is not visible to the app. See
+[Menu Bar App](menu_bar_app.md#how-the-app-finds-the-glomeris-cli) for the
+full resolution order.
+
+You do not need to restart the app after installing the CLI: it re-resolves
+on every invocation, so the next poll picks it up.
+
 ## macOS permissions
 
 Glomeris's own I/O runs as the invoking user; it does not request or use
