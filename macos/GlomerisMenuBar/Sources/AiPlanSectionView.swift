@@ -219,13 +219,14 @@ enum AiPlanStateMessages {
             // The environment note is here because it is the single most
             // likely reason a user who *has* configured a provider in their
             // shell still lands here: a menu-bar agent launched from Finder
-            // inherits no shell environment. HORO-1309 replaces this with a
-            // real settings link.
+            // inherits no shell environment. HORO-1309 made that fixable
+            // without a terminal, and the view renders a Settings button
+            // beside this message — a message cannot carry a control.
             return .notLookedYet(
                 "No AI provider configured",
-                detail: "Glomeris found no provider settings, so it sent nothing. Note that "
-                    + "this app does not inherit your shell environment, so variables "
-                    + "exported in a terminal are not visible here."
+                detail: "Glomeris found no provider settings, so it sent nothing. Set one up in "
+                    + "Settings — note that this app does not inherit your shell environment, "
+                    + "so variables exported in a terminal are not visible here."
             )
 
         case .malformedOutput:
@@ -356,6 +357,12 @@ struct AiPlanSectionView: View {
     private let client: GlomerisClient
     private let projectRootsStore: ProjectRootsStore
 
+    /// Read at spawn time, not at init time, so a provider configured in the
+    /// Settings window takes effect on the next Ask without reopening the
+    /// popover (HORO-1309). Holding the resolved environment here instead
+    /// would cache a credential for the lifetime of a view.
+    private let settingsStore: GlomerisLlmSettingsStore
+
     @State private var outcome: AiPlanOutcome?
     @State private var lastPlannedAt: Date?
     @State private var isPlanning = false
@@ -375,10 +382,12 @@ struct AiPlanSectionView: View {
 
     init(
         client: GlomerisClient = GlomerisClient(),
-        projectRootsStore: ProjectRootsStore = ProjectRootsStore()
+        projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
+        settingsStore: GlomerisLlmSettingsStore = GlomerisLlmSettingsStore()
     ) {
         self.client = client
         self.projectRootsStore = projectRootsStore
+        self.settingsStore = settingsStore
     }
 
     var body: some View {
@@ -451,8 +460,8 @@ struct AiPlanSectionView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(
                 "Asking sends a summary of what Glomeris found to your configured provider, "
-                    + "which may cost money. Run `glomeris llm-plan --print-payload` to see "
-                    + "exactly what would be sent."
+                    + "which may cost money. Settings shows exactly what would be sent, without "
+                    + "sending it."
             )
             .font(GlomerisDesign.captionFont)
             .foregroundStyle(.tertiary)
@@ -487,6 +496,15 @@ struct AiPlanSectionView: View {
     private var outcomeBody: some View {
         if let message = AiPlanStateMessages.message(for: outcome, isPlanning: isPlanning) {
             GlomerisStateMessageView(message: message)
+        }
+
+        // HORO-1309: the one state with a remedy the user can act on from
+        // here. Rendered as a control beside the message rather than as more
+        // words inside it, because `AiPlanStateMessages` is a pure token->copy
+        // mapper and putting a button in it would give the message-building
+        // layer the ability to act.
+        if outcome == .notConfigured {
+            GlomerisSettingsButton(title: "Set up an AI provider…")
         }
 
         if case .plan(let report) = outcome {
@@ -666,16 +684,25 @@ struct AiPlanSectionView: View {
         lastErrorMessage = nil
 
         do {
-            let raw = try await client.runRaw(
-                ["llm-plan", "--json", "--progress-json"]
-                    + projectRootsStore.commandLineArguments,
-                progressType: ProgressEventDto.self,
-                onProgress: { event in
-                    Task { @MainActor in
-                        progressStatusText = ProgressStatusText.text(for: event)
+            // `withEnvironment` is what makes the Settings window's provider
+            // configuration reach the CLI: this app is `LSUIElement` and, when
+            // launched from Finder, inherits no shell environment at all, so
+            // before HORO-1309 the documented `GLOMERIS_LLM_*` setup silently
+            // did nothing here. `childEnvironment` is a COMPLETE environment,
+            // not an overlay — `Process.environment` replaces wholesale, and
+            // dropping PATH would break executable resolution.
+            let raw = try await client
+                .withEnvironment(settingsStore.childEnvironment())
+                .runRaw(
+                    ["llm-plan", "--json", "--progress-json"]
+                        + projectRootsStore.commandLineArguments,
+                    progressType: ProgressEventDto.self,
+                    onProgress: { event in
+                        Task { @MainActor in
+                            progressStatusText = ProgressStatusText.text(for: event)
+                        }
                     }
-                }
-            )
+                )
             outcome = AiPlanInterpretation.interpret(
                 exitCode: raw.exitCode,
                 stdout: raw.stdout,
