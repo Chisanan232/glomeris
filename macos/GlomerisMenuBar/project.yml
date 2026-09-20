@@ -17,6 +17,8 @@ targets:
     platform: macOS
     sources:
       - Sources
+    # NOTE: Sources/Info.plist is GENERATED from the properties below —
+    # `xcodegen generate` overwrites it. Edit it here, never there.
     info:
       path: Sources/Info.plist
       properties:
@@ -24,11 +26,24 @@ targets:
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         NSHumanReadableCopyright: "Copyright © Glomeris. All rights reserved."
+        # HORO-1305. Both keys are declared rather than relying on the partial
+        # plist actool merges in. CFBundleIconName is what modern AppKit and
+        # System Settings > Login Items read from the compiled asset catalog;
+        # CFBundleIconFile names the AppIcon.icns actool also emits, which is
+        # the older Finder fallback. Before this ticket neither key existed and
+        # there was no asset catalog at all, so the app showed the generic
+        # blank icon in Finder, Login Items and Cmd-Tab.
+        CFBundleIconFile: AppIcon
+        CFBundleIconName: AppIcon
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBar
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: NO
+        # HORO-1305. Sources/Assets.xcassets/AppIcon.appiconset is generated
+        # from Sources/GlomerisMark.swift by scripts/generate-app-icon.sh;
+        # scripts/check-app-icon-matches-geometry.sh keeps the two in step.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     scheme:
       testTargets:
         - GlomerisMenuBarTests
@@ -42,6 +57,7 @@ targets:
       - path: Sources/GlomerisClient.swift
       - path: Sources/GlomerisExecutableLocator.swift
       - path: Sources/MenuBarAppearance.swift
+      - path: Sources/GlomerisMark.swift
       - path: Sources/ProjectRootsStore.swift
       - path: Sources/GlomerisDtos.swift
       - path: Sources/StatusHealthSectionView.swift

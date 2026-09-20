@@ -46,11 +46,15 @@ jobs:
     # let it merge unchecked. Guarding that cross-language contract is most of
     # this job's value, so it runs on every PR.
     #
-    # Runner and Xcode are both pinned, not left to the image default:
-    # MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS asserts an SF
-    # Symbol resolves on the *running* OS, so the OS and toolchain are part of
-    # what this job asserts. `macos-latest` would silently re-point that
-    # assertion at a new OS during some unrelated PR.
+    # Runner and Xcode are both pinned, not left to the image default,
+    # because some of what this job asserts is a property of the running OS.
+    # That used to be MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS
+    # ("does this SF Symbol exist here"); HORO-1305 replaced the stock symbol
+    # with locally drawn geometry and that test with
+    # testMenuBarImageActuallyDrawsInk, which rasterises the glyph through
+    # AppKit and CoreGraphics and counts opaque pixels. The pin still matters
+    # for the same reason: `macos-latest` would silently re-point a
+    # rendering-dependent assertion at a new OS during some unrelated PR.
     #
     # It must also be an Xcode that can open the committed project at all.
     # XcodeGen 2.46.0 emits `objectVersion = 77`, and macos-14's default Xcode
@@ -136,6 +140,37 @@ jobs:
           echo "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin" >> "$GITHUB_PATH"
       - name: Check the committed xcodeproj matches project.yml
         run: bash scripts/check-xcodeproj-matches-xcodegen.sh
+
+  app-icon-drift:
+    # HORO-1305: the AppIcon PNGs under
+    # macos/GlomerisMenuBar/Sources/Assets.xcassets are generated from
+    # Sources/GlomerisMark.swift, and both are committed.
+    #
+    # Binary assets are the one thing a reviewer genuinely cannot review — a
+    # PNG in a diff is "Binary files differ", so any claim about what the icon
+    # looks like is taken on trust. Generating it from readable geometry only
+    # helps if something proves the committed bytes really are that geometry's
+    # output. Finder, the Dock and System Settings > Login Items read the
+    # compiled asset catalog and never read the Swift, so without this a mark
+    # edit with stale PNGs would ship an icon the code no longer describes.
+    #
+    # A separate job, for the same reason xcodeproj-drift is one: stale art
+    # and a failing test are different problems and neither should mask the
+    # other.
+    #
+    # Xcode is pinned to match `macos-app` — the comparison tolerance in
+    # macos/tools/icongen/main.swift is calibrated against CoreGraphics'
+    # rasteriser, so the toolchain is part of what is being asserted.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the pinned Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.2.app
+          xcodebuild -version
+      - name: Check the committed app icon matches GlomerisMark's geometry
+        run: bash scripts/check-app-icon-matches-geometry.sh
 
   no-policy-in-swift:
     # HORO-1068: mechanical guard — GlomerisMenuBar (the macOS thin client)
