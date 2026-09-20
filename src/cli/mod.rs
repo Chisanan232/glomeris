@@ -472,15 +472,32 @@ pub fn credential_flag_name(arg: &str) -> &str {
 /// for why an LLM-proposed plan must never reach execution directly.
 ///
 /// SAFETY-CRITICAL: a [`PolicyClass::Protected`] decision short-circuits
-/// here, BEFORE `actions.get`/`dry_run` are ever called for that item —
-/// this is what makes it structurally impossible for a hallucinating (or
-/// adversarial) LLM response to cause a protected resource's action to be
-/// resolved, let alone rendered. See `tests/golden_llm_plan_protected_refusal.rs`
-/// for an end-to-end proof.
+/// here, BEFORE `dry_run` is ever called for that item — this is what makes
+/// it structurally impossible for a hallucinating (or adversarial) LLM
+/// response to cause a protected resource's action to be *planned*, let
+/// alone rendered. See `tests/golden_llm_plan_protected_refusal.rs` for an
+/// end-to-end proof.
+///
+/// HORO-1308 narrowed that sentence by one word, deliberately and with no
+/// loss: it used to say "before `actions.get`/`dry_run`". Every item now
+/// also carries the same [`DetectCandidateReport`] projection `glomeris
+/// detect` prints, and building it calls [`resolve_action_for`] — a registry
+/// lookup — for protected resources too, exactly as `detect` already does
+/// for them. That lookup plans nothing, touches no filesystem, and its
+/// result is *discarded unused* for a protected decision:
+/// `executable_fields` tests `PolicyClass::Protected` first and returns
+/// `(false, [], Some("PROTECTED: …"))` whatever action was resolved. The
+/// property that matters — no action is ever planned or offered for a
+/// protected resource, however insistently a model asks — is unchanged, and
+/// is asserted directly in the golden test.
+///
+/// `impact` is the free-space context for the nested candidates' impact
+/// tiers; pass [`ImpactContext::default`] where it is genuinely unknown.
 pub fn build_llm_plan_report(
     candidates: &[(Evidence, PolicyDecision)],
     actions: &ActionRegistry,
     provider: &dyn LlmProvider,
+    impact: ImpactContext,
 ) -> LlmPlanReport {
     let evidences: Vec<Evidence> = candidates.iter().map(|(ev, _)| ev.clone()).collect();
     let result = plan_with_llm(provider, &evidences, actions);
@@ -501,6 +518,19 @@ pub fn build_llm_plan_report(
         let policy_label = crate::reporting::label_for(decision).as_str();
         let priority = validated.priority;
         let model_reason = validated.model_reason;
+        // Built from `ev` and `decision` only — the local evidence and the
+        // real policy verdict. Note what is NOT an input: anything from
+        // `validated`. The model cannot influence `executable`,
+        // `offered_actions` or `refusal_reason` even by naming a different
+        // action than the one policy would resolve.
+        let candidate = DetectCandidateReport::from_evidence_and_decision(
+            ev,
+            decision,
+            resolve_action_for(ev, actions),
+            impact,
+        );
+        let completeness = crate::reporting::dto::completeness_tag(&ev.completeness());
+        let confidence = crate::reporting::dto::confidence_tag(ev.confidence());
 
         if decision.class == PolicyClass::Protected {
             items.push(LlmPlanItemReport {
@@ -513,6 +543,9 @@ pub fn build_llm_plan_report(
                 skip_reason: Some(
                     "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
                 ),
+                candidate,
+                completeness,
+                confidence,
             });
             continue;
         }
@@ -527,6 +560,9 @@ pub fn build_llm_plan_report(
                     model_reason,
                     explain: Some(plan.explain),
                     skip_reason: None,
+                    candidate,
+                    completeness,
+                    confidence,
                 },
                 Err(e) => LlmPlanItemReport {
                     resource_id,
@@ -536,6 +572,9 @@ pub fn build_llm_plan_report(
                     model_reason,
                     explain: None,
                     skip_reason: Some(format!("{e:?}")),
+                    candidate,
+                    completeness,
+                    confidence,
                 },
             },
             None => LlmPlanItemReport {
@@ -546,6 +585,9 @@ pub fn build_llm_plan_report(
                 model_reason,
                 explain: None,
                 skip_reason: Some("no registered action for this action id".to_string()),
+                candidate,
+                completeness,
+                confidence,
             },
         });
     }
@@ -2026,7 +2068,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.provider_error.is_none());
         assert_eq!(report.items.len(), 1);
@@ -2078,7 +2121,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.provider_error.is_none());
         assert_eq!(report.items.len(), 1);
@@ -2106,7 +2150,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.items.is_empty());
         assert_eq!(report.dropped_unknown_resource, 1);
@@ -2125,7 +2170,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
 
         assert!(report.items.is_empty());
         assert!(report.provider_error.is_some());
@@ -2150,7 +2196,8 @@ mod tests {
         let candidates = vec![(ev, decision)];
         let actions = ActionRegistry::builtin();
 
-        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let report =
+            build_llm_plan_report(&candidates, &actions, &provider, ImpactContext::default());
         let rendered = report.provider_error.expect("provider error is set");
 
         assert!(rendered.contains("HTTP 401"), "got: {rendered}");

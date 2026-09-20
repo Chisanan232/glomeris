@@ -690,13 +690,19 @@ fn run_llm_plan_command(args: &[String]) {
         return;
     }
 
+    // Same free-space context `detect` uses, so an AI-suggested row's size
+    // emphasis matches the identical row in the candidates list rather than
+    // being computed against a different (or absent) notion of "free".
+    let impact = impact_context();
     let report = match plan_file {
         Some(path) => {
             let provider = FilePlanProvider { path };
-            glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider)
+            glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider, impact)
         }
         None => match provider_from_env() {
-            Ok(provider) => glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider),
+            Ok(provider) => {
+                glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider, impact)
+            }
             Err(_) => {
                 eprintln!(
                     "glomeris llm-plan: missing LLM configuration — set GLOMERIS_LLM_API_KEY, \
