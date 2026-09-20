@@ -364,6 +364,77 @@ Exit codes for this subcommand specifically:
   missing live-mode environment configuration, or an `--api-key`/`--key`/
   `--token` flag.
 
+## `glomeris llm-check [--json]`
+
+Not macOS-gated. Tests the configured BYOK setup and reports whether the
+endpoint, credential and model work (HORO-1309). Runs no detectors, reads no
+project roots, collects no evidence, and consults no policy — it is not a
+planning command, and there is nothing it could execute.
+
+- Sends the two fixed prompts in `actions::llm::CONNECTION_TEST_SYSTEM_PROMPT`
+  / `CONNECTION_TEST_USER_PROMPT` ("You are a connection test. Reply with the
+  single word: ok." / "ok") through the same `LlmProvider::complete` a real
+  plan uses. Same code path, so a pass means a plan will route and authenticate
+  — not that a cheaper probe succeeded.
+- The prompts are constants with no interpolation, so a connection test
+  describes nothing about this machine: no path, no home directory, no account
+  name (`connection_test_prompts_describe_nothing_local`).
+- Configuration comes only from
+  `GLOMERIS_LLM_API_KEY`/`GLOMERIS_LLM_BASE_URL`/`GLOMERIS_LLM_MODEL`, all
+  three required, exactly as for `llm-plan`.
+  `--api-key`/`--key`/`--token` are rejected by flag name, and the error names
+  the flag only — never the value beside it.
+- `--json` prints an `LlmCheckReport`: `outcome`, `model`, `endpoint_path`,
+  `error`, `response_excerpt`. Human-readable output opens with
+  `LLM CONNECTION OK` or `LLM CONNECTION FAILED (<outcome>)`.
+- `outcome` is one of five tokens, produced by the single
+  `actions::llm::llm_check_outcome` mapping so the CLI, the book and the
+  menu-bar app cannot disagree about what a failure was:
+
+| `outcome` | What happened | Where the fix is |
+|---|---|---|
+| `ok` | The provider answered and its reply is excerpted in `response_excerpt` | — |
+| `unreachable` | No HTTP response at all — DNS, TLS, refused connection, timeout | Network, host name, or VPN |
+| `rejected` | The provider answered with a non-2xx status | Credential, or the base-URL path — read the path in `error` |
+| `unusable_response` | A 2xx response that was empty, not JSON, or missing `choices[0].message.content` | Model name, or a gateway not actually speaking the OpenAI shape |
+| `misconfigured` | A base URL that cannot work — `validate_base_url` refused it before anything was sent | The base URL itself; see [BYOK LLM Planner](byok.md#glomeris_llm_base_url-is-the-api-root-not-the-host-root) |
+
+  The fifth is the odd one out: `LlmError::InvalidConfiguration` can only come
+  from constructing the provider, which happens *before* any report exists, so
+  `glomeris llm-check` never prints a report whose `outcome` is
+  `misconfigured` — it exits `2` with one line on stderr instead. The token is
+  in the vocabulary because that is the name for what happened, and a caller
+  branching on exit `2` (the menu-bar app does) classifies it that way itself
+  rather than inventing a sixth word for the same condition.
+
+- `error` carries the same secret-free sentence `llm-plan`'s `provider_error`
+  does — status, API style, request path, `x-request-id` when the provider
+  sends one, and a bounded excerpt of the provider's own error body, with the
+  configured key scrubbed out of it. Never the `Authorization` header, the
+  key, the scheme, the host, or the query string.
+
+```sh
+glomeris llm-check --json
+```
+
+Exit codes for this subcommand specifically:
+
+- `0` — the provider answered and `outcome` is `ok`.
+- `1` — a check ran and did not pass (`unreachable`, `rejected`,
+  `unusable_response`). **The report is printed first**, so an exit `1` still
+  carries a complete, readable diagnosis on stdout.
+- `2` — nothing was sent and there is no report at all: an unrecognized
+  argument, an `--api-key`/`--key`/`--token` flag, a base URL
+  `validate_base_url` refused, or missing configuration (the message names
+  the three variable *names*, never a value). Stdout is empty; the reason is
+  one line on stderr prefixed `glomeris llm-check: `.
+
+The split matters for a caller branching on the code without parsing output,
+which is exactly what the menu-bar app's connection test does: `2` means "fix
+your invocation or setup", never "the network is having a bad day". A `2` with
+no report is the one case where a UI has to quote the CLI's own sentence rather
+than render a report.
+
 ## `glomeris execute --action-id <id> --resource-id <id> [--project-root <path>]... [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]`
 
 macOS only (exits 1 with an error message on other platforms). The sole
@@ -657,11 +728,13 @@ currently do end to end.
 - `1` — a macOS-only command was run on a non-macOS platform, a
   platform-level operation (e.g. reading the `launchd` plist path) failed,
   or (for `llm-plan` specifically) the LLM provider call/response parsing
-  failed, or `--plan-file` named an unreadable path.
+  failed, or `--plan-file` named an unreadable path, or (for `llm-check`
+  specifically) the check ran and did not pass.
 - `2` — usage error: unknown top-level command, unknown `daemon` subcommand,
-  missing/unrecognized `free` arguments, or (for `llm-plan` specifically)
-  an unrecognized argument, a missing flag value, missing live-mode LLM
-  environment configuration, or an `--api-key`/`--key`/`--token` flag.
+  missing/unrecognized `free` arguments, or (for `llm-plan`/`llm-check`
+  specifically) an unrecognized argument, a missing flag value, missing
+  live-mode LLM environment configuration, a base URL that cannot work, or an
+  `--api-key`/`--key`/`--token` flag.
 - `75` — (`free`/`emergency`/`execute` only) the HORO-1054 execution lock
   is already held by another `glomeris` invocation.
 
@@ -671,5 +744,6 @@ those codes (`1`, `2`) overlap this list's meanings but are worth reading
 in full since `execute` is the one subcommand with real destructive
 consequences.
 
-See `glomeris llm-plan`'s own section above for that subcommand's exit
-codes in full detail.
+See `glomeris llm-plan`'s and `glomeris llm-check`'s own sections above for
+those subcommands' exit codes in full detail — `llm-check`'s `1`/`2` split in
+particular carries a meaning this list cannot: whether a report exists.
