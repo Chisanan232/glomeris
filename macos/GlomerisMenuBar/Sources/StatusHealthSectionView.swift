@@ -101,6 +101,14 @@ struct SectionFetchErrors: Equatable {
                 : "\(subject): \(trimmed)"
         case .unexpectedExitCode(let code):
             return "\(subject): the CLI exited with code \(code)."
+        case .executableNotFound(let searched):
+            // Names the places that were actually searched rather than
+            // telling the user to install "somewhere", because HORO-1295 was
+            // precisely a case of the binary being installed and the app
+            // looking in the wrong place. Someone who already ran
+            // `brew install glomeris` needs to be able to see that.
+            return "\(subject): the glomeris CLI was not found. Looked in: "
+                + searched.joined(separator: ", ") + "."
         }
     }
 }

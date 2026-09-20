@@ -71,6 +71,12 @@ enum GlomerisClientError: Error, Equatable {
     /// The process exited `0` but stdout did not decode as the requested
     /// `Output` type.
     case outputDecodingFailed(String)
+    /// No `glomeris` binary was found in any of the searched locations, so
+    /// nothing was spawned (HORO-1295). Distinct from `executionFailed`
+    /// because the remedy is different and knowable: a binary that exists
+    /// but fails to launch is a broken install, whereas this is no install
+    /// at all, and the associated names tell the user where to put one.
+    case executableNotFound(searched: [String])
 }
 
 /// One-shot carrier for a child process's exit status, handing it from
@@ -136,22 +142,51 @@ final class ExitStatusRelay: @unchecked Sendable {
 
 /// Spawns the `glomeris` binary and decodes its output.
 struct GlomerisClient {
-    let executableURL: URL
+    /// A caller-chosen binary that bypasses resolution entirely, or `nil` to
+    /// resolve through `locator` on every invocation.
+    private let pinnedExecutableURL: URL?
+    private let locator: GlomerisExecutableLocator
     let environment: [String: String]?
 
-    init(executableURL: URL = GlomerisClient.defaultExecutableURL, environment: [String: String]? = nil) {
-        self.executableURL = executableURL
+    /// Always spawns exactly `executableURL`, never resolving anything. The
+    /// tests use this to pin a fixture binary, and a pin is honoured even
+    /// when it does not exist — so a test pinning a missing path still gets
+    /// the spawn failure it is asserting on, rather than silently finding
+    /// whatever `glomeris` the host happens to have installed.
+    init(executableURL: URL, environment: [String: String]? = nil) {
+        pinnedExecutableURL = executableURL
+        locator = GlomerisExecutableLocator()
         self.environment = environment
     }
 
-    /// TODO(HORO-????): finding the actual embedded/installed `glomeris`
-    /// binary (bundled resource vs. Homebrew vs. `PATH` resolution via
-    /// `/usr/bin/env glomeris` semantics) is explicit future scope, not
-    /// this ticket's. This is a placeholder path only — callers who need
-    /// a specific binary should pass `executableURL` explicitly to the
-    /// initializer rather than rely on this default.
-    static var defaultExecutableURL: URL {
-        URL(fileURLWithPath: "/usr/local/bin/glomeris")
+    /// Resolves the binary through `locator` (HORO-1295). This is what the
+    /// views use, and replaces the previous hardcoded
+    /// `/usr/local/bin/glomeris` default that made the app unusable after a
+    /// documented `brew install` on Apple Silicon.
+    init(
+        environment: [String: String]? = nil,
+        locator: GlomerisExecutableLocator = GlomerisExecutableLocator()
+    ) {
+        pinnedExecutableURL = nil
+        self.locator = locator
+        self.environment = environment
+    }
+
+    /// The binary to spawn for one invocation.
+    ///
+    /// Resolved per invocation rather than once when the client is built, so
+    /// installing the CLI while the app is already running takes effect at
+    /// the next poll (10s) instead of requiring a restart — the app is an
+    /// `LSUIElement` that a user leaves running for days, and "quit and
+    /// relaunch it" is not a remedy anyone should have to be told.
+    private func resolveExecutableURL() throws -> URL {
+        if let pinnedExecutableURL {
+            return pinnedExecutableURL
+        }
+        guard let located = locator.locate() else {
+            throw GlomerisClientError.executableNotFound(searched: locator.searchedLocations)
+        }
+        return located.url
     }
 
     /// Runs `glomeris` with `arguments`, decodes stdout as `Output`, and
@@ -199,16 +234,17 @@ struct GlomerisClient {
     /// Runs `glomeris` and hands back its raw exit code, stdout, stderr,
     /// and decoded progress lines with no exit-code-specific
     /// interpretation — see `GlomerisRawResult`'s doc comment for why
-    /// this exists alongside `run` above. Only throws if the process
-    /// could not be spawned at all; every other outcome, including any
-    /// non-zero exit code, is returned rather than thrown.
+    /// this exists alongside `run` above. Only throws if no binary was found
+    /// to spawn, or if the one found could not be spawned at all; every other
+    /// outcome, including any non-zero exit code, is returned rather than
+    /// thrown.
     func runRaw<Progress: Decodable>(
         _ arguments: [String],
         progressType: Progress.Type = Progress.self,
         onProgress: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> GlomerisRawResult<Progress> {
         let process = Process()
-        process.executableURL = executableURL
+        process.executableURL = try resolveExecutableURL()
         process.arguments = arguments
         if let environment {
             process.environment = environment
