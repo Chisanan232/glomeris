@@ -28,6 +28,43 @@ private struct DetectReportProbe: Decodable {
     let candidates: [DetectCandidateProbe]
 }
 
+/// Collects results produced on a non-test thread, so the hang test below
+/// can run its workload off the cooperative pool and still assert on what
+/// happened. `@unchecked Sendable` with an explicit lock rather than an
+/// `actor`, because the assertions run synchronously after
+/// `wait(for:timeout:)` returns and must not need `await` — an `await` in
+/// the assertion would put the test back on the very pool whose starvation
+/// it is trying to detect.
+private final class InvocationLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recordedExitCodes: [Int32] = []
+    private var recordedFailures: [String] = []
+
+    func record(exitCode: Int32) {
+        lock.lock()
+        recordedExitCodes.append(exitCode)
+        lock.unlock()
+    }
+
+    func record(failure: String) {
+        lock.lock()
+        recordedFailures.append(failure)
+        lock.unlock()
+    }
+
+    var exitCodes: [Int32] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedExitCodes
+    }
+
+    var failures: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedFailures
+    }
+}
+
 final class GlomerisClientTests: XCTestCase {
     // MARK: - Shared fixture executable
 
@@ -74,6 +111,62 @@ final class GlomerisClientTests: XCTestCase {
 
         XCTAssertFalse(source.contains("/bin/sh"), "GlomerisClient must never shell out via /bin/sh")
         XCTAssertFalse(source.contains(".launchPath"), "GlomerisClient must never use Process.launchPath")
+    }
+
+    /// HORO-1304's deterministic guard, in the same mechanical style as the
+    /// no-shell check above — and for the same reason: the property is
+    /// absolute, and a source assertion holds on every run, whereas the bug
+    /// it prevents only surfaced in about one run in six.
+    ///
+    /// `runRaw` is `async`, so its body executes on a Swift-concurrency
+    /// cooperative thread. `Process.waitUntilExit()` blocks the calling
+    /// thread, and with no `terminationHandler` installed Foundation reaps
+    /// the child via the *launching* thread's run loop — which a cooperative
+    /// thread never runs again. The wait then never ends: the child has long
+    /// since exited, and nothing will ever tell this thread so. Awaiting
+    /// `ExitStatusRelay`, fed by a handler installed before `run()`, both
+    /// suspends instead of blocking and puts the reaping on a dispatch queue
+    /// rather than a run loop.
+    ///
+    /// Asserted on the source rather than via a probe because there is no
+    /// "safe" occurrence to allow: any `waitUntilExit` reachable from an
+    /// `async` context reintroduces the defect, and a reviewer adding one
+    /// deserves to be told exactly that rather than to be handed a flake.
+    ///
+    /// Comment lines are stripped before scanning, so the rule applies to
+    /// code and the source stays free to name the banned call while
+    /// explaining why it is banned — which the fix's own comment does, and
+    /// which a naive whole-file `contains` check turned into a self-inflicted
+    /// failure.
+    func testSourceNeverBlocksAThreadWaitingForProcessExit() throws {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // GlomerisMenuBar
+            .appendingPathComponent("Sources/GlomerisClient.swift")
+        let wholeFile = try String(contentsOf: sourceURL, encoding: .utf8)
+        let source = wholeFile
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertFalse(
+            source.contains("waitUntilExit"),
+            """
+            GlomerisClient must never call Process.waitUntilExit(): it blocks \
+            the calling thread, which in an async function is a Swift \
+            concurrency cooperative thread, and it then never returns \
+            (HORO-1304). Await ExitStatusRelay instead.
+            """
+        )
+        XCTAssertTrue(
+            source.contains("terminationHandler"),
+            """
+            The exit status must be delivered by a terminationHandler \
+            installed before Process.run(); without one, Foundation reaps the \
+            child through the launching thread's run loop, which a \
+            cooperative thread never runs (HORO-1304).
+            """
+        )
     }
 
     // MARK: - Success path
@@ -287,6 +380,131 @@ final class GlomerisClientTests: XCTestCase {
 
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(result.progressLines.map(\.percent), [10, 50])
+    }
+
+    // MARK: - HORO-1304: waiting for exit must never block a thread
+
+    /// Concurrent-invocation coverage: many `runRaw` calls in flight at once
+    /// must all return, each with its own child's exit code.
+    ///
+    /// Scope, stated honestly because it is easy to assume otherwise: this
+    /// test does **not** reproduce HORO-1304. It was written to, and
+    /// A/B-tested against the blocking implementation three ways — 60
+    /// sequential spawns, then 72 concurrent ones, then the same with no
+    /// `terminationHandler` installed at all. All three passed while the bug
+    /// was present. The hang needs whatever ordering the full class produces
+    /// (it surfaced in about one run in six, in a different test each time),
+    /// and no synthetic workload found here reproduces it on demand. The
+    /// deterministic guard for the defect is
+    /// `testSourceNeverBlocksAThreadWaitingForProcessExit` above; the
+    /// mechanism that replaced the block is pinned by the `ExitStatusRelay`
+    /// tests below.
+    ///
+    /// What this test does add is genuine: the app fires its popover fetches
+    /// concurrently, nothing else here exercises more than one invocation at
+    /// a time, and it verifies exit codes are not cross-wired between
+    /// simultaneous children. It also runs the workload on `Task.detached`
+    /// and waits on an `XCTestExpectation`, so the test thread is a real
+    /// thread on a run loop: if a future regression does wedge the
+    /// cooperative pool, this fails on a deadline instead of wedging
+    /// `xcodebuild` until the CI job's own limit — which is exactly why the
+    /// original hang read as an infrastructure timeout rather than a test
+    /// failure.
+    func testConcurrentRunRawInvocationsAllReturnWithoutBlockingTheCooperativePool() {
+        // Deliberately wider than the cooperative pool on any machine this
+        // runs on: the pool is sized to the active core count, so exceeding
+        // it is what turns "a blocked thread" into "no thread left to make
+        // progress".
+        let concurrency = max(24, ProcessInfo.processInfo.activeProcessorCount * 2)
+        let rounds = 3
+        let expected = concurrency * rounds
+        let log = InvocationLog()
+        let client = fixtureClient()
+        let finished = expectation(description: "\(expected) concurrent runRaw invocations return")
+
+        Task.detached {
+            for round in 0..<rounds {
+                await withTaskGroup(of: Void.self) { group in
+                    for slot in 0..<concurrency {
+                        group.addTask {
+                            let exitCode = Int32(slot % 7)
+                            do {
+                                let result = try await client.runRaw(
+                                    [String(exitCode), #"{"value": 1}"#, "{\"percent\": 3}\n"],
+                                    progressType: PercentProgress.self
+                                )
+                                log.record(exitCode: result.exitCode)
+                            } catch {
+                                log.record(failure: "round \(round) slot \(slot) threw: \(error)")
+                            }
+                        }
+                    }
+                }
+            }
+            finished.fulfill()
+        }
+
+        wait(for: [finished], timeout: 90)
+
+        XCTAssertEqual(log.failures, [])
+        XCTAssertEqual(
+            log.exitCodes.count,
+            expected,
+            "every concurrent invocation must return, and report its own child's exit code"
+        )
+        XCTAssertEqual(
+            log.exitCodes.sorted(),
+            (0..<expected).map { Int32(($0 % concurrency) % 7) }.sorted(),
+            "exit codes must not be cross-wired between concurrent invocations"
+        )
+    }
+
+    /// The exit status is now delivered by a `terminationHandler` installed
+    /// *before* `Process.run()`, because Foundation will not invoke a handler
+    /// attached to an already-terminated process. That creates two possible
+    /// orderings, and `ExitStatusRelay` exists to make both safe. This is
+    /// the one that used to be a race in every hand-rolled version of this
+    /// pattern: the child is fast, exits before anybody awaits, and the
+    /// status must already be sitting in the relay.
+    func testExitStatusRelayDeliversAStatusThatArrivedBeforeAnyoneWaited() async {
+        let relay = ExitStatusRelay()
+        relay.complete(5)
+
+        let status = await relay.wait()
+
+        XCTAssertEqual(status, 5)
+    }
+
+    /// The other ordering: somebody is already suspended when the child
+    /// exits. This is the path that must resume the continuation rather
+    /// than leave it parked forever — i.e. the actual fix for the hang.
+    func testExitStatusRelayDeliversAStatusThatArrivesAfterTheWaitBegins() async {
+        let relay = ExitStatusRelay()
+        Task.detached {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            relay.complete(7)
+        }
+
+        let status = await relay.wait()
+
+        XCTAssertEqual(status, 7)
+    }
+
+    /// Resuming a `CheckedContinuation` twice traps. The relay is one-shot
+    /// so that a duplicate termination callback — or a `wait` racing a
+    /// second `complete` — degrades to "first status wins" instead of
+    /// crashing the app.
+    func testExitStatusRelayIsOneShotSoARepeatedCompletionCannotTrap() async {
+        let relay = ExitStatusRelay()
+        relay.complete(3)
+        relay.complete(9)
+
+        let first = await relay.wait()
+        // Waiting again is also safe: the status is retained, not consumed.
+        let second = await relay.wait()
+
+        XCTAssertEqual(first, 3, "the first completion wins")
+        XCTAssertEqual(second, 3)
     }
 
     // MARK: - Real binary integration
