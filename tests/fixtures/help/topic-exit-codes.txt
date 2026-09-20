@@ -1,0 +1,19 @@
+Exit codes
+
+Shared by every subcommand:
+  0   success.
+  1   a real failure: a macOS-only command on another platform, a platform
+      operation that failed, or a provider call that could not complete.
+  2   usage error: an unknown command or subcommand, a missing or
+      unrecognized argument, or a credential passed as a flag.
+  75  the execution lock is held by another glomeris invocation. Only the
+      commands that can delete take this lock.
+
+Commands that give these codes more specific meanings:
+  llm-plan    1, 2                  `glomeris llm-plan --help`
+  llm-check   0, 1, 2               `glomeris llm-check --help`
+  execute     0, 1, 2, 3, 4, 5, 75  `glomeris execute --help`
+
+`execute` is the one worth reading in full before scripting against it: its
+codes distinguish a policy refusal from a revalidation abort from a plan that
+ran and failed, which a caller needs to tell apart.

@@ -1,0 +1,19 @@
+glomeris status — Current disk-pressure state and the thresholds behind it.
+
+usage: glomeris status [--json]
+
+Read-only — changes nothing.
+
+Reads the filesystem's free space and reports which pressure state that falls
+into, together with the thresholds used to decide. Runs no detectors, so it is
+fast and says nothing about individual resources.
+
+Options
+  --json
+      Print a StatusReport as JSON on stdout instead of prose.
+
+Examples
+  glomeris status
+      Is anything wrong right now?
+
+See also: detect, history

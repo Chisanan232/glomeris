@@ -1,0 +1,64 @@
+glomeris execute — Run one action against one resource, under policy.
+
+usage: glomeris execute --action-id <id> --resource-id <id>
+                [--confirm-ask --observed-fingerprint <token>]
+                [--project-root <path>]... [--json] [--progress-json]
+
+Can delete data — every deletion is policy-gated.
+
+The only command that performs one specific deletion you named. You supply
+selectors and nothing else: there is no flag to pass a policy class, a raw
+path as a target, a shell string, or a --force override.
+
+What happens to the resource is policy's decision, not yours and not this flag
+list's. AUTO_SAFE proceeds with no confirmation. ASK requires --confirm-ask
+together with the exact --observed-fingerprint token from a prior `explain
+--json` on that same resource — a fingerprint this process observed itself
+would defeat the point, so it is not accepted. PROTECTED refuses
+unconditionally: no combination of flags that exists can authorize it. Even
+after authorization, a revalidation immediately before deletion aborts the
+plan if the resource changed in between.
+
+Options
+  --action-id <id>
+      Required. Must match the action the resolved resource actually
+      offers, as printed by `actions list` or `explain`.
+  --resource-id <id>
+      Required. A resource id as printed by `detect` or `explain`.
+  --confirm-ask
+      Supply consent for an ASK-classified resource. Must be passed
+      together with --observed-fingerprint or not at all.
+  --observed-fingerprint <token>
+      The fingerprint_token from a prior `explain --json` on this
+      resource, copied verbatim. Never hand-constructed.
+  --project-root <path>
+      Same meaning as for `detect`. Repeatable.
+  --json
+      Print an ExecuteReport, or an ExecuteRefusalReport naming which
+      refusal fired, on stdout. Never silent on a non-executed outcome.
+  --progress-json
+      Stream progress events as JSON lines to stderr.
+
+Examples
+  glomeris execute --action-id cargo.clean.target_dir \
+    --resource-id cargo_target_dir:/Users/me/proj/target --json
+      An AUTO_SAFE resource needs no confirmation flags.
+  glomeris execute --action-id <id> --resource-id <id> \
+    --confirm-ask --observed-fingerprint "$TOKEN"
+      An ASK resource, with consent pinned to what `explain` saw.
+
+Exit codes
+  0   the action executed and succeeded.
+  1   the action executed but a step of the plan failed.
+  2   usage error, including --confirm-ask without a fingerprint or a
+      malformed token.
+  3   refused by policy: PROTECTED, ASK with no consent, or a consent that
+      did not match.
+  4   aborted by revalidation — the resource changed between
+      authorization and deletion.
+  5   the resource id matched nothing, offered no action, or offered a
+      different one.
+  75  another glomeris invocation holds the execution lock.
+  Run `glomeris help exit-codes` for the codes shared by every command.
+
+See also: explain, clean, actions

@@ -1,0 +1,32 @@
+glomeris explain — Why one resource is classified the way it is.
+
+usage: glomeris explain <resource_id_or_path> [--project-root <path>]...
+                [--json] [--progress-json]
+
+Read-only — changes nothing.
+
+Shows the full evidence-and-policy picture for a single resource: what was
+observed, which rule that triggered, and what would be offered for it. This is
+the command to reach for when a classification looks wrong — it shows the
+reasoning, not just the verdict. With --json it also emits the
+fingerprint_token that `execute` requires for an ASK-classified resource.
+
+Options
+  <resource_id_or_path>
+      Required. Either a resource id as printed by `detect`, or a
+      filesystem path.
+  --project-root <path>
+      Same meaning as for `detect`. Repeatable.
+  --json
+      Print an ExplainReport as JSON on stdout, including
+      fingerprint_token.
+  --progress-json
+      Stream progress events as JSON lines to stderr.
+
+Examples
+  glomeris explain ~/Library/Developer/Xcode/DerivedData
+      Why is that safe, or not?
+  glomeris explain cargo_target_dir:/Users/me/proj/target --json
+      Capture fingerprint_token before an ASK execution.
+
+See also: detect, execute

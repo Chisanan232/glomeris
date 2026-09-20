@@ -1,0 +1,26 @@
+glomeris clean — Render what would be cleaned. Executes nothing.
+
+usage: glomeris clean --dry-run [--target <resource_id_or_path>]
+                [--project-root <path>]...
+
+Advisory — proposes, never executes.
+
+Builds the real plan for every candidate (or one, with --target) and prints it
+without running it. --dry-run is required and there is no flag that removes
+it: this command has no executing mode to fall into by typo. To actually act,
+use `execute` for one resource or `free` for a target.
+
+Options
+  --dry-run
+      Required. Omitting it is a usage error, not an execution.
+  --target <resource_id_or_path>
+      Restrict the output to one resource. Without it, every discovered
+      candidate is rendered.
+  --project-root <path>
+      Same meaning as for `detect`. Repeatable.
+
+Examples
+  glomeris clean --dry-run
+      What would be removed, exactly?
+
+See also: detect, execute, free

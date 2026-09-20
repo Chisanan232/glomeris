@@ -1,0 +1,46 @@
+glomeris llm-plan — Ask a configured LLM for a suggestion. Advisory only.
+
+usage: glomeris llm-plan [--schema] [--print-payload] [--plan-file <path>]
+                [--project-root <path>]... [--json] [--progress-json]
+
+Advisory — proposes, never executes.
+
+Produces a suggestion and stops. Nothing a model returns is executed, and
+nothing it returns can invent an action: a plan can only select action ids
+this binary already registered, which are then re-checked against evidence
+this process collected itself. A model cannot override policy, supply a path,
+or run a command. Requires a BYOK provider you configure; no provider is built
+into Glomeris.
+
+Options
+  --schema
+      Print an example LlmPlan document and exit. Contacts nothing.
+  --print-payload
+      Print the exact request a live run would send, without sending it
+      and without reading a credential. Shows which fields leave this Mac
+      and which stay.
+  --plan-file <path>
+      Read a plan from a file instead of calling a provider. Offline, and
+      the way to replay a captured plan.
+  --project-root <path>
+      Same meaning as for `detect`. Repeatable. Note it does not bound
+      every detector, so it is not a privacy control.
+  --json
+      Print an LlmPlanReport as JSON on stdout.
+  --progress-json
+      Stream progress events as JSON lines to stderr.
+
+Examples
+  glomeris llm-plan --print-payload
+      What would be sent, before I send anything?
+  glomeris llm-plan --json
+      Get a suggestion for this machine.
+
+Exit codes
+  1   the provider call or response parsing failed, or --plan-file named
+      an unreadable path.
+  2   an unrecognized argument, a missing flag value, a credential passed
+      as a flag, or no provider configured for a live run.
+  Run `glomeris help exit-codes` for the codes shared by every command.
+
+See also: llm-check, clean, execute

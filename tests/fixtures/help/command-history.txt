@@ -1,0 +1,21 @@
+glomeris history — Recorded disk-pressure transitions.
+
+usage: glomeris history [--json] [--limit <N>]
+
+Read-only — changes nothing.
+
+A bounded tail of the pressure-state changes the monitor recorded. This is the
+machine's disk history, not a record of actions taken — for what was
+actually executed, use `actions history`.
+
+Options
+  --limit <N>
+      How many of the most recent entries to show.
+  --json
+      Print a HistoryReport as JSON on stdout.
+
+Examples
+  glomeris history --limit 20
+      Has this been getting worse?
+
+See also: actions, status
