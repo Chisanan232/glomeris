@@ -1,27 +1,59 @@
 # CLI Reference
 
-This page documents every subcommand and flag present in `src/main.rs` as of
-this writing. The CLI surface is still evolving — treat this page as a
-snapshot, and check `main.rs`'s `match` arms directly if something here looks
-stale.
+**The built-in help is canonical.** `glomeris <command> --help` renders from
+`src/cli/help.rs`, which is the one place a command's usage, flags, safety
+semantics, examples and exit codes are written down, and whose output is held
+to golden snapshots in `tests/fixtures/help/` (HORO-1311). If this page and
+`--help` ever disagree, `--help` is right and this page is stale.
+
+What this page adds that `--help` deliberately does not: the JSON payload
+shapes, the report field semantics, and the cross-references into the rest of
+this book. It is the reference you read at a desk; `--help` is the one you read
+mid-task.
 
 ## `glomeris`
 
-No arguments: prints `glomeris <version>` (from `CARGO_PKG_VERSION`) and
-exits.
+No arguments: prints `glomeris <version>` (from `CARGO_PKG_VERSION`) and a
+pointer to `glomeris --help`. `--version`/`-V` prints the same version line on
+its own.
 
-## `glomeris --help` / `-h` / `help`, and unrecognized-command usage
+## Help surfaces
 
-`--help`/`-h`/`help` and the usage line printed on an unrecognized top-level
-command (exit 2) both render from the same `COMMANDS` table in `src/main.rs`
-(HORO-1050) — there is exactly one place to add or edit a subcommand's usage
-line, so the two surfaces cannot independently drift out of sync the way they
-once did (HORO-1034: the unrecognized-command usage omitted `llm-plan`).
+Everything below renders from the single `COMMANDS` table in
+`src/cli/help.rs`. That table lived in `src/main.rs` until HORO-1311, where no
+test could read it — so `tests/shared_command_table.rs` kept a hand-written
+mirror of it, which drifted exactly as the pre-HORO-1050 duplication had
+(HORO-1034: the unrecognized-command usage omitted `llm-plan`; by HORO-1311 the
+test mirror omitted `llm-check`). There is now one table, read directly by both
+the binary and its tests.
 
-Every top-level subcommand also supports its own `glomeris <subcommand>
---help` / `-h`, looked up in that same table, which prints just that
-subcommand's one-line usage and a short description instead of being
-rejected as an unrecognized argument.
+| Invocation | What it prints |
+|---|---|
+| `glomeris --help` / `-h` / `help` | Every command, grouped by what it does to your machine, with a one-line summary each. |
+| `glomeris <command> --help` / `-h` | That command's usage, safety statement, flags, examples, exit codes and related commands. |
+| `glomeris help <command>` | Identical to `glomeris <command> --help`. |
+| `glomeris help exit-codes` | The exit-status reference (see [Exit codes](#exit-codes)). |
+| `glomeris help <unknown-topic>` | The list of topics that exist, to stderr, exit 2. |
+| `glomeris <unknown-command>` | A one-line error and a pointer to `--help`, to stderr, exit 2. |
+| `glomeris <command> <bad-flag>` | *That command's* usage only, to stderr, exit 2. |
+
+The groups in top-level help are `INSPECT`, `PLAN`, `ACT`, `OBSERVE` and
+`SERVICE`, ordered so that the read-only commands come before anything that can
+delete. A group heading describes consequence, not category: `INSPECT` says
+"nothing is changed", and `ACT` says its commands delete data and that every
+deletion is policy-gated.
+
+Note that a command's group and its per-command safety line describe only
+whether *the command itself* writes to the filesystem. They are not policy
+classifications: `AUTO_SAFE`, `ASK` and `PROTECTED` classify *resources*, are
+decided by the policy engine, and never appear in a help safety label. See
+[Safety Model](safety_model.md).
+
+Two surfaces are narrower on purpose. An unrecognized top-level command gets a
+pointer rather than the manual — it previously reprinted the aggregate usage of
+all thirteen commands, a 13-line, 146-column wall in answer to one mistyped
+word. And a usage error inside a command prints only that command's usage, so
+getting a `free` flag wrong no longer tells you about `daemon`.
 
 ## `glomeris daemon <subcommand>`
 
@@ -569,7 +601,9 @@ Exit codes for this subcommand specifically:
 ## `glomeris emergency`
 
 macOS only (exits 1 with an error message on other platforms). Takes no
-arguments. See [Emergency Mode](emergency_mode.md).
+arguments, and rejects any with exit 2 — until HORO-1311 it silently discarded
+them, so `glomeris emergency --dry-run` performed a real recovery run. See
+[Emergency Mode](emergency_mode.md).
 
 ## `glomeris history [--json] [--limit <N>]`
 
@@ -723,6 +757,10 @@ actions declined/skipped, bytes freed, and free space before/after. See
 currently do end to end.
 
 ## Exit codes
+
+Also available as `glomeris help exit-codes`, which is the copy to trust — it
+renders from the same table as the per-command help, so a command's exit codes
+cannot drift between its own `--help` and the summary.
 
 - `0` — success.
 - `1` — a macOS-only command was run on a non-macOS platform, a
