@@ -1,0 +1,44 @@
+glomeris {VERSION} — evidence-first developer storage cleanup.
+
+Finds reclaimable developer storage, shows the evidence for why each candidate
+is safe or not, and acts only under policy control. AI can recommend; policy
+decides; the executor verifies.
+
+usage: glomeris <command> [options]
+
+INSPECT — look at this machine. Nothing is changed.
+  status        Current disk-pressure state and the thresholds behind it.
+  scan          Largest directories under one path, by size.
+  detect        Find reclaimable candidates and how each is classified.
+  explain       Why one resource is classified the way it is.
+
+PLAN — decide what to do. Nothing is executed.
+  clean         Render what would be cleaned. Executes nothing.
+  llm-plan      Ask a configured LLM for a suggestion. Advisory only.
+  llm-check     Test the configured LLM endpoint, credential and model.
+
+ACT — change this machine. Policy decides every deletion.
+  execute       Run one action against one resource, under policy.
+  free          Reclaim space until a target is reached.
+  emergency     Degraded-path recovery with no network and no LLM.
+
+OBSERVE — what happened before. Nothing is changed.
+  history       Recorded disk-pressure transitions.
+  actions       Registered actions, or the real-execution audit log.
+
+SERVICE — the background disk-pressure monitor.
+  daemon        Install, remove, inspect or run the background monitor.
+
+Start here
+  glomeris status
+      Is anything wrong right now?
+  glomeris detect
+      What could I reclaim, and how is each one classified?
+  glomeris explain <resource_id_or_path>
+      Why is that one safe, or not?
+  glomeris clean --dry-run
+      What exactly would be removed? (Still removes nothing.)
+
+More
+  glomeris <command> --help   Options, examples, and what it will not do.
+  glomeris help exit-codes    What each exit status means.

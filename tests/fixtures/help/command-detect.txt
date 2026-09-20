@@ -1,0 +1,30 @@
+glomeris detect — Find reclaimable candidates and how each is classified.
+
+usage: glomeris detect [--project-root <path>]... [--json] [--progress-json]
+
+Read-only — changes nothing.
+
+Runs every detector, correlates the evidence each one produces, and prints the
+candidates with their policy classification and size estimate. Deletes nothing
+and sends nothing anywhere. A candidate's size is not a safety judgement: a
+large AUTO_SAFE cache is an opportunity, and a small PROTECTED resource is
+still protected.
+
+Options
+  --project-root <path>
+      Scope the cargo and node detectors to this project. Repeatable. Does
+      not bound the Xcode detector (which is $HOME-bounded) or the
+      Homebrew and Docker detectors (which are bounded by neither).
+  --json
+      Print a DetectReport as JSON on stdout.
+  --progress-json
+      Stream one JSON progress event per line to stderr while detectors
+      run. stdout stays a single clean document.
+
+Examples
+  glomeris detect
+      What could I reclaim?
+  glomeris detect --project-root ~/code/my-app --json
+      Machine-readable, scoped to one project.
+
+See also: explain, clean, free

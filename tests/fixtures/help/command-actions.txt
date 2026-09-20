@@ -1,0 +1,28 @@
+glomeris actions — Registered actions, or the real-execution audit log.
+
+usage: glomeris actions <list|history> [--json] [--limit <N>]
+
+Read-only — changes nothing.
+
+`actions list` shows every action this binary has registered — the closed
+set an LLM plan or an `execute` call can select from, and nothing else.
+`actions history` shows a bounded tail of the audit log of real executions:
+what ran, against what, and how it ended.
+
+Options
+  list
+      Show the registered actions and which resource kind each applies to.
+  history
+      Show a bounded tail of the real-execution audit log.
+  --limit <N>
+      For `history`: how many of the most recent records to show.
+  --json
+      Print the report as JSON on stdout.
+
+Examples
+  glomeris actions list
+      What is Glomeris even able to do?
+  glomeris actions history --limit 10
+      What has it actually done to this machine?
+
+See also: execute, history

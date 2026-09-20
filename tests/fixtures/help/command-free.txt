@@ -1,0 +1,25 @@
+glomeris free — Reclaim space until a target is reached.
+
+usage: glomeris free --target <N%|NB> [--project-root <path>]...
+
+Can delete data — every deletion is policy-gated.
+
+Runs the recovery loop until free space reaches the target, then stops. It
+only ever performs actions policy classified as needing no confirmation, so it
+cannot escalate into an ASK or PROTECTED resource to hit a number — if the
+target is unreachable that way, it reports that rather than reaching further.
+Holds the execution lock for the whole run, so it exits 75 if another
+invocation already holds it.
+
+Options
+  --target <N%|NB>
+      Required. Either a percentage of the filesystem (`20%`) or an
+      absolute byte count.
+  --project-root <path>
+      Same meaning as for `detect`. Repeatable.
+
+Examples
+  glomeris free --target 20%
+      Reclaim until a fifth of the disk is free.
+
+See also: clean, execute, emergency

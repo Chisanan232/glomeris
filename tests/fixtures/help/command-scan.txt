@@ -1,0 +1,26 @@
+glomeris scan — Largest directories under one path, by size.
+
+usage: glomeris scan [path] [top_k]
+
+Read-only — changes nothing.
+
+Walks one directory tree and reports its largest entries. This is the raw size
+picture: no evidence correlation, no policy classification, and no notion of
+whether anything found is reclaimable — for that, use `detect`. Note the
+default path is the current directory, not your whole machine.
+
+Options
+  [path]
+      Where to start walking. Defaults to the current directory.
+  [top_k]
+      How many of the largest entries to print. Defaults to 20.
+      Positional, so it must follow a path — a lone number is read as a
+      path and finds nothing.
+
+Examples
+  glomeris scan ~/Library/Developer 30
+      What is biggest under one directory?
+  glomeris scan
+      Same, for the directory you are standing in.
+
+See also: detect, status

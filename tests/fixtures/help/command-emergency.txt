@@ -1,0 +1,17 @@
+glomeris emergency — Degraded-path recovery with no network and no LLM.
+
+usage: glomeris emergency
+
+Can delete data — every deletion is policy-gated.
+
+For when the disk is full enough that the normal path cannot run. Takes no
+arguments, contacts no network, and uses no LLM — the recovery it performs
+is the same policy-gated set of no-confirmation-needed actions, chosen without
+any of the machinery that could itself need space. Holds the execution lock
+for the whole run, so it exits 75 if another invocation already holds it.
+
+Examples
+  glomeris emergency
+      The disk is full and nothing else will run.
+
+See also: free, status

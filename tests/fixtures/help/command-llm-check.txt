@@ -1,0 +1,29 @@
+glomeris llm-check — Test the configured LLM endpoint, credential and model.
+
+usage: glomeris llm-check [--json]
+
+Advisory — proposes, never executes.
+
+Sends one request containing two fixed words and reports what came back. It
+runs no detectors, reads no project roots, collects no evidence and consults
+no policy, so it describes nothing about this machine to the provider. It
+never prints your credential. Use it to tell a wrong address apart from a
+wrong key apart from a wrong model name.
+
+Options
+  --json
+      Print an LlmCheckReport as JSON on stdout.
+
+Examples
+  glomeris llm-check
+      Does my provider setup actually work?
+
+Exit codes
+  0   the provider answered and the reply was usable.
+  1   the check ran and did not pass. The report is printed first — it
+      names which of the endpoint, credential or model to look at.
+  2   nothing was sent and there is no report: no provider configured, a
+      base URL that cannot work, or an unrecognized argument.
+  Run `glomeris help exit-codes` for the codes shared by every command.
+
+See also: llm-plan
