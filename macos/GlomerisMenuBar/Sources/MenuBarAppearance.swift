@@ -8,11 +8,20 @@
 //
 //  Why this needs a test at all: `MenuBarExtra` renders the icon only —
 //  the title is accessibility text, not visible chrome. An icon that fails
-//  to draw therefore produces an empty, zero-width status item: the app
-//  launches, stays alive, registers in the Aqua session, and has no
-//  reachable entrypoint whatsoever, while emitting no error, no crash and
-//  no log output. Nothing short of a human looking at the menu bar catches
-//  it. That is exactly how HORO-1294 shipped.
+//  to draw therefore produces a status item that is *present but blank*:
+//  the app launches, stays alive, registers in the Aqua session, and has no
+//  reachable entrypoint a human can aim at, while emitting no error, no
+//  crash and no log output. Nothing short of a human looking at the menu
+//  bar catches it. That is exactly how HORO-1294 shipped.
+//
+//  "Present but blank", not absent — this was measured on HORO-1294 and the
+//  distinction matters for anyone debugging the next instance. The broken
+//  build's item still existed in the accessibility tree at 18x24pt, enabled,
+//  with a working AXPress action; the fixed build's was 36x24pt. So the item
+//  reserves its usual padding and simply draws nothing into it. Querying the
+//  status item and finding it, or finding a non-zero size, therefore proves
+//  nothing about whether the icon rendered. That is why the guard below
+//  counts ink rather than asking whether an item or an image exists.
 //
 //  HORO-1305 changes what is drawn and, with it, how that class of defect
 //  is guarded. The item no longer borrows a stock SF Symbol
