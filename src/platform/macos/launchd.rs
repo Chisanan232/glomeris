@@ -10,6 +10,13 @@
 //! tested here. Actually asking `launchd` to load/run the agent needs a
 //! real macOS user session and is not exercised by `cargo test` — see the
 //! PR's "Known limitations" section.
+//!
+//! What *is* exercised, since HORO-1297, is how this module treats the
+//! `launchctl` child process: `tests/daemon_status_stdout_purity.rs` puts a
+//! fake `launchctl` first on the child's `PATH` and asserts that none of its
+//! output can reach Glomeris's own stdout. That covers the contract this
+//! module actually has to keep towards its callers, without needing a real
+//! agent loaded.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -456,15 +463,60 @@ pub fn status(plist_path: &Path) -> DaemonStatus {
     }
 }
 
+/// Upper bound on how much of `launchctl`'s stderr is quoted back inside an
+/// error message. `launchctl` is normally terse, but this is Glomeris's
+/// diagnostic text and must stay a readable sentence rather than becoming an
+/// unbounded paste of someone else's output.
+const LAUNCHCTL_STDERR_EXCERPT_LIMIT: usize = 256;
+
+/// Runs `launchctl` with `args`, **capturing** both of the child's streams.
+///
+/// HORO-1297: this used `.status()`, which *inherits* the parent's stdout,
+/// so `launchctl list <label>`'s property dictionary landed on Glomeris's
+/// own stdout ahead of the report that `daemon status --json` was about to
+/// print — making that output unparseable for the GUI (and for any other
+/// consumer) whenever the agent was actually loaded. Nothing here needs the
+/// child's output, so both streams are captured and the success/failure
+/// decision is taken from the exit status alone.
+///
+/// Capturing also fixes the ticket's secondary complaint, and for the same
+/// reason: `launchctl unload` on an already-unloaded per-user agent writes
+/// `Unload failed: 5: Input/output error` plus advice to retry as root to
+/// *its* stderr. Inherited, that contradicted the success line `daemon
+/// uninstall` printed immediately afterwards and pointed the user at a
+/// privilege escalation a per-user LaunchAgent never needs. Captured, it is
+/// surfaced only where it is actually informative: inside the error of a
+/// call whose result the caller has chosen not to discard.
 fn run_launchctl(args: &[&str]) -> io::Result<()> {
-    let status = Command::new("launchctl").args(args).status()?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(io::Error::other(format!(
-            "launchctl {args:?} exited with status: {status}"
-        )))
+    let output = Command::new("launchctl").args(args).output()?;
+    if output.status.success() {
+        return Ok(());
     }
+
+    let mut message = format!("launchctl {args:?} exited with status: {}", output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let excerpt = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !excerpt.is_empty() {
+        message.push_str(": ");
+        message.push_str(&truncate_on_char_boundary(
+            &excerpt,
+            LAUNCHCTL_STDERR_EXCERPT_LIMIT,
+        ));
+    }
+    Err(io::Error::other(message))
+}
+
+/// Truncates `s` to at most `limit` bytes without splitting a UTF-8
+/// character, appending an ellipsis marker when anything was dropped.
+fn truncate_on_char_boundary(s: &str, limit: usize) -> String {
+    if s.len() <= limit {
+        return s.to_string();
+    }
+    let mut end = limit;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 #[cfg(test)]
@@ -559,6 +611,41 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stderr_excerpt_is_left_alone_when_already_short() {
+        assert_eq!(
+            truncate_on_char_boundary("Unload failed: 5", 256),
+            "Unload failed: 5"
+        );
+    }
+
+    #[test]
+    fn stderr_excerpt_is_bounded_and_marked_when_truncated() {
+        let long = "x".repeat(LAUNCHCTL_STDERR_EXCERPT_LIMIT + 50);
+        let truncated = truncate_on_char_boundary(&long, LAUNCHCTL_STDERR_EXCERPT_LIMIT);
+        assert!(truncated.ends_with('…'), "truncation must be visible");
+        assert_eq!(
+            truncated.chars().filter(|c| *c == 'x').count(),
+            LAUNCHCTL_STDERR_EXCERPT_LIMIT
+        );
+    }
+
+    /// `launchctl`'s messages are localized, so the byte limit can land in
+    /// the middle of a multi-byte character. Slicing there would panic —
+    /// turning a diagnostic into a crash.
+    #[test]
+    fn stderr_excerpt_never_splits_a_multibyte_character() {
+        let multibyte = "上游错误".repeat(40);
+        for limit in 1..30 {
+            let truncated = truncate_on_char_boundary(&multibyte, limit);
+            assert!(
+                truncated.len() <= limit + '…'.len_utf8(),
+                "limit {limit} produced {} bytes",
+                truncated.len()
+            );
+        }
     }
 
     #[test]
