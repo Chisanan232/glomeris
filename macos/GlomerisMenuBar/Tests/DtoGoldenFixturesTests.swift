@@ -258,4 +258,92 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(aborted.actualReclaimedHuman)
         XCTAssertEqual(aborted.source, "free")
     }
+
+    // MARK: - LlmCheckReport (HORO-1309)
+
+    func testDecodesLlmCheckReportOk() throws {
+        let dto = try decodeFixture("llm_check_report_ok.json", as: LlmCheckReportDto.self)
+
+        XCTAssertEqual(dto.outcome, "ok")
+        XCTAssertEqual(dto.model, "gpt-4o-mini")
+        XCTAssertEqual(dto.endpointPath, "/v1/chat/completions")
+        XCTAssertNil(dto.error)
+        XCTAssertEqual(dto.responseExcerpt, "ok")
+    }
+
+    func testDecodesLlmCheckReportRejected() throws {
+        let dto = try decodeFixture("llm_check_report_rejected.json", as: LlmCheckReportDto.self)
+
+        XCTAssertEqual(dto.outcome, "rejected")
+        XCTAssertEqual(dto.endpointPath, "/v1/chat/completions")
+        XCTAssertNil(dto.responseExcerpt)
+        let error = try XCTUnwrap(dto.error)
+        XCTAssertTrue(error.contains("HTTP 401"))
+        XCTAssertTrue(error.contains("request_id=req_abc123"))
+    }
+
+    /// The `llm-check` report carries the request *path* and nothing else about
+    /// the address. Asserted on the raw JSON, not on the Swift model, for the
+    /// same reason as `testLlmPlanItemsCarryNoFingerprintToken`: a mirror
+    /// without a property proves only that this file ignores the key.
+    ///
+    /// Both halves matter. No `base_url`/`api_key` key means the app cannot
+    /// render a credential even by accident; no `://` anywhere means a user who
+    /// pasted a key into a query string — which some gateways accept — did not
+    /// have it copied into a report a UI shows and a log keeps.
+    func testLlmCheckReportsCarryNoHostAndNoCredential() throws {
+        for name in ["llm_check_report_ok.json", "llm_check_report_rejected.json"] {
+            let data = try loadFixture(name)
+            let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+
+            XCTAssertFalse(text.contains("base_url"), "\(name) names a base URL")
+            XCTAssertFalse(text.contains("api_key"), "\(name) names an API key")
+            XCTAssertFalse(text.contains("://"), "\(name) carries a scheme and host")
+        }
+    }
+
+    // MARK: - LlmPayloadReport (HORO-1298, surfaced by HORO-1309)
+
+    func testDecodesLlmPayloadReport() throws {
+        let dto = try decodeFixture("llm_payload_report.json", as: LlmPayloadReportDto.self)
+
+        XCTAssertTrue(dto.systemPrompt.hasPrefix("You are a storage cleanup ranking assistant."))
+        XCTAssertTrue(dto.userPrompt.hasPrefix("[{"))
+        XCTAssertEqual(dto.resourceAliases.count, 2)
+
+        let first = dto.resourceAliases[0]
+        XCTAssertEqual(first.wireResourceId, "resource_1")
+        XCTAssertEqual(first.localResourceId, "cargo_target_dir:/Users/dev/proj/target")
+        // `Identifiable` by the wire id — what `ForEach` in the privacy
+        // preview's alias table keys on.
+        XCTAssertEqual(first.id, "resource_1")
+        XCTAssertEqual(dto.resourceAliases[1].wireResourceId, "resource_2")
+    }
+
+    /// The claim the privacy preview makes on screen, asserted on the report it
+    /// makes it from: the two prompt fields are the outbound bytes, and no real
+    /// resource id — every one of which is an absolute path — appears in them.
+    ///
+    /// This is the Swift half of the same assertion in
+    /// `tests/dto_golden_fixtures.rs`. Worth having on both sides: Rust's
+    /// version pins what the producer emits, and this one pins that the mirror
+    /// the GUI renders from still separates the two lists.
+    func testLlmPayloadPromptsContainNoRealResourceId() throws {
+        let dto = try decodeFixture("llm_payload_report.json", as: LlmPayloadReportDto.self)
+
+        for alias in dto.resourceAliases {
+            XCTAssertFalse(
+                dto.systemPrompt.contains(alias.localResourceId),
+                "\(alias.localResourceId) is in the system prompt"
+            )
+            XCTAssertFalse(
+                dto.userPrompt.contains(alias.localResourceId),
+                "\(alias.localResourceId) is in the user prompt"
+            )
+            XCTAssertTrue(
+                dto.userPrompt.contains(alias.wireResourceId),
+                "\(alias.wireResourceId) should be what was sent in its place"
+            )
+        }
+    }
 }

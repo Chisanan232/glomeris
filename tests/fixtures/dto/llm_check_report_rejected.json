@@ -1,0 +1,7 @@
+{
+  "outcome": "rejected",
+  "model": "gpt-4o-mini",
+  "endpoint_path": "/v1/chat/completions",
+  "error": "provider returned HTTP 401 for openai:chat_completions POST /v1/chat/completions (request_id=req_abc123): {\"error\":{\"message\":\"Incorrect API key provided.\",\"type\":\"invalid_request_error\"}}",
+  "response_excerpt": null
+}
