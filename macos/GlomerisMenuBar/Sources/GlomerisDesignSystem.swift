@@ -234,21 +234,25 @@ struct GlomerisCard<Content: View>: View {
 
 // MARK: - Loading / empty / error
 
-/// What a section shows when it has no rows to show.
+/// What a section shows when it has no rows to show, plus the outcome of
+/// something the user asked for.
 ///
-/// These three are deliberately distinct presentations, because conflating
+/// These four are deliberately distinct presentations, because conflating
 /// them is the specific way a status panel lies:
 ///
 ///   - loading is transient and must not look like a failure, or a user
 ///     reads a slow first `detect` as a broken install;
 ///   - empty is frequently GOOD NEWS — "nothing worth reclaiming" means
 ///     the machine is in good shape — and must not be dressed as an error;
+///   - success reports that something the user asked for actually happened,
+///     which is a different claim from "there is nothing here";
 ///   - failure is the only one that may read as a problem, and it must say
 ///     what failed rather than showing an empty list that implies "clean".
 struct GlomerisStateMessage: Equatable {
     enum Kind: Equatable {
         case loading
         case empty
+        case success
         case failure
     }
 
@@ -263,7 +267,19 @@ struct GlomerisStateMessage: Equatable {
         switch kind {
         case .loading: return .neutral
         case .empty: return .neutral
+        case .success: return .positive
         case .failure: return .critical
+        }
+    }
+
+    /// A failure is coloured so it is findable; a success is stated in full
+    /// contrast because it is the answer to something the user just did.
+    /// Loading and empty stay quiet — they are context, not news.
+    var titleColor: Color {
+        switch kind {
+        case .failure: return tone.color
+        case .success: return .primary
+        case .loading, .empty: return .secondary
         }
     }
 
@@ -309,6 +325,23 @@ struct GlomerisStateMessage: Equatable {
         empty(title, detail: detail, symbolName: "magnifyingglass")
     }
 
+    /// Something the user asked for happened. `message` is expected to be
+    /// the text the CLI's own report produced (see
+    /// `describeExecuteOutcome`), so this reports a result rather than
+    /// asserting one.
+    ///
+    /// Distinct from `empty` on purpose: "nothing here" and "I did the
+    /// thing you asked" are different claims, and a user who just pressed
+    /// Clean needs to be able to tell which one they are looking at.
+    static func success(_ message: String) -> GlomerisStateMessage {
+        GlomerisStateMessage(
+            kind: .success,
+            title: message,
+            detail: nil,
+            symbolName: "checkmark.circle.fill"
+        )
+    }
+
     /// `message` is expected to come from
     /// `SectionFetchErrors.shortMessage(_:subject:)`, which already names
     /// the subcommand and summarises the failure in one sentence.
@@ -338,7 +371,7 @@ struct GlomerisStateMessageView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(message.title)
                     .font(GlomerisDesign.secondaryFont)
-                    .foregroundStyle(message.kind == .failure ? message.tone.color : .secondary)
+                    .foregroundStyle(message.titleColor)
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = message.detail {
                     Text(detail)

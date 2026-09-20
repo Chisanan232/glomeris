@@ -217,10 +217,11 @@ final class GlomerisDesignSystemTests: XCTestCase {
         let symbols = [
             GlomerisStateMessage.empty("x").symbolName,
             GlomerisStateMessage.notLookedYet("x").symbolName,
+            GlomerisStateMessage.success("x").symbolName,
             GlomerisStateMessage.failure("x").symbolName,
         ].compactMap { $0 }
 
-        XCTAssertEqual(symbols.count, 3, "every non-loading state needs a glyph")
+        XCTAssertEqual(symbols.count, 4, "every non-loading state needs a glyph")
         for name in symbols {
             XCTAssertNotNil(
                 NSImage(systemSymbolName: name, accessibilityDescription: nil),
@@ -229,20 +230,39 @@ final class GlomerisDesignSystemTests: XCTestCase {
         }
     }
 
-    /// Three states, three presentations. If any two became
+    /// "I cleaned it and reclaimed 1.2 GB" and "there is nothing here" are
+    /// different claims. The first is the answer to something the user just
+    /// pressed a button for, so it is stated in full contrast rather than
+    /// greyed out as context, and it gets its own glyph.
+    func testSuccessIsNotTheSameStateAsEmpty() {
+        let success = GlomerisStateMessage.success("Cleaned — reclaimed 1.2 GB.")
+        let empty = GlomerisStateMessage.empty("Nothing worth reclaiming")
+
+        XCTAssertEqual(success.kind, .success)
+        XCTAssertEqual(success.tone, .positive)
+        XCTAssertNotEqual(success.symbolName, empty.symbolName)
+        XCTAssertNotEqual(success.tone, empty.tone)
+        XCTAssertNotEqual(success.titleColor, empty.titleColor)
+        XCTAssertNotEqual(success.tone, .critical, "a completed cleanup must not read as a problem")
+        XCTAssertEqual(success.title, "Cleaned — reclaimed 1.2 GB.", "the CLI's wording must survive verbatim")
+    }
+
+    /// Four states, four presentations. If any two became
     /// indistinguishable the section would be telling the user the wrong
     /// thing about its own condition.
-    func testTheThreeStatesArePairwiseDistinguishable() {
+    func testTheFourStatesArePairwiseDistinguishable() {
         let states = [
             GlomerisStateMessage.loading("Checking…"),
             GlomerisStateMessage.empty("Nothing worth reclaiming"),
+            GlomerisStateMessage.notLookedYet("No scan yet"),
+            GlomerisStateMessage.success("Cleaned — reclaimed 1.2 GB."),
             GlomerisStateMessage.failure("detect failed"),
         ]
         let fingerprints = states.map { "\($0.kind)|\($0.symbolName ?? "spinner")|\($0.tone)" }
         XCTAssertEqual(
             Set(fingerprints).count,
             states.count,
-            "two of the three empty states present identically: \(fingerprints)"
+            "two states present identically: \(fingerprints)"
         )
     }
 }
