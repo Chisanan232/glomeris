@@ -274,6 +274,61 @@ final class GlomerisDesignSystemTests: XCTestCase {
         XCTAssertNotEqual(nothingRecorded.symbolName, GlomerisStateMessage.failure("x").symbolName)
     }
 
+    // MARK: - Appearance and legibility, across every source file
+
+    /// Dynamic Type only works if the type scale asks for a text *style*.
+    /// `.system(size: 11)` is 11pt at every accessibility setting, so a user
+    /// who has turned text up gets a popover that ignores them — and one
+    /// hardcoded size is enough to make the panel inconsistent, because
+    /// everything around it does scale.
+    ///
+    /// Scanned across the whole target rather than asserted on
+    /// `GlomerisDesign`, because the failure mode is a section view reaching
+    /// past the tokens, not the tokens themselves being wrong.
+    func testNoViewHardcodesAFixedFontSize() throws {
+        for (name, code) in try Self.sourceFiles() {
+            XCTAssertFalse(
+                code.contains(".system(size:"),
+                "\(name) sets a fixed point size, which does not follow Dynamic Type"
+            )
+            XCTAssertFalse(
+                code.contains("Font.custom("),
+                "\(name) uses a custom font at a fixed size"
+            )
+        }
+    }
+
+    /// Light and dark appearance are free as long as nothing names a literal
+    /// colour: the semantic `Color`s, `.secondary`/`.tertiary` and the
+    /// materials all resolve per appearance. A hardcoded RGB — or a forced
+    /// `preferredColorScheme` — is how a panel ends up unreadable in one of
+    /// the two, which is exactly the class of defect nobody catches without
+    /// looking at the screen in both.
+    ///
+    /// `NSColor.` is rewritten before scanning so the one legitimate literal
+    /// is not caught by the SwiftUI rule: `MenuBarAppearance` fills the mark
+    /// flat black on purpose, because it is a *template* image and the system
+    /// recolours it.
+    func testNoViewHardcodesAnAppearanceSpecificColour() throws {
+        let forbidden = [
+            "Color(red:",
+            "Color(white:",
+            "Color(.sRGB",
+            "Color.black",
+            "Color.white",
+            "preferredColorScheme(",
+        ]
+        for (name, code) in try Self.sourceFiles() {
+            let swiftUIOnly = code.replacingOccurrences(of: "NSColor.", with: "appKitLiteral.")
+            for token in forbidden {
+                XCTAssertFalse(
+                    swiftUIOnly.contains(token),
+                    "\(name) contains \(token) — it will not adapt to light/dark appearance"
+                )
+            }
+        }
+    }
+
     /// Four kinds, six presentations. If any two became indistinguishable
     /// the section would be telling the user the wrong thing about its own
     /// condition.
@@ -292,5 +347,32 @@ final class GlomerisDesignSystemTests: XCTestCase {
             states.count,
             "two states present identically: \(fingerprints)"
         )
+    }
+
+    // MARK: - Helpers
+
+    /// Every Swift file in the app target, comment-stripped, as
+    /// (file name, code). Comments are removed so that documenting a
+    /// forbidden construct — as the two scans above both do — cannot fail
+    /// the scan it is explaining.
+    private static func sourceFiles() throws -> [(String, String)] {
+        let sourcesURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // GlomerisMenuBar
+            .appendingPathComponent("Sources")
+        let names = try FileManager.default
+            .contentsOfDirectory(atPath: sourcesURL.path)
+            .filter { $0.hasSuffix(".swift") }
+            .sorted()
+
+        XCTAssertGreaterThan(names.count, 5, "the source scan found almost nothing — wrong path?")
+
+        return try names.map { name in
+            let code = try String(contentsOf: sourcesURL.appendingPathComponent(name), encoding: .utf8)
+                .split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+                .joined(separator: "\n")
+            return (name, code)
+        }
     }
 }
