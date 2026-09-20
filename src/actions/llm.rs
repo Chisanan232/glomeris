@@ -140,15 +140,133 @@ pub trait LlmProvider {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError>;
 }
 
-/// Why an [`LlmProvider`] call failed. Its `Debug` output is safe to log:
-/// none of these variants embed the API key (see
-/// `openai_error_never_leaks_api_key` in this module's tests, added
-/// alongside the real `OpenAiCompatibleProvider` implementation).
+/// Label naming the wire protocol a provider speaks, recorded in
+/// [`LlmError::ProviderStatus`] so a failure says which surface it was
+/// talking to. This is a diagnostic string, not a dispatch mechanism:
+/// [`OpenAiCompatibleProvider`] speaks exactly one protocol, and a second
+/// protocol should arrive as a second provider type rather than as a
+/// branch inside this one.
+pub const API_STYLE_CHAT_COMPLETIONS: &str = "openai:chat_completions";
+
+/// How many bytes of a provider's error body [`LlmError::ProviderStatus`]
+/// retains. Bounded because a misconfigured base URL frequently returns an
+/// HTML error page or a multi-megabyte proxy dump, and this string ends up
+/// in `--json` output and in logs.
+const PROVIDER_ERROR_BODY_LIMIT: usize = 512;
+
+/// Why an [`LlmProvider`] call failed. Its `Debug` and `Display` output are
+/// both safe to log: no variant embeds the API key. For
+/// [`LlmError::ProviderStatus`] that is enforced actively rather than
+/// assumed — `redact_secret` removes the key from the provider's own
+/// response body before it is stored, because a provider that echoes the
+/// credential it rejected back in its error message would otherwise leak
+/// it into every log and `--json` report (see
+/// `provider_status_redacts_echoed_api_key` in this module's tests).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmError {
     NotConfigured,
+    /// The request never produced an HTTP response: DNS failure, TLS
+    /// failure, connection refused, timeout. Distinct from
+    /// [`LlmError::ProviderStatus`], where the provider *did* answer —
+    /// conflating the two is what made a BYOK 401 undiagnosable
+    /// (HORO-1299).
     NetworkError(String),
+    /// The provider answered with a non-2xx status. Carries only
+    /// non-secret diagnostics, deliberately excluding the scheme, host and
+    /// query string of the request: the path alone is what distinguishes a
+    /// base-URL mistake (`/chat/completions` vs `/v1/chat/completions`),
+    /// while a host may be private infrastructure and a query string may
+    /// carry a credential.
+    ProviderStatus {
+        status: u16,
+        api_style: String,
+        endpoint_path: String,
+        request_id: Option<String>,
+        body_excerpt: String,
+    },
     InvalidResponse(String),
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::NotConfigured => write!(
+                f,
+                "LLM provider is not configured (GLOMERIS_LLM_API_KEY, \
+                 GLOMERIS_LLM_BASE_URL, GLOMERIS_LLM_MODEL must all be set)"
+            ),
+            LlmError::NetworkError(detail) => {
+                write!(f, "provider unreachable: {detail}")
+            }
+            LlmError::ProviderStatus {
+                status,
+                api_style,
+                endpoint_path,
+                request_id,
+                body_excerpt,
+            } => {
+                write!(
+                    f,
+                    "provider returned HTTP {status} for {api_style} POST {endpoint_path}"
+                )?;
+                if let Some(id) = request_id {
+                    write!(f, " (request_id={id})")?;
+                }
+                if !body_excerpt.is_empty() {
+                    write!(f, ": {body_excerpt}")?;
+                }
+                Ok(())
+            }
+            LlmError::InvalidResponse(detail) => {
+                write!(f, "provider response was unusable: {detail}")
+            }
+        }
+    }
+}
+
+/// Returns the path component of `url` for diagnostics — everything from
+/// the first `/` after the authority up to any `?`/`#`. Drops the scheme
+/// and host (potentially private infrastructure) and the query string
+/// (which some gateways use to carry an API key). Falls back to `"/"` when
+/// `url` has no path, and returns the input unchanged when it has no
+/// recognizable authority, so a malformed base URL is still visible in the
+/// message that reports the failure.
+fn diagnostic_endpoint_path(url: &str) -> String {
+    let after_scheme = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => return url.to_string(),
+    };
+    let path = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => return "/".to_string(),
+    };
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    path[..end].to_string()
+}
+
+/// Removes every occurrence of `secret` from `text`, collapses whitespace
+/// so the result is one log-safe line, and truncates it to
+/// [`PROVIDER_ERROR_BODY_LIMIT`] bytes on a character boundary.
+///
+/// The empty-`secret` guard is load-bearing: `str::replace("", _)` inserts
+/// the replacement between every character, so without it an unset API key
+/// would corrupt the diagnostic instead of redacting nothing.
+fn redact_secret(text: &str, secret: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = if secret.is_empty() {
+        collapsed
+    } else {
+        collapsed.replace(secret, "<REDACTED>")
+    };
+
+    if redacted.len() <= PROVIDER_ERROR_BODY_LIMIT {
+        return redacted;
+    }
+    let mut cut = PROVIDER_ERROR_BODY_LIMIT;
+    while cut > 0 && !redacted.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… (truncated)", &redacted[..cut])
 }
 
 /// Real provider: any OpenAI-compatible `/chat/completions` endpoint
@@ -182,6 +300,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let auth_header = format!("Bearer {}", self.api_key);
 
         let response = ureq::post(&url)
+            .config()
+            // Report a non-2xx status as a *response* rather than a
+            // transport error, so its status, request id and body are
+            // available to build an `LlmError::ProviderStatus`. With
+            // ureq's default (`true`), every HTTP status collapsed into an
+            // opaque `NetworkError("http status: 401")` and the provider's
+            // own explanation was discarded unread — HORO-1299.
+            .http_status_as_error(false)
+            .build()
             .header("Authorization", &auth_header)
             .header("Content-Type", "application/json")
             .send_json(&body)
@@ -195,9 +322,36 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 LlmError::NetworkError(e.to_string())
             })?;
 
-        let text = response
-            .into_body()
-            .read_to_string()
+        let status = response.status().as_u16();
+        // Read before `into_body()` consumes the response. `x-request-id`
+        // is the near-universal convention among OpenAI-compatible
+        // gateways; a provider that omits it simply yields `None`.
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
+        let body_text = response.into_body().read_to_string();
+
+        if !(200..300).contains(&status) {
+            // A failed body read must not mask the status: the status is
+            // the most diagnostic part of the failure, so it is reported
+            // either way.
+            let body_excerpt = match &body_text {
+                Ok(text) => redact_secret(text, &self.api_key),
+                Err(e) => format!("<error body unreadable: {e}>"),
+            };
+            return Err(LlmError::ProviderStatus {
+                status,
+                api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+                endpoint_path: diagnostic_endpoint_path(&url),
+                request_id,
+                body_excerpt,
+            });
+        }
+
+        let text = body_text
             .map_err(|e| LlmError::InvalidResponse(format!("failed to read response body: {e}")))?;
 
         let value: serde_json::Value = serde_json::from_str(&text)
