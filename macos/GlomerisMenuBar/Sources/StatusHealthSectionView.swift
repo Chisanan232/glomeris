@@ -181,6 +181,21 @@ struct StatusHealthSectionView: View {
         }
     }
 
+    /// Both fetches write `@State`, so all three of these are pinned to the
+    /// main actor.
+    ///
+    /// They are dispatched with `async let` and therefore run concurrently.
+    /// Without the isolation they inherit from here, two concurrent tasks
+    /// would mutate `fetchErrors` — and SwiftUI state generally — off the
+    /// main actor: a data race that can tear a two-field struct or corrupt a
+    /// `String`'s storage, which is a particularly bad failure mode for the
+    /// one surface whose job is to report failures honestly (HORO-1297).
+    ///
+    /// Isolation costs no concurrency here. Both fetchers spend their time
+    /// suspended on subprocess I/O, so they still interleave and both
+    /// children still run at once; only the `@State` writes are serialised,
+    /// and `GlomerisClient` already reads the pipes off the main thread.
+    @MainActor
     private func refresh() async {
         async let status = fetchStatus()
         async let daemon = fetchDaemonStatus()
@@ -194,6 +209,7 @@ struct StatusHealthSectionView: View {
         }
     }
 
+    @MainActor
     private func fetchStatus() async -> StatusReportDto? {
         do {
             let result = try await client.run(
@@ -209,6 +225,7 @@ struct StatusHealthSectionView: View {
         }
     }
 
+    @MainActor
     private func fetchDaemonStatus() async -> DaemonStatusReportDto? {
         do {
             let result = try await client.run(
