@@ -114,8 +114,85 @@ required, with no default `base_url`:
 | Variable | Purpose |
 |---|---|
 | `GLOMERIS_LLM_API_KEY` | Bearer token sent as `Authorization: Bearer <key>` |
-| `GLOMERIS_LLM_BASE_URL` | Base URL of an OpenAI-compatible `/chat/completions` endpoint |
+| `GLOMERIS_LLM_BASE_URL` | **API root** of an OpenAI-compatible service — see below |
 | `GLOMERIS_LLM_MODEL` | Model name sent in the request body |
+
+### `GLOMERIS_LLM_BASE_URL` is the API root, not the host root
+
+Glomeris appends `/chat/completions` to the base URL **verbatim**. It never
+inserts a `/v1` segment for you, and never strips one. A single trailing
+slash is tolerated. So the base URL must be the path prefix your provider
+serves its API under — for most providers that includes `/v1`:
+
+```sh
+export GLOMERIS_LLM_BASE_URL="https://gateway.example.com/v1"
+# request goes to https://gateway.example.com/v1/chat/completions
+```
+
+Setting the host root instead is the most common misconfiguration:
+
+```sh
+export GLOMERIS_LLM_BASE_URL="https://gateway.example.com"
+# request goes to https://gateway.example.com/chat/completions  ← wrong path
+```
+
+Because Glomeris does not rewrite the path, a base URL that already ends in
+`/v1` produces exactly one `/v1` segment — there is no `/v1/v1` failure mode.
+
+Do not try to identify this mistake from the status code: a gateway may
+answer an unrouted path with `404`, but `403`, `401` and even `400` are all
+things real gateways return instead. Read the **path** in the error message
+— it is the path that was actually requested, so it tells you directly which
+of the two forms you configured:
+
+```
+provider returned HTTP 403 for openai:chat_completions POST /chat/completions
+                                                            ^ no /v1 — host root was configured
+```
+
+A full configuration, using placeholders throughout:
+
+```sh
+export GLOMERIS_LLM_API_KEY="<token>"          # never commit; never pass in argv
+export GLOMERIS_LLM_BASE_URL="https://gateway.example.com/v1"
+export GLOMERIS_LLM_MODEL="example-model"
+glomeris llm-plan --project-root ~/code/my-project
+```
+
+Prefer `export` in your shell (or a secret manager that exports into the
+process environment) over a plaintext `.env` file, and never pass the key on
+the command line — `glomeris llm-plan` rejects `--api-key`/`--key`/`--token`
+outright for that reason.
+
+### Diagnosing a provider failure
+
+Provider failures are reported in the `provider_error` field (and on the
+text output's `provider error:` line) as one readable, secret-free sentence.
+The three classes are deliberately distinct:
+
+| Class | Meaning |
+|---|---|
+| `provider unreachable: …` | No HTTP response at all — DNS, TLS, refused connection, timeout |
+| `provider returned HTTP <status> …` | The provider answered with a non-2xx status |
+| `provider response was unusable: …` | A 2xx response that was empty, not JSON, or missing `choices[0].message.content` |
+
+An HTTP failure names the status, the API style, the request path, the
+provider's `x-request-id` when it sends one, and a bounded excerpt of the
+provider's own error body:
+
+```
+provider returned HTTP 401 for openai:chat_completions POST /v1/chat/completions \
+  (request_id=req-abc-123): {"error":{"code":"invalid_api_key"}}
+```
+
+What is deliberately **not** in that message: the `Authorization` header,
+the API key, the request payload, the scheme, the host, and the query
+string. The host is omitted because it may be private infrastructure and
+the query string because some gateways accept a credential there; the path
+alone is what diagnoses a base-URL mistake. The body excerpt is truncated
+to a bounded length and is scrubbed of the configured API key, so a
+provider that echoes the credential it just rejected cannot turn Glomeris's
+diagnostics into the leak.
 
 `actions::llm::provider_from_env` is the only place `std::env::var` is
 called for these — the key is held just long enough to build the
@@ -149,8 +226,21 @@ message, or a PR description.** Treat it as you would any other credential.
 - `OpenAiCompatibleProvider` deliberately does **not** derive `Debug` — a
   derived `Debug` would print `api_key` verbatim. A test confirms a real
   failed `complete()` call's error output never contains the key.
-- `LlmError`'s variants never embed the key either, confirmed by a
-  dedicated test.
+- `LlmError`'s variants never embed the key either — every variant's
+  `Display` output is asserted key-free by
+  `api_key_never_appears_in_display_output_of_any_variant`, including the
+  `ProviderStatus` body excerpt, which actively scrubs the configured key
+  (`redact_secret_removes_every_occurrence_and_collapses_whitespace`) so a
+  provider echoing the credential back cannot leak it through Glomeris.
+- The diagnostic endpoint path in a provider error is the path only: two
+  tests (`diagnostic_endpoint_path_drops_scheme_host_and_query`,
+  `diagnostic_endpoint_path_never_contains_the_host`) assert the scheme,
+  host, and query string are all dropped.
+- The wire protocol itself is pinned against a loopback mock HTTP server
+  rather than mocked at the trait: the appended path, trailing-slash
+  tolerance, `Authorization: Bearer` scheme, model and both message roles,
+  and the 401/403/404/empty-body/non-JSON/connection-closed failure modes
+  each have a test that inspects the bytes actually sent.
 - `LlmPlanItem` uses `#[serde(deny_unknown_fields)]`: a model trying to
   smuggle an extra field (e.g. a `"command"`) fails deserialization of the
   *whole* plan, not just that item — confirmed by

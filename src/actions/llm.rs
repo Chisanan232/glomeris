@@ -140,15 +140,133 @@ pub trait LlmProvider {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError>;
 }
 
-/// Why an [`LlmProvider`] call failed. Its `Debug` output is safe to log:
-/// none of these variants embed the API key (see
-/// `openai_error_never_leaks_api_key` in this module's tests, added
-/// alongside the real `OpenAiCompatibleProvider` implementation).
+/// Label naming the wire protocol a provider speaks, recorded in
+/// [`LlmError::ProviderStatus`] so a failure says which surface it was
+/// talking to. This is a diagnostic string, not a dispatch mechanism:
+/// [`OpenAiCompatibleProvider`] speaks exactly one protocol, and a second
+/// protocol should arrive as a second provider type rather than as a
+/// branch inside this one.
+pub const API_STYLE_CHAT_COMPLETIONS: &str = "openai:chat_completions";
+
+/// How many bytes of a provider's error body [`LlmError::ProviderStatus`]
+/// retains. Bounded because a misconfigured base URL frequently returns an
+/// HTML error page or a multi-megabyte proxy dump, and this string ends up
+/// in `--json` output and in logs.
+const PROVIDER_ERROR_BODY_LIMIT: usize = 512;
+
+/// Why an [`LlmProvider`] call failed. Its `Debug` and `Display` output are
+/// both safe to log: no variant embeds the API key. For
+/// [`LlmError::ProviderStatus`] that is enforced actively rather than
+/// assumed — `redact_secret` removes the key from the provider's own
+/// response body before it is stored, because a provider that echoes the
+/// credential it rejected back in its error message would otherwise leak
+/// it into every log and `--json` report (see
+/// `provider_status_redacts_echoed_api_key` in this module's tests).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmError {
     NotConfigured,
+    /// The request never produced an HTTP response: DNS failure, TLS
+    /// failure, connection refused, timeout. Distinct from
+    /// [`LlmError::ProviderStatus`], where the provider *did* answer —
+    /// conflating the two is what made a BYOK 401 undiagnosable
+    /// (HORO-1299).
     NetworkError(String),
+    /// The provider answered with a non-2xx status. Carries only
+    /// non-secret diagnostics, deliberately excluding the scheme, host and
+    /// query string of the request: the path alone is what distinguishes a
+    /// base-URL mistake (`/chat/completions` vs `/v1/chat/completions`),
+    /// while a host may be private infrastructure and a query string may
+    /// carry a credential.
+    ProviderStatus {
+        status: u16,
+        api_style: String,
+        endpoint_path: String,
+        request_id: Option<String>,
+        body_excerpt: String,
+    },
     InvalidResponse(String),
+}
+
+impl std::fmt::Display for LlmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LlmError::NotConfigured => write!(
+                f,
+                "LLM provider is not configured (GLOMERIS_LLM_API_KEY, \
+                 GLOMERIS_LLM_BASE_URL, GLOMERIS_LLM_MODEL must all be set)"
+            ),
+            LlmError::NetworkError(detail) => {
+                write!(f, "provider unreachable: {detail}")
+            }
+            LlmError::ProviderStatus {
+                status,
+                api_style,
+                endpoint_path,
+                request_id,
+                body_excerpt,
+            } => {
+                write!(
+                    f,
+                    "provider returned HTTP {status} for {api_style} POST {endpoint_path}"
+                )?;
+                if let Some(id) = request_id {
+                    write!(f, " (request_id={id})")?;
+                }
+                if !body_excerpt.is_empty() {
+                    write!(f, ": {body_excerpt}")?;
+                }
+                Ok(())
+            }
+            LlmError::InvalidResponse(detail) => {
+                write!(f, "provider response was unusable: {detail}")
+            }
+        }
+    }
+}
+
+/// Returns the path component of `url` for diagnostics — everything from
+/// the first `/` after the authority up to any `?`/`#`. Drops the scheme
+/// and host (potentially private infrastructure) and the query string
+/// (which some gateways use to carry an API key). Falls back to `"/"` when
+/// `url` has no path, and returns the input unchanged when it has no
+/// recognizable authority, so a malformed base URL is still visible in the
+/// message that reports the failure.
+fn diagnostic_endpoint_path(url: &str) -> String {
+    let after_scheme = match url.find("://") {
+        Some(i) => &url[i + 3..],
+        None => return url.to_string(),
+    };
+    let path = match after_scheme.find('/') {
+        Some(i) => &after_scheme[i..],
+        None => return "/".to_string(),
+    };
+    let end = path.find(['?', '#']).unwrap_or(path.len());
+    path[..end].to_string()
+}
+
+/// Removes every occurrence of `secret` from `text`, collapses whitespace
+/// so the result is one log-safe line, and truncates it to
+/// [`PROVIDER_ERROR_BODY_LIMIT`] bytes on a character boundary.
+///
+/// The empty-`secret` guard is load-bearing: `str::replace("", _)` inserts
+/// the replacement between every character, so without it an unset API key
+/// would corrupt the diagnostic instead of redacting nothing.
+fn redact_secret(text: &str, secret: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let redacted = if secret.is_empty() {
+        collapsed
+    } else {
+        collapsed.replace(secret, "<REDACTED>")
+    };
+
+    if redacted.len() <= PROVIDER_ERROR_BODY_LIMIT {
+        return redacted;
+    }
+    let mut cut = PROVIDER_ERROR_BODY_LIMIT;
+    while cut > 0 && !redacted.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… (truncated)", &redacted[..cut])
 }
 
 /// Real provider: any OpenAI-compatible `/chat/completions` endpoint
@@ -182,6 +300,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let auth_header = format!("Bearer {}", self.api_key);
 
         let response = ureq::post(&url)
+            .config()
+            // Report a non-2xx status as a *response* rather than a
+            // transport error, so its status, request id and body are
+            // available to build an `LlmError::ProviderStatus`. With
+            // ureq's default (`true`), every HTTP status collapsed into an
+            // opaque `NetworkError("http status: 401")` and the provider's
+            // own explanation was discarded unread — HORO-1299.
+            .http_status_as_error(false)
+            .build()
             .header("Authorization", &auth_header)
             .header("Content-Type", "application/json")
             .send_json(&body)
@@ -195,9 +322,36 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 LlmError::NetworkError(e.to_string())
             })?;
 
-        let text = response
-            .into_body()
-            .read_to_string()
+        let status = response.status().as_u16();
+        // Read before `into_body()` consumes the response. `x-request-id`
+        // is the near-universal convention among OpenAI-compatible
+        // gateways; a provider that omits it simply yields `None`.
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+
+        let body_text = response.into_body().read_to_string();
+
+        if !(200..300).contains(&status) {
+            // A failed body read must not mask the status: the status is
+            // the most diagnostic part of the failure, so it is reported
+            // either way.
+            let body_excerpt = match &body_text {
+                Ok(text) => redact_secret(text, &self.api_key),
+                Err(e) => format!("<error body unreadable: {e}>"),
+            };
+            return Err(LlmError::ProviderStatus {
+                status,
+                api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+                endpoint_path: diagnostic_endpoint_path(&url),
+                request_id,
+                body_excerpt,
+            });
+        }
+
+        let text = body_text
             .map_err(|e| LlmError::InvalidResponse(format!("failed to read response body: {e}")))?;
 
         let value: serde_json::Value = serde_json::from_str(&text)
@@ -778,5 +932,571 @@ mod tests {
             Some(LlmError::NetworkError(_))
         ));
         assert!(result.validated_items.is_empty());
+    }
+
+    // ---- Provider wire-protocol tests (HORO-1299) -------------------
+    //
+    // These drive the real `OpenAiCompatibleProvider` against a loopback
+    // mock so endpoint construction, the Authorization header, model
+    // serialization and every failure classification are asserted against
+    // actual bytes on a socket rather than against a hand-written fake.
+    // The mock is ~40 lines of `std::net` and needs no dev-dependency.
+
+    /// Everything the mock observed about the provider's request.
+    struct CapturedRequest {
+        request_line: String,
+        headers: Vec<(String, String)>,
+        body: String,
+    }
+
+    impl CapturedRequest {
+        fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        }
+    }
+
+    /// Serves exactly one HTTP request on an ephemeral loopback port and
+    /// replies with `status_line`/`extra_headers`/`body`. Returns the base
+    /// URL to configure a provider with — deliberately including a `/v1`
+    /// segment so every test also pins the "base URL is the API root, and
+    /// `/chat/completions` is appended to it verbatim" contract — plus a
+    /// handle yielding the captured request.
+    ///
+    /// `extra_headers`, when non-empty, must be CRLF-terminated.
+    fn serve_one(
+        status_line: &str,
+        extra_headers: &str,
+        body: &str,
+    ) -> (String, std::thread::JoinHandle<CapturedRequest>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let status_line = status_line.to_string();
+        let extra_headers = extra_headers.to_string();
+        let body = body.to_string();
+
+        let handle = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream);
+
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+
+            let mut headers = Vec::new();
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read header line");
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    break;
+                }
+                if let Some((key, value)) = trimmed.split_once(':') {
+                    let key = key.trim().to_string();
+                    let value = value.trim().to_string();
+                    if key.eq_ignore_ascii_case("content-length") {
+                        content_length = value.parse().unwrap_or(0);
+                    }
+                    headers.push((key, value));
+                }
+            }
+
+            let mut body_buf = vec![0u8; content_length];
+            reader.read_exact(&mut body_buf).expect("read request body");
+
+            let response = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n{extra_headers}\r\n{body}",
+                body.len()
+            );
+            let mut stream = reader.into_inner();
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            stream.flush().expect("flush response");
+
+            CapturedRequest {
+                request_line: request_line.trim_end().to_string(),
+                headers,
+                body: String::from_utf8_lossy(&body_buf).to_string(),
+            }
+        });
+
+        (format!("http://127.0.0.1:{port}/v1"), handle)
+    }
+
+    const OK_COMPLETION: &str = r#"{"choices":[{"message":{"content":"{\"items\": []}"}}]}"#;
+
+    /// A key shaped like a real one, so a redaction assertion that passed
+    /// only because the needle was trivially short would not fool us.
+    const TEST_KEY: &str = "sk-test-do-not-leak-0123456789abcdef";
+
+    fn provider_for(base_url: &str) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider {
+            base_url: base_url.to_string(),
+            api_key: TEST_KEY.to_string(),
+            model: "example-model".to_string(),
+        }
+    }
+
+    #[test]
+    fn provider_appends_chat_completions_to_base_url_verbatim() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", OK_COMPLETION);
+        provider_for(&base).complete("system", "user").expect("ok");
+        let request = server.join().expect("server thread");
+
+        // `GLOMERIS_LLM_BASE_URL` is the API ROOT: the provider appends
+        // `/chat/completions` and inserts no `/v1` of its own, so a base
+        // already ending in `/v1` yields exactly one `/v1` segment.
+        assert_eq!(request.request_line, "POST /v1/chat/completions HTTP/1.1");
+        assert!(!request.request_line.contains("/v1/v1"));
+    }
+
+    #[test]
+    fn provider_tolerates_trailing_slash_on_base_url() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", OK_COMPLETION);
+        let mut provider = provider_for(&base);
+        provider.base_url.push('/');
+        provider.complete("system", "user").expect("ok");
+        let request = server.join().expect("server thread");
+
+        assert_eq!(request.request_line, "POST /v1/chat/completions HTTP/1.1");
+    }
+
+    #[test]
+    fn provider_sends_bearer_authorization_header() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", OK_COMPLETION);
+        provider_for(&base).complete("system", "user").expect("ok");
+        let request = server.join().expect("server thread");
+
+        assert_eq!(
+            request.header("authorization"),
+            Some(format!("Bearer {TEST_KEY}").as_str())
+        );
+        assert_eq!(request.header("content-type"), Some("application/json"));
+    }
+
+    #[test]
+    fn provider_serializes_model_and_both_message_roles() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", OK_COMPLETION);
+        provider_for(&base)
+            .complete("SYSTEM-PROMPT", "USER-PROMPT")
+            .expect("ok");
+        let request = server.join().expect("server thread");
+
+        let sent: serde_json::Value = serde_json::from_str(&request.body).expect("request is JSON");
+        assert_eq!(sent["model"], "example-model");
+        assert_eq!(sent["messages"][0]["role"], "system");
+        assert_eq!(sent["messages"][0]["content"], "SYSTEM-PROMPT");
+        assert_eq!(sent["messages"][1]["role"], "user");
+        assert_eq!(sent["messages"][1]["content"], "USER-PROMPT");
+        // The request body carries the prompts and nothing else that could
+        // be mistaken for a credential.
+        assert!(!request.body.contains(TEST_KEY));
+    }
+
+    #[test]
+    fn provider_returns_completion_content_on_success() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", OK_COMPLETION);
+        let text = provider_for(&base).complete("system", "user").expect("ok");
+        server.join().expect("server thread");
+
+        assert_eq!(text, r#"{"items": []}"#);
+    }
+
+    #[test]
+    fn provider_401_yields_provider_status_not_network_error() {
+        // The exact regression behind HORO-1299: this used to surface as
+        // `NetworkError("http status: 401")` with the body discarded.
+        let (base, server) = serve_one(
+            "HTTP/1.1 401 Unauthorized",
+            "",
+            r#"{"error":{"message":"invalid api key","code":"invalid_api_key"}}"#,
+        );
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("401 must be an error");
+        server.join().expect("server thread");
+
+        let LlmError::ProviderStatus {
+            status,
+            api_style,
+            endpoint_path,
+            body_excerpt,
+            ..
+        } = &error
+        else {
+            panic!("expected ProviderStatus, got {error:?}");
+        };
+        assert_eq!(*status, 401);
+        assert_eq!(api_style, API_STYLE_CHAT_COMPLETIONS);
+        assert_eq!(endpoint_path, "/v1/chat/completions");
+        assert!(body_excerpt.contains("invalid_api_key"));
+    }
+
+    #[test]
+    fn provider_403_yields_provider_status_with_body() {
+        let (base, server) = serve_one(
+            "HTTP/1.1 403 Forbidden",
+            "",
+            r#"{"error":{"message":"Selected provider is forbidden"}}"#,
+        );
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("403 must be an error");
+        server.join().expect("server thread");
+
+        let LlmError::ProviderStatus {
+            status,
+            body_excerpt,
+            ..
+        } = &error
+        else {
+            panic!("expected ProviderStatus, got {error:?}");
+        };
+        assert_eq!(*status, 403);
+        assert!(body_excerpt.contains("forbidden"));
+    }
+
+    #[test]
+    fn provider_404_reports_the_path_that_was_missing() {
+        // The single most useful base-URL-misconfiguration signal: the
+        // path actually requested is in the error, so "host root vs API
+        // root" is diagnosable without a packet capture.
+        let (base, server) = serve_one("HTTP/1.1 404 Not Found", "", "not found");
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("404 must be an error");
+        server.join().expect("server thread");
+
+        let LlmError::ProviderStatus {
+            status,
+            endpoint_path,
+            ..
+        } = &error
+        else {
+            panic!("expected ProviderStatus, got {error:?}");
+        };
+        assert_eq!(*status, 404);
+        assert_eq!(endpoint_path, "/v1/chat/completions");
+    }
+
+    #[test]
+    fn provider_status_redacts_echoed_api_key() {
+        // A gateway that echoes the rejected credential back in its error
+        // message must not turn Glomeris's own diagnostics into the leak.
+        let (base, server) = serve_one(
+            "HTTP/1.1 401 Unauthorized",
+            "",
+            &format!(r#"{{"error":{{"message":"key {TEST_KEY} is not valid"}}}}"#),
+        );
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("401 must be an error");
+        server.join().expect("server thread");
+
+        let rendered = format!("{error:?} {error}");
+        assert!(
+            !rendered.contains(TEST_KEY),
+            "provider diagnostics must never echo the API key: {rendered}"
+        );
+        assert!(rendered.contains("<REDACTED>"));
+    }
+
+    #[test]
+    fn provider_status_captures_request_id_when_present() {
+        let (base, server) = serve_one(
+            "HTTP/1.1 500 Internal Server Error",
+            "x-request-id: req-abc-123\r\n",
+            "upstream exploded",
+        );
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("500 must be an error");
+        server.join().expect("server thread");
+
+        let LlmError::ProviderStatus { request_id, .. } = &error else {
+            panic!("expected ProviderStatus, got {error:?}");
+        };
+        assert_eq!(request_id.as_deref(), Some("req-abc-123"));
+        assert!(format!("{error}").contains("request_id=req-abc-123"));
+    }
+
+    #[test]
+    fn provider_status_body_excerpt_is_bounded() {
+        let huge = "x".repeat(50_000);
+        let (base, server) = serve_one("HTTP/1.1 502 Bad Gateway", "", &huge);
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("502 must be an error");
+        server.join().expect("server thread");
+
+        let LlmError::ProviderStatus { body_excerpt, .. } = &error else {
+            panic!("expected ProviderStatus, got {error:?}");
+        };
+        assert!(
+            body_excerpt.len() < PROVIDER_ERROR_BODY_LIMIT + 32,
+            "excerpt must stay bounded, got {} bytes",
+            body_excerpt.len()
+        );
+        assert!(body_excerpt.ends_with("… (truncated)"));
+    }
+
+    #[test]
+    fn provider_empty_success_body_yields_invalid_response() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", "");
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("empty body is unusable");
+        server.join().expect("server thread");
+
+        assert!(matches!(error, LlmError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn provider_non_json_success_body_yields_invalid_response() {
+        let (base, server) = serve_one("HTTP/1.1 200 OK", "", "<html>gateway splash</html>");
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("non-JSON body is unusable");
+        server.join().expect("server thread");
+
+        let LlmError::InvalidResponse(detail) = &error else {
+            panic!("expected InvalidResponse, got {error:?}");
+        };
+        assert!(detail.contains("not JSON"));
+    }
+
+    #[test]
+    fn provider_success_body_missing_content_yields_invalid_response() {
+        // Well-formed JSON, valid HTTP 200, but not a completion — e.g. a
+        // model/provider error returned with a 200 status, which some
+        // gateways do.
+        let (base, server) = serve_one(
+            "HTTP/1.1 200 OK",
+            "",
+            r#"{"error":{"message":"model not found"}}"#,
+        );
+        let error = provider_for(&base)
+            .complete("system", "user")
+            .expect_err("missing content is unusable");
+        server.join().expect("server thread");
+
+        let LlmError::InvalidResponse(detail) = &error else {
+            panic!("expected InvalidResponse, got {error:?}");
+        };
+        assert!(detail.contains("choices[0].message.content"));
+    }
+
+    #[test]
+    fn provider_connection_closed_without_response_yields_network_error() {
+        // Transport failure with a server that accepts and then hangs up:
+        // distinct from a non-2xx response, and must stay a NetworkError.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = listener.local_addr().expect("local_addr").port();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            drop(stream);
+        });
+
+        let error = provider_for(&format!("http://127.0.0.1:{port}/v1"))
+            .complete("system", "user")
+            .expect_err("closed connection must fail");
+        server.join().expect("server thread");
+
+        assert!(
+            matches!(error, LlmError::NetworkError(_)),
+            "expected NetworkError, got {error:?}"
+        );
+        assert!(!format!("{error:?}").contains(TEST_KEY));
+    }
+
+    #[test]
+    fn plan_with_llm_falls_back_to_empty_on_provider_status() {
+        // A provider failure is never fatal and never grants authority: the
+        // report comes back with zero validated items and the error set, so
+        // the caller falls back to rule-only ranking.
+        let (base, server) = serve_one("HTTP/1.1 401 Unauthorized", "", r#"{"error":"nope"}"#);
+        let provider = provider_for(&base);
+        let evidence_set = vec![evidence_for(
+            ResourceKind::CargoTargetDir,
+            "/tmp/proj/target",
+        )];
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        server.join().expect("server thread");
+
+        assert!(matches!(
+            result.provider_error,
+            Some(LlmError::ProviderStatus { status: 401, .. })
+        ));
+        assert!(result.validated_items.is_empty());
+    }
+
+    // ---- Diagnostic helper units ------------------------------------
+
+    #[test]
+    fn diagnostic_endpoint_path_drops_scheme_host_and_query() {
+        assert_eq!(
+            diagnostic_endpoint_path("https://gateway.example.com/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
+        // A query string may carry a credential on some gateways, so it is
+        // never retained.
+        assert_eq!(
+            diagnostic_endpoint_path("https://gateway.example.com/v1/chat/completions?key=SECRET"),
+            "/v1/chat/completions"
+        );
+        assert_eq!(
+            diagnostic_endpoint_path("https://gateway.example.com/chat/completions#frag"),
+            "/chat/completions"
+        );
+        // Host-root base URL with no path at all.
+        assert_eq!(diagnostic_endpoint_path("https://gateway.example.com"), "/");
+        // Non-URL input is returned as-is so a malformed base URL is still
+        // visible in the error that reports it.
+        assert_eq!(diagnostic_endpoint_path("not-a-url"), "not-a-url");
+    }
+
+    #[test]
+    fn diagnostic_endpoint_path_never_contains_the_host() {
+        let path =
+            diagnostic_endpoint_path("https://internal-gateway.corp.example/v1/chat/completions");
+        assert!(!path.contains("internal-gateway"));
+        assert!(!path.contains("corp.example"));
+    }
+
+    #[test]
+    fn redact_secret_removes_every_occurrence_and_collapses_whitespace() {
+        let body = format!("line one {TEST_KEY}\n  line two {TEST_KEY}\t end");
+        let redacted = redact_secret(&body, TEST_KEY);
+
+        assert!(!redacted.contains(TEST_KEY));
+        assert_eq!(redacted.matches("<REDACTED>").count(), 2);
+        assert!(!redacted.contains('\n'));
+        assert_eq!(redacted, "line one <REDACTED> line two <REDACTED> end");
+    }
+
+    #[test]
+    fn redact_secret_with_empty_secret_does_not_corrupt_the_body() {
+        // `str::replace("", _)` inserts the replacement between every
+        // character; the empty-secret guard is what prevents that.
+        assert_eq!(redact_secret("plain body", ""), "plain body");
+    }
+
+    #[test]
+    fn redact_secret_truncates_on_a_character_boundary() {
+        // Multi-byte characters straddling the limit must not panic or
+        // produce invalid UTF-8.
+        let body = "é".repeat(PROVIDER_ERROR_BODY_LIMIT);
+        let redacted = redact_secret(&body, TEST_KEY);
+
+        assert!(redacted.ends_with("… (truncated)"));
+        assert!(redacted.len() < PROVIDER_ERROR_BODY_LIMIT + 32);
+    }
+
+    #[test]
+    fn provider_status_display_names_status_style_and_path() {
+        let error = LlmError::ProviderStatus {
+            status: 401,
+            api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            request_id: None,
+            body_excerpt: r#"{"error":"invalid api key"}"#.to_string(),
+        };
+        let rendered = format!("{error}");
+
+        assert!(rendered.contains("HTTP 401"));
+        assert!(rendered.contains("openai:chat_completions"));
+        assert!(rendered.contains("/v1/chat/completions"));
+        assert!(rendered.contains("invalid api key"));
+        // No request id was present, so no empty placeholder is rendered.
+        assert!(!rendered.contains("request_id="));
+    }
+
+    /// Not hypothetical: real gateways answer `401` with a completely empty
+    /// body. The status, style and path must still be a usable sentence, with
+    /// no dangling `:` separator for an excerpt that does not exist.
+    #[test]
+    fn provider_status_display_omits_the_separator_when_there_is_no_body() {
+        let error = LlmError::ProviderStatus {
+            status: 401,
+            api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            request_id: None,
+            body_excerpt: String::new(),
+        };
+        let rendered = format!("{error}");
+
+        assert_eq!(
+            rendered,
+            "provider returned HTTP 401 for openai:chat_completions POST /v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn provider_bodyless_error_response_yields_provider_status() {
+        let (base_url, handle) = serve_one("HTTP/1.1 401 Unauthorized", "", "");
+        let provider = OpenAiCompatibleProvider {
+            base_url,
+            api_key: TEST_KEY.to_string(),
+            model: "example-model".to_string(),
+        };
+
+        let error = provider
+            .complete("s", "u")
+            .expect_err("401 must be an error");
+        handle.join().expect("server thread");
+
+        match error {
+            LlmError::ProviderStatus {
+                status,
+                body_excerpt,
+                ..
+            } => {
+                assert_eq!(status, 401);
+                assert!(
+                    body_excerpt.is_empty(),
+                    "an absent body must stay absent, not become a placeholder: {body_excerpt:?}"
+                );
+            }
+            other => panic!("expected ProviderStatus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_configured_display_names_all_three_env_vars() {
+        let rendered = format!("{}", LlmError::NotConfigured);
+        assert!(rendered.contains("GLOMERIS_LLM_API_KEY"));
+        assert!(rendered.contains("GLOMERIS_LLM_BASE_URL"));
+        assert!(rendered.contains("GLOMERIS_LLM_MODEL"));
+    }
+
+    #[test]
+    fn api_key_never_appears_in_display_output_of_any_variant() {
+        let errors = vec![
+            LlmError::NotConfigured,
+            LlmError::NetworkError("connection refused".to_string()),
+            LlmError::InvalidResponse("bad json".to_string()),
+            LlmError::ProviderStatus {
+                status: 401,
+                api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+                endpoint_path: "/v1/chat/completions".to_string(),
+                request_id: Some("req-1".to_string()),
+                body_excerpt: "<REDACTED> rejected".to_string(),
+            },
+        ];
+        for error in errors {
+            let rendered = format!("{error} {error:?}");
+            assert!(!rendered.contains(TEST_KEY), "leaked in: {rendered}");
+        }
     }
 }
