@@ -173,8 +173,9 @@ Pressing **Ask AI for a plan** runs `glomeris llm-plan --json
 progress the Reclaimable space card shows, and offers a **Stop** button that
 terminates the CLI child rather than just abandoning the result. Above the
 button, permanently: *"The model recommends. Glomeris decides what may run."*
-and a note that `glomeris llm-plan --print-payload` will show you the exact
-payload that would leave your machine, without contacting anyone.
+and a note that asking costs money and that *"Settings shows exactly what would
+be sent, without sending it"* — the privacy preview described under
+[Preferences — AI Provider](#preferences--ai-provider) below.
 
 Each suggestion is one row, and every row is split down the middle by who said
 what:
@@ -221,9 +222,13 @@ Six situations, six distinct messages: never asked; asking; no provider
 configured; the provider answered with nothing; the provider call failed
 (quoted); and output this app could not read, which means the app and the
 `glomeris` on `PATH` are different versions. The first three are not failures
-and are not coloured like failures. Note that a Finder-launched menu-bar app
-inherits no shell environment, so `GLOMERIS_LLM_*` variables exported in a
-terminal are invisible to it — the card says this too.
+and are not coloured like failures. The *no provider configured* message says
+why a shell user can still land there — a Finder-launched menu-bar app inherits
+no shell environment, so `GLOMERIS_LLM_*` variables exported in a terminal are
+invisible to it — and is the one state with a **Set up an AI provider…** button
+beside it, which opens Settings. The button is beside the message rather than
+inside it on purpose: the copy layer is a pure token-to-words mapping, and a
+message that could carry a control would be a message that could act.
 
 ### Disk space history, and What Glomeris has done
 
@@ -257,17 +262,70 @@ detection state.
 
 ## Preferences — Project Roots
 
-The popover's **Project roots…** footer button — or `Cmd+,` — opens a
-simple list with add/remove controls for the project-roots preference,
-backed by a small local store. (The footer exists because the menu-bar item
-opens a window rather than a menu, so the popover is the app's only
-surface; **Quit** is there for the same reason.)
+The popover's **Project roots…** footer button — or `Cmd+,` — opens Settings,
+whose **Projects** tab is a simple list with add/remove controls for the
+project-roots preference, backed by a small local store. (The footer exists
+because the menu-bar item opens a window rather than a menu, so the popover is
+the app's only surface; **Quit** is there for the same reason.)
 These are the same paths you'd otherwise pass repeatedly as `--project-root
 <path>` on the command line — the CLI's cargo/node detectors only look
 under directories they're told about. This view is pure presentation: it
 edits the stored list and does not itself call `detect`/`explain`/
 `execute`; the roots are appended as `--project-root` arguments the next
 time another card (Disk space, Reclaimable space, …) spawns the CLI.
+
+## Preferences — AI Provider
+
+Settings' second tab (HORO-1309) is where the BYOK provider is configured, for
+the common case of someone who runs the app from Finder and has never exported
+anything in a shell. Four cards, in the order the questions arise:
+
+**AI Provider** — the API root address and the model name. Under each field, a
+row saying where that field's effective value came from: *Configured here*,
+*From the environment*, or *Not set*. Per field, what you type here wins over
+what the app inherited; a field left empty falls back to the inherited
+`GLOMERIS_LLM_*` variable, including falling back to it being absent. Clearing
+a field therefore returns you to the environment rather than switching a working
+setup off. The rule is that the settings screen never lies: if the field shows
+an address, that is the address used. Neither field has a Save button, because
+neither has unsaved state — they write through as you type. Nothing here
+validates the URL or knows which models exist; the CLI does both, and
+**Test connection** is what reports it.
+
+**API Key** — a `SecureField`, a **Save** button, and a **Remove key** button
+marked as the destructive action it is. The key goes into the login keychain,
+and from there into the environment of the `glomeris` child process at the
+moment one is spawned. It is never a command-line argument (visible to `ps`, and
+refused by the CLI by flag name), never this app's preferences, never a file the
+app writes, never a log line, and never displayed: there is no reveal control,
+nothing reads it back, and the typed text is cleared as soon as it is handed to
+the keychain — whether the write succeeded or not, so a failure cannot leave it
+sitting in a field behind an error message.
+
+**Test Connection** — one `glomeris llm-check --json`, described honestly as
+*"one tiny request — two words"*, disabled until all three of the address, the
+model and the key are available. The result is one of five outcomes in plain
+words, each reading differently because each has its fix in a different place:
+a rejected credential, an unreachable host, a reply the app could not use, a
+base URL that cannot work, and success — which reports the path it posted to,
+the model, and what came back. See
+[BYOK LLM Planner](byok.md#glomeris-llm-check--does-the-configuration-actually-work)
+for the outcome table. A failure is carried verbatim; nothing is paraphrased
+into something more reassuring than what happened.
+
+**What Gets Sent** — one `glomeris llm-plan --print-payload --json`, with the
+same project roots a real plan would use, so it previews *your* payload rather
+than a generic example. It splits the result into **Leaves this Mac** (the two
+prompts, with a character count) and **Stays on this Mac** (the wire-alias
+table, which is where the absolute paths are). The second group is blue, not
+green: green in this app means `AUTO_SAFE` or *succeeded*, and data being
+withheld is a deliberate hold, not a success.
+
+Opening that preview sends nothing and cannot — `--print-payload` returns before
+a provider is constructed — and the preview is the one command on this screen
+that runs *without* the credential in its environment. Neither button does
+anything until pressed: there is no timer, nothing runs when the window opens,
+and nothing retries.
 
 ## How the app finds the `glomeris` CLI
 
@@ -309,7 +367,8 @@ searched, rather than failing silently or naming a path it only assumed.
 | Background monitor | `glomeris daemon status --json` |
 | Reclaimable space + Refresh | `glomeris detect --json --progress-json` |
 | AI Plan — Ask AI for a plan | `glomeris llm-plan --json --progress-json` |
-| AI Plan — what would be sent | `glomeris llm-plan --print-payload` (no provider contacted) |
+| Settings → AI Provider — Test connection | `glomeris llm-check --json` |
+| Settings → AI Provider — Show what would be sent | `glomeris llm-plan --print-payload --json` (no provider contacted) |
 | Candidate detail | `glomeris explain <resource_id> --json --progress-json` |
 | Clean (with confirmation) | `glomeris execute --action-id <id> --resource-id <id> [--confirm-ask --observed-fingerprint <token>] --json --progress-json` |
 | Disk space history | `glomeris history --json` |
