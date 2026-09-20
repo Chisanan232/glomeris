@@ -16,10 +16,18 @@
 //  used rather than "the display's".
 //
 //  The comparison is pixel-wise with a small tolerance rather than a file
-//  hash. A hash would also be sensitive to the PNG encoder's own choices and
-//  to antialiasing differences in CoreGraphics' polygon rasteriser between
-//  macOS versions — neither of which is drift, and both of which would turn
-//  the CI guard into a flake that gets disabled.
+//  hash, as insurance: a hash is also sensitive to the PNG encoder's own
+//  choices and to antialiasing differences in CoreGraphics' polygon
+//  rasteriser across OS and toolchain versions, neither of which is drift and
+//  both of which would turn the CI guard into a flake that gets disabled.
+//
+//  Being honest about how much insurance was actually needed: on the two
+//  hosts tried so far — this workstation and the macos-15 / Xcode 26.2 CI
+//  runner — every size renders BIT-IDENTICALLY (max Δ0 on all ten PNGs), so a
+//  hash would have worked today. The tolerance is kept because that
+//  equivalence is a coincidence of matched toolchains rather than a
+//  guarantee, but no cross-host flake has been observed, and this comment
+//  should not be read as claiming one was.
 //
 //  Measured sensitivity of the tolerance below (negative controls run when it
 //  was written, on the committed art):
@@ -197,7 +205,8 @@ func renderIcon(pixels: Int) -> CGImage {
 func pngData(for image: CGImage) -> Data {
     let rep = NSBitmapImageRep(cgImage: image)
     // Setting an explicit pixel size keeps the PNG's own metadata stable
-    // across hosts, which the hash-based drift check depends on.
+    // across hosts, which is what lets the drift check compare a committed
+    // file against a fresh render without tripping over encoder metadata.
     rep.size = NSSize(width: image.width, height: image.height)
     guard let data = rep.representation(using: .png, properties: [:]) else {
         fatalError("PNG encoding failed")
