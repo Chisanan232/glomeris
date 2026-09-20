@@ -160,6 +160,71 @@ stay selectable so they can be quoted in a bug report.
   CLI printed — one specific message per outcome, not a generic
   success/failure toast.
 
+### AI Plan
+
+The one card that talks to the internet, and only ever when you press its
+button. There is no timer behind it, nothing runs when the popover opens, and
+nothing retries — asking a provider costs money, so asking has to be something
+you did. Until you press it the card says exactly that: *"Nothing has been sent
+anywhere."*
+
+Pressing **Ask AI for a plan** runs `glomeris llm-plan --json
+--progress-json` with your project roots, streams the same per-detector
+progress the Reclaimable space card shows, and offers a **Stop** button that
+terminates the CLI child rather than just abandoning the result. Above the
+button, permanently: *"The model recommends. Glomeris decides what may run."*
+and a note that `glomeris llm-plan --print-payload` will show you the exact
+payload that would leave your machine, without contacting anyone.
+
+Each suggestion is one row, and every row is split down the middle by who said
+what:
+
+- **The machine's half** — safety class, storage impact, the size tier, and
+  the evidence/confidence pair — is rendered as badges from the same
+  vocabulary the candidates list uses, and comes from the real policy engine.
+  It reads identically whether or not a provider was ever contacted. Below
+  them, in plain words, is what Glomeris is willing to do: *"Glomeris is
+  willing to run this"*, *"Glomeris will ask you to confirm this before
+  anything runs"*, or the refusal, verbatim.
+- **The model's half** — its rationale — is an attributed, italic quotation
+  under a *"The model says"* label. It is deliberately **not** a badge. A
+  badge in this app means a verdict was reached; putting a model's sentence in
+  one would dress an opinion as a finding. A screen reader hears the machine's
+  verdict first, then *"The model's reason, which is advice and not a
+  verdict: …"*.
+
+The rows appear in the order the provider returned them, and the card says so
+(*"In the order the model suggested. Glomeris's own ranking is the list
+above."*). No rank number is drawn on a row, and the model's own `priority`
+field is carried in `--json` but never shown: the list position already makes
+that claim once, and two competing numberings would read as though one of them
+were authoritative. Nothing in the app re-sorts the list either — Glomeris's
+ranking is the Reclaimable space card, which is why the AI Plan card sits
+below it.
+
+**A recommendation cannot make anything runnable.** A model that confidently
+describes your SSH private key as a stale build directory gets its sentence
+quoted, next to a `PROTECTED` badge and a refusal, with no action offered — the
+row is built from the same `executable`/`offered_actions`/`refusal_reason`
+fields the candidates list reads, which the CLI computed before the provider
+was contacted. Suggestions naming a resource Glomeris never found, or an action
+it does not have, are dropped by the CLI and the count of them is printed under
+the list rather than quietly swallowed.
+
+Tapping a row opens the same candidate detail sheet as the candidates list,
+which issues its own `explain` call and owns the only Clean button in the app.
+A plan item carries no fingerprint token, so there is no shortcut past that —
+cleaning something a model suggested goes through exactly the path, and the
+same confirmation, as cleaning something you found yourself.
+
+Six situations, six distinct messages: never asked; asking; no provider
+configured; the provider answered with nothing; the provider call failed
+(quoted); and output this app could not read, which means the app and the
+`glomeris` on `PATH` are different versions. The first three are not failures
+and are not coloured like failures. Note that a Finder-launched menu-bar app
+inherits no shell environment, so `GLOMERIS_LLM_*` variables exported in a
+terminal are invisible to it — the card says this too.
+
 ### Disk space history, and What Glomeris has done
 
 Two independent, already-computed lists in two cards, each polled the same
@@ -243,6 +308,8 @@ searched, rather than failing silently or naming a path it only assumed.
 | Disk space | `glomeris status --json` |
 | Background monitor | `glomeris daemon status --json` |
 | Reclaimable space + Refresh | `glomeris detect --json --progress-json` |
+| AI Plan — Ask AI for a plan | `glomeris llm-plan --json --progress-json` |
+| AI Plan — what would be sent | `glomeris llm-plan --print-payload` (no provider contacted) |
 | Candidate detail | `glomeris explain <resource_id> --json --progress-json` |
 | Clean (with confirmation) | `glomeris execute --action-id <id> --resource-id <id> [--confirm-ask --observed-fingerprint <token>] --json --progress-json` |
 | Disk space history | `glomeris history --json` |

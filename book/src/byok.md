@@ -5,6 +5,15 @@ LLM planner. As of HORO-1008, it is wired into the `glomeris` binary as an
 **advisory, non-executing** subcommand: `glomeris llm-plan`. This page
 documents both the library module and the CLI surface over it.
 
+Since HORO-1308 the menu-bar app has an **AI Plan** card over the same
+subcommand. It is a thin client: it spawns `glomeris llm-plan --json
+--progress-json`, renders the report, and has no planner, no provider client
+and no execution path of its own. Everything on this page — what leaves your
+machine, what the validator drops, what the planner can and cannot do —
+applies unchanged to the GUI, because it is the same code doing the work. See
+[Menu Bar App](menu_bar_app.md#ai-plan) for how the card separates the model's
+words from the machine's.
+
 ## What it is
 
 An advisory ranking suggestion over evidence the crate already collected.
@@ -342,6 +351,14 @@ message, or a PR description.** Treat it as you would any other credential.
   through the exact `--plan-file` input surface the CLI uses, closing the
   gap [Known Limitations](known_limitations.md) previously described as
   "verified at the code level only, not end-to-end through the CLI."
+- The GUI half is held to the same line by
+  `macos/GlomerisMenuBar/Tests/AiPlanSectionViewTests.swift`: a row built from
+  a confident, plausible recommendation to delete a credential carries the
+  refusal and no willingness to act, and the card has no execution call site,
+  no fingerprint token and no re-sorting of the model's order. The repo-wide
+  `scripts/check-no-policy-label-branching.sh` additionally proves nothing in
+  the app — this card included — branches on a `policy_label` string to decide
+  what may run.
 
 ## Known limitations
 
