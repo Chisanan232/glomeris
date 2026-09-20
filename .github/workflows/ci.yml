@@ -177,8 +177,27 @@ jobs:
     # must never branch UI behavior on `policyLabel`/`policy_label`'s string
     # content, only on structured fields like `executable`. See
     # docs/internal/HORO-1068-no-policy-in-swift-review.md.
+    #
+    # HORO-1306 added a second check to the same script: the display
+    # vocabulary file switches on an anonymous token string, which is only
+    # acceptable because it is provably incapable of acting on the result.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check no policy_label branching in Swift
         run: bash scripts/check-no-policy-label-branching.sh
+
+  vocabulary-covers-cli-tokens:
+    # HORO-1306: the GUI's plain-language wording tables are transcribed from
+    # the Rust enums by hand, so the drift that matters is the silent one —
+    # the CLI learns a state and the popover shows a question mark for it.
+    # This diffs the two sets in both directions.
+    #
+    # A separate job from no-policy-in-swift on purpose: "the GUI has no word
+    # for a real state" and "the GUI might be deciding policy" are unrelated
+    # problems, and neither should hide behind the other's red X.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every CLI token has GUI wording
+        run: bash scripts/check-vocabulary-covers-cli-tokens.sh
