@@ -217,11 +217,12 @@ final class GlomerisDesignSystemTests: XCTestCase {
         let symbols = [
             GlomerisStateMessage.empty("x").symbolName,
             GlomerisStateMessage.notLookedYet("x").symbolName,
+            GlomerisStateMessage.nothingRecorded("x").symbolName,
             GlomerisStateMessage.success("x").symbolName,
             GlomerisStateMessage.failure("x").symbolName,
         ].compactMap { $0 }
 
-        XCTAssertEqual(symbols.count, 4, "every non-loading state needs a glyph")
+        XCTAssertEqual(symbols.count, 5, "every non-loading state needs a glyph")
         for name in symbols {
             XCTAssertNotNil(
                 NSImage(systemSymbolName: name, accessibilityDescription: nil),
@@ -247,14 +248,41 @@ final class GlomerisDesignSystemTests: XCTestCase {
         XCTAssertEqual(success.title, "Cleaned — reclaimed 1.2 GB.", "the CLI's wording must survive verbatim")
     }
 
-    /// Four states, four presentations. If any two became
-    /// indistinguishable the section would be telling the user the wrong
-    /// thing about its own condition.
+    /// An empty log is not a clean bill of health either. An empty pressure
+    /// history could mean the disk has been steady, or it could mean nothing
+    /// has been watching it — and the popover cannot tell those apart from
+    /// the report it is handed, so it must not pick the flattering reading.
+    func testNothingRecordedDoesNotClaimAnAllClear() {
+        let nothingRecorded = GlomerisStateMessage.nothingRecorded(
+            "No changes recorded yet",
+            detail: "A line is logged here each time free space crosses a threshold."
+        )
+
+        XCTAssertNotEqual(
+            nothingRecorded.symbolName,
+            GlomerisStateMessage.empty("x").symbolName,
+            "an empty log must not borrow the glyph that means 'all clear'"
+        )
+        // It is also not the same claim as "nobody has looked": the log HAS
+        // been read, and it is genuinely empty.
+        XCTAssertNotEqual(
+            nothingRecorded.symbolName,
+            GlomerisStateMessage.notLookedYet("x").symbolName
+        )
+        XCTAssertEqual(nothingRecorded.kind, .empty)
+        XCTAssertEqual(nothingRecorded.tone, .neutral)
+        XCTAssertNotEqual(nothingRecorded.symbolName, GlomerisStateMessage.failure("x").symbolName)
+    }
+
+    /// Four kinds, six presentations. If any two became indistinguishable
+    /// the section would be telling the user the wrong thing about its own
+    /// condition.
     func testTheFourStatesArePairwiseDistinguishable() {
         let states = [
             GlomerisStateMessage.loading("Checking…"),
             GlomerisStateMessage.empty("Nothing worth reclaiming"),
             GlomerisStateMessage.notLookedYet("No scan yet"),
+            GlomerisStateMessage.nothingRecorded("No changes recorded yet"),
             GlomerisStateMessage.success("Cleaned — reclaimed 1.2 GB."),
             GlomerisStateMessage.failure("detect failed"),
         ]

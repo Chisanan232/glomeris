@@ -295,8 +295,10 @@ struct GlomerisStateMessage: Equatable {
         )
     }
 
-    /// `symbolName` is overridable for one reason only — see
-    /// `notLookedYet(_:detail:)` below.
+    /// `symbolName` is overridable for the two named factories below, and
+    /// for nothing else. Both exist because the default checkmark is a claim
+    /// — "I looked, and it is fine" — and there are emptinesses that have
+    /// not earned it.
     static func empty(
         _ title: String,
         detail: String? = nil,
@@ -323,6 +325,16 @@ struct GlomerisStateMessage: Equatable {
     /// reassurance.
     static func notLookedYet(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
         empty(title, detail: detail, symbolName: "magnifyingglass")
+    }
+
+    /// A log that has nothing in it yet. Distinct from `empty` for the same
+    /// reason `notLookedYet` is: an empty pressure history could mean the
+    /// disk has been steady, or it could mean nothing has been watching it,
+    /// and the popover cannot tell those apart from the report it is handed.
+    /// A checkmark would pick the flattering reading. The tray says only
+    /// what is true — there are no entries.
+    static func nothingRecorded(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
+        empty(title, detail: detail, symbolName: "tray")
     }
 
     /// Something the user asked for happened. `message` is expected to be
