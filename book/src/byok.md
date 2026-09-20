@@ -235,6 +235,16 @@ Removing it is explicit (AC 8): a **Remove key** button, worded as the
 destructive action it is, which deletes the keychain item. Afterwards the field
 falls back to the environment if one is exported, and reads `Not set` if not.
 
+Note what that fallback means, because the precedence rule cuts the other way
+here. If `GLOMERIS_LLM_API_KEY` was exported into the environment this app was
+launched from, deleting the stored key does not stop Glomeris reaching a
+provider — it *promotes* the inherited key into use. Someone pressing a button
+labelled **Remove key** is more likely revoking access than tidying a field, so
+the app says so in that case rather than reporting a bare "Key removed": it
+names the variable and tells you to unset it too. Unsetting it means relaunching
+the app from an environment without it — a running process's environment is not
+editable from the settings screen.
+
 ### The privacy preview
 
 The same screen offers a preview of the outbound payload, over `glomeris
