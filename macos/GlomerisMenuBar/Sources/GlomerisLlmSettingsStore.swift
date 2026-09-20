@@ -116,8 +116,9 @@ struct GlomerisLlmSettingsStore {
 
     /// Whether an API key is stored here. There is deliberately no getter for
     /// the key itself on this type: the only code that needs the value is
-    /// [`environmentOverlay`], which puts it straight into a child process's
-    /// environment. Anything else asking for it would be a leak in the making.
+    /// [`childEnvironment(basedOn:)`], which puts it straight into a child
+    /// process's environment. Anything else asking for it would be a leak in
+    /// the making.
     var hasStoredApiKey: Bool {
         credentials.secret(forKey: Self.apiKeyAccount) != nil
     }
