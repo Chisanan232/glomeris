@@ -133,16 +133,21 @@ Setting the host root instead is the most common misconfiguration:
 
 ```sh
 export GLOMERIS_LLM_BASE_URL="https://gateway.example.com"
-# request goes to https://gateway.example.com/chat/completions  ← usually 404
+# request goes to https://gateway.example.com/chat/completions  ← wrong path
 ```
 
 Because Glomeris does not rewrite the path, a base URL that already ends in
 `/v1` produces exactly one `/v1` segment — there is no `/v1/v1` failure mode.
-If you get a `404`, the error message names the exact path that was
-requested, which tells you immediately which of the two forms you have:
+
+Do not try to identify this mistake from the status code: a gateway may
+answer an unrouted path with `404`, but `403`, `401` and even `400` are all
+things real gateways return instead. Read the **path** in the error message
+— it is the path that was actually requested, so it tells you directly which
+of the two forms you configured:
 
 ```
-provider returned HTTP 404 for openai:chat_completions POST /chat/completions
+provider returned HTTP 403 for openai:chat_completions POST /chat/completions
+                                                            ^ no /v1 — host root was configured
 ```
 
 A full configuration, using placeholders throughout:

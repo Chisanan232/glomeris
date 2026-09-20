@@ -1422,6 +1422,56 @@ mod tests {
         assert!(!rendered.contains("request_id="));
     }
 
+    /// Not hypothetical: real gateways answer `401` with a completely empty
+    /// body. The status, style and path must still be a usable sentence, with
+    /// no dangling `:` separator for an excerpt that does not exist.
+    #[test]
+    fn provider_status_display_omits_the_separator_when_there_is_no_body() {
+        let error = LlmError::ProviderStatus {
+            status: 401,
+            api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            request_id: None,
+            body_excerpt: String::new(),
+        };
+        let rendered = format!("{error}");
+
+        assert_eq!(
+            rendered,
+            "provider returned HTTP 401 for openai:chat_completions POST /v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn provider_bodyless_error_response_yields_provider_status() {
+        let (base_url, handle) = serve_one("HTTP/1.1 401 Unauthorized", "", "");
+        let provider = OpenAiCompatibleProvider {
+            base_url,
+            api_key: TEST_KEY.to_string(),
+            model: "example-model".to_string(),
+        };
+
+        let error = provider
+            .complete("s", "u")
+            .expect_err("401 must be an error");
+        handle.join().expect("server thread");
+
+        match error {
+            LlmError::ProviderStatus {
+                status,
+                body_excerpt,
+                ..
+            } => {
+                assert_eq!(status, 401);
+                assert!(
+                    body_excerpt.is_empty(),
+                    "an absent body must stay absent, not become a placeholder: {body_excerpt:?}"
+                );
+            }
+            other => panic!("expected ProviderStatus, got {other:?}"),
+        }
+    }
+
     #[test]
     fn not_configured_display_names_all_three_env_vars() {
         let rendered = format!("{}", LlmError::NotConfigured);
