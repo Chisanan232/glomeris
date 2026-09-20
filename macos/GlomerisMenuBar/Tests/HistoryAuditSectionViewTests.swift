@@ -173,6 +173,35 @@ final class HistoryAuditSectionViewTests: XCTestCase {
         XCTAssertTrue(row.outcomeText.contains("some_future_outcome"))
     }
 
+    // MARK: - One error per list
+
+    /// Both lists are fetched concurrently and each used to write the same
+    /// `lastErrorMessage`, clearing it on success — so a healthy `history`
+    /// read erased a failing `actions history` one and the popover reported
+    /// an unreadable audit trail as an empty one.
+    ///
+    /// Asserted on the source because the defect is in which state the two
+    /// fetches share, which no view-model fixture can observe.
+    func testEachListOwnsItsOwnErrorMessage() throws {
+        let source = try Self.readSource("HistoryAuditSectionView.swift")
+        let code = source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        XCTAssertTrue(code.contains("historyErrorMessage"))
+        XCTAssertTrue(code.contains("actionHistoryErrorMessage"))
+        XCTAssertFalse(
+            code.contains("lastErrorMessage"),
+            "a single shared error lets one list's success hide the other's failure"
+        )
+        XCTAssertEqual(
+            code.components(separatedBy: "SectionFetchErrors.shortMessage").count - 1,
+            2,
+            "each fetch must produce its own message"
+        )
+    }
+
     // MARK: - AC: known-contents fixture renders correctly end to end
 
     /// The ticket's literal AC: a fixture with known contents — at least
@@ -222,5 +251,15 @@ final class HistoryAuditSectionViewTests: XCTestCase {
         XCTAssertEqual(abortedRow.detailText, "ResourceIdentityChanged")
 
         XCTAssertNotEqual(autoSafeRow.isSuccess, abortedRow.isSuccess)
+    }
+
+    // MARK: - Helpers
+
+    private static func readSource(_ fileName: String) throws -> String {
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // GlomerisMenuBar
+            .appendingPathComponent("Sources/\(fileName)")
+        return try String(contentsOf: sourceURL, encoding: .utf8)
     }
 }

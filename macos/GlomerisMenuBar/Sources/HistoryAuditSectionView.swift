@@ -131,7 +131,14 @@ struct HistoryAuditSectionView: View {
 
     @State private var historyEvents: [HistoryEventReportDto] = []
     @State private var actionHistoryEvents: [ActionHistoryEventReportDto] = []
-    @State private var lastErrorMessage: String?
+    /// One error per list, not one shared between them. The two fetches run
+    /// concurrently and each clears its own message on success; sharing one
+    /// meant a healthy `history` read erased a failing `actions history` one,
+    /// so an unreadable audit trail was presented as an empty one — the exact
+    /// "silence is not the same as nothing to report" defect HORO-1297 fixed
+    /// for the status panel.
+    @State private var historyErrorMessage: String?
+    @State private var actionHistoryErrorMessage: String?
     @State private var pollTask: Task<Void, Never>?
 
     init(
@@ -165,6 +172,12 @@ struct HistoryAuditSectionView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            }
+
+            if let historyErrorMessage {
+                Text(historyErrorMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
             }
 
             Divider()
@@ -201,8 +214,8 @@ struct HistoryAuditSectionView: View {
                 }
             }
 
-            if let lastErrorMessage {
-                Text(lastErrorMessage)
+            if let actionHistoryErrorMessage {
+                Text(actionHistoryErrorMessage)
                     .font(.caption2)
                     .foregroundStyle(.red)
             }
@@ -244,10 +257,10 @@ struct HistoryAuditSectionView: View {
                 outputType: HistoryReportDto.self,
                 progressType: EmptyProgressDto.self
             )
-            lastErrorMessage = nil
+            historyErrorMessage = nil
             return result.output.events
         } catch {
-            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "history")
+            historyErrorMessage = SectionFetchErrors.shortMessage(error, subject: "history")
             return nil
         }
     }
@@ -259,10 +272,10 @@ struct HistoryAuditSectionView: View {
                 outputType: ActionHistoryReportDto.self,
                 progressType: EmptyProgressDto.self
             )
-            lastErrorMessage = nil
+            actionHistoryErrorMessage = nil
             return result.output.events
         } catch {
-            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "actions history")
+            actionHistoryErrorMessage = SectionFetchErrors.shortMessage(error, subject: "actions history")
             return nil
         }
     }
