@@ -27,6 +27,88 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  macos-app:
+    # HORO-1296: before this job existed, nothing on CI compiled the Swift
+    # target or ran its test bundle. `xcodebuild` appeared in exactly one
+    # workflow, macos-app-release.yml, which runs only at release time — so
+    # every GlomerisMenuBar test was enforced solely by whoever remembered to
+    # run it locally, and a change that broke the Swift build merged green.
+    # HORO-1294 (an invisible menu-bar item, caused by a nonexistent SF
+    # Symbol) added a regression test that could not protect main for exactly
+    # this reason.
+    #
+    # Deliberately NOT path-filtered to `macos/**`. DtoGoldenFixturesTests
+    # decodes the golden fixtures under `tests/fixtures/dto/` at the repo
+    # root — the same files `tests/dto_golden_fixtures.rs` asserts the Rust
+    # DTOs serialize to. A Rust-side field rename that updates those fixtures
+    # and nothing else would leave the hand-written Swift mirrors in
+    # Sources/GlomerisDtos.swift silently wrong, and a `macos/**` filter would
+    # let it merge unchecked. Guarding that cross-language contract is most of
+    # this job's value, so it runs on every PR.
+    #
+    # Runner pinned to `macos-14`, not `macos-latest`:
+    # MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS asserts an SF
+    # Symbol resolves on the *running* OS, so the OS version is part of what
+    # this job asserts. `macos-latest` would silently re-point that assertion
+    # at a new OS during some unrelated PR.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the glomeris CLI
+        # GlomerisClientTests.testRealGlomerisDetectJSONDecodes is the only
+        # test that drives the real binary through GlomerisClient, and it
+        # XCTSkips when the binary is absent. Without this step it would skip
+        # on every run — an unenforced test inside the job whose whole purpose
+        # is to stop tests going unenforced.
+        run: cargo build --bin glomeris
+      - name: Verify the CLI is present so no test silently skips
+        run: |
+          if [ ! -x target/debug/glomeris ]; then
+            echo "::error::target/debug/glomeris is missing — testRealGlomerisDetectJSONDecodes would XCTSkip instead of running"
+            exit 1
+          fi
+      - name: Test GlomerisMenuBar
+        run: |
+          xcodebuild test \
+            -project macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj \
+            -scheme GlomerisMenuBar \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO
+
+  xcodeproj-drift:
+    # HORO-1296: GlomerisMenuBar.xcodeproj is generated from project.yml and
+    # both are committed, but xcodebuild builds the project and never reads
+    # the spec — so a spec edit without regeneration leaves project.yml
+    # describing a build nobody performs.
+    #
+    # A separate job from `macos-app` on purpose: a stale project and a
+    # failing test are different problems, and neither should be able to mask
+    # the other by short-circuiting a shared job.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned XcodeGen
+        # Downloaded into RUNNER_TEMP rather than the checkout so the
+        # extracted tree cannot show up as untracked files in the repo the
+        # next step is about to diff. `share/xcodegen` must stay a sibling of
+        # `bin/` — XcodeGen finds its setting presets relative to the
+        # executable — so the archive layout is used as-is.
+        run: |
+          set -euo pipefail
+          VERSION_FILE=macos/GlomerisMenuBar/.xcodegen-version
+          VERSION="$(grep -E '^version=' "$VERSION_FILE" | head -1 | cut -d= -f2)"
+          SHA256="$(grep -E '^sha256=' "$VERSION_FILE" | head -1 | cut -d= -f2)"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${VERSION}/xcodegen.zip"
+          echo "${SHA256}  xcodegen.zip" | shasum -a 256 -c -
+          unzip -q xcodegen.zip -d xcodegen-dist
+          echo "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Check the committed xcodeproj matches project.yml
+        run: bash scripts/check-xcodeproj-matches-xcodegen.sh
+
   no-policy-in-swift:
     # HORO-1068: mechanical guard — GlomerisMenuBar (the macOS thin client)
     # must never branch UI behavior on `policyLabel`/`policy_label`'s string
