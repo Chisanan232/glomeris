@@ -767,6 +767,224 @@ mod tests {
         assert_eq!(view.age_days, None);
     }
 
+    /// The account name embedded in the fixture paths below. Asserting on
+    /// this specific string — rather than only on `/` — is what makes the
+    /// privacy tests fail for the right reason if the projection ever
+    /// starts carrying a path in some other shape (a parent directory, a
+    /// `Display`-formatted provenance field, a "home-relative" rewrite
+    /// that keeps the leading segment).
+    const FIXTURE_ACCOUNT: &str = "someaccount";
+
+    fn realistic_evidence_set() -> Vec<Evidence> {
+        vec![
+            evidence_for(
+                ResourceKind::XcodeDerivedData,
+                "/Users/someaccount/Library/Developer/Xcode/DerivedData/MyApp-abc123",
+            ),
+            evidence_for(
+                ResourceKind::CargoTargetDir,
+                "/Users/someaccount/src/work-project/target",
+            ),
+            evidence_for(
+                ResourceKind::NodeModules,
+                "/Users/someaccount/src/work-project/node_modules",
+            ),
+        ]
+    }
+
+    #[test]
+    fn payload_carries_no_path_or_account_name() {
+        let actions = ActionRegistry::builtin();
+        let payload = build_request_payload(&realistic_evidence_set(), &actions).unwrap();
+
+        // The two strings below are the ENTIRE machine-derived egress
+        // surface of a `plan_with_llm` call: `complete()` receives these
+        // and nothing else, so proving both are path-free proves the
+        // request is.
+        for (label, text) in [
+            ("system_prompt", payload.system_prompt),
+            ("user_prompt", payload.user_prompt.as_str()),
+        ] {
+            assert!(
+                !text.contains(FIXTURE_ACCOUNT),
+                "{label} must not contain the account name: {text}"
+            );
+            assert!(
+                !text.contains('/'),
+                "{label} must not contain a path separator: {text}"
+            );
+            assert!(
+                !text.contains("Users"),
+                "{label} must not contain a home-directory segment: {text}"
+            );
+            assert!(
+                !text.contains("DerivedData"),
+                "{label} must not contain a directory name: {text}"
+            );
+        }
+
+        // ...while the local alias table — which is never serialized —
+        // still holds the real resources, or resolution would be
+        // impossible rather than private.
+        assert_eq!(payload.aliases().len(), 3);
+        assert!(payload.aliases()[0].1.to_string().contains(FIXTURE_ACCOUNT));
+    }
+
+    #[test]
+    fn wire_ids_are_positional_and_independent_of_the_resource() {
+        let actions = ActionRegistry::builtin();
+        let realistic = build_request_payload(&realistic_evidence_set(), &actions).unwrap();
+
+        let wire_ids: Vec<&str> = realistic
+            .aliases()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(wire_ids, vec!["resource_1", "resource_2", "resource_3"]);
+
+        // Three entirely different resources in the same positions
+        // produce byte-identical wire ids: the alias is derived from
+        // position only, so it leaks nothing about what it names, and it
+        // is not a stable handle that could correlate this machine across
+        // requests.
+        let unrelated = build_request_payload(
+            &[
+                evidence_for(ResourceKind::CargoTargetDir, "/opt/other/target"),
+                evidence_for(ResourceKind::NodeModules, "/opt/other/node_modules"),
+                evidence_for(ResourceKind::HomebrewCache, "/opt/homebrew/cache"),
+            ],
+            &actions,
+        )
+        .unwrap();
+        let unrelated_ids: Vec<&str> = unrelated
+            .aliases()
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(unrelated_ids, wire_ids);
+    }
+
+    #[test]
+    fn wire_alias_resolves_to_the_matching_resource() {
+        // The form a live model actually answers in: it was shown
+        // `resource_2` and says `resource_2`, and that must come back as
+        // the second resource of the set — the real path never having
+        // crossed the wire in either direction.
+        let evidence_set = realistic_evidence_set();
+        let text = r#"{"items": [{"resource_id": "resource_2", "action_id": "cargo.clean.target_dir", "priority": 3, "reason": "stale build output"}]}"#;
+        let provider = FakeProvider {
+            response: Ok(text.to_string()),
+        };
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(result.provider_error.is_none());
+        assert_eq!(result.dropped_unknown_resource, 0);
+        assert_eq!(result.validated_items.len(), 1);
+        let (resource, action_id, priority) = &result.validated_items[0];
+        assert_eq!(*resource, evidence_set[1].resource);
+        assert_eq!(action_id.0, "cargo.clean.target_dir");
+        assert_eq!(*priority, Some(3));
+    }
+
+    #[test]
+    fn out_of_range_wire_alias_is_dropped_and_counted() {
+        let evidence_set = realistic_evidence_set();
+        let text = r#"{"items": [{"resource_id": "resource_99", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": null}]}"#;
+        let provider = FakeProvider {
+            response: Ok(text.to_string()),
+        };
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(result.provider_error.is_none());
+        assert!(result.validated_items.is_empty());
+        assert_eq!(result.dropped_unknown_resource, 1);
+    }
+
+    #[test]
+    fn model_supplied_path_cannot_name_an_undiscovered_resource() {
+        // Opaque wire ids do not become an escape hatch in the other
+        // direction: the real-id fallback is still a lookup into this
+        // process's own discovery output, so a model that guesses a path
+        // — including one it was never shown — names nothing.
+        let evidence_set = realistic_evidence_set();
+        let text = r#"{"items": [{"resource_id": "cargo_target_dir:/etc/passwd", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": null}]}"#;
+        let provider = FakeProvider {
+            response: Ok(text.to_string()),
+        };
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert!(result.provider_error.is_none());
+        assert!(result.validated_items.is_empty());
+        assert_eq!(result.dropped_unknown_resource, 1);
+    }
+
+    #[test]
+    fn serialized_view_exposes_exactly_the_documented_fields() {
+        // A field added to `LlmResourceView` is a field that starts
+        // leaving the machine, and the privacy assertions above only
+        // catch it if its value happens to look like a path. This pins
+        // the key set itself, so any new field fails here and has to be
+        // justified deliberately.
+        let actions = ActionRegistry::builtin();
+        let payload = build_request_payload(&realistic_evidence_set(), &actions).unwrap();
+        let views: serde_json::Value = serde_json::from_str(&payload.user_prompt).unwrap();
+
+        let mut keys: Vec<&str> = views[0]
+            .as_object()
+            .expect("each view serializes as a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "age_days",
+                "completeness",
+                "kind",
+                "offered_action_ids",
+                "reclaimable_bytes",
+                "regenerability",
+                "resource_id",
+            ]
+        );
+    }
+
+    #[test]
+    fn payload_view_order_matches_alias_order() {
+        // Resolution is only correct if the i-th view the model sees and
+        // the i-th alias entry describe the same resource; nothing else
+        // ties the two `enumerate()` passes in `build_request_payload`
+        // together.
+        let evidence_set = realistic_evidence_set();
+        let actions = ActionRegistry::builtin();
+        let payload = build_request_payload(&evidence_set, &actions).unwrap();
+
+        // Compared through the raw JSON rather than by deserializing:
+        // `LlmResourceView` is serialize-only by design (nothing inbound
+        // may be shaped like an evidence projection), so there is no
+        // `Deserialize` impl to lean on here.
+        let raw: serde_json::Value = serde_json::from_str(&payload.user_prompt).unwrap();
+        assert_eq!(raw.as_array().unwrap().len(), evidence_set.len());
+        assert_eq!(payload.aliases().len(), evidence_set.len());
+
+        for (index, ev) in evidence_set.iter().enumerate() {
+            let (wire_id, resource) = &payload.aliases()[index];
+            assert_eq!(raw[index]["resource_id"], serde_json::json!(wire_id));
+            assert_eq!(
+                raw[index]["kind"],
+                serde_json::json!(LlmResourceView::from_evidence(ev, &actions, index).kind)
+            );
+            assert_eq!(*resource, ev.resource);
+        }
+    }
+
     #[test]
     fn unexpected_field_rejects_whole_plan() {
         // deny_unknown_fields rejects the WHOLE containing struct on any
