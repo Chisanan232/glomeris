@@ -77,6 +77,18 @@ enum GlomerisClientError: Error, Equatable {
     /// but fails to launch is a broken install, whereas this is no install
     /// at all, and the associated names tell the user where to put one.
     case executableNotFound(searched: [String])
+    /// The calling `Task` was cancelled, so the child was sent `SIGTERM` and
+    /// its output discarded (HORO-1308).
+    ///
+    /// A typed case rather than Swift's own `CancellationError` on purpose:
+    /// every popover section already funnels its failures through
+    /// `SectionFetchErrors.shortMessage`, which knows how to turn a
+    /// `GlomerisClientError` into one sentence of user-facing copy and would
+    /// otherwise render this one as `String(describing:)` boilerplate. Being
+    /// in the same enum is also what lets that funnel return *no message at
+    /// all* for a cancellation — a scan the user stopped, or one abandoned
+    /// because they closed the popover, is not a failure to report.
+    case cancelled
 }
 
 /// One-shot carrier for a child process's exit status, handing it from
@@ -137,6 +149,65 @@ final class ExitStatusRelay: @unchecked Sendable {
             waiters.append(continuation)
             lock.unlock()
         }
+    }
+}
+
+/// Holds the spawned child so a cancellation arriving from another thread can
+/// signal it, without either side having to know which happened first
+/// (HORO-1308).
+///
+/// Two orderings have to be correct. Ordinarily the child is adopted first and
+/// a later cancellation signals it. But `withTaskCancellationHandler` invokes
+/// its handler immediately if the task is *already* cancelled, which can
+/// happen while `Process.run()` is still in progress — and a terminate request
+/// that arrived then must not be dropped on the floor, or the popover closing
+/// mid-scan would leave an orphaned `glomeris` running to completion. So a
+/// request that beats the child is remembered and applied at adoption.
+///
+/// `Process.terminate()` raises an Objective-C exception — uncatchable from
+/// Swift, so it would take the app down — if the process was never launched.
+/// Holding the reference only from the moment `run()` has returned
+/// successfully is what makes that unreachable; there is no launched check to
+/// get wrong because an unlaunched process is never visible here.
+///
+/// Internal rather than private only so the orderings can be asserted on
+/// directly from the test target, same as `ExitStatusRelay`.
+final class ProcessTerminationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+    private var terminationRequested = false
+
+    /// Call once, immediately after `Process.run()` returns without throwing.
+    func adopt(_ process: Process) {
+        lock.lock()
+        self.process = process
+        let signalNow = terminationRequested
+        lock.unlock()
+
+        // Outside the lock: `terminate()` is a Foundation call and must not
+        // run with our lock held.
+        if signalNow {
+            process.terminate()
+        }
+    }
+
+    /// Safe from any thread, at any time, any number of times — including
+    /// before `adopt` and after the child has already exited.
+    func requestTermination() {
+        lock.lock()
+        terminationRequested = true
+        let target = process
+        lock.unlock()
+
+        target?.terminate()
+    }
+
+    /// Whether a termination was ever asked for. Read after the fact to tell
+    /// "the child exited on its own" from "we killed it".
+    var wasTerminationRequested: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return terminationRequested
     }
 }
 
@@ -234,14 +305,61 @@ struct GlomerisClient {
     /// Runs `glomeris` and hands back its raw exit code, stdout, stderr,
     /// and decoded progress lines with no exit-code-specific
     /// interpretation — see `GlomerisRawResult`'s doc comment for why
-    /// this exists alongside `run` above. Only throws if no binary was found
-    /// to spawn, or if the one found could not be spawned at all; every other
-    /// outcome, including any non-zero exit code, is returned rather than
-    /// thrown.
+    /// this exists alongside `run` above. Throws if no binary was found
+    /// to spawn, if the one found could not be spawned at all, or if the
+    /// calling task was cancelled; every other outcome, including any
+    /// non-zero exit code, is returned rather than thrown.
+    ///
+    /// ## Cancellation (HORO-1308)
+    ///
+    /// Cancelling the calling task sends the child `SIGTERM` and throws
+    /// `GlomerisClientError.cancelled`. This is what lets a user stop an
+    /// `llm-plan` run they started — a call that talks to a remote provider
+    /// and can sit there for tens of seconds with nothing to show — instead of
+    /// being stuck watching a spinner they cannot dismiss. It also stops the
+    /// existing polling sections leaving an orphaned child behind every time
+    /// the popover closes mid-fetch.
+    ///
+    /// **Only ever offer cancellation for a read-only or advisory subcommand.**
+    /// `status`, `daemon status`, `detect`, `explain`, `history`,
+    /// `action-history` and `llm-plan` observe and advise; interrupting one
+    /// loses nothing but the answer. `execute` is the exception and must never
+    /// be reachable from a cancellable task: `SIGTERM` partway through a
+    /// deletion would leave the filesystem in a state neither this app nor the
+    /// audit log could describe, and the result would be reported as
+    /// "cancelled" whether or not the removal had already happened. That is
+    /// why `CandidateDetailView` runs `performClean()` only from button
+    /// actions in detached `Task {}` blocks and never from a `.task {}`
+    /// modifier, which SwiftUI cancels on disappear —
+    /// `GlomerisClientTests.testNoCancellableTaskModifierCanReachExecute`
+    /// pins that mechanically.
     func runRaw<Progress: Decodable>(
         _ arguments: [String],
         progressType: Progress.Type = Progress.self,
         onProgress: (@Sendable (Progress) -> Void)? = nil
+    ) async throws -> GlomerisRawResult<Progress> {
+        let terminationGate = ProcessTerminationGate()
+        return try await withTaskCancellationHandler {
+            try await spawnAndDrain(
+                arguments,
+                progressType: Progress.self,
+                onProgress: onProgress,
+                terminationGate: terminationGate
+            )
+        } onCancel: {
+            // Runs on whichever thread cancelled us, possibly before the child
+            // has even been adopted — see `ProcessTerminationGate`.
+            terminationGate.requestTermination()
+        }
+    }
+
+    /// `runRaw`'s body, split out only so the cancellation handler above wraps
+    /// one expression instead of forty lines.
+    private func spawnAndDrain<Progress: Decodable>(
+        _ arguments: [String],
+        progressType: Progress.Type,
+        onProgress: (@Sendable (Progress) -> Void)?,
+        terminationGate: ProcessTerminationGate
     ) async throws -> GlomerisRawResult<Progress> {
         let process = Process()
         process.executableURL = try resolveExecutableURL()
@@ -269,6 +387,9 @@ struct GlomerisClient {
         } catch {
             throw GlomerisClientError.executionFailed(error.localizedDescription)
         }
+        // Only now, and only on the success path: the gate must never hold a
+        // process that was not launched.
+        terminationGate.adopt(process)
 
         let decoder = JSONDecoder()
 
@@ -302,6 +423,18 @@ struct GlomerisClient {
         // Awaiting the relay suspends instead of blocking, so the thread
         // stays available and the wait always ends.
         let exitCode = await exitStatus.wait()
+
+        // A terminated child's exit code is the signal that killed it and its
+        // stdout is whatever happened to have been flushed — a truncated JSON
+        // document at best. Throwing rather than returning that keeps a partial
+        // body from ever reaching a decoder.
+        //
+        // Gated on the gate's own flag rather than `Task.isCancelled`, which
+        // here would mean the same thing, because the flag is the thing the
+        // tests can set and observe directly without needing a cancelled task.
+        if terminationGate.wasTerminationRequested {
+            throw GlomerisClientError.cancelled
+        }
 
         return GlomerisRawResult(
             exitCode: exitCode,
