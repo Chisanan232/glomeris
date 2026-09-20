@@ -15,6 +15,48 @@ unless a human explicitly adds it here too. `plan_with_llm` is the entry
 point: it serializes a set of these views, calls a provider, and defensively
 validates the response.
 
+## What leaves your machine
+
+Two strings: a fixed system prompt and a JSON array of `LlmResourceView`
+values. `LlmRequestPayload` is that request, and it is the whole outbound
+surface — nothing about the local machine is added downstream of it.
+
+Each view identifies its resource by a **positional wire alias** —
+`resource_1`, `resource_2`, … — not by its real `ResourceId`. That matters
+because a `ResourceId` for a path-backed resource kind renders as an
+absolute path, and an absolute path under `$HOME` carries your OS account
+name and your directory layout. Since HORO-1298, no path, home directory
+or account name is transmitted; what the model gets is the resource's
+kind, reclaimable size, age, regenerability, evidence completeness and the
+action ids offered for it, which is what a ranking judgement is actually
+made from.
+
+The alias is positional rather than a hash of the resource. A hash would be
+stable across runs, which sounds better until you count the keyspace: a
+path like `/Users/<name>/Library/Developer/Xcode/DerivedData` has one
+unknown segment, so anyone holding a candidate account-name list can
+confirm it against the hash offline. A stable pseudonym is also, by
+construction, a handle for correlating your machine across requests. An
+index is neither, and costs nothing — the model is ranking resources it was
+just handed, not recognizing them from last week.
+
+The wire-id → real-`ResourceId` table stays in the process's memory and is
+never serialized. It is how a response's `resource_id` regains meaning
+locally.
+
+### Checking this yourself
+
+```
+glomeris llm-plan --print-payload [--json]
+```
+
+Runs discovery, prints the exact request a live run would send plus the
+local alias table, and stops — before any provider is constructed. No API
+key is needed, and no network call is made, so the command cannot send the
+thing it is showing you. The two prompt sections are what leaves; the alias
+section is explicitly labelled as not sent, and is the only place the real
+absolute paths appear.
+
 ## What it is not, and never will be
 
 `plan_with_llm`'s output is a ranking suggestion only. It never calls
@@ -39,6 +81,8 @@ subcommand.
 
 ```
 glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json]
+glomeris llm-plan --print-payload [--project-root <path>]... [--json]
+glomeris llm-plan --schema
 ```
 
 - Without `--plan-file`, calls a real OpenAI-compatible endpoint via
@@ -48,8 +92,11 @@ glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json]
   `extract_plan`/`LlmPlan`/`plan_with_llm` validation pipeline — useful for
   reproducing a scenario deterministically, with no network call and no API
   key.
-- `--json` prints the `LlmPlanReport` as JSON instead of the human-readable
-  form.
+- `--print-payload` prints the outbound request without sending it, and
+  returns before a provider is constructed — see "What leaves your
+  machine" above. Requires no API key.
+- `--json` prints the `LlmPlanReport` (or, with `--print-payload`, the
+  `LlmPayloadReport`) as JSON instead of the human-readable form.
 
 Human-readable output always opens with:
 
@@ -64,7 +111,10 @@ See [CLI Reference](cli_reference.md) for the full flag/exit-code table.
 `glomeris llm-plan --schema` prints an example, syntactically valid
 `LlmPlan` JSON document to stdout — the canonical way to get a starting
 point for a `--plan-file` fixture without reading `src/actions/llm.rs`'s
-`LlmPlanItem` struct directly:
+`LlmPlanItem` struct directly. Its `resource_id` is in the
+`ResourceId::to_string()` form because a human writing a fixture by hand
+names resources the way `glomeris detect` prints them; a live model is
+handed wire aliases instead, and answers with those:
 
 ```
 glomeris llm-plan --schema
@@ -74,7 +124,7 @@ glomeris llm-plan --schema
 {
   "items": [
     {
-      "resource_id": "cargo_target_dir:/Users/you/project/target",
+      "resource_id": "cargo_target_dir:/path/to/project/target",
       "action_id": "cargo.clean.target_dir",
       "priority": 1,
       "reason": "stale build artifacts, not modified in 30 days"
@@ -87,7 +137,7 @@ Field meanings, all on `LlmPlanItem`:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `resource_id` | `String`, required | Must match a `ResourceId::to_string()` from the evidence set `plan_with_llm` was called with — an unmatched value drops just that item (`dropped_unknown_resource`), never the whole plan. |
+| `resource_id` | `String`, required | Must match either a positional wire alias (`resource_1`, …) from the request the model was given, or — for a hand-written `--plan-file` fixture — a `ResourceId::to_string()` from the evidence set `plan_with_llm` was called with. Both are looked up in sets this process built from its own discovery, so neither can name a resource that was not found locally. An unmatched value drops just that item (`dropped_unknown_resource`), never the whole plan. |
 | `action_id` | `String`, required | Must match a registered `ActionRegistry` action id — an unmatched value drops just that item (`dropped_unknown_action`). |
 | `priority` | `Option<u32>` | Informational ranking hint only. |
 | `reason` | `Option<String>` | Human-readable explanation. Never interpreted as an instruction, a path, or anything that reaches execution. |
@@ -241,6 +291,32 @@ message, or a PR description.** Treat it as you would any other credential.
   tolerance, `Authorization: Bearer` scheme, model and both message roles,
   and the 401/403/404/empty-body/non-JSON/connection-closed failure modes
   each have a test that inspects the bytes actually sent.
+- No absolute path, home directory or account name is transmitted. Asserted
+  at three levels: on the payload struct
+  (`payload_carries_no_path_or_account_name`), on the CLI report
+  (`build_llm_payload_report_separates_outbound_prompts_from_local_aliases`),
+  and on the bytes of the real HTTP request, captured by a loopback
+  listener standing in for the provider
+  (`tests/llm_plan_egress_privacy.rs`) — headers included. That last test
+  also pins the two halves that make the proof non-vacuous: the payload
+  demonstrably *does* describe a path-backed resource, and the real path
+  *was* available locally and was withheld deliberately.
+- Wire aliases are positional, so the same request shape carries
+  byte-identical ids regardless of what the resources are
+  (`wire_ids_are_positional_and_independent_of_the_resource`) — there is no
+  stable identifier in the payload that could correlate a machine across
+  requests.
+- An alias resolves only through the request's own table, and a real-id
+  string only through the evidence set: a model that invents either — an
+  out-of-range `resource_99`, or a guessed path it was never shown — names
+  nothing (`out_of_range_wire_alias_is_dropped_and_counted`,
+  `model_supplied_path_cannot_name_an_undiscovered_resource`). No
+  model-provided identifier gains execution authority; policy still
+  classifies every surviving item.
+- The serialized view's key set is pinned to its seven documented fields
+  (`serialized_view_exposes_exactly_the_documented_fields`), so adding a
+  field to `LlmResourceView` — the only way to widen what leaves — fails a
+  test rather than passing silently.
 - `LlmPlanItem` uses `#[serde(deny_unknown_fields)]`: a model trying to
   smuggle an extra field (e.g. a `"command"`) fails deserialization of the
   *whole* plan, not just that item — confirmed by

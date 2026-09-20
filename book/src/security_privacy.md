@@ -8,7 +8,7 @@ anywhere in the codebase is the optional BYOK LLM planner's HTTP call to
 whatever endpoint you configure (see [BYOK LLM Planner](byok.md)) — nothing
 else in the crate makes a network request.
 
-## No raw filesystem inventory sent to any LLM, except resource paths when you explicitly invoke `llm-plan` with live config
+## No raw filesystem inventory, and no filesystem paths, sent to any LLM
 
 As of HORO-1008, `glomeris llm-plan` is wired into the binary (see
 [BYOK LLM Planner](byok.md)). No filesystem data is sent anywhere unless you
@@ -16,11 +16,34 @@ explicitly run that subcommand without `--plan-file` *and* have all three
 `GLOMERIS_LLM_*` environment variables set — every other command in this
 book never makes a network request. Even then, what is sent is bounded and
 explicit: `LlmResourceView` is a hand-maintained projection of one
-`Evidence` record containing a resource's path/id, kind, size estimate,
-age, regenerability, and completeness — never raw file contents, never a
-directory listing, never anything beyond that fixed set of fields. Adding a
-field to `Evidence` later has no effect on what a model sees unless a human
-explicitly adds it to `LlmResourceView` too.
+`Evidence` record containing a resource's kind, size estimate, age,
+regenerability, completeness, and the action ids offered for it — never raw
+file contents, never a directory listing, never anything beyond that fixed
+set of fields. Adding a field to `Evidence` later has no effect on what a
+model sees unless a human explicitly adds it to `LlmResourceView` too, and
+adding a field to `LlmResourceView` itself fails a test that pins its
+serialized key set.
+
+**Nor are resource paths sent.** Until HORO-1298 each view identified its
+resource by its real `ResourceId`, which for the five path-backed resource
+kinds renders as an absolute path — and an absolute path under `$HOME`
+discloses the OS account name and the machine's directory layout. Note that
+`--project-root` never bounded this: it scopes the cargo and node detectors
+only, while the Xcode detector is `$HOME`-bounded and the Homebrew and
+Docker detectors shell out and are bounded by neither. Each view now
+carries a positional wire alias — `resource_1`, `resource_2`, … — and the
+table mapping an alias back to a real `ResourceId` has no `Serialize`
+derive and stays in the process's memory. The aliases are positional rather
+than hashed on purpose: a hashed path would be both brute-forceable (one
+unknown segment in `/Users/<name>/Library/...`) and a stable handle for
+correlating your machine across requests.
+
+Run `glomeris llm-plan --print-payload` to see the exact request a live run
+would send, including the local alias table, without sending it and without
+configuring a credential. Three tests enforce the property, the strongest
+of them (`tests/llm_plan_egress_privacy.rs`) by capturing the real HTTP
+request with a loopback listener and asserting the transmitted bytes
+contain no path separator at all.
 
 ## BYOK secret handling
 

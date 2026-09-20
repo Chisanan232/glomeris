@@ -244,7 +244,7 @@ Human-readable output only — `clean --dry-run` has no `--json` mode. One
 line per considered resource, either its rendered `ActionPlan.explain` text
 or a `skip_reason` (e.g. `PROTECTED`, no registered action).
 
-## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--schema]`
+## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--schema] [--print-payload]`
 
 Not macOS-gated. ADVISORY, NON-EXECUTING (HORO-1008) — never constructs a
 `policy::Approval` and never calls `policy::approval::authorize` or
@@ -271,6 +271,14 @@ configuration and safety-property writeup.
 - `--api-key`/`--key`/`--token` are explicitly rejected (not accepted and
   ignored) — the error names `$GLOMERIS_LLM_API_KEY` instead.
 - `--json` prints the report as JSON.
+- `--print-payload` (HORO-1298) runs discovery, prints the exact request a
+  live run would send — the system prompt, the user prompt, and the local
+  wire-id-to-real-resource table under a heading marking it as *not* sent —
+  then returns before any provider is constructed. Requires no credential
+  and makes no network call, so it cannot send what it displays. The
+  outbound prompts identify resources only by positional alias
+  (`resource_1`, …); absolute paths appear in the alias table and nowhere
+  else. See [BYOK LLM Planner](byok.md#what-leaves-your-machine).
 - `--schema` (HORO-1048) prints an example, syntactically valid `LlmPlan`
   JSON document to stdout and exits — a distinct, self-contained mode
   that never runs discovery, never reads `--plan-file`, and never checks
@@ -286,7 +294,7 @@ glomeris llm-plan --schema
 {
   "items": [
     {
-      "resource_id": "cargo_target_dir:/Users/you/project/target",
+      "resource_id": "cargo_target_dir:/path/to/project/target",
       "action_id": "cargo.clean.target_dir",
       "priority": 1,
       "reason": "stale build artifacts, not modified in 30 days"
@@ -297,7 +305,9 @@ glomeris llm-plan --schema
 
 This exact output round-trips unchanged through `glomeris llm-plan
 --plan-file <path>` — see the linked BYOK page for the full field table and
-the round-trip test that proves it.
+the round-trip test that proves it. The `resource_id` form shown here is
+the one a human writes by hand in a fixture; a live model is given
+positional wire aliases and answers with those, and both forms resolve.
 
 Human-readable output always opens with `LLM SUGGESTION — advisory only,
 nothing is executed by this command`.
@@ -306,8 +316,9 @@ Exit codes for this subcommand specifically:
 
 - `0` — success, including zero suggestions or every suggestion being
   `PROTECTED`.
-- `1` — the provider call or response parsing failed, or `--plan-file`
-  named an unreadable path.
+- `1` — the provider call or response parsing failed, `--plan-file`
+  named an unreadable path, or `--print-payload` could not serialize the
+  request.
 - `2` — usage error: an unrecognized argument, `--plan-file` with no value,
   missing live-mode environment configuration, or an `--api-key`/`--key`/
   `--token` flag.

@@ -177,9 +177,16 @@ impl fmt::Display for ResourceLocator {
 }
 
 /// Stable identity of one resource. [`ResourceId`]'s [`Display`](std::fmt::Display) output is
-/// the ONLY resource handle a future LLM will ever see — keep the format
-/// stable: `"<resource_kind_snake_case>:<locator>"`, e.g.
+/// the resource handle every CLI report, `--resource-id` selector and
+/// hand-written `--plan-file` fixture uses — keep the format stable:
+/// `"<resource_kind_snake_case>:<locator>"`, e.g.
 /// `"cargo_target_dir:/Users/x/proj/target"`.
+///
+/// It is NOT what an LLM sees. As the example above shows, this string
+/// embeds an absolute path for every path-backed resource kind, so
+/// `crate::actions::llm` substitutes a positional wire alias before the
+/// request leaves the machine (HORO-1298). Local use of this format is
+/// unrestricted; adding an egress path for it is not.
 #[derive(Debug, Clone)]
 pub struct ResourceId {
     pub kind: ResourceKind,

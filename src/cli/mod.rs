@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::actions::llm::{plan_with_llm, LlmProvider};
+use crate::actions::llm::{build_request_payload, plan_with_llm, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
@@ -33,8 +33,8 @@ use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserCon
 use crate::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, ActionListItem, ActionListReport,
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPlanItemReport,
-    LlmPlanReport, ProgressEvent, StatusReport,
+    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPayloadReport,
+    LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
 };
 use crate::reporting::policy_label::label_for;
 
@@ -540,6 +540,62 @@ pub fn build_llm_plan_report(
     }
 }
 
+/// Builds an [`LlmPayloadReport`] — the exact request a live `llm-plan`
+/// run would send for `candidates`, without sending it and without needing
+/// a provider or a credential (HORO-1298).
+///
+/// Calls [`build_request_payload`], the same function [`plan_with_llm`]
+/// calls, rather than reconstructing the payload: a `--print-payload`
+/// output that could drift from the real request would be worse than no
+/// output at all, since its whole purpose is letting an operator verify
+/// what leaves their machine.
+pub fn build_llm_payload_report(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+) -> Result<LlmPayloadReport, crate::actions::llm::LlmError> {
+    let evidences: Vec<Evidence> = candidates.iter().map(|(ev, _)| ev.clone()).collect();
+    let payload = build_request_payload(&evidences, actions)?;
+
+    Ok(LlmPayloadReport {
+        system_prompt: payload.system_prompt.to_string(),
+        user_prompt: payload.user_prompt.clone(),
+        resource_aliases: payload
+            .aliases()
+            .iter()
+            .map(|(wire_resource_id, resource)| LlmPayloadResourceAlias {
+                wire_resource_id: wire_resource_id.clone(),
+                local_resource_id: resource.to_string(),
+            })
+            .collect(),
+    })
+}
+
+/// Prints an [`LlmPayloadReport`] as human-readable text, with the two
+/// outbound strings and the local alias table under separate headings —
+/// the separation is the point, so it must be visible and not require
+/// reading `--json` to see.
+pub fn print_llm_payload_report(report: &LlmPayloadReport) {
+    println!("LLM REQUEST PAYLOAD — nothing is sent by this command");
+    println!();
+    println!("-- sent: system_prompt --");
+    println!("{}", report.system_prompt);
+    println!();
+    println!("-- sent: user_prompt --");
+    println!("{}", report.user_prompt);
+    println!();
+    println!(
+        "-- NOT sent: local resource aliases ({}) --",
+        report.resource_aliases.len()
+    );
+    if report.resource_aliases.is_empty() {
+        println!("(no resources discovered)");
+        return;
+    }
+    for alias in &report.resource_aliases {
+        println!("{} = {}", alias.wire_resource_id, alias.local_resource_id);
+    }
+}
+
 /// Renders an example, syntactically valid `LlmPlan` JSON document
 /// (HORO-1048) — `glomeris llm-plan --schema`'s entire stdout, and the
 /// literal text embedded in `book/src/byok.md`'s schema example. Built
@@ -552,11 +608,22 @@ pub fn build_llm_plan_report(
 /// `LlmPlan` unchanged, and `tests/llm_plan_schema_round_trip.rs` proves
 /// the same thing through the actual `glomeris llm-plan --plan-file`
 /// input surface.
+///
+/// The example's `resource_id` is a `ResourceId::to_string()`-shaped value
+/// because this document's audience is a human hand-writing a
+/// `--plan-file` fixture, and that is the form `glomeris detect` prints.
+/// A live model never sees such a value — it is handed positional wire
+/// aliases instead (HORO-1298, see `crate::actions::llm`'s module docs) —
+/// and both forms resolve. The placeholder path is deliberately not
+/// home-shaped: a `/Users/<name>/...` example invited exactly the
+/// assumption HORO-1298 was about, that real local paths are what crosses
+/// the wire. It is also deliberately a path that no real discovery run
+/// will match, which `tests/llm_plan_schema_round_trip.rs` depends on.
 pub fn llm_plan_schema_example() -> String {
     let value = serde_json::json!({
         "items": [
             {
-                "resource_id": "cargo_target_dir:/Users/you/project/target",
+                "resource_id": "cargo_target_dir:/path/to/project/target",
                 "action_id": "cargo.clean.target_dir",
                 "priority": 1,
                 "reason": "stale build artifacts, not modified in 30 days"
@@ -1840,6 +1907,51 @@ mod tests {
         }
     }
 
+    /// HORO-1298: `--print-payload` is only worth anything if the two
+    /// prompt fields — the bytes that would actually be transmitted — are
+    /// path-free while the alias table, which stays local, still names the
+    /// real resource. A regression that reverted the wire ids would show up
+    /// as the account name appearing in `user_prompt`.
+    #[test]
+    fn build_llm_payload_report_separates_outbound_prompts_from_local_aliases() {
+        let ev = evidence(
+            "/Users/someaccount/Library/Developer/Xcode/DerivedData/MyApp-abc123",
+            ResourceKind::XcodeDerivedData,
+            Some(4096),
+        );
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let candidates = vec![(ev.clone(), decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report = build_llm_payload_report(&candidates, &actions).unwrap();
+
+        for (label, text) in [
+            ("system_prompt", &report.system_prompt),
+            ("user_prompt", &report.user_prompt),
+        ] {
+            assert!(
+                !text.contains("someaccount") && !text.contains('/'),
+                "{label} must carry no path or account name: {text}"
+            );
+        }
+
+        assert_eq!(report.resource_aliases.len(), 1);
+        let alias = &report.resource_aliases[0];
+        assert_eq!(alias.wire_resource_id, "resource_1");
+        assert_eq!(alias.local_resource_id, ev.resource.to_string());
+        assert!(alias.local_resource_id.contains("someaccount"));
+    }
+
+    #[test]
+    fn build_llm_payload_report_on_no_candidates_yields_an_empty_alias_table() {
+        let actions = ActionRegistry::builtin();
+        let report = build_llm_payload_report(&[], &actions).unwrap();
+
+        assert!(report.resource_aliases.is_empty());
+        assert_eq!(report.user_prompt, "[]");
+        assert!(!report.system_prompt.is_empty());
+    }
+
     /// SAFETY-CRITICAL regression test: a `PROTECTED` candidate that the
     /// LLM "approves" for a real, registered action must short-circuit
     /// before that action is ever resolved — `requested_action_id` and
@@ -2019,10 +2131,7 @@ mod tests {
             .expect("llm_plan_schema_example must produce valid LlmPlan JSON");
         assert_eq!(plan.items.len(), 1);
         let item = &plan.items[0];
-        assert_eq!(
-            item.resource_id,
-            "cargo_target_dir:/Users/you/project/target"
-        );
+        assert_eq!(item.resource_id, "cargo_target_dir:/path/to/project/target");
         assert_eq!(item.action_id, "cargo.clean.target_dir");
         assert_eq!(item.priority, Some(1));
 

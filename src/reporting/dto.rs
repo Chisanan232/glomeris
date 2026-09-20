@@ -472,6 +472,35 @@ pub struct LlmPlanReport {
     pub provider_error: Option<String>,
 }
 
+/// One wire-id -> real-resource mapping of a `glomeris llm-plan
+/// --print-payload` report (HORO-1298).
+///
+/// `local_resource_id` is the real `ResourceId` string and therefore, for
+/// path-backed resource kinds, an absolute path. That is correct here and
+/// only here: this DTO exists to show the operator what the opaque ids in
+/// `user_prompt` stand for, on their own machine. It is deliberately NOT
+/// part of `LlmPayloadReport`'s prompt fields, which are the bytes that
+/// actually leave.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LlmPayloadResourceAlias {
+    pub wire_resource_id: String,
+    pub local_resource_id: String,
+}
+
+/// `glomeris llm-plan --print-payload` report (HORO-1298): the exact
+/// request a live `llm-plan` run would send, shown without sending it, so
+/// "no absolute paths leave this machine" is checkable by the person whose
+/// machine it is rather than taken on trust.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LlmPayloadReport {
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub resource_aliases: Vec<LlmPayloadResourceAlias>,
+}
+
 /// `glomeris execute` report (HORO-1055): a thin projection of
 /// [`crate::executor::ExecutionReport`] — never duplicates its outcome
 /// logic, only renders the already-decided outcome. Built only for the
