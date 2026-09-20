@@ -7,6 +7,18 @@
 //! response shape, and [`plan_with_llm`] is the entry point that calls a
 //! provider and validates its response.
 //!
+//! **What never leaves the machine (HORO-1298)**: a resource's real
+//! identity. [`LlmRequestPayload`] is the whole egress surface — two
+//! strings — and the `resource_id` inside it is a positional alias
+//! ([`wire_resource_id`]), so no absolute path, home directory or account
+//! name is transmitted even though the ranking task is unchanged: kind,
+//! reclaimable size, age, regenerability, completeness and the offered
+//! action ids are what a ranking decision is actually made from. The
+//! alias table that maps a returned id back to a real [`ResourceId`]
+//! exists only in this process's memory, which is why a model's answer
+//! can still be resolved exactly while a model's knowledge of this
+//! machine stays empty.
+//!
 //! **What this module is NOT, and never will be**: an authorization
 //! mechanism. `plan_with_llm`'s output is a ranking suggestion only — it
 //! never calls [`crate::policy::classify`]/`authorize`, and it must not.
@@ -48,6 +60,11 @@ use super::ActionRegistry;
 /// here.
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct LlmResourceView {
+    /// The resource's WIRE identity — a positional alias
+    /// ([`wire_resource_id`]) scoped to one request, never the real
+    /// [`ResourceId`] and therefore never a filesystem path (HORO-1298).
+    /// The real id lives only in [`LlmRequestPayload::aliases`], on this
+    /// machine, and is what the response is resolved back to.
     pub resource_id: String,
     pub kind: &'static str,
     pub reclaimable_bytes: Option<u64>,
@@ -61,7 +78,14 @@ impl LlmResourceView {
     /// Explicit, field-by-field conversion — no `From`/blanket impl, so
     /// adding a field to `Evidence` never silently starts flowing to an
     /// LLM; a human has to come here and decide to add it.
-    pub fn from_evidence(ev: &Evidence, actions: &ActionRegistry) -> Self {
+    ///
+    /// `index` is this resource's position in the payload being built, and
+    /// is the ONLY thing `resource_id` is derived from. Taking an index
+    /// rather than a caller-supplied string is deliberate: there is no
+    /// parameter here that a path could be passed through, so no call site
+    /// — present or future — can reintroduce HORO-1298 by handing this
+    /// function `ev.resource.to_string()`.
+    pub fn from_evidence(ev: &Evidence, actions: &ActionRegistry, index: usize) -> Self {
         // `age_days` is derived from `last_modified` relative to when this
         // evidence was collected — never from an ambient `SystemTime::now()`
         // call, matching `crate::policy::engine::classify`'s "no ambient
@@ -75,7 +99,7 @@ impl LlmResourceView {
         });
 
         Self {
-            resource_id: ev.resource.to_string(),
+            resource_id: wire_resource_id(index),
             kind: ev.resource.kind_tag(),
             reclaimable_bytes: ev.reclaimable_bytes.observed().copied(),
             age_days,
@@ -84,6 +108,98 @@ impl LlmResourceView {
             offered_action_ids: actions.ids_for_kind(ev.resource.kind),
         }
     }
+}
+
+/// The wire identity of the `index`-th resource of one request payload
+/// (HORO-1298): `resource_1`, `resource_2`, … — a positional alias and
+/// nothing else.
+///
+/// Positional deliberately, rather than a hash or other derivation of the
+/// resource itself. A hashed path would be stable across invocations,
+/// which sounds like an improvement until you count the keyspace: a path
+/// such as `/Users/<name>/Library/Developer/Xcode/DerivedData` has exactly
+/// one unknown segment, so any party holding a candidate username list can
+/// confirm it against the hash offline. A stable pseudonym is also, by
+/// construction, a cross-session correlation handle for the machine. An
+/// index has neither property and costs nothing: the model is ranking the
+/// resources it was just handed, not recognizing them from last week.
+fn wire_resource_id(index: usize) -> String {
+    format!("resource_{}", index + 1)
+}
+
+/// Everything machine-derived that leaves this host for one
+/// [`plan_with_llm`] call, plus the purely local table needed to resolve
+/// the model's answer back to real resources (HORO-1298).
+///
+/// `system_prompt` and `user_prompt` are the request verbatim — nothing
+/// else about the local machine is added downstream (see
+/// [`OpenAiCompatibleProvider::complete`], which sends exactly these two
+/// strings plus the configured model name). That makes this type the one
+/// place to audit for egress, and the thing
+/// `glomeris llm-plan --print-payload` prints.
+///
+/// `aliases` is NOT serializable and never sent: it maps each wire id to
+/// the real [`ResourceId`] it stands for, which is how the response's
+/// `resource_id` values regain meaning locally without the model ever
+/// having been told a path.
+pub struct LlmRequestPayload {
+    pub system_prompt: &'static str,
+    pub user_prompt: String,
+    aliases: Vec<(String, ResourceId)>,
+}
+
+impl LlmRequestPayload {
+    /// The local wire-id -> real-resource table, in payload order. For
+    /// local rendering and response resolution only — a caller that sends
+    /// this anywhere has defeated the point of the type.
+    pub fn aliases(&self) -> &[(String, ResourceId)] {
+        &self.aliases
+    }
+
+    /// The real resource a returned wire id stands for, or `None` if the
+    /// id was never sent. This is a lookup into a table this process built
+    /// from resources it already discovered itself — a returned id selects
+    /// from that table and can never introduce a resource of its own, let
+    /// alone a path.
+    fn resolve(&self, wire_id: &str) -> Option<&ResourceId> {
+        self.aliases
+            .iter()
+            .find(|(id, _)| id == wire_id)
+            .map(|(_, resource)| resource)
+    }
+}
+
+/// Builds the exact payload one [`plan_with_llm`] call would send for
+/// `evidence_set`, without sending it (HORO-1298). Deterministic: the same
+/// evidence in the same order always produces byte-identical prompts, with
+/// no clock or randomness involved, which is what makes
+/// `--print-payload`'s output a truthful preview of the request rather
+/// than an approximation of it.
+pub fn build_request_payload(
+    evidence_set: &[Evidence],
+    actions: &ActionRegistry,
+) -> Result<LlmRequestPayload, LlmError> {
+    let views: Vec<LlmResourceView> = evidence_set
+        .iter()
+        .enumerate()
+        .map(|(index, ev)| LlmResourceView::from_evidence(ev, actions, index))
+        .collect();
+
+    let aliases = evidence_set
+        .iter()
+        .enumerate()
+        .map(|(index, ev)| (wire_resource_id(index), ev.resource.clone()))
+        .collect();
+
+    let user_prompt = serde_json::to_string(&views).map_err(|e| {
+        LlmError::InvalidResponse(format!("failed to serialize evidence views: {e}"))
+    })?;
+
+    Ok(LlmRequestPayload {
+        system_prompt: SYSTEM_PROMPT,
+        user_prompt,
+        aliases,
+    })
 }
 
 fn regenerability_tag(r: Regenerability) -> &'static str {
@@ -492,26 +608,19 @@ pub fn plan_with_llm(
     evidence_set: &[Evidence],
     actions: &ActionRegistry,
 ) -> LlmPlanResult {
-    let views: Vec<LlmResourceView> = evidence_set
-        .iter()
-        .map(|ev| LlmResourceView::from_evidence(ev, actions))
-        .collect();
-
-    let user_prompt = match serde_json::to_string(&views) {
-        Ok(json) => json,
+    let payload = match build_request_payload(evidence_set, actions) {
+        Ok(payload) => payload,
         Err(e) => {
             return LlmPlanResult {
                 validated_items: Vec::new(),
                 dropped_unknown_resource: 0,
                 dropped_unknown_action: 0,
-                provider_error: Some(LlmError::InvalidResponse(format!(
-                    "failed to serialize evidence views: {e}"
-                ))),
+                provider_error: Some(e),
             };
         }
     };
 
-    let raw = match provider.complete(SYSTEM_PROMPT, &user_prompt) {
+    let raw = match provider.complete(payload.system_prompt, &payload.user_prompt) {
         Ok(raw) => raw,
         Err(e) => {
             return LlmPlanResult {
@@ -540,10 +649,23 @@ pub fn plan_with_llm(
     let mut dropped_unknown_action = 0u32;
 
     for item in plan.items {
-        let Some(resource) = evidence_set
-            .iter()
-            .find(|ev| ev.resource.to_string() == item.resource_id)
-            .map(|ev| ev.resource.clone())
+        // Wire alias first (what a live model was actually given), then the
+        // real `ResourceId` string. The second form is not a live-model
+        // path — a model is never told a real id — it exists so a
+        // hand-written `--plan-file` fixture can keep naming resources the
+        // way `glomeris detect` prints them. Both are lookups into sets
+        // this process built from its own discovery, so neither can name a
+        // resource that was not already found here, and neither decides
+        // anything: policy still classifies every survivor.
+        let Some(resource) = payload
+            .resolve(&item.resource_id)
+            .or_else(|| {
+                evidence_set
+                    .iter()
+                    .map(|ev| &ev.resource)
+                    .find(|resource| resource.to_string() == item.resource_id)
+            })
+            .cloned()
         else {
             dropped_unknown_resource += 1;
             continue;
@@ -625,9 +747,9 @@ mod tests {
     fn from_evidence_projects_expected_fields() {
         let ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
         let actions = ActionRegistry::builtin();
-        let view = LlmResourceView::from_evidence(&ev, &actions);
+        let view = LlmResourceView::from_evidence(&ev, &actions, 0);
 
-        assert_eq!(view.resource_id, "cargo_target_dir:/tmp/proj/target");
+        assert_eq!(view.resource_id, "resource_1");
         assert_eq!(view.kind, "cargo_target_dir");
         assert_eq!(view.reclaimable_bytes, Some(1024));
         assert_eq!(view.age_days, Some(0));
@@ -641,7 +763,7 @@ mod tests {
         let mut ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
         ev.last_modified = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         let actions = ActionRegistry::builtin();
-        let view = LlmResourceView::from_evidence(&ev, &actions);
+        let view = LlmResourceView::from_evidence(&ev, &actions, 0);
         assert_eq!(view.age_days, None);
     }
 
@@ -828,6 +950,11 @@ mod tests {
 
     #[test]
     fn valid_item_survives_validation() {
+        // Names the resource by its real `ResourceId` string rather than
+        // its wire alias, exercising the hand-written-fixture fallback in
+        // `plan_with_llm` (HORO-1298) — see
+        // `wire_alias_resolves_to_the_matching_resource` for the form a
+        // live model actually answers in.
         let ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
         let resource_id = ev.resource.to_string();
         let text = format!(
