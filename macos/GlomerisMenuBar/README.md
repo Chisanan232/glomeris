@@ -65,13 +65,54 @@ Code signing is disabled (`CODE_SIGNING_ALLOWED=NO` / `CODE_SIGNING_REQUIRED=NO`
 in `project.yml`) so this builds on a clean checkout / CI runner with no
 Apple Developer account or signing identity configured.
 
+**A recent Xcode is required.** The committed project is `objectVersion = 77`,
+and an Xcode too old for that format refuses to open it at all rather than
+degrading gracefully: Xcode 15.4 reports "a future Xcode project file format
+(77)" and exits 74 without reading the project. XcodeGen chooses the format, so
+it is not something `project.yml` can lower. Measured: 15.4 fails, 26.2 (what
+CI pins) works — the exact lower bound in between has not been established.
+
 ## Regenerating the Xcode project
 
-Only needed after editing `project.yml` (e.g. adding a new source file or
-target setting):
+Required after editing `project.yml` (e.g. adding a new source file or target
+setting) — CI enforces it, see below. The simplest way is to run the guard,
+which regenerates in place:
 
 ```sh
-brew install xcodegen   # if not already installed
+bash scripts/check-xcodeproj-matches-xcodegen.sh
+git add macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj
+```
+
+Or directly:
+
+```sh
 cd macos/GlomerisMenuBar
 xcodegen generate --spec project.yml
 ```
+
+Use the XcodeGen version pinned in
+[`.xcodegen-version`](.xcodegen-version). Different versions emit different
+`project.pbxproj` bytes for the same spec, so `brew install xcodegen` (which
+tracks whatever is current) will eventually produce a project that differs from
+the committed one for toolchain reasons alone. The guard checks the version on
+`PATH` and refuses to run on a mismatch rather than reporting phantom drift.
+
+## What CI enforces (HORO-1296)
+
+`.github/workflows/ci.yml` has two macOS jobs for this app:
+
+- **`macos-app`** builds the `glomeris` CLI, then runs the `GlomerisMenuBar`
+  test scheme. It is not path-filtered to `macos/**`: the DTO golden-fixture
+  tests decode `tests/fixtures/dto/` at the repo root, shared with the Rust
+  suite, so a Rust-side change can legitimately break the Swift mirrors. The
+  CLI is built first because one test `XCTSkip`s without it.
+- **`xcodeproj-drift`** regenerates with the pinned XcodeGen and fails if the
+  committed project differs.
+
+Both run on `macos-15`. `macos-app` additionally selects Xcode 26.2
+explicitly rather than taking the image default, for two reasons:
+`MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS` asserts an SF
+Symbol resolves on the running OS, so the toolchain is part of what the job
+asserts; and 26.2 is the version the app is developed and dogfooded against.
+`xcodeproj-drift` needs no Xcode pin — it never runs `xcodebuild`, and
+XcodeGen's output was observed not to depend on the installed Xcode.
