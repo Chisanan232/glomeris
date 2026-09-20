@@ -1,0 +1,7 @@
+{
+  "outcome": "ok",
+  "model": "gpt-4o-mini",
+  "endpoint_path": "/v1/chat/completions",
+  "error": null,
+  "response_excerpt": "ok"
+}

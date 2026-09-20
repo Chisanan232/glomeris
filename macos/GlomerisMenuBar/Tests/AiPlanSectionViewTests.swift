@@ -600,8 +600,18 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertTrue(source.contains("The model recommends. Glomeris decides what may run."))
         XCTAssertTrue(source.contains("may cost money"))
         XCTAssertTrue(
-            source.contains("--print-payload"),
-            "the privacy preview the CLI already offers must be discoverable from here"
+            source.contains("Settings shows exactly what would be sent"),
+            "the privacy preview must be discoverable from here"
+        )
+        // HORO-1309 moved the preview into the GUI. Until then this card told
+        // the user to run `glomeris llm-plan --print-payload` in a terminal —
+        // advice that was correct and also unusable for the audience of a
+        // menu-bar app, which is exactly the class of instruction this campaign
+        // is removing. Asserted as an absence so it cannot come back as a
+        // "helpful" addition once the GUI surface exists.
+        XCTAssertFalse(
+            source.contains("Run `glomeris"),
+            "the card must not send the user to a terminal for something the GUI now does"
         )
     }
 }

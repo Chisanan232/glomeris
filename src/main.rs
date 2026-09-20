@@ -68,6 +68,13 @@ const COMMANDS: &[CommandSpec] = &[
         description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion. --schema emits an example LlmPlan document instead; --print-payload shows the exact request that would be sent, without sending it.",
     },
     CommandSpec {
+        name: "llm-check",
+        usage: "llm-check [--json]",
+        description: "Test the configured BYOK LLM setup with one trivial request that describes \
+                       nothing about this machine, and report whether the endpoint, credential \
+                       and model work. Sends no evidence and runs no detectors.",
+    },
+    CommandSpec {
         name: "execute",
         usage: "execute --action-id <id> --resource-id <id> [--project-root <path>]... \
                  [--confirm-ask --observed-fingerprint <token>] [--json] [--progress-json]",
@@ -134,6 +141,7 @@ fn main() {
         Some("explain") => run_explain_command(&args[1..]),
         Some("clean") => run_clean_command(&args[1..]),
         Some("llm-plan") => run_llm_plan_command(&args[1..]),
+        Some("llm-check") => run_llm_check_command(&args[1..]),
         Some("execute") => run_execute_command(&args[1..]),
         Some("emergency") => run_emergency_command(),
         Some("history") => run_history_command(&args[1..]),
@@ -703,6 +711,16 @@ fn run_llm_plan_command(args: &[String]) {
             Ok(provider) => {
                 glomeris::cli::build_llm_plan_report(&candidates, &actions, &provider, impact)
             }
+            // "You have not set this up" and "you set it up wrongly, here is
+            // what to change" need different messages, and a user in the
+            // second case is being actively misled by the first: they *did*
+            // set all three variables. `Display` for
+            // `InvalidConfiguration` carries only Glomeris's own guidance,
+            // never the offending value.
+            Err(glomeris::actions::llm::LlmError::InvalidConfiguration(detail)) => {
+                eprintln!("glomeris llm-plan: {detail}");
+                std::process::exit(2);
+            }
             Err(_) => {
                 eprintln!(
                     "glomeris llm-plan: missing LLM configuration — set GLOMERIS_LLM_API_KEY, \
@@ -721,6 +739,92 @@ fn run_llm_plan_command(args: &[String]) {
     }
 
     if report.provider_error.is_some() {
+        std::process::exit(1);
+    }
+}
+
+/// `glomeris llm-check [--json]` — does the configured BYOK setup work?
+/// (HORO-1309)
+///
+/// The narrowest possible command: no project roots, no detectors, no
+/// evidence, no policy, no actions. It sends the two fixed prompts in
+/// [`glomeris::actions::llm::CONNECTION_TEST_SYSTEM_PROMPT`] through the same
+/// [`glomeris::actions::llm::LlmProvider::complete`] a plan uses, so a pass
+/// means a real request will work rather than meaning a cheaper probe
+/// succeeded.
+///
+/// Exit codes, chosen so a GUI or script can branch without parsing output:
+/// `0` the provider answered; `1` it did not (unreachable, rejected, or an
+/// unusable response — the report says which, and is printed first); `2` the
+/// configuration is absent or cannot work, i.e. nothing was sent and the fix
+/// is local. Deliberately the same shape `llm-plan` uses: `2` means "fix your
+/// invocation or setup", never "the network is having a bad day".
+///
+/// Like `llm-plan`, the credential comes only from `GLOMERIS_LLM_API_KEY` and
+/// is never accepted as an argument — passing a key in argv exposes it to
+/// `ps` and shell history.
+fn run_llm_check_command(args: &[String]) {
+    use glomeris::actions::llm::{
+        chat_completions_endpoint_path, provider_from_env, LlmError, LlmProvider,
+    };
+
+    let mut json = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            other => {
+                // Flag NAME only, never the whole token — see the identical
+                // guard in `run_llm_plan_command` for why printing `other`
+                // verbatim would echo a `--api-key=<secret>` value.
+                let flag_name = glomeris::cli::credential_flag_name(other);
+                if matches!(flag_name, "--api-key" | "--key" | "--token") {
+                    eprintln!(
+                        "glomeris llm-check: unrecognized argument '{flag_name}' — read the key \
+                         from $GLOMERIS_LLM_API_KEY; passing a key in argv exposes it to ps and \
+                         shell history"
+                    );
+                    std::process::exit(2);
+                }
+                eprintln!("glomeris llm-check: unrecognized argument '{other}'");
+                print_usage();
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let provider = match provider_from_env() {
+        Ok(provider) => provider,
+        Err(LlmError::InvalidConfiguration(detail)) => {
+            eprintln!("glomeris llm-check: {detail}");
+            std::process::exit(2);
+        }
+        Err(_) => {
+            eprintln!(
+                "glomeris llm-check: missing LLM configuration — set GLOMERIS_LLM_API_KEY, \
+                 GLOMERIS_LLM_BASE_URL, and GLOMERIS_LLM_MODEL"
+            );
+            std::process::exit(2);
+        }
+    };
+
+    // Read before the provider is moved behind `&dyn LlmProvider`, and by the
+    // same rule `complete` builds its URL with — so the reported path is the
+    // one actually posted to, not a second guess at it.
+    let endpoint_path = chat_completions_endpoint_path(&provider.base_url);
+    let model = provider.model.clone();
+    let report = glomeris::cli::build_llm_check_report(
+        &provider as &dyn LlmProvider,
+        &model,
+        &endpoint_path,
+    );
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_llm_check_report(&report);
+    }
+
+    if report.outcome != "ok" {
         std::process::exit(1);
     }
 }

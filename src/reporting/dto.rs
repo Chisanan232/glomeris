@@ -581,6 +581,60 @@ pub struct LlmPayloadReport {
     pub resource_aliases: Vec<LlmPayloadResourceAlias>,
 }
 
+/// `glomeris llm-check` report (HORO-1309): the outcome of one bounded,
+/// trivial round trip to the configured provider, so "is my BYOK setup
+/// actually working" is answerable without spending a real planning request
+/// and without a user having to interpret a raw HTTP failure.
+///
+/// ## What is deliberately not in here
+///
+/// The API key, obviously — but also the base URL. Only its path survives,
+/// as `endpoint_path`, for the same reasons
+/// [`crate::actions::llm::LlmError::ProviderStatus`] keeps only the path: a
+/// host may be private infrastructure, and some gateways accept a credential
+/// in the query string, so a user who pasted one into their base URL must
+/// not have it copied into a report that a UI may render and a log may
+/// retain. The path alone is what diagnoses the one misconfiguration this
+/// report exists to catch — host root configured instead of API root. The
+/// full URL is never needed here because the surface asking the question
+/// already has it: the user typed it in.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LlmCheckReport {
+    /// One of `"ok"`, `"misconfigured"`, `"unreachable"`, `"rejected"`, or
+    /// `"unusable_response"` — a stable token for a UI to branch on, so it
+    /// never has to pattern-match on the prose in `error`.
+    ///
+    /// `"misconfigured"` means nothing was sent, because the settings
+    /// themselves cannot work — the user has something to fix locally.
+    /// `"rejected"` means the provider answered and refused: a wrong key, a
+    /// wrong path, a model the account cannot use. `"unreachable"` means
+    /// there was no answer at all. Keeping those apart is the whole of
+    /// HORO-1299's lesson — collapsing them is what made a BYOK 401
+    /// undiagnosable.
+    pub outcome: &'static str,
+    /// The configured model name, echoed back so a successful check says
+    /// which model answered rather than only that something did. Not a
+    /// secret, and chosen by the user.
+    pub model: String,
+    /// The request path a live call posts to — see this type's doc comment
+    /// for why the host and query string are dropped.
+    pub endpoint_path: String,
+    /// One readable, secret-free sentence, present for every outcome except
+    /// `"ok"`. Straight from
+    /// [`crate::actions::llm::LlmError`]'s `Display`, whose key-free output
+    /// is asserted per variant in that module's own tests.
+    pub error: Option<String>,
+    /// A bounded excerpt of what the provider actually replied, present only
+    /// for `"ok"`. Bounded via [`crate::actions::llm::excerpt`] because this
+    /// is provider-controlled text heading for a fixed-width popover: a
+    /// gateway that answers a two-word connection test with an essay does
+    /// not get to decide how much of the UI it occupies.
+    pub response_excerpt: Option<String>,
+}
+
 /// `glomeris execute` report (HORO-1055): a thin projection of
 /// [`crate::executor::ExecutionReport`] — never duplicates its outcome
 /// logic, only renders the already-decided outcome. Built only for the

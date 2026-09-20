@@ -1,0 +1,14 @@
+{
+  "system_prompt": "You are a storage cleanup ranking assistant. You will receive a JSON array of resource views. Respond with ONLY a JSON object of the shape {\"items\": [{\"resource_id\": string, \"action_id\": string, \"priority\": number, \"reason\": string}]}, choosing resource_id and action_id only from the values you were given.",
+  "user_prompt": "[{\"resource_id\":\"resource_1\",\"kind\":\"cargo_target_dir\",\"reclaimable_bytes\":2147483648,\"age_days\":31,\"regenerability\":\"regenerable_by_rebuild\",\"completeness\":\"complete\",\"offered_action_ids\":[\"cargo.clean.target_dir\"]},{\"resource_id\":\"resource_2\",\"kind\":\"node_modules\",\"reclaimable_bytes\":536870912,\"age_days\":null,\"regenerability\":\"regenerable_by_tool\",\"completeness\":\"partial\",\"offered_action_ids\":[\"node.remove.node_modules\"]}]",
+  "resource_aliases": [
+    {
+      "wire_resource_id": "resource_1",
+      "local_resource_id": "cargo_target_dir:/Users/dev/proj/target"
+    },
+    {
+      "wire_resource_id": "resource_2",
+      "local_resource_id": "node_modules:/Users/dev/proj/node_modules"
+    }
+  ]
+}

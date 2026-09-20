@@ -761,6 +761,85 @@ enum GlomerisVocabulary {
         }
     }
 
+    // MARK: - AI provider connection test (`llm-check` -> `outcome`, HORO-1309)
+
+    static let llmCheckAxis = "AI provider"
+
+    /// Wording for the `outcome` token `glomeris llm-check --json` reports
+    /// (see `actions::llm::llm_check_outcome`, its sole producer, which
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` diffs against this
+    /// table).
+    ///
+    /// # Why these five states stay apart
+    ///
+    /// This is HORO-1299's lesson in vocabulary form. A BYOK setup can fail
+    /// in ways that need completely different things from the user, and
+    /// collapsing them into one "connection failed" is what made that
+    /// failure undiagnosable: "nothing was sent, fix these fields" is a
+    /// local problem, "nothing answered" is a network or address problem,
+    /// and "the provider answered and refused" is a credential, path or
+    /// model-entitlement problem. Each explanation names what to go and
+    /// look at, because a diagnostic that does not is just a red dot.
+    ///
+    /// # Why tone is used here when the candidate axes refuse it
+    ///
+    /// Tint is reserved for the safety axis *in a candidate row*, so a large
+    /// AUTO_SAFE opportunity can never be misread as a hazard. Nothing here
+    /// ever renders in a candidate row: this is the result of one diagnostic
+    /// the user explicitly asked for, where "did it work" is the entire
+    /// content, so a tone states the answer rather than implying a verdict
+    /// about a file. The symbol and the words still carry it alone in
+    /// greyscale and under VoiceOver, which `GlomerisVocabularyTests`
+    /// asserts for this axis along with every other.
+    ///
+    /// Nothing in this table names a provider, a host or a model: AC 6 keeps
+    /// the configuration generic, and wording that guessed at "your OpenAI
+    /// key" would be wrong for every self-hosted and gateway setup.
+    static func llmCheckOutcome(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "ok":
+            return term(
+                "ok", llmCheckAxis, "Connected",
+                "Your provider answered. The address, key and model all work.",
+                "checkmark.seal.fill", .positive
+            )
+        case "misconfigured":
+            return term(
+                "misconfigured", llmCheckAxis, "Not set up yet",
+                "Nothing was sent, because these settings cannot work as they stand. "
+                    + "Fill in the missing field, or fix the one the message names.",
+                "gearshape.fill", .caution
+            )
+        case "unreachable":
+            return term(
+                "unreachable", llmCheckAxis, "No answer",
+                "Nothing answered at that address. Check the address itself, and whether "
+                    + "the service is running and reachable from this machine.",
+                "wifi.slash", .warning
+            )
+        case "rejected":
+            return term(
+                "rejected", llmCheckAxis, "Provider refused",
+                "The provider answered and turned the request down — usually a key it "
+                    + "does not accept, a path it does not serve, or a model this account "
+                    + "cannot use.",
+                "hand.raised.fill", .warning
+            )
+        case "unusable_response":
+            return term(
+                "unusable_response", llmCheckAxis, "Unexpected reply",
+                "Something answered, but not with anything Glomeris could read as a "
+                    + "completion. The address is probably not the API root.",
+                "exclamationmark.bubble.fill", .caution
+            )
+        default:
+            return unrecognised(
+                token, llmCheckAxis, "Unrecognised result",
+                "The CLI reported a connection-test result this app has no wording for."
+            )
+        }
+    }
+
     // MARK: - Table helpers
 
     private static func term(

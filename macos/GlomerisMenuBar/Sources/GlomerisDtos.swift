@@ -405,3 +405,70 @@ struct ExecuteRefusalReportDto: Decodable, Equatable {
     let reason: String
     let message: String
 }
+
+/// Mirrors `reporting::dto::LlmCheckReport` — the result of one
+/// `glomeris llm-check` run (HORO-1309).
+///
+/// `outcome` is a plain `String` for the same forward-compatibility reason as
+/// `ExecuteReportDto.outcome`: a new Rust outcome must degrade to "something
+/// unexpected happened" in the UI rather than fail decoding of the report that
+/// would have explained it. The known values are in
+/// `GlomerisVocabulary.llmCheckOutcome`, which the
+/// `vocabulary-covers-cli-tokens` CI job checks against the Rust producer.
+///
+/// Note what is not here: no base URL and no API key. The Rust side never
+/// emits them — see `LlmCheckReport`'s own doc comment — so there is nothing
+/// for this app to accidentally render.
+struct LlmCheckReportDto: Decodable, Equatable {
+    let outcome: String
+    let model: String
+    let endpointPath: String
+    let error: String?
+    let responseExcerpt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case outcome
+        case model
+        case endpointPath = "endpoint_path"
+        case error
+        case responseExcerpt = "response_excerpt"
+    }
+}
+
+/// Mirrors `reporting::dto::LlmPayloadReport` — what `glomeris llm-plan
+/// --print-payload` emits: the exact request a live plan would send, obtained
+/// without sending it (HORO-1298, surfaced in the GUI by HORO-1309).
+///
+/// `systemPrompt` and `userPrompt` are the outbound bytes. `resourceAliases`
+/// is the opposite: the local-only table mapping each wire id back to the real
+/// resource, which is what makes the preview readable to the user while
+/// keeping absolute paths off the wire. A privacy preview that showed the
+/// aliases as though they were transmitted would misrepresent the thing it
+/// exists to disclose, so the two must stay visually distinct wherever this is
+/// rendered.
+struct LlmPayloadReportDto: Decodable, Equatable {
+    let systemPrompt: String
+    let userPrompt: String
+    let resourceAliases: [LlmPayloadResourceAliasDto]
+
+    enum CodingKeys: String, CodingKey {
+        case systemPrompt = "system_prompt"
+        case userPrompt = "user_prompt"
+        case resourceAliases = "resource_aliases"
+    }
+}
+
+/// Mirrors `reporting::dto::LlmPayloadResourceAlias`: one wire id and the
+/// local resource it stands for. `Identifiable` by the wire id, which the Rust
+/// side generates uniquely per payload.
+struct LlmPayloadResourceAliasDto: Decodable, Equatable, Identifiable {
+    let wireResourceId: String
+    let localResourceId: String
+
+    var id: String { wireResourceId }
+
+    enum CodingKeys: String, CodingKey {
+        case wireResourceId = "wire_resource_id"
+        case localResourceId = "local_resource_id"
+    }
+}

@@ -33,13 +33,17 @@
 //! action-audit popover section actually needed it — see that ticket's
 //! `HistoryAuditSectionView.swift`. `LlmPlanReport` was added in HORO-1308,
 //! for the same reason: `AiPlanSectionView.swift` decodes it.
+//! `LlmCheckReport` and `LlmPayloadReport` were added in HORO-1309, when
+//! `AiProviderPreferencesView.swift` started decoding both.
 
 use std::path::PathBuf;
 
+use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
 use glomeris::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, DaemonStatusReport, DetectCandidateReport,
-    DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, LlmPlanItemReport,
-    LlmPlanReport, OfferedAction, StatusReport,
+    DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, LlmCheckReport,
+    LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, OfferedAction,
+    StatusReport,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -355,4 +359,105 @@ fn action_history_report_matches_golden_fixture() {
         ],
     };
     assert_matches_fixture(&report, "action_history_report.json");
+}
+
+/// HORO-1309. Two fixtures rather than one, for the same reason
+/// `ExecuteReport` has two: the type's interest is entirely in which of its
+/// optionals is populated. `"ok"` carries a `response_excerpt` and no
+/// `error`; every other outcome carries an `error` and no excerpt, and a
+/// single fixture would leave one of those two directions unasserted on both
+/// sides of the contract.
+#[test]
+fn llm_check_report_ok_matches_golden_fixture() {
+    let report = LlmCheckReport {
+        outcome: llm_check_outcome(None),
+        model: "gpt-4o-mini".to_string(),
+        endpoint_path: "/v1/chat/completions".to_string(),
+        error: None,
+        response_excerpt: Some("ok".to_string()),
+    };
+    assert_matches_fixture(&report, "llm_check_report_ok.json");
+}
+
+#[test]
+fn llm_check_report_rejected_matches_golden_fixture() {
+    // The error sentence is `LlmError`'s own `Display`, produced here rather
+    // than hand-written, so the fixture cannot drift into holding a string
+    // its producer could never emit — and so the `outcome` token comes from
+    // `llm_check_outcome`, the same sole producer the macOS app's wording is
+    // diffed against by `scripts/check-vocabulary-covers-cli-tokens.sh`.
+    let error = LlmError::ProviderStatus {
+        status: 401,
+        api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+        endpoint_path: "/v1/chat/completions".to_string(),
+        request_id: Some("req_abc123".to_string()),
+        body_excerpt:
+            "{\"error\":{\"message\":\"Incorrect API key provided.\",\"type\":\"invalid_request_error\"}}"
+                .to_string(),
+    };
+    let report = LlmCheckReport {
+        outcome: llm_check_outcome(Some(&error)),
+        model: "gpt-4o-mini".to_string(),
+        endpoint_path: "/v1/chat/completions".to_string(),
+        error: Some(error.to_string()),
+        response_excerpt: None,
+    };
+
+    assert_eq!(report.outcome, "rejected");
+    assert!(
+        !report.error.as_deref().unwrap().contains("://"),
+        "the rejection sentence must carry no scheme or host — only the path"
+    );
+    assert_matches_fixture(&report, "llm_check_report_rejected.json");
+}
+
+/// HORO-1298's report, surfaced in the GUI by HORO-1309. The fixture's
+/// `system_prompt` and `user_prompt` are what actually leave the machine and
+/// the `resource_aliases` are what deliberately do not, so this asserts that
+/// separation as well as the field names: no alias's real, absolute
+/// `local_resource_id` may appear anywhere in either prompt.
+#[test]
+fn llm_payload_report_matches_golden_fixture() {
+    let aliases = vec![
+        LlmPayloadResourceAlias {
+            wire_resource_id: "resource_1".to_string(),
+            local_resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+        },
+        LlmPayloadResourceAlias {
+            wire_resource_id: "resource_2".to_string(),
+            local_resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+        },
+    ];
+    let report = LlmPayloadReport {
+        // Quoted from `actions::llm`'s private `SYSTEM_PROMPT`. Not read back
+        // out of the fixture, which would make this field assert nothing, and
+        // not reachable by reference either — the const is deliberately
+        // private so that only `build_request_payload` can put it on a wire.
+        system_prompt: "You are a storage cleanup ranking assistant. You will receive a JSON \
+             array of resource views. Respond with ONLY a JSON object of the shape \
+             {\"items\": [{\"resource_id\": string, \"action_id\": string, \"priority\": \
+             number, \"reason\": string}]}, choosing resource_id and action_id only from the \
+             values you were given."
+            .to_string(),
+        user_prompt: "[{\"resource_id\":\"resource_1\",\"kind\":\"cargo_target_dir\",\
+             \"reclaimable_bytes\":2147483648,\"age_days\":31,\
+             \"regenerability\":\"regenerable_by_rebuild\",\"completeness\":\"complete\",\
+             \"offered_action_ids\":[\"cargo.clean.target_dir\"]},\
+             {\"resource_id\":\"resource_2\",\"kind\":\"node_modules\",\
+             \"reclaimable_bytes\":536870912,\"age_days\":null,\
+             \"regenerability\":\"regenerable_by_tool\",\"completeness\":\"partial\",\
+             \"offered_action_ids\":[\"node.remove.node_modules\"]}]"
+            .to_string(),
+        resource_aliases: aliases,
+    };
+
+    for alias in &report.resource_aliases {
+        assert!(
+            !report.system_prompt.contains(&alias.local_resource_id)
+                && !report.user_prompt.contains(&alias.local_resource_id),
+            "{} is in the outbound prompts; the alias table exists so that it is not",
+            alias.local_resource_id
+        );
+    }
+    assert_matches_fixture(&report, "llm_payload_report.json");
 }

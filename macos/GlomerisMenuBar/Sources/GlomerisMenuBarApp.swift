@@ -46,8 +46,23 @@ struct GlomerisMenuBarApp: App {
         // SwiftUI `Settings` scene (Cmd+, / app menu "Settings…") — pure
         // presentation over ProjectRootsStore, no detect/explain/execute
         // wiring.
+        //
+        // HORO-1309 added the second tab. Both panes stay presentation over a
+        // store; the AI tab additionally runs two read-only `glomeris`
+        // subcommands from button actions (`llm-check`, `llm-plan
+        // --print-payload`) and renders the tokens they print. Neither
+        // classifies anything — see that file's header.
         Settings {
-            ProjectRootsPreferencesView()
+            TabView {
+                ProjectRootsPreferencesView()
+                    .tabItem {
+                        Label("Projects", systemImage: "folder")
+                    }
+                AiProviderPreferencesView()
+                    .tabItem {
+                        Label("AI Provider", systemImage: "sparkles")
+                    }
+            }
         }
     }
 }

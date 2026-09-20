@@ -300,6 +300,15 @@ const MODEL_REASON_LIMIT: usize = 400;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LlmError {
     NotConfigured,
+    /// All three settings are present, but one of them cannot work —
+    /// currently only a base URL [`validate_base_url`] refuses. Distinct from
+    /// [`LlmError::NotConfigured`] because "you have not set this up" and
+    /// "you set it up wrongly, here is what to change" are different problems
+    /// with different fixes, and from [`LlmError::NetworkError`] because no
+    /// request was ever attempted. Carries only Glomeris's own message: never
+    /// the offending value, since the value a user most plausibly gets wrong
+    /// by pasting is the one containing their credential.
+    InvalidConfiguration(String),
     /// The request never produced an HTTP response: DNS failure, TLS
     /// failure, connection refused, timeout. Distinct from
     /// [`LlmError::ProviderStatus`], where the provider *did* answer —
@@ -330,6 +339,9 @@ impl std::fmt::Display for LlmError {
                 "LLM provider is not configured (GLOMERIS_LLM_API_KEY, \
                  GLOMERIS_LLM_BASE_URL, GLOMERIS_LLM_MODEL must all be set)"
             ),
+            LlmError::InvalidConfiguration(detail) => {
+                write!(f, "LLM provider configuration is invalid: {detail}")
+            }
             LlmError::NetworkError(detail) => {
                 write!(f, "provider unreachable: {detail}")
             }
@@ -379,6 +391,41 @@ fn diagnostic_endpoint_path(url: &str) -> String {
     path[..end].to_string()
 }
 
+/// Folds every run of whitespace into a single space, so a multi-line
+/// provider body becomes one log-safe line.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Truncates to at most `limit` bytes, always on a character boundary, and
+/// says so when it cut. Separate from [`collapse_whitespace`] because
+/// [`redact_secret`] must do its replacement *between* the two: collapsing
+/// first can rejoin a key that a provider wrapped across lines, and
+/// truncating last is what stops a key straddling the cut from surviving in
+/// half.
+fn truncate_on_char_boundary(text: String, limit: usize) -> String {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut cut = limit;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… (truncated)", &text[..cut])
+}
+
+/// One bounded, single-line excerpt of provider-controlled text, for a
+/// surface that has to show *something* the provider said without letting it
+/// decide how much room it gets.
+///
+/// Public because `crate::cli`'s connection-test report needs the identical
+/// treatment [`LlmError::ProviderStatus`]'s body excerpt already gets, and a
+/// second hand-rolled truncation is exactly how one of them ends up slicing
+/// a multi-byte character in half.
+pub fn excerpt(text: &str, limit: usize) -> String {
+    truncate_on_char_boundary(collapse_whitespace(text), limit)
+}
+
 /// Removes every occurrence of `secret` from `text`, collapses whitespace
 /// so the result is one log-safe line, and truncates it to
 /// [`PROVIDER_ERROR_BODY_LIMIT`] bytes on a character boundary.
@@ -387,21 +434,14 @@ fn diagnostic_endpoint_path(url: &str) -> String {
 /// the replacement between every character, so without it an unset API key
 /// would corrupt the diagnostic instead of redacting nothing.
 fn redact_secret(text: &str, secret: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     let redacted = if secret.is_empty() {
         collapsed
     } else {
         collapsed.replace(secret, "<REDACTED>")
     };
 
-    if redacted.len() <= PROVIDER_ERROR_BODY_LIMIT {
-        return redacted;
-    }
-    let mut cut = PROVIDER_ERROR_BODY_LIMIT;
-    while cut > 0 && !redacted.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}… (truncated)", &redacted[..cut])
+    truncate_on_char_boundary(redacted, PROVIDER_ERROR_BODY_LIMIT)
 }
 
 /// Real provider: any OpenAI-compatible `/chat/completions` endpoint
@@ -419,10 +459,153 @@ pub struct OpenAiCompatibleProvider {
     pub model: String,
 }
 
+/// The full request URL [`OpenAiCompatibleProvider::complete`] posts to,
+/// derived from a base URL exactly as it does: one trailing slash tolerated,
+/// `/chat/completions` appended verbatim, no `/v1` ever inserted or stripped.
+///
+/// Public so a caller can report *which* endpoint it is about to talk to
+/// without rebuilding that rule — see `book/src/byok.md`, where configuring
+/// the host root instead of the API root is documented as the single most
+/// common misconfiguration. A second copy of this concatenation is how the
+/// diagnostic that diagnoses that mistake would start lying about it.
+pub fn chat_completions_url(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+/// The secret-free path of [`chat_completions_url`], for diagnostics — see
+/// [`diagnostic_endpoint_path`] for what is deliberately dropped.
+pub fn chat_completions_endpoint_path(base_url: &str) -> String {
+    diagnostic_endpoint_path(&chat_completions_url(base_url))
+}
+
+/// The stable outcome token for one connection-test result (HORO-1309):
+/// `None` for a provider that answered usably, otherwise the class of failure.
+///
+/// The SOLE producer of these five strings, which is what lets
+/// `scripts/check-vocabulary-covers-cli-tokens.sh` diff them against the
+/// macOS app's wording. A second `match` somewhere that also emitted
+/// `"rejected"` would make that check misleading rather than merely
+/// incomplete — see that script's own note on the three vocabularies it
+/// cannot honestly verify for the same reason.
+///
+/// Why these boundaries: `unreachable` means no answer arrived at all,
+/// `rejected` means the provider answered and refused, and conflating those
+/// two is precisely what made a BYOK 401 undiagnosable in HORO-1299.
+/// `unusable_response` keeps a working endpoint and credential from being
+/// reported as a credential problem. `misconfigured` means nothing was sent
+/// and the fix is local.
+pub fn llm_check_outcome(error: Option<&LlmError>) -> &'static str {
+    match error {
+        None => "ok",
+        Some(LlmError::NetworkError(_)) => "unreachable",
+        Some(LlmError::ProviderStatus { .. }) => "rejected",
+        Some(LlmError::InvalidResponse(_)) => "unusable_response",
+        Some(LlmError::InvalidConfiguration(_)) => "misconfigured",
+        // Unreachable from the connection test — a caller cannot obtain a
+        // provider without being configured — but mapped rather than
+        // panicking, because a connection test that crashes is worse than one
+        // that is merely wrong about the category.
+        Some(LlmError::NotConfigured) => "misconfigured",
+    }
+}
+
+/// Rejects base URLs that [`chat_completions_url`] cannot correctly append to
+/// (HORO-1309).
+///
+/// Every message names what to do instead, because this is the error a user
+/// hits while setting BYOK up for the first time and the only information
+/// they have is what Glomeris tells them. The alternative to checking here is
+/// a 404 from a real provider, which diagnoses nothing.
+///
+/// This lives in Rust and is reported through `glomeris llm-check` rather
+/// than being re-implemented in the macOS settings UI: a second copy of these
+/// rules in Swift would drift, and the standing project rule keeps decision
+/// logic out of the thin client.
+///
+/// Deliberately *not* rejected: `http://` (a local gateway on loopback is a
+/// legitimate BYOK setup) and any particular host or path shape (AC 6 — no
+/// company-specific host or model may be baked in).
+pub fn validate_base_url(base_url: &str) -> Result<(), String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("base URL is empty; set the API root of your provider, \
+                    for example https://api.openai.com/v1"
+            .to_string());
+    }
+    if trimmed != base_url {
+        return Err("base URL has leading or trailing whitespace; \
+                    remove it (a pasted URL often carries a trailing newline)"
+            .to_string());
+    }
+    if base_url.contains(char::is_whitespace) {
+        return Err("base URL contains a space; a URL cannot contain one".to_string());
+    }
+
+    let after_scheme = match base_url.split_once("://") {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => rest,
+        Some((_, _)) => {
+            return Err("base URL must start with https:// or http://".to_string());
+        }
+        None => {
+            return Err("base URL has no scheme; it must start with https:// \
+                        or http://"
+                .to_string());
+        }
+    };
+    if after_scheme.is_empty() || after_scheme.starts_with('/') {
+        return Err("base URL has no host".to_string());
+    }
+
+    // A query or fragment must be refused rather than tolerated: appending
+    // `/chat/completions` to `…/v1?key=…` puts the path *inside the query
+    // string*, producing a request that cannot work and a diagnostic path of
+    // `/v1` that misdescribes why. Refusing also keeps a credential a user
+    // pasted into the URL out of the request Glomeris builds.
+    if let Some(i) = base_url.find(['?', '#']) {
+        let what = if base_url[i..].starts_with('?') {
+            "a query string"
+        } else {
+            "a fragment"
+        };
+        return Err(format!(
+            "base URL has {what}; give only the API root, because Glomeris \
+             appends /chat/completions to it"
+        ));
+    }
+
+    // The other half of the most common BYOK misconfiguration documented in
+    // `book/src/byok.md`: pasting the endpoint URL rather than the API root
+    // would produce `/v1/chat/completions/chat/completions`.
+    if base_url
+        .trim_end_matches('/')
+        .to_ascii_lowercase()
+        .ends_with("/chat/completions")
+    {
+        return Err("base URL is the full endpoint URL; give only the API \
+                    root — Glomeris appends /chat/completions itself"
+            .to_string());
+    }
+
+    Ok(())
+}
+
+/// The two prompts `glomeris llm-check` sends (HORO-1309).
+///
+/// Fixed literals, and deliberately about nothing: a connection test must
+/// prove the credential, the route and the model name are right without
+/// describing the machine it runs on. There is no interpolation here and
+/// there must never be — `connection_test_prompts_describe_nothing_local`
+/// pins that they contain no path, no home directory and no account name,
+/// which is only meaningfully assertable because they are constants.
+pub const CONNECTION_TEST_SYSTEM_PROMPT: &str =
+    "You are a connection test. Reply with the single word: ok.";
+/// See [`CONNECTION_TEST_SYSTEM_PROMPT`].
+pub const CONNECTION_TEST_USER_PROMPT: &str = "ok";
+
 impl LlmProvider for OpenAiCompatibleProvider {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
-        let base = self.base_url.trim_end_matches('/');
-        let url = format!("{base}/chat/completions");
+        let url = chat_completions_url(&self.base_url);
 
         let body = serde_json::json!({
             "model": self.model,
@@ -538,13 +721,33 @@ impl LlmProvider for FilePlanProvider {
 /// the returned [`OpenAiCompatibleProvider`] and is never logged, printed,
 /// or returned any other way.
 pub fn provider_from_env() -> Result<OpenAiCompatibleProvider, LlmError> {
-    let api_key = std::env::var("GLOMERIS_LLM_API_KEY").unwrap_or_default();
-    let base_url = std::env::var("GLOMERIS_LLM_BASE_URL").unwrap_or_default();
-    let model = std::env::var("GLOMERIS_LLM_MODEL").unwrap_or_default();
+    provider_from_parts(
+        std::env::var("GLOMERIS_LLM_API_KEY").unwrap_or_default(),
+        std::env::var("GLOMERIS_LLM_BASE_URL").unwrap_or_default(),
+        std::env::var("GLOMERIS_LLM_MODEL").unwrap_or_default(),
+    )
+}
 
+/// The requirement and validation rules [`provider_from_env`] applies, with
+/// the environment read out of the way.
+///
+/// Split out so those rules are testable without mutating `GLOMERIS_LLM_*`:
+/// a test that set them would race the parallel test asserting they are
+/// unset, and an env-mutating test is exactly the kind that passes alone and
+/// fails in CI. `provider_from_env` stays the only `std::env::var` site.
+pub fn provider_from_parts(
+    api_key: String,
+    base_url: String,
+    model: String,
+) -> Result<OpenAiCompatibleProvider, LlmError> {
     if api_key.is_empty() || base_url.is_empty() || model.is_empty() {
         return Err(LlmError::NotConfigured);
     }
+
+    // Checked here rather than in each command so every live-mode caller gets
+    // the same actionable message, and before the provider exists so a URL
+    // that cannot work never reaches a request builder.
+    validate_base_url(&base_url).map_err(LlmError::InvalidConfiguration)?;
 
     Ok(OpenAiCompatibleProvider {
         base_url,
@@ -1921,6 +2124,256 @@ mod tests {
 
         assert!(redacted.ends_with("… (truncated)"));
         assert!(redacted.len() < PROVIDER_ERROR_BODY_LIMIT + 32);
+    }
+
+    /// The shared helper `crate::cli`'s connection-test report uses. Same
+    /// character-boundary obligation as `redact_secret`, at a caller-chosen
+    /// limit — so it gets the same multi-byte test rather than being trusted
+    /// because it happens to share an implementation today.
+    #[test]
+    fn excerpt_bounds_provider_text_on_a_character_boundary() {
+        assert_eq!(excerpt("ok", 120), "ok");
+        assert_eq!(excerpt("  ok\n\n  then   more ", 120), "ok then more");
+
+        let bounded = excerpt(&"é".repeat(400), 120);
+        assert!(bounded.ends_with("… (truncated)"));
+        assert!(bounded.len() < 120 + 32);
+    }
+
+    /// A provider that answers with a wall of text does not get to decide how
+    /// much of a fixed-width popover it occupies.
+    #[test]
+    fn excerpt_does_not_let_a_provider_choose_its_own_length() {
+        let shouted = "no".repeat(10_000);
+        assert!(excerpt(&shouted, 120).len() < 200);
+    }
+
+    /// The path rule `book/src/byok.md` documents, and the reason this is a
+    /// function rather than two `format!` calls: the diagnostic that tells a
+    /// user they configured the host root instead of the API root is only
+    /// truthful if it is built from the same concatenation the request was.
+    #[test]
+    fn chat_completions_url_appends_verbatim_and_tolerates_one_slash() {
+        assert_eq!(
+            chat_completions_url("https://gateway.example.com/v1"),
+            "https://gateway.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://gateway.example.com/v1/"),
+            "https://gateway.example.com/v1/chat/completions"
+        );
+        // Never inserted for you — this is the misconfiguration, rendered
+        // exactly as the user will see it in a failure message.
+        assert_eq!(
+            chat_completions_endpoint_path("https://gateway.example.com"),
+            "/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_endpoint_path("https://gateway.example.com/v1"),
+            "/v1/chat/completions"
+        );
+    }
+
+    /// Every state gets its own token, and the set is exactly what the macOS
+    /// app has wording for — `scripts/check-vocabulary-covers-cli-tokens.sh`
+    /// checks that second half mechanically, and this checks the first: a
+    /// mapping that collapsed two states into one token would make the drift
+    /// check pass while the GUI lost the distinction.
+    #[test]
+    fn llm_check_outcome_gives_each_state_its_own_token() {
+        let tokens = [
+            llm_check_outcome(None),
+            llm_check_outcome(Some(&LlmError::NetworkError("x".into()))),
+            llm_check_outcome(Some(&LlmError::ProviderStatus {
+                status: 401,
+                api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+                endpoint_path: "/v1/chat/completions".to_string(),
+                request_id: None,
+                body_excerpt: String::new(),
+            })),
+            llm_check_outcome(Some(&LlmError::InvalidResponse("x".into()))),
+            llm_check_outcome(Some(&LlmError::InvalidConfiguration("x".into()))),
+        ];
+
+        let mut unique = tokens.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            tokens.len(),
+            "tokens must be distinct: {tokens:?}"
+        );
+        assert_eq!(llm_check_outcome(None), "ok");
+
+        // A local problem is never reported as something the provider did.
+        for local in [
+            LlmError::NotConfigured,
+            LlmError::InvalidConfiguration("x".into()),
+        ] {
+            assert_eq!(llm_check_outcome(Some(&local)), "misconfigured");
+        }
+    }
+
+    /// The shapes a BYOK user legitimately configures. Includes `http://` on
+    /// loopback because a local gateway is a first-class setup, and a host
+    /// root with no path at all because some providers really do serve the
+    /// API there — that is a *diagnosable* mistake, not an invalid URL, and
+    /// refusing it here would block a working configuration.
+    #[test]
+    fn validate_base_url_accepts_every_shape_a_real_provider_uses() {
+        for accepted in [
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/",
+            "https://openrouter.ai/api/v1",
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:1234/v1",
+            "https://gateway.internal.example",
+            "https://gateway.internal.example/openai/deployments/some-deployment",
+        ] {
+            assert_eq!(
+                validate_base_url(accepted),
+                Ok(()),
+                "must accept {accepted}"
+            );
+        }
+    }
+
+    /// Each rejection must name what to change, since this is the error a user
+    /// meets before anything has ever worked. Asserted on a distinguishing
+    /// word rather than the whole sentence so rewording the guidance does not
+    /// break the test, while deleting the guidance does.
+    #[test]
+    fn validate_base_url_rejects_what_cannot_work_and_says_what_to_do() {
+        for (rejected, expected_hint) in [
+            ("", "empty"),
+            ("   ", "empty"),
+            ("https://api.openai.com/v1\n", "whitespace"),
+            (" https://api.openai.com/v1", "whitespace"),
+            ("https://api openai.com/v1", "space"),
+            ("api.openai.com/v1", "no scheme"),
+            ("ftp://api.openai.com/v1", "https://"),
+            ("file:///etc/passwd", "https://"),
+            ("https:///v1", "no host"),
+            (
+                "https://api.openai.com/v1?key=would-be-a-credential",
+                "query",
+            ),
+            ("https://api.openai.com/v1#frag", "fragment"),
+            ("https://api.openai.com/v1/chat/completions", "API"),
+            ("https://api.openai.com/v1/chat/completions/", "API"),
+            ("https://api.openai.com/V1/Chat/Completions", "API"),
+        ] {
+            let message = validate_base_url(rejected)
+                .expect_err(&format!("must reject {rejected:?}"))
+                .to_lowercase();
+            assert!(
+                message.contains(&expected_hint.to_lowercase()),
+                "message for {rejected:?} must mention {expected_hint:?}: {message}"
+            );
+        }
+    }
+
+    /// The value a user most plausibly gets wrong by pasting is the one with a
+    /// credential in it, so no rejection may echo the input back.
+    #[test]
+    fn validate_base_url_never_echoes_the_offending_value() {
+        let secret = "sk-should-never-appear-anywhere";
+        for rejected in [
+            format!("https://gw.example/v1?access_token={secret}"),
+            format!("https://gw.example/v1#{secret}"),
+            format!("https://gw.example/{secret}/chat/completions"),
+            format!("ftp://gw.example/{secret}"),
+            format!("gw.example/{secret}"),
+            format!("https://gw.example/v1/{secret} "),
+        ] {
+            let message = validate_base_url(&rejected).expect_err("must reject");
+            assert!(
+                !message.contains(secret) && !message.contains("gw.example"),
+                "message echoed the input: {message}"
+            );
+        }
+    }
+
+    /// The reason the query-string rejection exists, pinned as an executable
+    /// fact rather than left in a comment: appending to such a URL puts the
+    /// endpoint inside the query string, which cannot work.
+    #[test]
+    fn a_query_string_base_url_would_append_into_the_query_hence_the_refusal() {
+        let with_query = "https://gw.example/v1?key=x";
+        assert_eq!(
+            chat_completions_url(with_query),
+            "https://gw.example/v1?key=x/chat/completions"
+        );
+        assert_eq!(chat_completions_endpoint_path(with_query), "/v1");
+        assert!(validate_base_url(with_query).is_err());
+    }
+
+    /// `provider_from_parts` is the single choke point every live-mode caller
+    /// reaches through `provider_from_env`, so validating there is what makes
+    /// the check universal. Tested on the parts rather than through the
+    /// environment deliberately: mutating `GLOMERIS_LLM_*` from a test would
+    /// race the parallel test that asserts those variables are unset.
+    #[test]
+    fn provider_from_parts_refuses_an_invalid_base_url_before_building_a_provider() {
+        let result = provider_from_parts(
+            "not-a-real-key".to_string(),
+            "https://gw.example/v1/chat/completions".to_string(),
+            "some-model".to_string(),
+        );
+
+        match result {
+            Err(LlmError::InvalidConfiguration(detail)) => {
+                assert!(detail.contains("API root"), "got: {detail}");
+                assert!(!detail.contains("not-a-real-key"), "got: {detail}");
+                assert!(!detail.contains("gw.example"), "got: {detail}");
+            }
+            Err(other) => panic!("wrong error class: {other}"),
+            Ok(_) => panic!("a full endpoint URL must not build a provider"),
+        }
+    }
+
+    #[test]
+    fn provider_from_parts_requires_all_three_and_distinguishes_absent_from_invalid() {
+        for (key, url, model) in [
+            ("", "https://gw.example/v1", "m"),
+            ("k", "", "m"),
+            ("k", "https://gw.example/v1", ""),
+        ] {
+            assert_eq!(
+                provider_from_parts(key.to_string(), url.to_string(), model.to_string()).err(),
+                Some(LlmError::NotConfigured),
+                "an absent value is NotConfigured, never InvalidConfiguration"
+            );
+        }
+
+        let provider = provider_from_parts(
+            "k".to_string(),
+            "https://gw.example/v1".to_string(),
+            "m".to_string(),
+        )
+        .expect("a valid trio builds a provider");
+        assert_eq!(provider.base_url, "https://gw.example/v1");
+        assert_eq!(provider.model, "m");
+    }
+
+    /// A connection test must prove the credential, the route and the model
+    /// without describing the machine it runs on. Asserted against the real
+    /// environment's own values, so this cannot pass by testing a fiction.
+    #[test]
+    fn connection_test_prompts_describe_nothing_local() {
+        let both = format!("{CONNECTION_TEST_SYSTEM_PROMPT} {CONNECTION_TEST_USER_PROMPT}");
+
+        assert!(!both.contains('/'), "a path separator is in {both:?}");
+        if let Ok(home) = std::env::var("HOME") {
+            assert!(!home.is_empty());
+            assert!(!both.contains(&home));
+            if let Some(account) = home.rsplit('/').next() {
+                assert!(
+                    !account.is_empty() && !both.to_lowercase().contains(&account.to_lowercase()),
+                    "the account name appears in {both:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -80,6 +80,11 @@ final class GlomerisVocabularyTests: XCTestCase {
         "docker_image_cache", "unknown",
     ]
 
+    /// `src/actions/llm.rs` — `llm_check_outcome`, all five. HORO-1309.
+    private static let llmCheckTokens = [
+        "ok", "misconfigured", "unreachable", "rejected", "unusable_response",
+    ]
+
     /// `src/policy/class.rs` — `ReasonCode::as_str`, all 18.
     private static let reasonTokens = [
         "protected_credential_material", "protected_git_internals", "protected_infra_state",
@@ -105,6 +110,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("actionSource", sourceTokens, GlomerisVocabulary.actionSource),
             ("kind", kindTokens, GlomerisVocabulary.kind),
             ("reason", reasonTokens, GlomerisVocabulary.reason),
+            ("llmCheck", llmCheckTokens, GlomerisVocabulary.llmCheckOutcome),
         ]
     }
 
@@ -280,6 +286,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             GlomerisVocabulary.sourceAxis,
             GlomerisVocabulary.kindAxis,
             GlomerisVocabulary.reasonAxis,
+            GlomerisVocabulary.llmCheckAxis,
         ]
         XCTAssertEqual(
             Set(axisNames).count,
@@ -300,6 +307,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             "actionSource": GlomerisVocabulary.sourceAxis,
             "kind": GlomerisVocabulary.kindAxis,
             "reason": GlomerisVocabulary.reasonAxis,
+            "llmCheck": GlomerisVocabulary.llmCheckAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -430,6 +438,76 @@ final class GlomerisVocabularyTests: XCTestCase {
                 .positive,
                 "\(token) must not read as reassuring"
             )
+        }
+    }
+
+    // MARK: - AI provider connection test (HORO-1309)
+
+    /// Only a working connection may read as reassuring. The other four are
+    /// all things the user has to go and fix, and a green-toned chip on any
+    /// of them would say the setup is fine while planning keeps failing.
+    func testOnlyASuccessfulConnectionTestReadsAsPositive() {
+        XCTAssertEqual(GlomerisVocabulary.llmCheckOutcome("ok").tone, .positive)
+        for token in ["misconfigured", "unreachable", "rejected", "unusable_response"] {
+            XCTAssertNotEqual(
+                GlomerisVocabulary.llmCheckOutcome(token).tone,
+                .positive,
+                "\(token) must not read as a working setup"
+            )
+        }
+    }
+
+    /// HORO-1299's lesson, asserted rather than only documented: a local
+    /// configuration problem must not be described as something the provider
+    /// did, and a provider refusal must not be described as something local.
+    /// Collapsing the two is what made a BYOK 401 undiagnosable.
+    func testAConfigurationProblemAndAProviderRefusalSayDifferentThings() {
+        let misconfigured = GlomerisVocabulary.llmCheckOutcome("misconfigured")
+        XCTAssertTrue(
+            misconfigured.explanation.lowercased().contains("nothing was sent"),
+            """
+            a local configuration problem must say nothing left this machine, \
+            or the user will go looking at the provider: \(misconfigured.explanation)
+            """
+        )
+
+        let rejected = GlomerisVocabulary.llmCheckOutcome("rejected")
+        XCTAssertTrue(
+            rejected.explanation.lowercased().contains("answered"),
+            "a refusal must say the provider answered: \(rejected.explanation)"
+        )
+
+        let unreachable = GlomerisVocabulary.llmCheckOutcome("unreachable")
+        XCTAssertFalse(
+            unreachable.explanation.lowercased().contains("refus"),
+            "no answer at all is not a refusal: \(unreachable.explanation)"
+        )
+
+        let explanations = Self.llmCheckTokens.map {
+            GlomerisVocabulary.llmCheckOutcome($0).explanation
+        }
+        XCTAssertEqual(
+            Set(explanations).count,
+            explanations.count,
+            "two connection-test states give the same advice, so one of them is useless"
+        )
+    }
+
+    /// AC 6: provider configuration stays generic. Wording that named a
+    /// vendor would be wrong for every self-hosted, gateway and
+    /// corporate-proxy setup — and this app is the surface most likely to
+    /// acquire a helpful-sounding "check your OpenAI key".
+    func testNoConnectionTestWordingNamesAParticularProvider() {
+        let vendors = ["openai", "anthropic", "azure", "ollama", "openrouter", "claude", "gpt"]
+        for token in Self.llmCheckTokens + ["a_token_from_a_newer_cli"] {
+            let term = GlomerisVocabulary.llmCheckOutcome(token)
+            let copy = "\(term.title) \(term.explanation)".lowercased()
+            for vendor in vendors {
+                XCTAssertFalse(
+                    copy.contains(vendor),
+                    "\(token)'s wording names \(vendor), which is wrong for every other setup"
+                )
+            }
         }
     }
 

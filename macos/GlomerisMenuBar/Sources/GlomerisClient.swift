@@ -217,7 +217,9 @@ struct GlomerisClient {
     /// resolve through `locator` on every invocation.
     private let pinnedExecutableURL: URL?
     private let locator: GlomerisExecutableLocator
-    let environment: [String: String]?
+    /// A complete environment for spawned children, or `nil` to inherit this
+    /// process's. Never partial — see `withEnvironment(_:)`.
+    private(set) var environment: [String: String]?
 
     /// Always spawns exactly `executableURL`, never resolving anything. The
     /// tests use this to pin a fixture binary, and a pin is honoured even
@@ -241,6 +243,26 @@ struct GlomerisClient {
         pinnedExecutableURL = nil
         self.locator = locator
         self.environment = environment
+    }
+
+    /// A copy of this client that launches children with `environment`,
+    /// keeping the same pinned executable or locator.
+    ///
+    /// Exists so a credential can be assembled at the moment a command runs
+    /// rather than when the view holding the client is created (HORO-1309).
+    /// The API key is read from the keychain, handed to one `Process`, and
+    /// dropped; a client stored as a view property for the app's lifetime
+    /// would instead hold it in memory for days and keep serving a key the
+    /// user had since revoked.
+    ///
+    /// `environment` must be a *complete* environment, not an overlay —
+    /// `Process.environment` replaces rather than merges. See
+    /// `GlomerisLlmSettingsStore.childEnvironment(basedOn:)`, which is what
+    /// builds one.
+    func withEnvironment(_ environment: [String: String]) -> GlomerisClient {
+        var copy = self
+        copy.environment = environment
+        return copy
     }
 
     /// The binary to spawn for one invocation.
