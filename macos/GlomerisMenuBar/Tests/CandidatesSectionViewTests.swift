@@ -395,6 +395,26 @@ final class CandidatesSectionViewTests: XCTestCase {
         XCTAssertNil(CandidateSafetyFilter.all.keptToken, "\"All\" must not filter")
     }
 
+    /// The empty-filter message is built from the filter's name, so that name
+    /// has to survive being dropped into a sentence. The picker labels do not:
+    /// "Not enough evidence" yields "none are not enough evidence".
+    func testEveryFilterNameReadsAsEnglishMidSentence() {
+        for filter in CandidateSafetyFilter.allCases {
+            let sentence = "Glomeris found 3 candidates, but none are "
+                + "\(filter.midSentenceDescription)."
+            XCTAssertFalse(
+                sentence.contains("are not enough"),
+                "\(filter.rawValue) produces a garbled sentence: \(sentence)"
+            )
+            XCTAssertFalse(filter.midSentenceDescription.isEmpty)
+            // A sentence fragment, not a UI label: no capital to start it.
+            XCTAssertEqual(
+                filter.midSentenceDescription.first,
+                filter.midSentenceDescription.first?.lowercased().first
+            )
+        }
+    }
+
     /// Protection is not the same thing as invisibility: a user must be able
     /// to ask "what here is off-limits?" and get an answer.
     func testProtectedCandidatesAreFilterableRatherThanHidden() {

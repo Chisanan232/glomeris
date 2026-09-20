@@ -222,6 +222,24 @@ enum CandidateSafetyFilter: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The same filter named as a noun phrase, for use mid-sentence in the
+    /// "nothing matched" message.
+    ///
+    /// Separate from `label` because a picker label and a sentence fragment
+    /// are not interchangeable: "Not enough evidence" is right on a menu row
+    /// and produces "none are not enough evidence" in prose. Empty-state copy
+    /// is exactly where a user is already confused, so it is the last place
+    /// that can afford a garbled sentence.
+    var midSentenceDescription: String {
+        switch self {
+        case .all: return "candidates"
+        case .autoSafe: return "safe to reclaim"
+        case .ask: return "waiting on your confirmation"
+        case .protected: return "protected"
+        case .unknownIncomplete: return "short on evidence"
+        }
+    }
+
     /// The `policy_label` token this filter keeps, or `nil` for "keep
     /// everything".
     ///
@@ -456,11 +474,11 @@ struct CandidatesSectionView: View {
         // whose rows are all filtered out is a different situation from an
         // empty scan, and must not borrow its wording.
         if !candidates.isEmpty, visibleCandidates.isEmpty {
-            return .notLookedYet(
+            return .filteredOut(
                 "No candidates match this filter",
                 detail: "Glomeris found \(candidates.count) "
                     + "\(candidates.count == 1 ? "candidate" : "candidates"), "
-                    + "but none are \(safetyFilter.label.lowercased()). "
+                    + "but none are \(safetyFilter.midSentenceDescription). "
                     + "Change the filter in the view options to see them."
             )
         }

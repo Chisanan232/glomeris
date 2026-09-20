@@ -295,10 +295,10 @@ struct GlomerisStateMessage: Equatable {
         )
     }
 
-    /// `symbolName` is overridable for the two named factories below, and
-    /// for nothing else. Both exist because the default checkmark is a claim
-    /// — "I looked, and it is fine" — and there are emptinesses that have
-    /// not earned it.
+    /// `symbolName` is overridable for the three named factories below, and
+    /// for nothing else. All three exist because the default checkmark is a
+    /// claim — "I looked, and it is fine" — and there are emptinesses that
+    /// have not earned it.
     static func empty(
         _ title: String,
         detail: String? = nil,
@@ -335,6 +335,22 @@ struct GlomerisStateMessage: Equatable {
     /// what is true — there are no entries.
     static func nothingRecorded(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
         empty(title, detail: detail, symbolName: "tray")
+    }
+
+    /// Nothing to show because the user's own filter is hiding it (HORO-1307)
+    /// — the one empty state that is not a fact about the machine at all.
+    ///
+    /// Distinct from both of the above, and the distinction is the point.
+    /// `empty`'s checkmark would claim a clean bill of health that is
+    /// outright false: things were found. `notLookedYet`'s magnifying glass
+    /// would claim nothing has been scanned, which is also false, and is the
+    /// more dangerous of the two lies because it invites a pointless rescan
+    /// instead of pointing at the filter. The funnel deliberately matches the
+    /// glyph on the control that caused this, so the message and its cause
+    /// are visually linked rather than leaving the user to guess. The tone
+    /// stays neutral: filtering is not a problem, it is just not a finding.
+    static func filteredOut(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
+        empty(title, detail: detail, symbolName: "line.3.horizontal.decrease.circle")
     }
 
     /// Something the user asked for happened. `message` is expected to be
