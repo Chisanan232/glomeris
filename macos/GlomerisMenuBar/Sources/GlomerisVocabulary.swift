@@ -386,6 +386,66 @@ enum GlomerisVocabulary {
         )
     }
 
+    // MARK: - Storage impact tier (`impact_tier`, HORO-1307)
+
+    static let impactTierAxis = "Worth a look"
+
+    /// Wording for the `impact_tier` token Rust computed for a candidate
+    /// (see `reporting::impact`), or `nil` when there is nothing to call
+    /// out.
+    ///
+    /// # Why this returns an Optional
+    ///
+    /// `"normal"` and `"unknown"` return `nil`, and so does a missing token
+    /// from an older CLI. A chip on every single row is not emphasis, it is
+    /// noise — the whole value of the tier is that only the few rows worth
+    /// pausing on carry it. `"unknown"` in particular has nothing to add,
+    /// because the size badge beside it already reads "Size unknown", and a
+    /// second chip repeating that would spend the user's attention saying
+    /// the same thing twice.
+    ///
+    /// An unrecognised token does NOT return `nil`: a newer CLI inventing a
+    /// tier this app has no wording for should surface visibly rather than
+    /// vanish, the same rule every other vocabulary here follows.
+    ///
+    /// # Why every tier is `.neutral`
+    ///
+    /// Exactly the same reason `storageImpact` is, and it matters more here
+    /// because a tier is closer to looking like a verdict. "Large" is not a
+    /// warning. A large AUTO_SAFE candidate is the best news the list can
+    /// carry, and a normal-sized PROTECTED one is still untouchable, so
+    /// hue must stay reserved for the safety axis or the two become
+    /// confusable at a glance. Emphasis is carried instead by a filled
+    /// badge, a distinct symbol and the word itself — which is also what
+    /// keeps the distinction alive in greyscale, under a colour-vision
+    /// deficiency, and for anyone reading it via VoiceOver.
+    /// `GlomerisVocabularyTests` asserts no tier is ever tinted.
+    static func impactTier(_ token: String?) -> GlomerisTerm? {
+        switch token {
+        case "large":
+            return term(
+                "large", impactTierAxis, "Biggest wins",
+                "One of the largest things Glomeris found. Reclaiming this would "
+                    + "make a real difference to your free space.",
+                "arrow.up.circle.fill", .neutral
+            )
+        case "notable":
+            return term(
+                "notable", impactTierAxis, "Worth a look",
+                "Big enough to be worth your attention, though not the largest thing here.",
+                "arrow.up.circle", .neutral
+            )
+        case "normal", "unknown", nil:
+            // Nothing to add. See the doc comment above.
+            return nil
+        case let other?:
+            return unrecognised(
+                other, impactTierAxis, "Unrecognised size tier",
+                "The CLI reported a storage-impact tier this app has no wording for."
+            )
+        }
+    }
+
     // MARK: - Background monitor (`daemon status --json`)
 
     static let monitorAxis = "Background monitor"
