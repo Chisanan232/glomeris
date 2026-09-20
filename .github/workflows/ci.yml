@@ -46,11 +46,15 @@ jobs:
     # let it merge unchecked. Guarding that cross-language contract is most of
     # this job's value, so it runs on every PR.
     #
-    # Runner and Xcode are both pinned, not left to the image default:
-    # MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS asserts an SF
-    # Symbol resolves on the *running* OS, so the OS and toolchain are part of
-    # what this job asserts. `macos-latest` would silently re-point that
-    # assertion at a new OS during some unrelated PR.
+    # Runner and Xcode are both pinned, not left to the image default,
+    # because some of what this job asserts is a property of the running OS.
+    # That used to be MenuBarAppearanceTests.testSystemImageNameResolvesOnThisOS
+    # ("does this SF Symbol exist here"); HORO-1305 replaced the stock symbol
+    # with locally drawn geometry and that test with
+    # testMenuBarImageActuallyDrawsInk, which rasterises the glyph through
+    # AppKit and CoreGraphics and counts opaque pixels. The pin still matters
+    # for the same reason: `macos-latest` would silently re-point a
+    # rendering-dependent assertion at a new OS during some unrelated PR.
     #
     # It must also be an Xcode that can open the committed project at all.
     # XcodeGen 2.46.0 emits `objectVersion = 77`, and macos-14's default Xcode

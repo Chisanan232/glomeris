@@ -29,8 +29,16 @@ import SwiftUI
 @main
 struct GlomerisMenuBarApp: App {
     var body: some Scene {
-        MenuBarExtra(MenuBarAppearance.title, systemImage: MenuBarAppearance.systemImageName) {
+        // HORO-1305: a custom template image rather than a `systemImage`
+        // name. `Image(nsImage:)` is used instead of drawing the
+        // `GlomerisMarkShape` directly in the label because a status item
+        // needs an AppKit template image to be recoloured correctly for
+        // light/dark menu bars, highlight state and tinted wallpapers.
+        MenuBarExtra {
             GlomerisPopoverView()
+        } label: {
+            Image(nsImage: MenuBarAppearance.menuBarImage())
+                .accessibilityLabel(MenuBarAppearance.title)
         }
         .menuBarExtraStyle(.window)
 
