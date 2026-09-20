@@ -142,6 +142,12 @@ fn detect_report_matches_golden_fixture() {
                 reclaimable_bytes: Some(2_147_483_648),
                 reclaimable_human: Some("2.0 GB".to_string()),
                 reclaimable_bytes_is_lower_bound: false,
+                // 2 GiB clears the 1 GiB notable floor but not the 10 GiB
+                // large one. Deliberately paired with AUTO_SAFE here, and
+                // with UNKNOWN_INCOMPLETE below, so the fixture exercises
+                // the fact that the impact and safety axes vary
+                // independently (HORO-1307).
+                impact_tier: "notable",
                 policy_label: "AUTO_SAFE",
                 reasons: vec!["no_active_use_observed"],
                 executable: true,
@@ -157,6 +163,7 @@ fn detect_report_matches_golden_fixture() {
                 reclaimable_bytes: Some(10_737_418_240),
                 reclaimable_human: Some("10.0 GB".to_string()),
                 reclaimable_bytes_is_lower_bound: true,
+                impact_tier: "large",
                 policy_label: "UNKNOWN_INCOMPLETE",
                 reasons: vec!["evidence_incomplete"],
                 executable: false,

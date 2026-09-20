@@ -185,6 +185,29 @@ final class GlomerisDesignSystemTests: XCTestCase {
         XCTAssertEqual(notLooked.detail, "Refresh to look for space you can reclaim.")
     }
 
+    /// A filter hiding every row is the user's own doing, not a fact about
+    /// their disk — so it may borrow neither the checkmark that means "all
+    /// clear" (things WERE found) nor the magnifying glass that means "nothing
+    /// has been scanned" (something WAS scanned). The second would be the
+    /// worse mistake: it invites a pointless rescan instead of pointing at the
+    /// filter.
+    func testFilteredOutBorrowsNeitherAllClearNorNotLookedYet() {
+        let filtered = GlomerisStateMessage.filteredOut(
+            "No candidates match this filter",
+            detail: "Glomeris found 3 candidates, but none are protected."
+        )
+
+        XCTAssertNotEqual(filtered.symbolName, GlomerisStateMessage.empty("x").symbolName)
+        XCTAssertNotEqual(filtered.symbolName, GlomerisStateMessage.notLookedYet("x").symbolName)
+        XCTAssertNotEqual(filtered.symbolName, GlomerisStateMessage.nothingRecorded("x").symbolName)
+        XCTAssertNotEqual(filtered.symbolName, GlomerisStateMessage.failure("x").symbolName)
+        XCTAssertNotEqual(filtered.symbolName, "checkmark.circle")
+
+        XCTAssertEqual(filtered.kind, .empty)
+        XCTAssertEqual(filtered.tone, .neutral, "filtering is not a problem, it is just not a finding")
+        XCTAssertEqual(filtered.detail, "Glomeris found 3 candidates, but none are protected.")
+    }
+
     /// Failure is the only one of the three allowed to read as a problem —
     /// and it must say what failed. An empty list shown instead would imply
     /// "nothing to clean", which is the opposite of the truth.
@@ -218,11 +241,12 @@ final class GlomerisDesignSystemTests: XCTestCase {
             GlomerisStateMessage.empty("x").symbolName,
             GlomerisStateMessage.notLookedYet("x").symbolName,
             GlomerisStateMessage.nothingRecorded("x").symbolName,
+            GlomerisStateMessage.filteredOut("x").symbolName,
             GlomerisStateMessage.success("x").symbolName,
             GlomerisStateMessage.failure("x").symbolName,
         ].compactMap { $0 }
 
-        XCTAssertEqual(symbols.count, 5, "every non-loading state needs a glyph")
+        XCTAssertEqual(symbols.count, 6, "every non-loading state needs a glyph")
         for name in symbols {
             XCTAssertNotNil(
                 NSImage(systemSymbolName: name, accessibilityDescription: nil),

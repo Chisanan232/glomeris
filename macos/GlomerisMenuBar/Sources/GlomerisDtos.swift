@@ -125,6 +125,20 @@ struct DetectCandidateReportDto: Decodable, Equatable, Identifiable {
     let reclaimableBytes: UInt64?
     let reclaimableHuman: String?
     let reclaimableBytesIsLowerBound: Bool
+    /// HORO-1307: the tier Rust already decided for this candidate's size
+    /// (`"unknown"`/`"normal"`/`"notable"`/`"large"`).
+    ///
+    /// Optional purely for forward/backward tolerance: the app resolves
+    /// whichever `glomeris` is on `PATH`, which may predate this field. A
+    /// non-optional `String` would fail the whole `DetectReportDto` decode
+    /// and blank the candidates list entirely — a missing emphasis hint is
+    /// not worth losing the list over. `GlomerisVocabulary.impactTier`
+    /// treats `nil` as "nothing to call out", which is exactly right.
+    ///
+    /// Never branched on to decide whether an action is permitted. It is an
+    /// emphasis hint about magnitude; `executable`/`offeredActions` remain
+    /// the only authority on what may be done.
+    let impactTier: String?
     let policyLabel: String
     let reasons: [String]
     let executable: Bool
@@ -137,6 +151,7 @@ struct DetectCandidateReportDto: Decodable, Equatable, Identifiable {
         case reclaimableBytes = "reclaimable_bytes"
         case reclaimableHuman = "reclaimable_human"
         case reclaimableBytesIsLowerBound = "reclaimable_bytes_is_lower_bound"
+        case impactTier = "impact_tier"
         case policyLabel = "policy_label"
         case reasons
         case executable

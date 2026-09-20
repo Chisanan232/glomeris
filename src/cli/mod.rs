@@ -36,7 +36,9 @@ use crate::reporting::dto::{
     ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPayloadReport,
     LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
 };
+use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
+use crate::reporting::ranking;
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
 /// `executor::recovery_loop::CANDIDATE_CORRELATION_TIMEOUT`'s reasoning
@@ -267,22 +269,36 @@ pub fn find_candidate<'a>(
 /// (HORO-1053) to populate each candidate's `executable`/
 /// `offered_actions`/`refusal_reason` fields — no policy logic is
 /// duplicated here.
+///
+/// `impact` supplies free-space context for each candidate's
+/// `impact_tier` (HORO-1307); pass [`ImpactContext::default`] where the
+/// caller has none.
+///
+/// The returned candidates are in the canonical order documented in
+/// [`crate::reporting::ranking`] — biggest reclaimable size first,
+/// unmeasured sizes last, fully deterministic. Ordering happens here, at the
+/// single point where the report is assembled, so the human-readable output
+/// and `--json` cannot present different orders. Before HORO-1307 this
+/// returned detector-registration order, which meant a 40 GB build directory
+/// could sit below a 2 MB cache.
 pub fn build_detect_report(
     candidates: &[(Evidence, PolicyDecision)],
     actions: &ActionRegistry,
+    impact: ImpactContext,
 ) -> DetectReport {
-    DetectReport {
-        candidates: candidates
-            .iter()
-            .map(|(ev, d)| {
-                DetectCandidateReport::from_evidence_and_decision(
-                    ev,
-                    d,
-                    resolve_action_for(ev, actions),
-                )
-            })
-            .collect(),
-    }
+    let mut candidates: Vec<DetectCandidateReport> = candidates
+        .iter()
+        .map(|(ev, d)| {
+            DetectCandidateReport::from_evidence_and_decision(
+                ev,
+                d,
+                resolve_action_for(ev, actions),
+                impact,
+            )
+        })
+        .collect();
+    ranking::sort_detect_candidates(&mut candidates);
+    DetectReport { candidates }
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
@@ -1407,7 +1423,7 @@ mod tests {
         ];
 
         let actions = ActionRegistry::builtin();
-        let report = build_detect_report(&candidates, &actions);
+        let report = build_detect_report(&candidates, &actions, ImpactContext::default());
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -1490,7 +1506,11 @@ mod tests {
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::now());
 
         let actions = ActionRegistry::builtin();
-        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())], &actions);
+        let detect_report = build_detect_report(
+            &[(ev.clone(), decision.clone())],
+            &actions,
+            ImpactContext::default(),
+        );
         let candidate = &detect_report.candidates[0];
         assert!(candidate.reclaimable_bytes_is_lower_bound);
         assert_eq!(
@@ -1539,7 +1559,11 @@ mod tests {
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
 
         let actions = ActionRegistry::builtin();
-        let detect_report = build_detect_report(&[(ev.clone(), decision.clone())], &actions);
+        let detect_report = build_detect_report(
+            &[(ev.clone(), decision.clone())],
+            &actions,
+            ImpactContext::default(),
+        );
         let candidate = &detect_report.candidates[0];
         assert!(!candidate.reclaimable_bytes_is_lower_bound);
         assert_eq!(

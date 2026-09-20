@@ -112,6 +112,31 @@ resource, including the already-computed
 (e.g. the menu-bar app) reads to decide what it can offer, without ever
 re-deriving that from `policy_label`/`reasons` itself:
 
+Candidates are returned **biggest reclaimable size first** (HORO-1307).
+Before that they came back in detector-registration order, so a 40 GB Cargo
+`target/` could be printed below a 2 MB npm cache. Ties are broken first by
+measurement quality — an exact size outranks a `≥` lower bound of the same
+number, because the exact one is the claim you can act on — and then by
+`resource_id`, so two runs over an unchanged machine produce the same order.
+Candidates whose size could not be measured at all sort last rather than
+being treated as zero. Ordering is applied at the single point where the
+report is assembled, so `--json` and the human-readable output can never
+disagree about it.
+
+`impact_tier` is `"unknown"`, `"normal"`, `"notable"` or `"large"`: a
+pre-computed magnitude band, so a UI does not have to invent thresholds of
+its own. It escalates on **either** an absolute size (≥ 1 GB is `notable`,
+≥ 10 GB is `large`) **or** a share of remaining free space (≥ 5% is
+`notable`, ≥ 20% is `large`) — measured against free rather than total space,
+because the problem someone opens Glomeris with is "I am running out of
+room". A 400 MB cache is `large` on a machine with 1.6 GB left.
+
+`impact_tier` is a size signal and nothing else. It is **not** a safety
+signal, and it must never be read as one: a `large` candidate can be
+`PROTECTED`, and a `normal` one can be `AUTO_SAFE`. `executable`,
+`offered_actions` and `refusal_reason` remain the only statement about what
+Glomeris is permitted to do.
+
 ```sh
 glomeris detect --project-root ~/dev/myproject --json
 ```
@@ -125,6 +150,7 @@ glomeris detect --project-root ~/dev/myproject --json
       "reclaimable_bytes": 2147483648,
       "reclaimable_human": "2.0 GB",
       "reclaimable_bytes_is_lower_bound": false,
+      "impact_tier": "notable",
       "policy_label": "AUTO_SAFE",
       "reasons": ["no_active_use_observed"],
       "executable": true,
@@ -142,6 +168,7 @@ glomeris detect --project-root ~/dev/myproject --json
       "reclaimable_bytes": 10737418240,
       "reclaimable_human": "10.0 GB",
       "reclaimable_bytes_is_lower_bound": true,
+      "impact_tier": "large",
       "policy_label": "UNKNOWN_INCOMPLETE",
       "reasons": ["evidence_incomplete"],
       "executable": false,

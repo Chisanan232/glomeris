@@ -141,11 +141,12 @@ final class CandidatesSectionViewTests: XCTestCase {
     // MARK: - Lower-bound marker rendering
 
     private func candidate(
-        isLowerBound: Bool,
+        isLowerBound: Bool = false,
         kind: String = "cargo_target",
         human: String? = "1.0 MB",
         policyLabel: String = "AUTO_SAFE",
-        resourceId: String = "/tmp/example/target"
+        resourceId: String = "/tmp/example/target",
+        impactTier: String? = nil
     ) -> DetectCandidateReportDto {
         DetectCandidateReportDto(
             resourceId: resourceId,
@@ -153,6 +154,7 @@ final class CandidatesSectionViewTests: XCTestCase {
             reclaimableBytes: 1_048_576,
             reclaimableHuman: human,
             reclaimableBytesIsLowerBound: isLowerBound,
+            impactTier: impactTier,
             policyLabel: policyLabel,
             reasons: ["regenerable by cargo build"],
             executable: true,
@@ -278,17 +280,214 @@ final class CandidatesSectionViewTests: XCTestCase {
         )
     }
 
-    /// Row order is the CLI's. Ranking is a judgment about what matters
-    /// most and HORO-1307 owns it; sorting here would put that judgment in
-    /// the thin client and then have to be undone.
-    func testRowsAreNotReorderedInSwift() throws {
+    // MARK: - Ranking stays Rust's (HORO-1307)
+
+    /// Supersedes HORO-1306's blanket "this file contains no `.sorted`".
+    ///
+    /// That assertion was a proxy for the real rule — *ranking* is a judgment
+    /// about what matters most and belongs in Rust — and it was written while
+    /// HORO-1307 was still pending. HORO-1307 delivered that ranking
+    /// (`reporting::ranking`, applied in `build_detect_report`), and with it a
+    /// legitimate second ordering: an alphabetical index for finding a
+    /// resource you already know the path of. That is a lookup aid, not a
+    /// claim about importance, so the rule is narrowed rather than dropped:
+    /// the default must be Rust's order byte-for-byte, and the only sort
+    /// permitted here is the explicitly user-chosen one, keyed on
+    /// `resourceId` and nothing else.
+    ///
+    /// Pinning it to `resourceId` is the part that matters. A sort on
+    /// `reclaimableBytes` would be a re-implementation of Rust's ranking and
+    /// would silently drift from its tie-break and lower-bound rules — `≥ 5
+    /// GB` and an exact 5 GB are not interchangeable there.
+    func testTheOnlySortingHereIsTheUserChosenPathIndex() throws {
         let source = try Self.readSource("CandidatesSectionView.swift")
         let code = source
             .split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
 
-        XCTAssertFalse(code.contains(".sorted"), "candidate order is the CLI's to decide")
+        let sortLines = code
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.contains(".sorted") }
+        XCTAssertEqual(sortLines.count, 1, "exactly one sort is permitted in this view")
+        XCTAssertTrue(
+            sortLines.first?.contains("resourceId") == true,
+            "the one permitted sort must be the alphabetical path index"
+        )
+        XCTAssertFalse(
+            sortLines.first?.contains("reclaimableBytes") == true,
+            "re-ranking by size in Swift would duplicate and then drift from reporting::ranking"
+        )
+    }
+
+    /// The default state is Rust's order, so the list a user sees without
+    /// touching anything is exactly what `detect` decided.
+    func testDefaultOrderIsTheCliRanking() throws {
+        let source = try Self.readSource("CandidatesSectionView.swift")
+        XCTAssertTrue(
+            source.contains("sortOrder: CandidateSortOrder = .recommended"),
+            "the list must open in the CLI's own order"
+        )
+        XCTAssertTrue(
+            source.contains("safetyFilter: CandidateSafetyFilter = .all"),
+            "nothing may be hidden until the user asks for it"
+        )
+    }
+
+    /// Behavioural counterpart to the source checks above: `.recommended`
+    /// passes the CLI's sequence through untouched even when that sequence is
+    /// neither size- nor path-ordered as far as this layer can tell.
+    func testRecommendedOrderPassesTheCliSequenceThroughUntouched() {
+        let cliOrder = ["/z/first", "/a/second", "/m/third"]
+        let input = cliOrder.map { candidate(resourceId: $0) }
+
+        let shaped = CandidateListShaping.shape(input, filter: .all, order: .recommended)
+
+        XCTAssertEqual(shaped.map(\.resourceId), cliOrder)
+    }
+
+    func testPathOrderIsAlphabeticalByResourceId() {
+        let input = ["/z/first", "/a/second", "/m/third"].map { candidate(resourceId: $0) }
+
+        let shaped = CandidateListShaping.shape(input, filter: .all, order: .path)
+
+        XCTAssertEqual(shaped.map(\.resourceId), ["/a/second", "/m/third", "/z/first"])
+    }
+
+    // MARK: - Safety filter (HORO-1307)
+
+    private var mixedPolicyCandidates: [DetectCandidateReportDto] {
+        [
+            candidate(policyLabel: "AUTO_SAFE", resourceId: "/a/safe"),
+            candidate(policyLabel: "PROTECTED", resourceId: "/b/protected"),
+            candidate(policyLabel: "ASK", resourceId: "/c/ask"),
+            candidate(policyLabel: "UNKNOWN_INCOMPLETE", resourceId: "/d/unknown"),
+        ]
+    }
+
+    func testEveryFilterKeepsExactlyItsOwnPolicyClass() {
+        let expected: [(CandidateSafetyFilter, [String])] = [
+            (.all, ["/a/safe", "/b/protected", "/c/ask", "/d/unknown"]),
+            (.autoSafe, ["/a/safe"]),
+            (.protected, ["/b/protected"]),
+            (.ask, ["/c/ask"]),
+            (.unknownIncomplete, ["/d/unknown"]),
+        ]
+
+        for (filter, ids) in expected {
+            let shaped = CandidateListShaping.shape(
+                mixedPolicyCandidates, filter: filter, order: .recommended
+            )
+            XCTAssertEqual(shaped.map(\.resourceId), ids, "filter \(filter.rawValue)")
+        }
+    }
+
+    /// Every case must be reachable from the picker and every case must map
+    /// to a token the Rust `PolicyLabel` actually emits — otherwise a filter
+    /// exists that can only ever produce an empty list.
+    func testEveryFilterCaseIsOfferedAndMapsToARealPolicyToken() {
+        XCTAssertEqual(CandidateSafetyFilter.allCases.count, 5)
+        XCTAssertEqual(CandidateSortOrder.allCases.count, 2)
+
+        let realTokens = ["AUTO_SAFE", "ASK", "PROTECTED", "UNKNOWN_INCOMPLETE"]
+        let mapped = CandidateSafetyFilter.allCases.compactMap(\.keptToken)
+        XCTAssertEqual(mapped.sorted(), realTokens.sorted())
+        XCTAssertNil(CandidateSafetyFilter.all.keptToken, "\"All\" must not filter")
+    }
+
+    /// The empty-filter message is built from the filter's name, so that name
+    /// has to survive being dropped into a sentence. The picker labels do not:
+    /// "Not enough evidence" yields "none are not enough evidence".
+    func testEveryFilterNameReadsAsEnglishMidSentence() {
+        for filter in CandidateSafetyFilter.allCases {
+            let sentence = "Glomeris found 3 candidates, but none are "
+                + "\(filter.midSentenceDescription)."
+            XCTAssertFalse(
+                sentence.contains("are not enough"),
+                "\(filter.rawValue) produces a garbled sentence: \(sentence)"
+            )
+            XCTAssertFalse(filter.midSentenceDescription.isEmpty)
+            // A sentence fragment, not a UI label: no capital to start it.
+            XCTAssertEqual(
+                filter.midSentenceDescription.first,
+                filter.midSentenceDescription.first?.lowercased().first
+            )
+        }
+    }
+
+    /// Protection is not the same thing as invisibility: a user must be able
+    /// to ask "what here is off-limits?" and get an answer.
+    func testProtectedCandidatesAreFilterableRatherThanHidden() {
+        let unfiltered = CandidateListShaping.shape(
+            mixedPolicyCandidates, filter: .all, order: .recommended
+        )
+        XCTAssertTrue(unfiltered.contains { $0.policyLabel == "PROTECTED" })
+
+        let onlyProtected = CandidateListShaping.shape(
+            mixedPolicyCandidates, filter: .protected, order: .recommended
+        )
+        XCTAssertEqual(onlyProtected.count, 1)
+    }
+
+    /// Filtering must not reorder. Combined with `.recommended`, the kept
+    /// subset stays in Rust's relative order.
+    func testFilteringPreservesRelativeOrder() {
+        let input = [
+            candidate(policyLabel: "AUTO_SAFE", resourceId: "/z/big"),
+            candidate(policyLabel: "PROTECTED", resourceId: "/m/mid"),
+            candidate(policyLabel: "AUTO_SAFE", resourceId: "/a/small"),
+        ]
+
+        let shaped = CandidateListShaping.shape(input, filter: .autoSafe, order: .recommended)
+
+        XCTAssertEqual(shaped.map(\.resourceId), ["/z/big", "/a/small"])
+    }
+
+    // MARK: - Storage-impact badge (HORO-1307)
+
+    /// The third badge is an emphasis hint and must appear only when there is
+    /// something to emphasise. A chip on every single row is noise, and
+    /// `"unknown"` would just restate the size badge's own "Size unknown".
+    func testImpactBadgeAppearsOnlyForNotableAndLargeCandidates() {
+        XCTAssertNotNil(CandidateRowViewModel(candidate(impactTier: "large")).impactTierTerm)
+        XCTAssertNotNil(CandidateRowViewModel(candidate(impactTier: "notable")).impactTierTerm)
+        XCTAssertNil(CandidateRowViewModel(candidate(impactTier: "normal")).impactTierTerm)
+        XCTAssertNil(CandidateRowViewModel(candidate(impactTier: "unknown")).impactTierTerm)
+        // An older `glomeris` on PATH omits the field entirely.
+        XCTAssertNil(CandidateRowViewModel(candidate(impactTier: nil)).impactTierTerm)
+    }
+
+    /// Size and safety are separate axes (HORO-1307 AC 4): a large candidate
+    /// may be protected and a small one may be safe, so the impact badge must
+    /// carry no safety tone of its own and must not vary with `policyLabel`.
+    func testImpactBadgeCarriesNoSafetyMeaning() {
+        let largeProtected = CandidateRowViewModel(
+            candidate(policyLabel: "PROTECTED", impactTier: "large")
+        )
+        let largeSafe = CandidateRowViewModel(
+            candidate(policyLabel: "AUTO_SAFE", impactTier: "large")
+        )
+
+        XCTAssertEqual(largeProtected.impactTierTerm, largeSafe.impactTierTerm)
+        XCTAssertEqual(largeProtected.impactTierTerm?.tone, .neutral)
+        XCTAssertNotEqual(
+            largeProtected.safetyTerm, largeSafe.safetyTerm,
+            "the safety badge, not the impact badge, is what differs between these two"
+        )
+    }
+
+    /// A row is read aloud as size, then safety, then emphasis — so the
+    /// emphasis is never the only way to learn a candidate is large.
+    func testAccessibilityLabelNamesTheImpactTierWhenPresent() {
+        let loud = CandidateRowViewModel(candidate(impactTier: "large"))
+        let quiet = CandidateRowViewModel(candidate(impactTier: "normal"))
+
+        XCTAssertTrue(loud.accessibilityLabel.contains("Biggest wins"))
+        XCTAssertFalse(quiet.accessibilityLabel.contains("Biggest wins"))
+        // The size itself is spoken either way: the badge adds emphasis, it
+        // does not carry information nothing else carries.
+        XCTAssertTrue(loud.accessibilityLabel.contains("1.0 MB"))
+        XCTAssertTrue(quiet.accessibilityLabel.contains("1.0 MB"))
     }
 
     // MARK: - Helpers

@@ -77,18 +77,56 @@ loop for candidates — `detect` runs only when you explicitly tap Refresh,
 streaming live per-detector progress via `--progress-json` while it works
 (button label switches to "Scanning…").
 
-Three states that are easy to conflate are kept distinct, because each is
+Four states that are easy to conflate are kept distinct, because each is
 a different claim about your disk:
 
 | State | What it says |
 |---|---|
 | "No scan yet" | Nothing has been looked at. **Not** a clean bill of health. |
 | "Nothing worth reclaiming" | Scanned, and there is genuinely nothing — good news. |
+| "No candidates match this filter" | Things were found; you are just not looking at them. |
 | A scan failure | Says what failed. An empty list is never shown in its place. |
 
 Each row shows the candidate's kind, what cleaning it would free, and its
 safety verdict in words. Tapping a row opens its detail view — there is no
 inline "Clean" button in this list.
+
+Rows arrive in the CLI's own order — biggest reclaimable size first — and
+are shown exactly as `detect` returned them. The app does no ranking of its
+own: deciding what matters most is a judgment, and it belongs next to the
+evidence in Rust rather than in a thin client that would then drift from it.
+
+The **View options** menu (the funnel next to Refresh) offers two things:
+
+- **Order** — "Biggest first", which is the CLI's order untouched, or
+  "Path (A–Z)", an alphabetical index for finding a resource whose path you
+  already know. There is deliberately no third "largest first" option: that
+  *is* "Biggest first".
+- **Show** — All, Safe to reclaim, Asks first, Protected, or Not enough
+  evidence. This hides rows and does nothing else; it cannot enable,
+  authorise or perform anything, and the list has no action affordance for it
+  to unlock. Protected items are a first-class filter value rather than
+  something hidden by default: "what on this machine is off-limits, and why"
+  is a reasonable question, and quietly omitting them would teach you that
+  protection means invisibility.
+
+When a filter is active the header reads "N of M items" so a shortened list
+can never be mistaken for a smaller problem.
+
+#### Size is not safety
+
+A third badge appears on the rows worth pausing on — "Biggest wins" or
+"Worth a look" — using the `impact_tier` the CLI already computed. It is an
+emphasis hint about magnitude only, carries no safety colour, and appears on
+no more rows than deserve it (ordinary and unmeasured candidates get no badge
+rather than a badge saying "normal", which would be noise).
+
+Storage impact, safety, and evidence confidence are three separate axes and
+the popover never collapses them. A large candidate may be protected; a small
+one may be perfectly safe to reclaim. Nothing is distinguished by colour
+alone — every badge pairs its colour with a distinct symbol and words — and
+VoiceOver reads each row as size, then safety, then emphasis, so the badge is
+never the only route to the fact.
 
 ### Candidate detail
 

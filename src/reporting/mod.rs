@@ -9,7 +9,10 @@
 
 pub mod bytes;
 pub mod dto;
+pub mod impact;
 pub mod policy_label;
+pub mod ranking;
 
 pub use bytes::human_bytes;
+pub use impact::{classify_impact, ImpactContext, ImpactThresholds, StorageImpactTier};
 pub use policy_label::{label_for, PolicyLabel};

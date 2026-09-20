@@ -86,10 +86,23 @@ impl TopKCandidates {
     }
 
     /// Consume the aggregator, returning its candidates sorted by
-    /// descending logical size.
+    /// descending logical size, then by path.
+    ///
+    /// The path tie-break exists for determinism (HORO-1307 AC 1). Sorting
+    /// on size alone left same-size candidates in `BinaryHeap` drain order,
+    /// which depends on the sequence pushes and pops happened to arrive in
+    /// — so two scans of an unchanged tree could return the same candidates
+    /// in a different order, and a list built on top of it would appear to
+    /// shuffle for no reason. Note that the heap's own `Ord` stays
+    /// size-only: it decides *eviction*, where path is irrelevant, and
+    /// mixing a tie-break into it would make eviction depend on filenames.
     pub fn into_sorted_vec(self) -> Vec<ScanCandidate> {
         let mut v: Vec<ScanCandidate> = self.heap.into_iter().map(|e| e.0).collect();
-        v.sort_by_key(|c| std::cmp::Reverse(c.logical_size_bytes));
+        v.sort_by(|a, b| {
+            b.logical_size_bytes
+                .cmp(&a.logical_size_bytes)
+                .then_with(|| a.path.cmp(&b.path))
+        });
         v
     }
 }

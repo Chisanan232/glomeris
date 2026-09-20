@@ -70,10 +70,33 @@
 //  partial, and that travels honestly inside the impact badge as the
 //  leading `≥` and its explanation.
 //
-//  Row order is whatever `detect` returned. Ranking candidates is a
-//  judgment about what matters most, and HORO-1307 owns it — sorting them
-//  here would put that judgment in the thin client and then have to be
-//  undone.
+//  ---------------------------------------------------------------------
+//  HORO-1307: priority, thresholds, and who decides them
+//  ---------------------------------------------------------------------
+//  Row order is still whatever `detect` returned — but `detect` now returns
+//  a canonical order (biggest reclaimable size first, unmeasured last,
+//  deterministic; see `reporting::ranking` in the Rust crate). Before that,
+//  candidates arrived in detector-registration order, so a 40 GB Cargo
+//  `target/` could sit below a 2 MB npm cache. Fixing that in Rust rather
+//  than here is the whole point: "what matters most" is a product judgment,
+//  the CLI and this app must not disagree about it, and a `.sorted` call in
+//  a thin client would be exactly the kind of second opinion this codebase
+//  is built to avoid.
+//
+//  For the same reason there is no size sort in the menu below. Re-sorting
+//  by size here would duplicate Rust's ranking and then drift from its
+//  tie-break and lower-bound rules — `≥ 5 GB` outranks an exact 5 GB, and
+//  that subtlety would silently go missing. The menu offers only
+//  "Recommended", which is Rust's order passed through untouched, and
+//  "Path", which is an alphabetical index rather than a competing judgment
+//  about importance.
+//
+//  A row can now carry a THIRD badge, but only sometimes: the
+//  `impact_tier` chip appears on `notable`/`large` candidates and on nothing
+//  else. A chip on every row is not emphasis, it is noise. The tier is
+//  neutral-toned at every level, like the size badge and for the same
+//  reason — "Biggest wins" is not a warning, and hue stays reserved for the
+//  safety axis so the two axes can never be confused at a glance.
 //
 
 import SwiftUI
@@ -98,6 +121,11 @@ struct CandidateRowViewModel: Equatable, Identifiable {
     /// How much space is at stake. Neutral at every size.
     let impactTerm: GlomerisTerm
 
+    /// Whether this is one of the few candidates worth pausing on, or `nil`
+    /// for the ordinary majority (HORO-1307). Read straight off the DTO's
+    /// `impactTier` — the magnitude judgment is Rust's, not this app's.
+    let impactTierTerm: GlomerisTerm?
+
     /// What Glomeris is allowed to do with it.
     let safetyTerm: GlomerisTerm
 
@@ -111,9 +139,18 @@ struct CandidateRowViewModel: Equatable, Identifiable {
     /// would otherwise be read as a run-on of four separate chips. Ordered
     /// the way the row is scanned: what it is, whether it is safe, how much
     /// is at stake, where it lives.
+    /// The tier is appended after the size rather than replacing it, and is
+    /// omitted entirely when there is none, so VoiceOver users get the same
+    /// "only the notable rows are called out" signal that sighted users get
+    /// from the chip — rather than hearing an extra clause on every row, or
+    /// nothing at all.
     var accessibilityLabel: String {
-        "\(kindTerm.title). \(safetyTerm.axis): \(safetyTerm.title). "
-            + "\(impactTerm.axis): \(impactTerm.title). Path: \(id)."
+        var label = "\(kindTerm.title). \(safetyTerm.axis): \(safetyTerm.title). "
+            + "\(impactTerm.axis): \(impactTerm.title)."
+        if let impactTierTerm {
+            label += " \(impactTierTerm.title)."
+        }
+        return label + " Path: \(id)."
     }
 
     init(_ dto: DetectCandidateReportDto) {
@@ -123,7 +160,134 @@ struct CandidateRowViewModel: Equatable, Identifiable {
             human: dto.reclaimableHuman,
             isLowerBound: dto.reclaimableBytesIsLowerBound
         )
+        impactTierTerm = GlomerisVocabulary.impactTier(dto.impactTier)
         safetyTerm = GlomerisVocabulary.safety(dto.policyLabel)
+    }
+}
+
+/// How the list is ordered on screen.
+///
+/// Deliberately only two cases, and deliberately no "largest first": that
+/// IS `recommended`, because `detect` already returns candidates biggest
+/// first (`reporting::ranking`). Offering it as a separate option would
+/// imply the default is something else, and implementing it here would be a
+/// second ranking that could drift from Rust's — see the file header.
+enum CandidateSortOrder: String, CaseIterable, Identifiable {
+    /// Rust's canonical order, passed through completely untouched.
+    case recommended
+    /// Alphabetical by path: an index for finding a known resource, not a
+    /// claim about what matters.
+    case path
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .recommended: return "Biggest first"
+        case .path: return "Path (A–Z)"
+        }
+    }
+}
+
+/// Which safety classes to show.
+///
+/// This is a view filter and nothing else. It hides rows; it cannot enable,
+/// authorise or perform anything. That is structurally guaranteed rather
+/// than merely intended: this list has no action affordance at all — its
+/// only two buttons are Refresh and the row tap, and a test pins that count
+/// — so there is nothing here for a filter to unlock. The Clean button
+/// lives solely in `CandidateDetailView` and reads `executable` from
+/// `explain`.
+///
+/// `PROTECTED` is a first-class filter value rather than something hidden by
+/// default: "what on this machine is off-limits, and why" is a legitimate
+/// question, and a product that quietly omits protected items teaches users
+/// that protection means invisibility.
+enum CandidateSafetyFilter: String, CaseIterable, Identifiable {
+    case all
+    case autoSafe
+    case ask
+    case protected
+    case unknownIncomplete
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all: return "All"
+        case .autoSafe: return "Safe to reclaim"
+        case .ask: return "Asks first"
+        case .protected: return "Protected"
+        case .unknownIncomplete: return "Not enough evidence"
+        }
+    }
+
+    /// The same filter named as a noun phrase, for use mid-sentence in the
+    /// "nothing matched" message.
+    ///
+    /// Separate from `label` because a picker label and a sentence fragment
+    /// are not interchangeable: "Not enough evidence" is right on a menu row
+    /// and produces "none are not enough evidence" in prose. Empty-state copy
+    /// is exactly where a user is already confused, so it is the last place
+    /// that can afford a garbled sentence.
+    var midSentenceDescription: String {
+        switch self {
+        case .all: return "candidates"
+        case .autoSafe: return "safe to reclaim"
+        case .ask: return "waiting on your confirmation"
+        case .protected: return "protected"
+        case .unknownIncomplete: return "short on evidence"
+        }
+    }
+
+    /// The `policy_label` token this filter keeps, or `nil` for "keep
+    /// everything".
+    ///
+    /// Comparing tokens to decide *visibility* is not policy branching:
+    /// nothing downstream of this changes what Glomeris is permitted to do.
+    /// `scripts/check-no-policy-label-branching.sh` guards the dangerous
+    /// version of this — a `policyLabel` comparison that gates an action —
+    /// and that script's Check 1 scans for exactly that shape. Keeping the
+    /// mapping in this enum, with no reference to `policyLabel` and no
+    /// conditional, keeps the guard meaningful instead of teaching it to
+    /// tolerate a near-miss.
+    var keptToken: String? {
+        switch self {
+        case .all: return nil
+        case .autoSafe: return "AUTO_SAFE"
+        case .ask: return "ASK"
+        case .protected: return "PROTECTED"
+        case .unknownIncomplete: return "UNKNOWN_INCOMPLETE"
+        }
+    }
+}
+
+/// Pure, directly-testable list shaping: apply a filter, then an order.
+///
+/// Extracted from the view so the interesting behaviour — that
+/// `.recommended` is a no-op, that filtering never invents or reorders
+/// anything, and that an empty result is distinguishable from an empty scan
+/// — is asserted without rendering SwiftUI.
+enum CandidateListShaping {
+    static func shape(
+        _ candidates: [DetectCandidateReportDto],
+        filter: CandidateSafetyFilter,
+        order: CandidateSortOrder
+    ) -> [DetectCandidateReportDto] {
+        let filtered: [DetectCandidateReportDto]
+        if let kept = filter.keptToken {
+            filtered = candidates.filter { $0.policyLabel == kept }
+        } else {
+            filtered = candidates
+        }
+
+        switch order {
+        case .recommended:
+            // Rust's order, untouched. Not a `.sorted` call by design.
+            return filtered
+        case .path:
+            return filtered.sorted { $0.resourceId < $1.resourceId }
+        }
     }
 }
 
@@ -155,6 +319,11 @@ struct CandidatesSectionView: View {
     /// view (and its Clean button) are the ONLY thing a row tap ever
     /// opens — no inline action runs from this list.
     @State private var selectedCandidate: DetectCandidateReportDto?
+    /// HORO-1307 view controls. Both default to "show me everything, in the
+    /// order Glomeris recommends", so the panel a user opens for the first
+    /// time is never silently filtered.
+    @State private var sortOrder: CandidateSortOrder = .recommended
+    @State private var safetyFilter: CandidateSafetyFilter = .all
 
     init(
         client: GlomerisClient = GlomerisClient(),
@@ -211,15 +380,68 @@ struct CandidatesSectionView: View {
                 .foregroundStyle(.secondary)
 
             Spacer(minLength: 0)
+
+            viewOptionsMenu
         }
+    }
+
+    /// Sort and filter, folded into one menu rather than two visible
+    /// pickers: in a panel this narrow, two always-expanded controls would
+    /// take more room than the first candidate row and compete with the
+    /// content they exist to organise. `Menu` also adds no `Button(`, which
+    /// keeps the "this list has exactly two buttons" invariant — and the
+    /// argument that it cannot authorise anything — intact and testable.
+    ///
+    /// The label shows a dot when a filter is active, because a filtered
+    /// list that looks unfiltered is how a user concludes Glomeris found
+    /// nothing when it found plenty.
+    private var viewOptionsMenu: some View {
+        Menu {
+            Picker("Order", selection: $sortOrder) {
+                ForEach(CandidateSortOrder.allCases) { order in
+                    Text(order.label).tag(order)
+                }
+            }
+            Picker("Show", selection: $safetyFilter) {
+                ForEach(CandidateSafetyFilter.allCases) { filter in
+                    Text(filter.label).tag(filter)
+                }
+            }
+        } label: {
+            Image(
+                systemName: safetyFilter == .all
+                    ? "line.3.horizontal.decrease.circle"
+                    : "line.3.horizontal.decrease.circle.fill"
+            )
+        }
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(
+            safetyFilter == .all
+                ? "View options. Showing all candidates, \(sortOrder.label)."
+                : "View options. Filtered to \(safetyFilter.label), \(sortOrder.label)."
+        )
+    }
+
+    /// The candidates actually rendered, after the user's filter and order.
+    private var visibleCandidates: [DetectCandidateReportDto] {
+        CandidateListShaping.shape(candidates, filter: safetyFilter, order: sortOrder)
     }
 
     /// Shown beside the card title. `nil` while there is nothing to count,
     /// so the title line stays quiet rather than announcing "0 items" next
     /// to a message that already says so in words.
+    ///
+    /// When a filter is hiding rows this reads "3 of 11 items". Showing only
+    /// the visible count would misreport what the scan actually found, and
+    /// showing only the total would contradict the list underneath it.
     private var countText: String? {
         guard !candidates.isEmpty else { return nil }
-        return candidates.count == 1 ? "1 item" : "\(candidates.count) items"
+        let visible = visibleCandidates.count
+        if visible == candidates.count {
+            return visible == 1 ? "1 item" : "\(visible) items"
+        }
+        return "\(visible) of \(candidates.count) items"
     }
 
     private var lastScannedText: String {
@@ -232,8 +454,8 @@ struct CandidatesSectionView: View {
 
     // MARK: - Body states
 
-    /// The four things this card can be showing instead of rows, and why
-    /// they are four rather than one:
+    /// The five things this card can be showing instead of rows, and why
+    /// they are five rather than one:
     ///
     ///   - a first scan in flight is slow on a cold cache and must not look
     ///     like a stuck or broken install;
@@ -241,8 +463,25 @@ struct CandidatesSectionView: View {
     ///   - having scanned and found nothing IS good news;
     ///   - a failed scan must never be presented as either of the last two,
     ///     which is why an empty list plus an error message does not also
-    ///     claim "nothing worth reclaiming".
+    ///     claim "nothing worth reclaiming";
+    ///   - and (HORO-1307) a filter hiding every row is the user's own doing,
+    ///     not a fact about their disk. Reusing "Nothing worth reclaiming"
+    ///     there would be an outright false claim about the machine, and the
+    ///     worst kind: silently self-inflicted and with the fix — clear the
+    ///     filter — invisible.
     private var stateMessage: GlomerisStateMessage? {
+        // Checked before the "no candidates at all" cases: a non-empty scan
+        // whose rows are all filtered out is a different situation from an
+        // empty scan, and must not borrow its wording.
+        if !candidates.isEmpty, visibleCandidates.isEmpty {
+            return .filteredOut(
+                "No candidates match this filter",
+                detail: "Glomeris found \(candidates.count) "
+                    + "\(candidates.count == 1 ? "candidate" : "candidates"), "
+                    + "but none are \(safetyFilter.midSentenceDescription). "
+                    + "Change the filter in the view options to see them."
+            )
+        }
         guard candidates.isEmpty else { return nil }
         if isScanning {
             return .loading("Scanning for reclaimable space…")
@@ -266,7 +505,7 @@ struct CandidatesSectionView: View {
 
     @ViewBuilder
     private var rows: some View {
-        ForEach(Array(candidates.map(CandidateRowViewModel.init).enumerated()), id: \.element.id) { index, row in
+        ForEach(Array(visibleCandidates.map(CandidateRowViewModel.init).enumerated()), id: \.element.id) { index, row in
             if index > 0 {
                 Divider()
             }
@@ -281,6 +520,13 @@ struct CandidatesSectionView: View {
     /// The impact badge is unfilled and the safety badge is filled, so the
     /// eye lands on the verdict first when scanning a long list — a size is
     /// only interesting once you know whether you are allowed to act on it.
+    ///
+    /// HORO-1307: the tier chip, when present, sits on the second line beside
+    /// the safety badge rather than next to the size. Two chips crowding the
+    /// right edge of the first line would wrap on a long size string, and
+    /// putting "Biggest wins" beside the safety verdict is also the honest
+    /// arrangement — it reads as one more independent fact about the
+    /// candidate, not as a qualifier on the number.
     @ViewBuilder
     private func rowView(_ row: CandidateRowViewModel) -> some View {
         Button {
@@ -297,6 +543,11 @@ struct CandidatesSectionView: View {
 
                 HStack(spacing: GlomerisDesign.inlineSpacing) {
                     GlomerisBadgeView(term: row.safetyTerm)
+                    if let impactTierTerm = row.impactTierTerm {
+                        // Filled, so it carries weight without carrying a
+                        // hue — its tone is `.neutral` at every tier.
+                        GlomerisBadgeView(term: impactTierTerm)
+                    }
                     Spacer(minLength: 0)
                     // Affordance only: it says "there is more behind this
                     // row", which is what a tap does. It carries no state,
