@@ -170,6 +170,90 @@ struct DetectReportDto: Decodable, Equatable {
     let candidates: [DetectCandidateReportDto]
 }
 
+/// Mirrors `reporting::dto::LlmPlanItemReport` (HORO-1308) — one row of the
+/// advisory `llm-plan` ranking.
+///
+/// ## Two of these fields are the model's words. The rest are the machine's.
+///
+/// `priority` and `modelReason` are the only fields a provider chose.
+/// Everything else — `policyLabel`, `completeness`, `confidence`, `explain`,
+/// `skipReason`, and every field of `candidate` — was computed locally from
+/// evidence and the real policy engine, and reads identically whether or not
+/// a provider was ever contacted. A surface rendering `modelReason` MUST
+/// attribute it to the model: it is a claim, and it sits next to evidence.
+///
+/// ## Why `candidate` is nested rather than flattened
+///
+/// It is the byte-for-byte same projection `detect --json` prints for this
+/// resource, so `AiPlanSectionView` builds its rows with the same
+/// `CandidateRowViewModel` the candidates list uses, and reads
+/// `candidate.executable` / `candidate.offeredActions` /
+/// `candidate.refusalReason` as the only authority on what may be done.
+/// There is deliberately no second enablement path for a recommendation to
+/// travel down, and no `fingerprintToken` here at all — acting on a
+/// suggestion still goes through its own `explain` call, exactly as acting
+/// on a candidates-list row does.
+struct LlmPlanItemReportDto: Decodable, Equatable, Identifiable {
+    let resourceId: String
+    let policyLabel: String
+    let requestedActionId: String?
+    /// The model's claimed ordering hint. Not the rank this app renders:
+    /// that is the item's position in `items`, which is the order Rust
+    /// actually validated and emitted. A model is free to number its
+    /// suggestions however it likes; it does not get to renumber the list.
+    let priority: UInt32?
+    /// The model's own rationale, already bounded to 400 characters and
+    /// control-character-stripped in Rust (`sanitize_model_reason`) so it
+    /// cannot rewrite a terminal line or crowd the real verdict off a
+    /// fixed-width popover. `nil` when the model gave none.
+    let modelReason: String?
+    let explain: String?
+    let skipReason: String?
+    let candidate: DetectCandidateReportDto
+    let completeness: String
+    let confidence: String
+
+    enum CodingKeys: String, CodingKey {
+        case resourceId = "resource_id"
+        case policyLabel = "policy_label"
+        case requestedActionId = "requested_action_id"
+        case priority
+        case modelReason = "model_reason"
+        case explain
+        case skipReason = "skip_reason"
+        case candidate
+        case completeness
+        case confidence
+    }
+
+    var id: String { resourceId }
+}
+
+/// Mirrors `reporting::dto::LlmPlanReport` (HORO-1308).
+///
+/// `providerError` is non-`nil` when the provider call itself failed; the CLI
+/// still prints this whole report and then exits 1, which is why the AI Plan
+/// card reads it through `runRaw` and decodes stdout on a non-zero exit
+/// rather than throwing the body away.
+///
+/// The two `dropped*` counts record suggestions Rust refused to validate —
+/// the model named a resource that was never discovered, or an action that is
+/// not registered. They are surfaced rather than swallowed: a plan with three
+/// rows and two silently discarded items is not a three-row plan.
+struct LlmPlanReportDto: Decodable, Equatable {
+    let items: [LlmPlanItemReportDto]
+    let droppedUnknownResource: UInt32
+    let droppedUnknownAction: UInt32
+    let providerError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case items
+        case droppedUnknownResource = "dropped_unknown_resource"
+        case droppedUnknownAction = "dropped_unknown_action"
+        case providerError = "provider_error"
+    }
+}
+
 /// Mirrors `reporting::dto::ProgressEvent` (HORO-1052) — one line of the
 /// `--progress-json` NDJSON stream emitted on stderr while `detect`'s
 /// discovery phase runs. The Rust side uses `#[serde(tag = "phase",

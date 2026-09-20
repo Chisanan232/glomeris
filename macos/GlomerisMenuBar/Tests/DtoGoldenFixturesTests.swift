@@ -157,6 +157,77 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.expectedReclaimedBytes, 2_147_483_648)
     }
 
+    // MARK: - LlmPlanReport
+
+    /// HORO-1308. Asserts the three shapes the AI Plan card renders, and
+    /// asserts them in the awkward pairing the fixture was built with:
+    /// the item the model explained best is also the one it was most wrong
+    /// about.
+    func testDecodesLlmPlanReport() throws {
+        let dto = try decodeFixture("llm_plan_report.json", as: LlmPlanReportDto.self)
+
+        XCTAssertEqual(dto.items.count, 3)
+        XCTAssertNil(dto.providerError)
+        // Surfaced, not swallowed — the model asked for things that do not
+        // exist, and a plan that hides that is overstating itself.
+        XCTAssertEqual(dto.droppedUnknownResource, 1)
+        XCTAssertEqual(dto.droppedUnknownAction, 2)
+
+        let safe = dto.items[0]
+        XCTAssertEqual(safe.policyLabel, "AUTO_SAFE")
+        XCTAssertEqual(safe.requestedActionId, "cargo.clean.target_dir")
+        XCTAssertEqual(safe.priority, 1)
+        XCTAssertEqual(safe.modelReason, "Largest build output and nothing is using it.")
+        XCTAssertEqual(safe.completeness, "complete")
+        XCTAssertEqual(safe.confidence, "high")
+        XCTAssertTrue(safe.candidate.executable)
+        XCTAssertEqual(safe.candidate.offeredActions.count, 1)
+        XCTAssertFalse(safe.candidate.offeredActions[0].requiresConfirmation)
+        XCTAssertEqual(safe.candidate.impactTier, "notable")
+
+        // No rationale at all, and its action still needs confirmation. So
+        // "the model explained it" can never be read as "this is fine", and
+        // an absent rationale can never be read as "nothing to confirm".
+        let ask = dto.items[1]
+        XCTAssertEqual(ask.policyLabel, "ASK")
+        XCTAssertNil(ask.modelReason)
+        XCTAssertEqual(ask.completeness, "partial")
+        XCTAssertTrue(ask.candidate.executable)
+        XCTAssertTrue(ask.candidate.offeredActions[0].requiresConfirmation)
+
+        // The important one: a confident, plausible-sounding recommendation
+        // to delete an SSH private key. Every field that gates an action says
+        // no, and the model's sentence is still carried — attributed, beside
+        // the refusal, never instead of it.
+        let protected = dto.items[2]
+        XCTAssertEqual(protected.policyLabel, "PROTECTED")
+        XCTAssertEqual(protected.modelReason, "looks like a stale build directory")
+        XCTAssertNil(protected.requestedActionId)
+        XCTAssertNil(protected.explain)
+        XCTAssertEqual(protected.skipReason, "PROTECTED: protected_credential_material")
+        XCTAssertFalse(protected.candidate.executable)
+        XCTAssertTrue(protected.candidate.offeredActions.isEmpty)
+        XCTAssertEqual(
+            protected.candidate.refusalReason,
+            "PROTECTED: protected_credential_material"
+        )
+        XCTAssertEqual(protected.candidate.reasons, ["protected_credential_material"])
+    }
+
+    /// The plan item carries no `fingerprint_token` — deliberately, because
+    /// that token is what pins consent for an `ASK` resource, and a plan must
+    /// not hand it out. Acting on a suggestion goes through its own `explain`
+    /// call first, exactly as acting on a candidates-list row does.
+    ///
+    /// Asserted on the raw JSON rather than on the Swift model, because the
+    /// Swift model not having a property proves only that this mirror ignores
+    /// the key; what matters is that Rust never emits it here.
+    func testLlmPlanItemsCarryNoFingerprintToken() throws {
+        let data = try loadFixture("llm_plan_report.json")
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        XCTAssertFalse(text.contains("fingerprint_token"))
+    }
+
     // MARK: - ActionHistoryReport
 
     func testDecodesActionHistoryReport() throws {

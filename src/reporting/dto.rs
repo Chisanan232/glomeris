@@ -526,8 +526,8 @@ pub struct LlmPlanItemReport {
     /// candidates list does.
     pub candidate: DetectCandidateReport,
     /// Evidence completeness for this resource (HORO-1308) — `"complete"`,
-    /// `"partial"` or `"minimal"`, straight from the same
-    /// [`crate::evidence::Completeness`] `explain` reports.
+    /// `"partial"` or `"failed"`, straight from [`completeness_tag`], the
+    /// same mapping `explain` reports go through.
     ///
     /// Present here and not in [`DetectCandidateReport`] because this is the
     /// surface where it matters most: a ranked *recommendation* invites
