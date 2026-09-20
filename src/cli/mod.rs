@@ -529,7 +529,14 @@ pub fn build_llm_plan_report(
         items,
         dropped_unknown_resource: result.dropped_unknown_resource,
         dropped_unknown_action: result.dropped_unknown_action,
-        provider_error: result.provider_error.map(|e| format!("{e:?}")),
+        // `Display`, not `Debug`: `LlmError`'s `Display` renders a
+        // human-readable sentence naming the HTTP status, API style,
+        // endpoint path and redacted provider message, whereas `Debug`
+        // renders Rust struct syntax. Both are secret-safe (see
+        // `api_key_never_appears_in_display_output_of_any_variant` in
+        // `actions::llm`'s tests), but only one is readable in a terminal
+        // or a `--json` field.
+        provider_error: result.provider_error.map(|e| e.to_string()),
     }
 }
 
@@ -1968,6 +1975,38 @@ mod tests {
 
         assert!(report.items.is_empty());
         assert!(report.provider_error.is_some());
+    }
+
+    #[test]
+    fn build_llm_plan_report_renders_provider_status_readably() {
+        // HORO-1299: the reported string must name the HTTP status and the
+        // endpoint path, and must not be Rust `Debug` struct syntax — this
+        // field is what a user sees in `--json` output and in a bug report.
+        let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1));
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let provider = FakeLlmPlanProvider {
+            response: Err(crate::actions::llm::LlmError::ProviderStatus {
+                status: 401,
+                api_style: crate::actions::llm::API_STYLE_CHAT_COMPLETIONS.to_string(),
+                endpoint_path: "/v1/chat/completions".to_string(),
+                request_id: Some("req-7".to_string()),
+                body_excerpt: r#"{"error":{"code":"invalid_api_key"}}"#.to_string(),
+            }),
+        };
+        let candidates = vec![(ev, decision)];
+        let actions = ActionRegistry::builtin();
+
+        let report = build_llm_plan_report(&candidates, &actions, &provider);
+        let rendered = report.provider_error.expect("provider error is set");
+
+        assert!(rendered.contains("HTTP 401"), "got: {rendered}");
+        assert!(rendered.contains("/v1/chat/completions"), "got: {rendered}");
+        assert!(rendered.contains("invalid_api_key"), "got: {rendered}");
+        assert!(rendered.contains("request_id=req-7"), "got: {rendered}");
+        assert!(
+            !rendered.contains("ProviderStatus {"),
+            "must not be Debug struct syntax: {rendered}"
+        );
     }
 
     #[test]
