@@ -614,6 +614,40 @@ final class CandidateDetailViewTests: XCTestCase {
         XCTAssertNotEqual(humanByteCount(987_654), "unknown")
     }
 
+    // MARK: - HORO-1306: the sheet leads with the verdict, not the fields
+
+    /// This sheet used to be eleven key/value rows in `explain --json`'s own
+    /// field order, so "is this safe to delete" was somewhere in the middle
+    /// of them. The cards are now ordered by the questions someone opening
+    /// it actually has, in order: may I, is it worth it, on what evidence,
+    /// and — last — what did the CLI literally say.
+    ///
+    /// Asserted at the call site, because that is the order rendered and,
+    /// this being a plain `VStack`, also the order VoiceOver reads.
+    func testCardsAreOrderedSafetyImpactEvidenceThenRawValues() throws {
+        let code = Self.strippedOfComments(try Self.readSource("CandidateDetailView.swift"))
+        let order = ["safetyCard(viewModel)", "impactCard(viewModel)", "evidenceCard(viewModel)", "rawValuesCard(viewModel)"]
+        let positions = try order.map { try XCTUnwrap(code.range(of: $0)?.lowerBound, "\($0) is not rendered") }
+
+        for (earlier, later) in zip(positions, positions.dropFirst()) {
+            XCTAssertLessThan(earlier, later, "cards render out of order: \(order)")
+        }
+    }
+
+    /// The raw `explain --json` values stay reachable — this is an
+    /// evidence-first product and a user has to be able to check the
+    /// wording against the CLI — but collapsed, so the sheet does not open
+    /// on a wall of enum names again.
+    func testRawValuesAreReachableButCollapsedBehindADisclosure() throws {
+        let code = Self.strippedOfComments(try Self.readSource("CandidateDetailView.swift"))
+
+        XCTAssertTrue(code.contains("DisclosureGroup"), "the raw values must still be reachable")
+        XCTAssertTrue(
+            code.contains(".textSelection(.enabled)"),
+            "values you are meant to quote in a bug report must be selectable"
+        )
+    }
+
     // MARK: - Helpers
 
     private static func readSource(_ fileName: String) throws -> String {
