@@ -182,6 +182,13 @@ struct DetectReportDto: Decodable, Equatable {
 /// a provider was ever contacted. A surface rendering `modelReason` MUST
 /// attribute it to the model: it is a claim, and it sits next to evidence.
 ///
+/// **The ORDER of `LlmPlanReport.items` is also the model's.** `plan_with_llm`
+/// pushes validated items in the order the provider returned them and never
+/// sorts; validation only drops entries. So a surface must not present a
+/// position in this list as a Glomeris ranking — the candidates list's order
+/// is Glomeris's judgment (`reporting::ranking`), this one is advice, and
+/// conflating them would launder a model's opinion into a machine verdict.
+///
 /// ## Why `candidate` is nested rather than flattened
 ///
 /// It is the byte-for-byte same projection `detect --json` prints for this
@@ -197,10 +204,12 @@ struct LlmPlanItemReportDto: Decodable, Equatable, Identifiable {
     let resourceId: String
     let policyLabel: String
     let requestedActionId: String?
-    /// The model's claimed ordering hint. Not the rank this app renders:
-    /// that is the item's position in `items`, which is the order Rust
-    /// actually validated and emitted. A model is free to number its
-    /// suggestions however it likes; it does not get to renumber the list.
+    /// The model's own priority number, carried verbatim and deliberately
+    /// NOT rendered by `AiPlanSectionView`. It is a second copy of the claim
+    /// the list order already makes, it can contradict that order, and two
+    /// competing numberings on one row would read as though one of them were
+    /// authoritative. Kept on the DTO because `--json` consumers should see
+    /// everything the provider said.
     let priority: UInt32?
     /// The model's own rationale, already bounded to 400 characters and
     /// control-character-stripped in Rust (`sanitize_model_reason`) so it
