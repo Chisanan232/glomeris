@@ -1,0 +1,21 @@
+# HORO-1296: the XcodeGen release that GlomerisMenuBar.xcodeproj is generated
+# with, pinned so the drift guard is meaningful.
+#
+# Different XcodeGen versions emit different `project.pbxproj` bytes for the
+# same `project.yml`. Without a pin, the guard would either report drift that
+# isn't there (CI's version newer than the committer's) or, in the other
+# direction, "fix" the committed project into whatever CI happens to install.
+# Pinning makes "regenerate and diff" a statement about `project.yml`, not
+# about the toolchain.
+#
+# Both `scripts/check-xcodeproj-matches-xcodegen.sh` and the `xcodeproj-drift`
+# job in `.github/workflows/ci.yml` read this file, so the version lives in
+# exactly one place. To upgrade: bump both fields, regenerate, and commit the
+# resulting `.xcodeproj` in the same commit.
+#
+# sha256 is of the `xcodegen.zip` asset on that release
+# (https://github.com/yonaskolb/XcodeGen/releases). GitHub release assets can
+# be replaced after publication, so the version tag alone is not a sufficient
+# pin for something CI downloads and executes.
+version=2.46.0
+sha256=4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
