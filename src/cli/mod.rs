@@ -608,11 +608,22 @@ pub fn print_llm_payload_report(report: &LlmPayloadReport) {
 /// `LlmPlan` unchanged, and `tests/llm_plan_schema_round_trip.rs` proves
 /// the same thing through the actual `glomeris llm-plan --plan-file`
 /// input surface.
+///
+/// The example's `resource_id` is a `ResourceId::to_string()`-shaped value
+/// because this document's audience is a human hand-writing a
+/// `--plan-file` fixture, and that is the form `glomeris detect` prints.
+/// A live model never sees such a value — it is handed positional wire
+/// aliases instead (HORO-1298, see `crate::actions::llm`'s module docs) —
+/// and both forms resolve. The placeholder path is deliberately not
+/// home-shaped: a `/Users/<name>/...` example invited exactly the
+/// assumption HORO-1298 was about, that real local paths are what crosses
+/// the wire. It is also deliberately a path that no real discovery run
+/// will match, which `tests/llm_plan_schema_round_trip.rs` depends on.
 pub fn llm_plan_schema_example() -> String {
     let value = serde_json::json!({
         "items": [
             {
-                "resource_id": "cargo_target_dir:/Users/you/project/target",
+                "resource_id": "cargo_target_dir:/path/to/project/target",
                 "action_id": "cargo.clean.target_dir",
                 "priority": 1,
                 "reason": "stale build artifacts, not modified in 30 days"
@@ -2120,10 +2131,7 @@ mod tests {
             .expect("llm_plan_schema_example must produce valid LlmPlan JSON");
         assert_eq!(plan.items.len(), 1);
         let item = &plan.items[0];
-        assert_eq!(
-            item.resource_id,
-            "cargo_target_dir:/Users/you/project/target"
-        );
+        assert_eq!(item.resource_id, "cargo_target_dir:/path/to/project/target");
         assert_eq!(item.action_id, "cargo.clean.target_dir");
         assert_eq!(item.priority, Some(1));
 
