@@ -435,7 +435,7 @@ enum GlomerisVocabulary {
             return term(
                 token, refusalAxis, "No longer there",
                 "Nothing on disk matches this resource any more.",
-                "questionmark.circle.fill", .warning
+                "magnifyingglass", .warning
             )
         case "action_not_found":
             return term(
@@ -467,7 +467,7 @@ enum GlomerisVocabulary {
                 token, refusalAxis, "Confirmation no longer valid",
                 "The resource changed after you confirmed, so the confirmation "
                     + "no longer applied and Glomeris refused to reuse it.",
-                "hand.raised.fill", .guarded
+                "hand.raised.slash.fill", .guarded
             )
         case "auto_safe_contract_violation":
             return term(
