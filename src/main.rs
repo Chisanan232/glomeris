@@ -64,8 +64,8 @@ const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "llm-plan",
-        usage: "llm-plan <--schema|[--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]>",
-        description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion. --schema emits an example LlmPlan document instead.",
+        usage: "llm-plan <--schema|--print-payload|[--project-root <path>]... [--plan-file <path>] [--json] [--progress-json]>",
+        description: "Produce an advisory, non-executing BYOK LLM cleanup suggestion. --schema emits an example LlmPlan document instead; --print-payload shows the exact request that would be sent, without sending it.",
     },
     CommandSpec {
         name: "execute",
@@ -588,6 +588,7 @@ fn run_llm_plan_command(args: &[String]) {
     let mut json = false;
     let mut progress_json = false;
     let mut schema = false;
+    let mut print_payload = false;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
@@ -601,6 +602,10 @@ fn run_llm_plan_command(args: &[String]) {
             }
             "--schema" => {
                 schema = true;
+                i += 1;
+            }
+            "--print-payload" => {
+                print_payload = true;
                 i += 1;
             }
             other => {
@@ -634,6 +639,27 @@ fn run_llm_plan_command(args: &[String]) {
 
     let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = ActionRegistry::builtin();
+
+    // HORO-1298: prints the request and stops, before any provider is
+    // constructed — so this needs no credential, makes no network call,
+    // and is the same code path a live run would send, not a description
+    // of it.
+    if print_payload {
+        match glomeris::cli::build_llm_payload_report(&candidates, &actions) {
+            Ok(report) => {
+                if json {
+                    print_json_or_exit(&report);
+                } else {
+                    glomeris::cli::print_llm_payload_report(&report);
+                }
+            }
+            Err(e) => {
+                eprintln!("glomeris llm-plan: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     let report = match plan_file {
         Some(path) => {
