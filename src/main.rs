@@ -51,7 +51,7 @@ fn main() {
         Some("llm-plan") => run_llm_plan_command(&args[1..]),
         Some("llm-check") => run_llm_check_command(&args[1..]),
         Some("execute") => run_execute_command(&args[1..]),
-        Some("emergency") => run_emergency_command(),
+        Some("emergency") => run_emergency_command(&args[1..]),
         Some("history") => run_history_command(&args[1..]),
         Some("free") => run_free_command(&args[1..]),
         Some(other) => {
@@ -369,7 +369,22 @@ fn acquire_execution_lock_or_exit(
 /// Never touches network or an LLM provider; see
 /// `glomeris::emergency`'s module docs for the full contract.
 #[cfg(target_os = "macos")]
-fn run_emergency_command() {
+fn run_emergency_command(args: &[String]) {
+    // Found while writing this command's help (HORO-1311): `emergency` took no
+    // `args` slice at all, so every argument was discarded before dispatch and
+    // `glomeris emergency --dry-run` performed a real, unannounced recovery
+    // run. That is the worst place in the product to silently accept a flag,
+    // because the flag a user is most likely to reach for here is the one that
+    // means "don't actually do it". Every other subcommand rejects an
+    // unrecognized argument with exit 2; this one now does too.
+    //
+    // `--help`/`-h` never arrive here — they are intercepted before dispatch.
+    if let Some(unexpected) = args.first() {
+        eprintln!("glomeris emergency: unrecognized argument '{unexpected}' — it takes none");
+        print_command_usage("emergency");
+        std::process::exit(2);
+    }
+
     use glomeris::actions::ActionRegistry;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::emergency::run_emergency;
@@ -415,7 +430,7 @@ fn run_emergency_command() {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_emergency_command() {
+fn run_emergency_command(_args: &[String]) {
     eprintln!("glomeris emergency: only supported on macOS");
     std::process::exit(1);
 }
