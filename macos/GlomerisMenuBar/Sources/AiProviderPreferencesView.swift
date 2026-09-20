@@ -692,6 +692,15 @@ struct AiProviderPreferencesView: View {
     private func runConnectionTest() async {
         isTesting = true
         checkErrorMessage = nil
+        // Cleared rather than left in place. A run that throws — including one
+        // the user stopped, for which `shortMessage` deliberately returns no
+        // message at all — otherwise falls back to rendering the *previous*
+        // run's result, which on this screen means a stale "Connection OK"
+        // either sitting under a fresh failure or reappearing as though it were
+        // the answer to the test just cancelled. Of everything on this screen,
+        // that is the one claim that must never be inherited from an earlier
+        // configuration.
+        checkOutcome = nil
 
         do {
             // `progressType` is named only to satisfy generic inference —
@@ -858,6 +867,9 @@ struct AiProviderPreferencesView: View {
     private func runPayloadPreview() async {
         isPreviewing = true
         previewErrorMessage = nil
+        // Same reason as `runConnectionTest`: a payload built from the previous
+        // set of project roots is not an answer to this press.
+        previewOutcome = nil
 
         do {
             let raw = try await client.runRaw(

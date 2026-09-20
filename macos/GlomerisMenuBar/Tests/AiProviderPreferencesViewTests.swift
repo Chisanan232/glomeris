@@ -458,6 +458,35 @@ final class AiProviderPreferencesViewTests: XCTestCase {
 
     // MARK: - Source-level guards
 
+    /// A run that throws must not leave the previous run's verdict on screen.
+    /// This matters more here than elsewhere in the app because
+    /// `SectionFetchErrors.shortMessage` returns `nil` for a cancellation by
+    /// design: with no error message to render, a stale "Connection OK" would
+    /// reappear as though it were the answer to the test the user just stopped.
+    /// Asserted by position rather than by presence — `checkOutcome` is assigned
+    /// inside the `do` block too, so only an assignment *before* it clears the
+    /// old value.
+    func testBothRunnersClearTheirPreviousResultBeforeRunning() throws {
+        let code = try Self.readCode()
+
+        for (runner, outcome) in [
+            ("private func runConnectionTest() async {", "checkOutcome"),
+            ("private func runPayloadPreview() async {", "previewOutcome"),
+        ] {
+            guard let start = code.range(of: runner) else {
+                return XCTFail("\(runner) no longer exists; update this test")
+            }
+            guard let doBlock = code.range(of: "do {", range: start.upperBound..<code.endIndex)
+            else {
+                return XCTFail("\(runner) no longer has a do block; update this test")
+            }
+            let preamble = String(code[start.upperBound..<doBlock.lowerBound])
+            XCTAssertTrue(
+                preamble.contains("\(outcome) = nil"),
+                "\(runner) does not clear \(outcome) before running")
+        }
+    }
+
     /// AC 7's strongest form. `llm-check` spends the user's money, so it must
     /// run only from a button the user pressed — never on appearance, never on
     /// a timer, never as a retry. Asserted structurally because "it does not
