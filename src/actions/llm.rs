@@ -379,6 +379,41 @@ fn diagnostic_endpoint_path(url: &str) -> String {
     path[..end].to_string()
 }
 
+/// Folds every run of whitespace into a single space, so a multi-line
+/// provider body becomes one log-safe line.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Truncates to at most `limit` bytes, always on a character boundary, and
+/// says so when it cut. Separate from [`collapse_whitespace`] because
+/// [`redact_secret`] must do its replacement *between* the two: collapsing
+/// first can rejoin a key that a provider wrapped across lines, and
+/// truncating last is what stops a key straddling the cut from surviving in
+/// half.
+fn truncate_on_char_boundary(text: String, limit: usize) -> String {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut cut = limit;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… (truncated)", &text[..cut])
+}
+
+/// One bounded, single-line excerpt of provider-controlled text, for a
+/// surface that has to show *something* the provider said without letting it
+/// decide how much room it gets.
+///
+/// Public because `crate::cli`'s connection-test report needs the identical
+/// treatment [`LlmError::ProviderStatus`]'s body excerpt already gets, and a
+/// second hand-rolled truncation is exactly how one of them ends up slicing
+/// a multi-byte character in half.
+pub fn excerpt(text: &str, limit: usize) -> String {
+    truncate_on_char_boundary(collapse_whitespace(text), limit)
+}
+
 /// Removes every occurrence of `secret` from `text`, collapses whitespace
 /// so the result is one log-safe line, and truncates it to
 /// [`PROVIDER_ERROR_BODY_LIMIT`] bytes on a character boundary.
@@ -387,21 +422,14 @@ fn diagnostic_endpoint_path(url: &str) -> String {
 /// the replacement between every character, so without it an unset API key
 /// would corrupt the diagnostic instead of redacting nothing.
 fn redact_secret(text: &str, secret: &str) -> String {
-    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed = collapse_whitespace(text);
     let redacted = if secret.is_empty() {
         collapsed
     } else {
         collapsed.replace(secret, "<REDACTED>")
     };
 
-    if redacted.len() <= PROVIDER_ERROR_BODY_LIMIT {
-        return redacted;
-    }
-    let mut cut = PROVIDER_ERROR_BODY_LIMIT;
-    while cut > 0 && !redacted.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}… (truncated)", &redacted[..cut])
+    truncate_on_char_boundary(redacted, PROVIDER_ERROR_BODY_LIMIT)
 }
 
 /// Real provider: any OpenAI-compatible `/chat/completions` endpoint
@@ -419,10 +447,28 @@ pub struct OpenAiCompatibleProvider {
     pub model: String,
 }
 
+/// The full request URL [`OpenAiCompatibleProvider::complete`] posts to,
+/// derived from a base URL exactly as it does: one trailing slash tolerated,
+/// `/chat/completions` appended verbatim, no `/v1` ever inserted or stripped.
+///
+/// Public so a caller can report *which* endpoint it is about to talk to
+/// without rebuilding that rule — see `book/src/byok.md`, where configuring
+/// the host root instead of the API root is documented as the single most
+/// common misconfiguration. A second copy of this concatenation is how the
+/// diagnostic that diagnoses that mistake would start lying about it.
+pub fn chat_completions_url(base_url: &str) -> String {
+    format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+/// The secret-free path of [`chat_completions_url`], for diagnostics — see
+/// [`diagnostic_endpoint_path`] for what is deliberately dropped.
+pub fn chat_completions_endpoint_path(base_url: &str) -> String {
+    diagnostic_endpoint_path(&chat_completions_url(base_url))
+}
+
 impl LlmProvider for OpenAiCompatibleProvider {
     fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, LlmError> {
-        let base = self.base_url.trim_end_matches('/');
-        let url = format!("{base}/chat/completions");
+        let url = chat_completions_url(&self.base_url);
 
         let body = serde_json::json!({
             "model": self.model,
@@ -1921,6 +1967,54 @@ mod tests {
 
         assert!(redacted.ends_with("… (truncated)"));
         assert!(redacted.len() < PROVIDER_ERROR_BODY_LIMIT + 32);
+    }
+
+    /// The shared helper `crate::cli`'s connection-test report uses. Same
+    /// character-boundary obligation as `redact_secret`, at a caller-chosen
+    /// limit — so it gets the same multi-byte test rather than being trusted
+    /// because it happens to share an implementation today.
+    #[test]
+    fn excerpt_bounds_provider_text_on_a_character_boundary() {
+        assert_eq!(excerpt("ok", 120), "ok");
+        assert_eq!(excerpt("  ok\n\n  then   more ", 120), "ok then more");
+
+        let bounded = excerpt(&"é".repeat(400), 120);
+        assert!(bounded.ends_with("… (truncated)"));
+        assert!(bounded.len() < 120 + 32);
+    }
+
+    /// A provider that answers with a wall of text does not get to decide how
+    /// much of a fixed-width popover it occupies.
+    #[test]
+    fn excerpt_does_not_let_a_provider_choose_its_own_length() {
+        let shouted = "no".repeat(10_000);
+        assert!(excerpt(&shouted, 120).len() < 200);
+    }
+
+    /// The path rule `book/src/byok.md` documents, and the reason this is a
+    /// function rather than two `format!` calls: the diagnostic that tells a
+    /// user they configured the host root instead of the API root is only
+    /// truthful if it is built from the same concatenation the request was.
+    #[test]
+    fn chat_completions_url_appends_verbatim_and_tolerates_one_slash() {
+        assert_eq!(
+            chat_completions_url("https://gateway.example.com/v1"),
+            "https://gateway.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://gateway.example.com/v1/"),
+            "https://gateway.example.com/v1/chat/completions"
+        );
+        // Never inserted for you — this is the misconfiguration, rendered
+        // exactly as the user will see it in a failure message.
+        assert_eq!(
+            chat_completions_endpoint_path("https://gateway.example.com"),
+            "/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_endpoint_path("https://gateway.example.com/v1"),
+            "/v1/chat/completions"
+        );
     }
 
     #[test]
