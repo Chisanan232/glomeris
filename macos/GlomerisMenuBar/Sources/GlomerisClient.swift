@@ -73,6 +73,67 @@ enum GlomerisClientError: Error, Equatable {
     case outputDecodingFailed(String)
 }
 
+/// One-shot carrier for a child process's exit status, handing it from
+/// Foundation's `terminationHandler` callback to an awaiting `async` caller
+/// without either side blocking a thread (HORO-1304).
+///
+/// This exists because the two events can happen in either order. The
+/// handler must be installed *before* `Process.run()` — Foundation never
+/// invokes a handler attached to a process that has already terminated — but
+/// the continuation to resume only exists later, once someone awaits. So the
+/// status may arrive before there is anybody to give it to, or somebody may
+/// be waiting before it arrives. Storing the status and the waiters under one
+/// lock makes both orderings correct, and means the fast-child case (the
+/// common one: `glomeris status --json` exits in milliseconds) needs no
+/// suspension at all.
+///
+/// Internal rather than private only so its ordering invariants can be
+/// asserted on directly from the test target; it is an implementation detail
+/// of `GlomerisClient.runRaw` and nothing else should use it.
+final class ExitStatusRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var status: Int32?
+    private var waiters: [CheckedContinuation<Int32, Never>] = []
+
+    /// Records the child's exit status and wakes anyone waiting. Extra calls
+    /// are ignored: resuming a `CheckedContinuation` twice traps, so a
+    /// duplicate termination callback must degrade to "first status wins"
+    /// rather than crash the app.
+    func complete(_ status: Int32) {
+        lock.lock()
+        guard self.status == nil else {
+            lock.unlock()
+            return
+        }
+        self.status = status
+        let waiting = waiters
+        waiters.removeAll()
+        lock.unlock()
+
+        // Resumed outside the lock: a continuation can run its caller
+        // synchronously, and that caller must never re-enter this lock.
+        for waiter in waiting {
+            waiter.resume(returning: status)
+        }
+    }
+
+    /// The child's exit status, suspending only if it has not arrived yet.
+    /// The status is retained rather than consumed, so this is safe to call
+    /// more than once.
+    func wait() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let status {
+                lock.unlock()
+                continuation.resume(returning: status)
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
+}
+
 /// Spawns the `glomeris` binary and decodes its output.
 struct GlomerisClient {
     let executableURL: URL
@@ -158,6 +219,15 @@ struct GlomerisClient {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Installed before `run()`, which is mandatory: Foundation will not
+        // call a handler attached to an already-terminated process, and these
+        // children routinely finish in milliseconds. `ExitStatusRelay`
+        // absorbs the resulting ordering ambiguity (HORO-1304).
+        let exitStatus = ExitStatusRelay()
+        process.terminationHandler = { finished in
+            exitStatus.complete(finished.terminationStatus)
+        }
+
         do {
             try process.run()
         } catch {
@@ -185,10 +255,18 @@ struct GlomerisClient {
         }()
         let (outData, (errData, liveProgressLines)) = await (stdoutData, stderrOutcome)
 
-        process.waitUntilExit()
+        // Never `process.waitUntilExit()`. That call blocks the calling
+        // thread, and the calling thread here belongs to the Swift
+        // concurrency cooperative pool — where it deadlocked outright,
+        // roughly one invocation in twenty, long after the child had exited
+        // and been reaped. A popover fetch that lost that race never
+        // returned, so the section sat on "loading…" forever with no error
+        // and no timeout (HORO-1304). Awaiting the relay suspends instead of
+        // blocking, so the thread stays available and the wait always ends.
+        let exitCode = await exitStatus.wait()
 
         return GlomerisRawResult(
-            exitCode: process.terminationStatus,
+            exitCode: exitCode,
             stdout: outData,
             stderr: errData,
             progressLines: liveProgressLines
