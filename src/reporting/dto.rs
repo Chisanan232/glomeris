@@ -14,6 +14,7 @@ use crate::evidence::{Completeness, Confidence, Evidence, NativeCleanup, Regener
 use crate::policy::{PolicyClass, PolicyDecision};
 
 use super::bytes::human_bytes;
+use super::impact::{classify_impact, ImpactContext, ImpactThresholds};
 use super::policy_label::{label_for, PolicyLabel};
 
 fn regenerability_tag(r: Regenerability) -> &'static str {
@@ -269,6 +270,17 @@ pub struct DetectCandidateReport {
     /// [`Evidence::reclaimable_bytes_is_lower_bound`]'s doc comment.
     /// Always `false` when `reclaimable_bytes` is `None`.
     pub reclaimable_bytes_is_lower_bound: bool,
+    /// How much this candidate's size is worth the user's attention:
+    /// `"unknown"`, `"normal"`, `"notable"` or `"large"` (HORO-1307). A
+    /// product judgment about magnitude, computed here so the CLI and the
+    /// menu-bar app cannot disagree about which findings matter — see
+    /// [`crate::reporting::impact`] for the threshold model.
+    ///
+    /// Strictly independent of `policy_label`. A `"large"` candidate may be
+    /// `AUTO_SAFE` (the best thing a user can be shown) and a `"normal"` one
+    /// may be `PROTECTED`. Nothing may branch on this field to decide
+    /// whether an action is allowed.
+    pub impact_tier: &'static str,
     pub policy_label: &'static str,
     pub reasons: Vec<&'static str>,
     /// `true` only when there's a real registered action for this
@@ -284,10 +296,16 @@ pub struct DetectCandidateReport {
 }
 
 impl DetectCandidateReport {
+    /// `impact` carries what is known about the filesystem's free space, for
+    /// the relative half of the impact-tier model. Pass
+    /// [`ImpactContext::default`] where that is genuinely unavailable — the
+    /// absolute thresholds alone still produce an honest tier, and guessing
+    /// a capacity would produce a confidently wrong one.
     pub fn from_evidence_and_decision(
         ev: &Evidence,
         decision: &PolicyDecision,
         resolved_action: Option<&dyn Action>,
+        impact: ImpactContext,
     ) -> Self {
         let reclaimable = ev.reclaimable_bytes.observed().copied();
         let (executable, offered_actions, refusal_reason) =
@@ -299,6 +317,8 @@ impl DetectCandidateReport {
             reclaimable_human: reclaimable.map(human_bytes),
             reclaimable_bytes_is_lower_bound: reclaimable.is_some()
                 && ev.reclaimable_bytes_is_lower_bound,
+            impact_tier: classify_impact(reclaimable, impact, &ImpactThresholds::default())
+                .as_str(),
             policy_label: label_for(decision).as_str(),
             reasons: decision.reasons.iter().map(|r| r.as_str()).collect(),
             executable,
@@ -632,7 +652,12 @@ mod tests {
     fn detect_candidate_report_projects_expected_fields() {
         let ev = base_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            None,
+            ImpactContext::default(),
+        );
 
         assert_eq!(report.resource_id, "cargo_target_dir:/tmp/proj/target");
         assert_eq!(report.kind, "cargo_target_dir");
@@ -648,7 +673,12 @@ mod tests {
         let mut ev = base_evidence();
         ev.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            None,
+            ImpactContext::default(),
+        );
 
         assert_eq!(report.reclaimable_bytes, None);
         assert_eq!(report.reclaimable_human, None);
@@ -662,7 +692,12 @@ mod tests {
         let mut ev = base_evidence();
         ev.reclaimable_bytes_is_lower_bound = true;
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            None,
+            ImpactContext::default(),
+        );
 
         assert!(report.reclaimable_bytes_is_lower_bound);
     }
@@ -676,7 +711,12 @@ mod tests {
         ev.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         ev.reclaimable_bytes_is_lower_bound = true;
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            None,
+            ImpactContext::default(),
+        );
 
         assert!(!report.reclaimable_bytes_is_lower_bound);
     }
@@ -821,8 +861,12 @@ mod tests {
             PolicyClass::Protected,
             vec![ReasonCode::ProtectedCredentialMaterial],
         );
-        let report =
-            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            Some(cargo_action()),
+            ImpactContext::default(),
+        );
 
         assert!(!report.executable);
         assert!(report.offered_actions.is_empty());
@@ -852,8 +896,12 @@ mod tests {
     fn ask_with_resolvable_action_requires_confirmation_detect() {
         let ev = base_evidence();
         let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
-        let report =
-            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            Some(cargo_action()),
+            ImpactContext::default(),
+        );
 
         assert!(report.executable);
         assert_eq!(report.offered_actions.len(), 1);
@@ -885,8 +933,12 @@ mod tests {
         let ev = base_evidence();
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
         assert_eq!(label_for(&d), PolicyLabel::UnknownIncomplete);
-        let report =
-            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            Some(cargo_action()),
+            ImpactContext::default(),
+        );
 
         assert!(report.executable);
         assert_eq!(report.offered_actions.len(), 1);
@@ -911,8 +963,12 @@ mod tests {
     fn auto_safe_with_resolvable_action_does_not_require_confirmation_detect() {
         let ev = base_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report =
-            DetectCandidateReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            Some(cargo_action()),
+            ImpactContext::default(),
+        );
 
         assert!(report.executable);
         assert_eq!(report.offered_actions.len(), 1);
@@ -944,7 +1000,12 @@ mod tests {
     fn no_resolvable_action_is_never_executable_regardless_of_policy_class_detect() {
         let ev = base_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = DetectCandidateReport::from_evidence_and_decision(&ev, &d, None);
+        let report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &d,
+            None,
+            ImpactContext::default(),
+        );
 
         assert!(!report.executable);
         assert!(report.offered_actions.is_empty());
@@ -978,11 +1039,19 @@ mod tests {
             PolicyClass::Protected,
             vec![ReasonCode::ProtectedCredentialMaterial],
         );
-        let protected_report =
-            DetectCandidateReport::from_evidence_and_decision(&ev, &protected, None);
+        let protected_report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &protected,
+            None,
+            ImpactContext::default(),
+        );
         let no_action = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let no_action_report =
-            DetectCandidateReport::from_evidence_and_decision(&ev, &no_action, None);
+        let no_action_report = DetectCandidateReport::from_evidence_and_decision(
+            &ev,
+            &no_action,
+            None,
+            ImpactContext::default(),
+        );
 
         assert_ne!(
             protected_report.refusal_reason,
