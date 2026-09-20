@@ -164,6 +164,84 @@ final class GlomerisClientTests: XCTestCase {
         }
     }
 
+    // MARK: - HORO-1297: the exact schema mismatch that broke the panel
+
+    /// The client half of HORO-1297, pinned end to end.
+    ///
+    /// `daemon status --json` used to print `launchctl list`'s property
+    /// dictionary ahead of its own report, because the Rust side built that
+    /// child with `.status()` (inheriting stdout) instead of `.output()`.
+    /// The Rust fix is pinned by `tests/daemon_status_stdout_purity.rs`; this
+    /// test pins the *other* end — that such stdout is rejected as
+    /// `outputDecodingFailed` and never silently coerced into a plausible
+    /// `DaemonStatusReportDto`. The two together are what make the defect
+    /// unable to return undetected: even if some future subcommand leaks a
+    /// child's stdout again, the client refuses it loudly.
+    ///
+    /// The payload is the real observed shape — tab-indented, `=`-separated,
+    /// `};`-terminated — followed by a *valid* report. A lenient decoder that
+    /// scanned for the first `{` would find the launchctl dictionary; one that
+    /// scanned for the last would find the real report and appear to work.
+    /// Neither is acceptable: the contract is one JSON document on stdout.
+    func testLaunchctlPollutedStdoutIsRejectedNotSalvaged() async throws {
+        let polluted = """
+        {
+        \t"Label" = "com.glomeris.monitor";
+        \t"LastExitStatus" = 0;
+        \t"PID" = 4242;
+        };
+        {"plist_installed":true,"plist_path":"/Users/dev/Library/LaunchAgents/com.glomeris.monitor.plist","loaded":true,"heartbeat_age_secs":8}
+        """
+        do {
+            _ = try await fixtureClient().run(
+                ["0", polluted, ""],
+                outputType: DaemonStatusReportDto.self,
+                progressType: EmptyProgress.self
+            )
+            XCTFail("expected GlomerisClientError.outputDecodingFailed")
+        } catch GlomerisClientError.outputDecodingFailed {
+            // expected
+        }
+    }
+
+    /// The control for the test above: the *fixed* CLI's stdout — the report
+    /// alone — must decode, and every field must survive the round trip. A
+    /// rejection test alone would also pass if the client rejected
+    /// everything.
+    func testCleanDaemonStatusStdoutDecodesWithEveryFieldIntact() async throws {
+        let clean = #"{"plist_installed":true,"plist_path":"/Users/dev/Library/LaunchAgents/com.glomeris.monitor.plist","loaded":true,"heartbeat_age_secs":8}"#
+        let result = try await fixtureClient().run(
+            ["0", clean, ""],
+            outputType: DaemonStatusReportDto.self,
+            progressType: EmptyProgress.self
+        )
+
+        XCTAssertTrue(result.output.plistInstalled)
+        XCTAssertTrue(result.output.loaded)
+        XCTAssertEqual(result.output.heartbeatAgeSecs, 8)
+        XCTAssertEqual(
+            result.output.plistPath,
+            "/Users/dev/Library/LaunchAgents/com.glomeris.monitor.plist"
+        )
+    }
+
+    /// The never-polled state, which the CLI emits as an explicit `null`.
+    /// `heartbeatAgeSecs` must decode as `nil` rather than failing — a
+    /// decode failure here would show the panel HORO-1297's red error line
+    /// for what is in fact a perfectly ordinary state.
+    func testNullHeartbeatAgeDecodesAsNilRatherThanFailing() async throws {
+        let clean = #"{"plist_installed":true,"plist_path":"/Users/dev/x.plist","loaded":false,"heartbeat_age_secs":null}"#
+        let result = try await fixtureClient().run(
+            ["0", clean, ""],
+            outputType: DaemonStatusReportDto.self,
+            progressType: EmptyProgress.self
+        )
+
+        XCTAssertNil(result.output.heartbeatAgeSecs)
+        XCTAssertFalse(result.output.loaded)
+        XCTAssertTrue(result.output.plistInstalled)
+    }
+
     // MARK: - runRaw (HORO-1065): no exit-code interpretation at all
 
     /// `execute`'s JSON body appears on stdout for most non-zero exit
