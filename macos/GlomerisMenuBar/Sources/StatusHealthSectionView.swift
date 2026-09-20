@@ -26,17 +26,30 @@ import SwiftUI
 /// separate, directly-testable type so HORO-1062's core AC — "loaded" and
 /// "heartbeat freshness" stay independently distinguishable — can be
 /// asserted on without going through SwiftUI view rendering.
+///
+/// HORO-1306 replaced the two display strings ("Loaded: Yes", "Last
+/// heartbeat: 8s ago") with two `GlomerisTerm`s. The AC being protected is
+/// that the two facts remain independent, not the literal wording, and
+/// "Loaded: Yes" described what a launchd plist thinks rather than what
+/// the product is doing. They are still two separate stored properties
+/// derived from two separate DTO fields, so neither can be recovered from
+/// the other and no combined "healthy" value exists to render instead.
 struct DaemonHealthViewModel: Equatable {
-    let loadedText: String
-    let heartbeatText: String
+    let loadedTerm: GlomerisTerm
+    let heartbeatTerm: GlomerisTerm
+
+    /// The formatted age on its own ("8s", "2h"), or nil when no heartbeat
+    /// has ever been recorded. Exposed because absence and age are
+    /// different facts and a caller may want to distinguish them without
+    /// re-parsing a sentence.
+    let heartbeatAgeDescription: String?
 
     init(_ dto: DaemonStatusReportDto) {
-        loadedText = dto.loaded ? "Loaded: Yes" : "Loaded: No"
-        if let ageSecs = dto.heartbeatAgeSecs {
-            heartbeatText = "Last heartbeat: \(Self.formatAge(ageSecs)) ago"
-        } else {
-            heartbeatText = "Last heartbeat: no heartbeat recorded"
-        }
+        loadedTerm = GlomerisVocabulary.monitorLoaded(dto.loaded)
+        heartbeatAgeDescription = dto.heartbeatAgeSecs.map(Self.formatAge)
+        heartbeatTerm = GlomerisVocabulary.monitorHeartbeat(
+            ageDescription: heartbeatAgeDescription
+        )
     }
 
     private static func formatAge(_ seconds: UInt64) -> String {
@@ -142,43 +155,10 @@ struct StatusHealthSectionView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Status")
-                .font(.headline)
-
-            if let statusReport {
-                Text("Disk: \(statusReport.pressureState) — \(statusReport.freeHuman) free of \(statusReport.totalHuman)")
-                    .font(.caption)
-            } else {
-                Text("Disk: loading…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Divider()
-
-            Text("Daemon Health")
-                .font(.headline)
-
-            if let daemonReport {
-                let viewModel = DaemonHealthViewModel(daemonReport)
-                Text(viewModel.loadedText)
-                    .font(.caption)
-                Text(viewModel.heartbeatText)
-                    .font(.caption)
-            } else {
-                Text("Daemon: loading…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            ForEach(fetchErrors.messages, id: \.self) { message in
-                Text(message)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-            }
+        VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
+            diskCard
+            monitorCard
         }
-        .padding(.vertical, 4)
         .task {
             await refresh()
             pollTask = Task {
@@ -193,6 +173,77 @@ struct StatusHealthSectionView: View {
             pollTask?.cancel()
             pollTask = nil
         }
+    }
+
+    // MARK: - Cards
+
+    /// Disk space. The pressure badge is the headline because it is the one
+    /// thing worth glancing at; the byte figures are the supporting detail
+    /// under it, not the other way round.
+    ///
+    /// The failure message renders IN ADDITION to any report already on
+    /// screen, never instead of it. A poll that fails after one has
+    /// succeeded leaves last-known-good figures visible — which is useful —
+    /// but silently showing them as though they were current is the exact
+    /// defect HORO-1297 fixed, so the error sits underneath them.
+    @ViewBuilder
+    private var diskCard: some View {
+        GlomerisCard(title: GlomerisVocabulary.pressureAxis) {
+            if let statusReport {
+                let pressure = GlomerisVocabulary.pressure(statusReport.pressureState)
+                GlomerisBadgeView(term: pressure)
+                Text("\(statusReport.freeHuman) free of \(statusReport.totalHuman)")
+                    .font(GlomerisDesign.primaryFont)
+                capacityBar(usedPercent: statusReport.usedPercent, tone: pressure.tone)
+            } else if fetchErrors.status == nil {
+                GlomerisStateMessageView(message: .loading("Checking disk space…"))
+            }
+
+            if let message = fetchErrors.status {
+                GlomerisStateMessageView(message: .failure(message))
+            }
+        }
+    }
+
+    /// The background monitor. Two rows because they are two facts: the
+    /// agent can be loaded and silent, or unloaded with an old heartbeat
+    /// still on disk, and collapsing them hides exactly the case that
+    /// HORO-1297 was.
+    @ViewBuilder
+    private var monitorCard: some View {
+        GlomerisCard(title: GlomerisVocabulary.monitorAxis) {
+            if let daemonReport {
+                let viewModel = DaemonHealthViewModel(daemonReport)
+                GlomerisDetailRow(label: "Status") {
+                    GlomerisBadgeView(term: viewModel.loadedTerm)
+                }
+                GlomerisDetailRow(label: "Last check-in") {
+                    GlomerisBadgeView(term: viewModel.heartbeatTerm)
+                }
+            } else if fetchErrors.daemon == nil {
+                GlomerisStateMessageView(message: .loading("Checking the background monitor…"))
+            }
+
+            // Same rule as the disk card: additive, never a replacement.
+            if let message = fetchErrors.daemon {
+                GlomerisStateMessageView(message: .failure(message))
+            }
+        }
+    }
+
+    /// A capacity bar, tinted by the pressure tone the badge above already
+    /// states in words. It is a redundant second encoding of one fact, not
+    /// a new one — which is the only reason a bare colour is acceptable
+    /// here. Its accessibility label carries the percentage, because a
+    /// filled rectangle conveys nothing to VoiceOver.
+    @ViewBuilder
+    private func capacityBar(usedPercent: Double, tone: GlomerisTone) -> some View {
+        let fraction = min(max(usedPercent / 100, 0), 1)
+        ProgressView(value: fraction)
+            .progressViewStyle(.linear)
+            .tint(tone.color)
+            .accessibilityLabel("Disk used")
+            .accessibilityValue("\(Int(fraction * 100)) percent")
     }
 
     /// Both fetches write `@State`, so all three of these are pinned to the

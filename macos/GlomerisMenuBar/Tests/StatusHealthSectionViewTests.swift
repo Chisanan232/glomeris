@@ -26,52 +26,106 @@ final class StatusHealthSectionViewTests: XCTestCase {
     }
 
     /// Core AC: loaded=true+fresh-heartbeat vs. loaded=false+no-heartbeat
-    /// must differ on the loaded-text axis AND the heartbeat-text axis
+    /// must differ on the loaded axis AND the heartbeat axis
     /// independently — not merely differ overall, which a single
     /// collapsed "Healthy"/"Unhealthy" field would already satisfy.
+    ///
+    /// HORO-1306 changed the two properties from display strings to
+    /// `GlomerisTerm`s. The wording moved; what this test protects did not.
     func testLoadedAndHeartbeatAreIndependentlyDistinguishable() {
         let healthy = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: 8))
         let neverRan = DaemonHealthViewModel(daemonReport(loaded: false, heartbeatAgeSecs: nil))
 
-        XCTAssertNotEqual(healthy.loadedText, neverRan.loadedText)
-        XCTAssertNotEqual(healthy.heartbeatText, neverRan.heartbeatText)
+        XCTAssertNotEqual(healthy.loadedTerm, neverRan.loadedTerm)
+        XCTAssertNotEqual(healthy.heartbeatTerm, neverRan.heartbeatTerm)
 
         // Cross-check: a report that is loaded but has never sent a
         // heartbeat must show "loaded" distinctly from a report that is
         // both loaded and has a fresh heartbeat, proving the two facts
         // are not derived from each other.
         let loadedButNoHeartbeat = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: nil))
-        XCTAssertEqual(loadedButNoHeartbeat.loadedText, healthy.loadedText)
-        XCTAssertNotEqual(loadedButNoHeartbeat.heartbeatText, healthy.heartbeatText)
+        XCTAssertEqual(loadedButNoHeartbeat.loadedTerm, healthy.loadedTerm)
+        XCTAssertNotEqual(loadedButNoHeartbeat.heartbeatTerm, healthy.heartbeatTerm)
     }
 
-    func testLoadedTrueRendersYes() {
+    /// The same independence, stated on the axis a reader of the popover
+    /// would use: neither term's *title* may be recoverable from the other
+    /// fact. A combined indicator would make both titles change together.
+    func testNeitherFactCanBeReadOffTheOther() {
+        let loadedFresh = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: 8))
+        let loadedSilent = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: nil))
+        let unloadedStaleHeartbeat = DaemonHealthViewModel(daemonReport(loaded: false, heartbeatAgeSecs: 8))
+
+        // Same loaded fact, different heartbeat fact.
+        XCTAssertEqual(loadedFresh.loadedTerm.title, loadedSilent.loadedTerm.title)
+        XCTAssertNotEqual(loadedFresh.heartbeatTerm.title, loadedSilent.heartbeatTerm.title)
+
+        // Same heartbeat fact, different loaded fact — the case a single
+        // "healthy" boolean would erase.
+        XCTAssertEqual(loadedFresh.heartbeatTerm.title, unloadedStaleHeartbeat.heartbeatTerm.title)
+        XCTAssertNotEqual(loadedFresh.loadedTerm.title, unloadedStaleHeartbeat.loadedTerm.title)
+    }
+
+    func testLoadedTrueReadsAsRunning() {
         let viewModel = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: 8))
-        XCTAssertEqual(viewModel.loadedText, "Loaded: Yes")
-        XCTAssertEqual(viewModel.heartbeatText, "Last heartbeat: 8s ago")
+        XCTAssertEqual(viewModel.loadedTerm.title, "Running")
+        XCTAssertEqual(viewModel.loadedTerm.tone, .positive)
+        XCTAssertEqual(viewModel.heartbeatTerm.title, "8s ago")
     }
 
-    func testLoadedFalseRendersNo() {
+    func testLoadedFalseReadsAsNotRunningAndSaysWhatThatCosts() {
         let viewModel = DaemonHealthViewModel(daemonReport(loaded: false, heartbeatAgeSecs: nil))
-        XCTAssertEqual(viewModel.loadedText, "Loaded: No")
-        XCTAssertEqual(viewModel.heartbeatText, "Last heartbeat: no heartbeat recorded")
+        XCTAssertEqual(viewModel.loadedTerm.title, "Not running")
+        XCTAssertNotEqual(
+            viewModel.loadedTerm.tone,
+            .positive,
+            "an unwatched disk must not read as reassuring"
+        )
+        // The consequence, not just the state: a user who sees "Not
+        // running" needs to know what they lose by leaving it that way.
+        XCTAssertTrue(viewModel.loadedTerm.explanation.contains("not be warned"))
     }
 
     /// The "daemon not installed / never ran" case: `heartbeatAgeSecs`
     /// is `nil`, which must render as an explicit message, not a crash
     /// or a garbage "0s ago"/empty string.
-    func testNilHeartbeatAgeRendersNoHeartbeatRecordedNotGarbage() {
+    func testNilHeartbeatAgeSaysSoRatherThanShowingZero() {
         let viewModel = DaemonHealthViewModel(daemonReport(loaded: false, heartbeatAgeSecs: nil))
-        XCTAssertEqual(viewModel.heartbeatText, "Last heartbeat: no heartbeat recorded")
-        XCTAssertFalse(viewModel.heartbeatText.contains("0s"))
+        XCTAssertEqual(viewModel.heartbeatTerm.title, "No check-in yet")
+        XCTAssertNil(viewModel.heartbeatAgeDescription)
+        XCTAssertFalse(viewModel.heartbeatTerm.title.contains("0s"))
     }
 
     func testHeartbeatAgeFormatsMinutesAndHours() {
         let minutes = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: 125))
-        XCTAssertEqual(minutes.heartbeatText, "Last heartbeat: 2m ago")
+        XCTAssertEqual(minutes.heartbeatAgeDescription, "2m")
+        XCTAssertEqual(minutes.heartbeatTerm.title, "2m ago")
 
         let hours = DaemonHealthViewModel(daemonReport(loaded: true, heartbeatAgeSecs: 7_300))
-        XCTAssertEqual(hours.heartbeatText, "Last heartbeat: 2h ago")
+        XCTAssertEqual(hours.heartbeatAgeDescription, "2h")
+        XCTAssertEqual(hours.heartbeatTerm.title, "2h ago")
+    }
+
+    /// A heartbeat age must not be toned as stale or fresh at any age.
+    /// Picking the cutoff would be inventing a freshness threshold in
+    /// Swift, and thresholds are the CLI's to set — the standing rule in
+    /// GlomerisMenuBarApp.swift keeps that judgment out of this target.
+    /// The age is stated plainly and the user judges it.
+    func testHeartbeatAgeCarriesNoFreshnessVerdict() {
+        for seconds: UInt64 in [0, 8, 125, 7_300, 604_800] {
+            let viewModel = DaemonHealthViewModel(
+                daemonReport(loaded: true, heartbeatAgeSecs: seconds)
+            )
+            XCTAssertEqual(
+                viewModel.heartbeatTerm.tone,
+                .neutral,
+                """
+                a \(seconds)s-old heartbeat is toned \
+                \(viewModel.heartbeatTerm.tone) — that is a staleness \
+                threshold, which belongs in the Rust CLI
+                """
+            )
+        }
     }
 
     // MARK: - HORO-1297: a failing fetch must stay visible
