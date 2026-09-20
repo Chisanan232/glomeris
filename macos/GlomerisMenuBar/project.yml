@@ -69,6 +69,7 @@ targets:
       - path: Sources/AiPlanSectionView.swift
       - path: Sources/CredentialStore.swift
       - path: Sources/GlomerisLlmSettingsStore.swift
+      - path: Sources/AiProviderPreferencesView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
