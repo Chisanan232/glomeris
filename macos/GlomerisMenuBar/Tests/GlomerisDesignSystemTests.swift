@@ -158,6 +158,33 @@ final class GlomerisDesignSystemTests: XCTestCase {
         XCTAssertEqual(empty.detail, "Your disk is in good shape.")
     }
 
+    /// "Not scanned yet" and "scanned, found nothing" are different facts,
+    /// and only the second one is a clean bill of health. The candidates
+    /// section deliberately never scans on appear, so the first thing a user
+    /// ever sees there is the un-looked state — under a checkmark it would
+    /// read as "your disk is fine" before anything had been measured.
+    func testNotLookedYetDoesNotClaimAnAllClear() {
+        let notLooked = GlomerisStateMessage.notLookedYet(
+            "No scan yet",
+            detail: "Refresh to look for space you can reclaim."
+        )
+        let foundNothing = GlomerisStateMessage.empty("Nothing worth reclaiming")
+
+        XCTAssertNotEqual(
+            notLooked.symbolName,
+            foundNothing.symbolName,
+            "not having looked must not borrow the glyph that means 'all clear'"
+        )
+        XCTAssertNotEqual(notLooked.symbolName, "checkmark.circle")
+
+        // Neither a failure nor reassurance: the user has nothing to fix,
+        // they just have not pressed Refresh.
+        XCTAssertEqual(notLooked.kind, .empty)
+        XCTAssertEqual(notLooked.tone, .neutral)
+        XCTAssertNotEqual(notLooked.symbolName, GlomerisStateMessage.failure("x").symbolName)
+        XCTAssertEqual(notLooked.detail, "Refresh to look for space you can reclaim.")
+    }
+
     /// Failure is the only one of the three allowed to read as a problem —
     /// and it must say what failed. An empty list shown instead would imply
     /// "nothing to clean", which is the opposite of the truth.
@@ -189,10 +216,11 @@ final class GlomerisDesignSystemTests: XCTestCase {
     func testStateMessageSymbolsResolveToRealSFSymbols() {
         let symbols = [
             GlomerisStateMessage.empty("x").symbolName,
+            GlomerisStateMessage.notLookedYet("x").symbolName,
             GlomerisStateMessage.failure("x").symbolName,
         ].compactMap { $0 }
 
-        XCTAssertEqual(symbols.count, 2, "both non-loading states need a glyph")
+        XCTAssertEqual(symbols.count, 3, "every non-loading state needs a glyph")
         for name in symbols {
             XCTAssertNotNil(
                 NSImage(systemSymbolName: name, accessibilityDescription: nil),

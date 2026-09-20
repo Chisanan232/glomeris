@@ -279,13 +279,34 @@ struct GlomerisStateMessage: Equatable {
         )
     }
 
-    static func empty(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
+    /// `symbolName` is overridable for one reason only — see
+    /// `notLookedYet(_:detail:)` below.
+    static func empty(
+        _ title: String,
+        detail: String? = nil,
+        symbolName: String = "checkmark.circle"
+    ) -> GlomerisStateMessage {
         GlomerisStateMessage(
             kind: .empty,
             title: title,
             detail: detail,
-            symbolName: "checkmark.circle"
+            symbolName: symbolName
         )
+    }
+
+    /// Nothing to show because nothing has been looked at yet — which is a
+    /// different fact from "looked, found nothing", and the difference is
+    /// worth a different glyph.
+    ///
+    /// The candidates section does not scan on appear (HORO-1063: `detect`
+    /// has exactly one call site, the Refresh button), so its first state is
+    /// always this one. Rendering it under `empty`'s checkmark would claim a
+    /// clean bill of health nobody has earned yet — the same class of lie as
+    /// showing an empty list when the fetch failed. The tone stays neutral
+    /// because not having looked is not a problem either; it just isn't
+    /// reassurance.
+    static func notLookedYet(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
+        empty(title, detail: detail, symbolName: "magnifyingglass")
     }
 
     /// `message` is expected to come from
