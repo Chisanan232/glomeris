@@ -475,6 +475,92 @@ final class GlomerisVocabularyTests: XCTestCase {
         }
     }
 
+    // MARK: - Storage-impact tier (HORO-1307)
+
+    /// `src/reporting/impact.rs` — `StorageImpactTier::as_str`. Transcribed
+    /// the same way as the axes above; `scripts/check-vocabulary-covers-cli-
+    /// tokens.sh` diffs this lookup against that Rust function directly.
+    private static let impactTierTokens = ["unknown", "normal", "notable", "large"]
+
+    /// `impactTier` is the one lookup that deliberately returns `nil`, so it
+    /// cannot join the `allAxes` sweep. The reason it is Optional is the
+    /// property worth pinning: a chip on every row is noise rather than
+    /// emphasis, and `"unknown"` would only restate what the size badge
+    /// already says ("Size unknown").
+    func testOnlyTheNotableTiersGetWording() {
+        XCTAssertNil(GlomerisVocabulary.impactTier("normal"))
+        XCTAssertNil(GlomerisVocabulary.impactTier("unknown"))
+        XCTAssertNil(GlomerisVocabulary.impactTier(nil))
+        XCTAssertNotNil(GlomerisVocabulary.impactTier("notable"))
+        XCTAssertNotNil(GlomerisVocabulary.impactTier("large"))
+    }
+
+    /// Every token Rust can emit is handled deliberately — either with
+    /// wording or with a deliberate `nil` — and none of them reaches the
+    /// unrecognised fallback.
+    func testEveryImpactTierTokenIsHandledDeliberately() {
+        for token in Self.impactTierTokens {
+            guard let term = GlomerisVocabulary.impactTier(token) else { continue }
+            XCTAssertEqual(term.token, token)
+            XCTAssertEqual(term.axis, GlomerisVocabulary.impactTierAxis)
+            XCTAssertFalse(
+                term.title.contains("Unrecognised"),
+                "\(token) fell through to the unrecognised fallback"
+            )
+        }
+
+        let unknownToken = GlomerisVocabulary.impactTier("colossal")
+        XCTAssertNotNil(unknownToken, "an unrecognised tier must be surfaced, not silently dropped")
+        XCTAssertEqual(unknownToken?.tone, .unknown)
+    }
+
+    /// The whole point of HORO-1307's AC 4: size is not safety. A tier must
+    /// never render as reassuring or as alarming, because "large" says
+    /// nothing about whether the thing may be deleted — a large AUTO_SAFE
+    /// candidate is an opportunity and a large PROTECTED one is still
+    /// protected.
+    func testNoImpactTierCarriesASafetyTone() {
+        for token in Self.impactTierTokens {
+            guard let term = GlomerisVocabulary.impactTier(token) else { continue }
+            XCTAssertEqual(
+                term.tone, .neutral,
+                "\(token) reads as a safety judgment, but it is a magnitude"
+            )
+        }
+    }
+
+    /// Greyscale and colour-blind legibility: the two tiers that do render
+    /// must be distinguishable by symbol, and both symbols must be real —
+    /// a mistyped SF Symbol name renders as nothing at all.
+    func testImpactTierSymbolsAreRealAndDistinct() {
+        let terms = Self.impactTierTokens.compactMap { GlomerisVocabulary.impactTier($0) }
+            + [GlomerisVocabulary.impactTier("colossal")].compactMap { $0 }
+        let symbols = terms.compactMap { $0.symbolName }
+
+        XCTAssertEqual(symbols.count, terms.count, "every rendered tier needs a symbol")
+        XCTAssertEqual(
+            Set(symbols).count, symbols.count,
+            "two tiers share a symbol, so they would differ by colour alone: \(symbols)"
+        )
+        for name in symbols {
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                "\(name) is not a real SF Symbol, so it would render as nothing at all"
+            )
+        }
+    }
+
+    /// Same chip-width and no-raw-tag rules the other axes are held to.
+    func testImpactTierWordingIsChipSizedAndLeaksNoTags() {
+        for token in Self.impactTierTokens {
+            guard let term = GlomerisVocabulary.impactTier(token) else { continue }
+            XCTAssertLessThanOrEqual(term.title.count, 34, "\(token)'s title is too long for a chip")
+            XCTAssertFalse(term.explanation.isEmpty)
+            XCTAssertFalse(term.accessibilityLabel.isEmpty)
+            XCTAssertTrue(term.accessibilityLabel.contains(":"))
+        }
+    }
+
     /// Explanations are sentences shown to a non-expert. They must not
     /// simply re-emit the internal tag the title was supposed to replace.
     func testExplanationsDoNotLeakInternalTags() {

@@ -110,6 +110,30 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertTrue(refused.offeredActions.isEmpty)
         XCTAssertEqual(refused.refusalReason, "no registered cleanup action for this resource kind")
         XCTAssertTrue(refused.reclaimableBytesIsLowerBound)
+
+        // HORO-1307: the new `impact_tier` key really reaches this mirror,
+        // and the fixture deliberately pairs the axes the opposite way round
+        // from the intuitive one — the *bigger* candidate is the one Glomeris
+        // will not touch. Anything that reads size as safety fails here.
+        XCTAssertEqual(executable.impactTier, "notable")
+        XCTAssertEqual(refused.impactTier, "large")
+        XCTAssertGreaterThan(refused.reclaimableBytes ?? 0, executable.reclaimableBytes ?? 0)
+    }
+
+    /// An older `glomeris` on `PATH` predates `impact_tier`. Losing an
+    /// emphasis hint is acceptable; losing the whole candidates list because
+    /// one optional key is absent is not.
+    func testDetectReportStillDecodesWithoutTheImpactTierKey() throws {
+        let json = """
+        {"candidates":[{"resource_id":"a","kind":"cargo_target","reclaimable_bytes":1,
+        "reclaimable_human":"1 B","reclaimable_bytes_is_lower_bound":false,
+        "policy_label":"AUTO_SAFE","reasons":[],"executable":true,
+        "offered_actions":[],"refusal_reason":null}]}
+        """
+        let dto = try JSONDecoder().decode(DetectReportDto.self, from: Data(json.utf8))
+
+        XCTAssertEqual(dto.candidates.count, 1)
+        XCTAssertNil(dto.candidates[0].impactTier)
     }
 
     // MARK: - ExecuteReport
