@@ -28,19 +28,38 @@ this purpose (see [CLI Reference](cli_reference.md)). If you trust the CLI's
 policy decisions on the command line, you're trusting the exact same
 decisions in the menu bar — the app has no separate opinion.
 
-## What the popover shows
+## How the popover reads
 
-Clicking the menu-bar icon opens a popover with three sections, top to
-bottom:
+Every section is a titled card in a scrolling column, ordered by the
+questions you open the panel with: what the disk is doing now, what could
+be reclaimed, what has already happened. Three presentation rules hold
+across all of them:
 
-### Status & daemon health
+- **Plain language first, the CLI's own token second.** `PRESSURED` reads
+  as "Running low", `aborted_by_revalidation` as "Stopped safely" — and
+  the raw token stays visible beside or beneath it, because this is an
+  evidence-first product and you have to be able to match what the panel
+  says against `--json` and against the docs.
+- **Three separate axes, never merged.** Storage impact (how much space),
+  safety (what the policy allows) and evidence quality (how sure the CLI
+  is) are shown as distinct badges. A large `AUTO_SAFE` candidate is an
+  opportunity, not a hazard; a small `PROTECTED` one is still protected.
+  Size is therefore drawn in a neutral tone at every magnitude.
+- **Colour is never the only signal.** Every badge carries a symbol and a
+  word as well as a tint, so the state survives greyscale, a
+  colour-vision deficiency and a tinted wallpaper. A refusal
+  (`PROTECTED`) is deliberately not painted like a failure: it is the
+  policy working, and there is nothing for you to fix.
 
-Polled on appear and every 10 seconds while the popover is open. Two
-independent facts are always shown side by side, deliberately never
-collapsed into a single "healthy" indicator:
+### Disk space, and Background monitor
+
+Two cards, polled on appear and every 10 seconds while the popover is
+open. The two facts are deliberately never collapsed into a single
+"healthy" indicator:
 
 - Current disk pressure (`glomeris status --json`) — used percent, free
-  space, pressure state (`OK`/`WARN`/`CRITICAL`).
+  space, and pressure state (one of `HEALTHY`, `WARN`, `PRESSURED`,
+  `CRITICAL`, `EMERGENCY`).
 - Daemon health (`glomeris daemon status --json`) — whether the `launchd`
   agent is loaded, and how long ago the poll loop last recorded a
   heartbeat (`"Last heartbeat: 42s ago"`, or `"no heartbeat recorded"`).
@@ -49,18 +68,27 @@ A `launchd`-loaded-but-wedged daemon and an actually-polling one stay
 visibly distinguishable — the app never merges `loaded` and
 `heartbeat_age_secs` into one boolean.
 
-### Candidates
+### Reclaimable space
 
 Shows the most recent `glomeris detect --json` scan ("Last scanned:
 &lt;time&gt;") plus a **Refresh** button. Nothing is scanned automatically:
 there is no appear-triggered scan, no timer, and no background polling
 loop for candidates — `detect` runs only when you explicitly tap Refresh,
 streaming live per-detector progress via `--progress-json` while it works
-(button label switches to "Scanning…"). Before the first refresh, the
-section shows "No scan yet — tap Refresh to scan."
+(button label switches to "Scanning…").
 
-Each row shows the candidate's kind and reclaimable size. Tapping a row
-opens its detail view — there is no inline "Clean" button in this list.
+Three states that are easy to conflate are kept distinct, because each is
+a different claim about your disk:
+
+| State | What it says |
+|---|---|
+| "No scan yet" | Nothing has been looked at. **Not** a clean bill of health. |
+| "Nothing worth reclaiming" | Scanned, and there is genuinely nothing — good news. |
+| A scan failure | Says what failed. An empty list is never shown in its place. |
+
+Each row shows the candidate's kind, what cleaning it would free, and its
+safety verdict in words. Tapping a row opens its detail view — there is no
+inline "Clean" button in this list.
 
 ### Candidate detail
 
@@ -71,6 +99,11 @@ resource, which supplies `fingerprint_token` — the same token
 there's no per-row Clean button in the candidates list above: cleaning a
 resource always goes through one `explain` call that captures the
 fingerprint the confirmation flow needs.
+
+The sheet is ordered by the questions you have when you open it: may I
+clean this, is it worth cleaning, on what evidence — and last, collapsed
+behind a disclosure, the literal values `explain --json` returned, which
+stay selectable so they can be quoted in a bug report.
 
 - The **Clean** button's enabled state reads `executable` from the
   `explain` report directly — never a re-derived guess from
@@ -89,19 +122,31 @@ fingerprint the confirmation flow needs.
   CLI printed — one specific message per outcome, not a generic
   success/failure toast.
 
-### Recent history & action audit
+### Disk space history, and What Glomeris has done
 
-Two independent, already-computed lists, each polled the same way as the
-status section:
+Two independent, already-computed lists in two cards, each polled the same
+way as the status section:
 
-- **Recent History** — the last N pressure transitions from `glomeris
+- **Disk space history** — the last N pressure transitions from `glomeris
   history --json` (e.g. `WARN -> CRITICAL`, with the used-percent/free-space
-  reading at the time).
-- **Action Audit** — the last N real-execution records from `glomeris
-  actions history --json`: which action ran against which resource, its
-  policy label, outcome, and which of `execute`/`free`/`emergency`
-  produced it. The `AUTO_SAFE`-vs-refused/aborted visual distinction reads
-  `outcome`/`abort_reason` directly, never the `policy_label` text.
+  reading at the time). The two ends of each transition are named exactly
+  as the status card names them, because they are the same enum.
+- **What Glomeris has done** — the last N real-execution records from
+  `glomeris actions history --json`: which action ran against which
+  resource, its policy label, outcome, and which of
+  `execute`/`free`/`emergency` produced it. "Triggered by" is spelled out
+  in words, because whether something was cleaned that you did not ask for
+  is the question this card exists to answer. The
+  `AUTO_SAFE`-vs-refused/aborted visual distinction reads
+  `outcome`/`abort_reason` directly, never the `policy_label` text — and
+  `aborted_by_revalidation` reads as "Stopped safely" rather than as a
+  failure, because the resource changed between checking and acting and so
+  nothing was touched.
+
+An empty list in either card says only that it is empty. Neither claims an
+all-clear it cannot support: an empty pressure history could mean the disk
+has been steady, or it could mean nothing has been watching it, and the
+report does not distinguish those.
 
 Neither list accepts a `--project-root` flag — both read global
 daemon-state files (`history.tsv`/`actions.jsonl`), not project-scoped
@@ -109,14 +154,17 @@ detection state.
 
 ## Preferences — Project Roots
 
-The app menu's **Settings…** (`Cmd+,`) opens a simple list with add/remove
-controls for the project-roots preference, backed by a small local store.
+The popover's **Project roots…** footer button — or `Cmd+,` — opens a
+simple list with add/remove controls for the project-roots preference,
+backed by a small local store. (The footer exists because the menu-bar item
+opens a window rather than a menu, so the popover is the app's only
+surface; **Quit** is there for the same reason.)
 These are the same paths you'd otherwise pass repeatedly as `--project-root
 <path>` on the command line — the CLI's cargo/node detectors only look
 under directories they're told about. This view is pure presentation: it
 edits the stored list and does not itself call `detect`/`explain`/
 `execute`; the roots are appended as `--project-root` arguments the next
-time another section (Status, Candidates, …) spawns the CLI.
+time another card (Disk space, Reclaimable space, …) spawns the CLI.
 
 ## How the app finds the `glomeris` CLI
 
@@ -152,14 +200,15 @@ searched, rather than failing silently or naming a path it only assumed.
 
 ## Every screen maps back to a CLI command
 
-| Section | CLI command(s) |
+| Card | CLI command(s) |
 |---|---|
-| Status & daemon health | `glomeris status --json`, `glomeris daemon status --json` |
-| Candidates + Refresh | `glomeris detect --json --progress-json` |
+| Disk space | `glomeris status --json` |
+| Background monitor | `glomeris daemon status --json` |
+| Reclaimable space + Refresh | `glomeris detect --json --progress-json` |
 | Candidate detail | `glomeris explain <resource_id> --json --progress-json` |
 | Clean (with confirmation) | `glomeris execute --action-id <id> --resource-id <id> [--confirm-ask --observed-fingerprint <token>] --json --progress-json` |
-| Recent History | `glomeris history --json` |
-| Action Audit | `glomeris actions history --json` |
+| Disk space history | `glomeris history --json` |
+| What Glomeris has done | `glomeris actions history --json` |
 
 See [CLI Reference](cli_reference.md) for the full flag/exit-code/JSON-shape
 reference behind every one of these.
