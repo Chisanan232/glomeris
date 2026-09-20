@@ -52,6 +52,59 @@ struct DaemonHealthViewModel: Equatable {
     }
 }
 
+/// The two fetches this section performs, each with its own error slot.
+///
+/// HORO-1297: they previously shared a single `lastErrorMessage`, and they
+/// run concurrently — so whichever finished last won. A `daemon status`
+/// failure was routinely erased microseconds later by the `status` fetch
+/// that had succeeded, which is how the very defect that broke this panel
+/// managed to leave no trace in it. Independent slots mean a failure of
+/// either fetch stays visible for as long as it persists, and clears only
+/// when *that* fetch succeeds.
+struct SectionFetchErrors: Equatable {
+    var status: String?
+    var daemon: String?
+
+    /// Outstanding messages in rendering order. Empty when both fetches
+    /// are healthy — which is the only condition under which this section
+    /// shows no error at all.
+    var messages: [String] {
+        [status, daemon].compactMap { $0 }
+    }
+
+    /// One short sentence fit for a ~260pt popover, naming the subcommand
+    /// and what kind of failure it was.
+    ///
+    /// `String(describing:)` on a `DecodingError` renders several lines of
+    /// Swift type and coding-path detail. That is exactly the wrong thing
+    /// to put here: HORO-1297's symptom was malformed CLI stdout, and the
+    /// user needs to be told *that* — not handed a `typeMismatch(Swift.
+    /// Bool, Swift.DecodingError.Context(...))` dump they cannot act on.
+    /// The underlying detail is not invented or hidden, just summarised;
+    /// `GlomerisClientError` already carries it for anyone logging.
+    static func shortMessage(_ error: Error, subject: String) -> String {
+        guard let clientError = error as? GlomerisClientError else {
+            return "\(subject): failed — \(error.localizedDescription)"
+        }
+        switch clientError {
+        case .outputDecodingFailed:
+            return "\(subject): the CLI's output was not the expected JSON."
+        case .executionFailed(let detail):
+            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+                ? "\(subject): the CLI could not be run."
+                : "\(subject): \(trimmed)"
+        case .usage(let detail):
+            let trimmed = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+                ? "\(subject): the CLI rejected these arguments."
+                : "\(subject): \(trimmed)"
+        case .unexpectedExitCode(let code):
+            return "\(subject): the CLI exited with code \(code)."
+        }
+    }
+}
+
 /// Popover section: disk pressure + daemon health, polled on appear and
 /// every 10 seconds while visible.
 struct StatusHealthSectionView: View {
@@ -61,7 +114,7 @@ struct StatusHealthSectionView: View {
 
     @State private var statusReport: StatusReportDto?
     @State private var daemonReport: DaemonStatusReportDto?
-    @State private var lastErrorMessage: String?
+    @State private var fetchErrors = SectionFetchErrors()
     @State private var pollTask: Task<Void, Never>?
 
     init(
@@ -105,8 +158,8 @@ struct StatusHealthSectionView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let lastErrorMessage {
-                Text(lastErrorMessage)
+            ForEach(fetchErrors.messages, id: \.self) { message in
+                Text(message)
                     .font(.caption2)
                     .foregroundStyle(.red)
             }
@@ -128,6 +181,21 @@ struct StatusHealthSectionView: View {
         }
     }
 
+    /// Both fetches write `@State`, so all three of these are pinned to the
+    /// main actor.
+    ///
+    /// They are dispatched with `async let` and therefore run concurrently.
+    /// Without the isolation they inherit from here, two concurrent tasks
+    /// would mutate `fetchErrors` — and SwiftUI state generally — off the
+    /// main actor: a data race that can tear a two-field struct or corrupt a
+    /// `String`'s storage, which is a particularly bad failure mode for the
+    /// one surface whose job is to report failures honestly (HORO-1297).
+    ///
+    /// Isolation costs no concurrency here. Both fetchers spend their time
+    /// suspended on subprocess I/O, so they still interleave and both
+    /// children still run at once; only the `@State` writes are serialised,
+    /// and `GlomerisClient` already reads the pipes off the main thread.
+    @MainActor
     private func refresh() async {
         async let status = fetchStatus()
         async let daemon = fetchDaemonStatus()
@@ -141,6 +209,7 @@ struct StatusHealthSectionView: View {
         }
     }
 
+    @MainActor
     private func fetchStatus() async -> StatusReportDto? {
         do {
             let result = try await client.run(
@@ -148,14 +217,15 @@ struct StatusHealthSectionView: View {
                 outputType: StatusReportDto.self,
                 progressType: EmptyProgressDto.self
             )
-            lastErrorMessage = nil
+            fetchErrors.status = nil
             return result.output
         } catch {
-            lastErrorMessage = "status: \(String(describing: error))"
+            fetchErrors.status = SectionFetchErrors.shortMessage(error, subject: "status")
             return nil
         }
     }
 
+    @MainActor
     private func fetchDaemonStatus() async -> DaemonStatusReportDto? {
         do {
             let result = try await client.run(
@@ -163,10 +233,10 @@ struct StatusHealthSectionView: View {
                 outputType: DaemonStatusReportDto.self,
                 progressType: EmptyProgressDto.self
             )
-            lastErrorMessage = nil
+            fetchErrors.daemon = nil
             return result.output
         } catch {
-            lastErrorMessage = "daemon status: \(String(describing: error))"
+            fetchErrors.daemon = SectionFetchErrors.shortMessage(error, subject: "daemon status")
             return nil
         }
     }
