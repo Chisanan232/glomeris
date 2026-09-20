@@ -141,6 +141,37 @@ jobs:
       - name: Check the committed xcodeproj matches project.yml
         run: bash scripts/check-xcodeproj-matches-xcodegen.sh
 
+  app-icon-drift:
+    # HORO-1305: the AppIcon PNGs under
+    # macos/GlomerisMenuBar/Sources/Assets.xcassets are generated from
+    # Sources/GlomerisMark.swift, and both are committed.
+    #
+    # Binary assets are the one thing a reviewer genuinely cannot review — a
+    # PNG in a diff is "Binary files differ", so any claim about what the icon
+    # looks like is taken on trust. Generating it from readable geometry only
+    # helps if something proves the committed bytes really are that geometry's
+    # output. Finder, the Dock and System Settings > Login Items read the
+    # compiled asset catalog and never read the Swift, so without this a mark
+    # edit with stale PNGs would ship an icon the code no longer describes.
+    #
+    # A separate job, for the same reason xcodeproj-drift is one: stale art
+    # and a failing test are different problems and neither should mask the
+    # other.
+    #
+    # Xcode is pinned to match `macos-app` — the comparison tolerance in
+    # macos/tools/icongen/main.swift is calibrated against CoreGraphics'
+    # rasteriser, so the toolchain is part of what is being asserted.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select the pinned Xcode
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.2.app
+          xcodebuild -version
+      - name: Check the committed app icon matches GlomerisMark's geometry
+        run: bash scripts/check-app-icon-matches-geometry.sh
+
   no-policy-in-swift:
     # HORO-1068: mechanical guard — GlomerisMenuBar (the macOS thin client)
     # must never branch UI behavior on `policyLabel`/`policy_label`'s string
