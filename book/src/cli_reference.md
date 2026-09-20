@@ -254,6 +254,15 @@ configuration and safety-property writeup.
 - Without `--plan-file`, credentials are read only from
   `GLOMERIS_LLM_API_KEY`/`GLOMERIS_LLM_BASE_URL`/`GLOMERIS_LLM_MODEL` (all
   three required, no default base URL) — never from a CLI flag.
+  `GLOMERIS_LLM_BASE_URL` is the **API root**: `/chat/completions` is
+  appended to it verbatim, so it usually ends in `/v1`
+  (`https://gateway.example.com/v1`). See
+  [BYOK LLM Planner](byok.md#glomeris_llm_base_url-is-the-api-root-not-the-host-root).
+- A failed provider call is reported on the `provider error:` line (or the
+  `provider_error` JSON field) as one secret-free sentence naming the HTTP
+  status, API style, request path, request id, and a bounded excerpt of the
+  provider's error body — never the `Authorization` header, the key, the
+  host, or the request payload.
 - `--plan-file <path>` reads the file's raw bytes as if they were the
   model's raw response text, through the same validation pipeline the live
   provider uses — no network call, no API key required.
