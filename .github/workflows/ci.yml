@@ -64,9 +64,15 @@ jobs:
         # is to stop tests going unenforced.
         run: cargo build --bin glomeris
       - name: Verify the CLI is present so no test silently skips
+        # Mirrors exactly the two locations the test itself looks in, so this
+        # cannot fail a job whose test would in fact have run. The step is not
+        # redundant with `cargo build` above: cargo can succeed while the
+        # binary lands somewhere else (a CARGO_TARGET_DIR set later, a
+        # workspace layout change), and that is precisely the case where the
+        # test would go back to skipping silently.
         run: |
-          if [ ! -x target/debug/glomeris ]; then
-            echo "::error::target/debug/glomeris is missing — testRealGlomerisDetectJSONDecodes would XCTSkip instead of running"
+          if [ ! -x target/debug/glomeris ] && [ ! -x "$HOME/.cargo/shared-target/debug/glomeris" ]; then
+            echo "::error::no glomeris binary at target/debug/ or ~/.cargo/shared-target/debug/ — testRealGlomerisDetectJSONDecodes would XCTSkip instead of running"
             exit 1
           fi
       - name: Test GlomerisMenuBar
