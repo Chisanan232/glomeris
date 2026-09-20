@@ -571,7 +571,7 @@ enum GlomerisVocabulary {
 
     static let reasonAxis = "Reason"
 
-    /// The 19 `ReasonCode` values, as prose. These are the "why" behind a
+    /// The 18 `ReasonCode` values, as prose. These are the "why" behind a
     /// safety class and read best as a short list of sentences, so they
     /// carry no symbol and no tone of their own — the safety badge above
     /// them already carries the tone, and repeating it per reason would

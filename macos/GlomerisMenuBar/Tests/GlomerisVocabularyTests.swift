@@ -80,7 +80,7 @@ final class GlomerisVocabularyTests: XCTestCase {
         "docker_image_cache", "unknown",
     ]
 
-    /// `src/policy/class.rs` — `ReasonCode::as_str`, all 19.
+    /// `src/policy/class.rs` — `ReasonCode::as_str`, all 18.
     private static let reasonTokens = [
         "protected_credential_material", "protected_git_internals", "protected_infra_state",
         "protected_persistent_volume", "protected_user_documents", "protected_system_path",
