@@ -386,6 +386,65 @@ enum GlomerisVocabulary {
         )
     }
 
+    // MARK: - Background monitor (`daemon status --json`)
+
+    static let monitorAxis = "Background monitor"
+
+    /// Whether the launch agent is loaded. A plain boolean from the CLI,
+    /// reworded — "Loaded: Yes" told the user what a plist thinks, not what
+    /// the product is doing.
+    static func monitorLoaded(_ loaded: Bool) -> GlomerisTerm {
+        loaded
+            ? GlomerisTerm(
+                token: "true",
+                axis: monitorAxis,
+                title: "Running",
+                explanation: "Glomeris is watching disk space in the background.",
+                symbolName: "bolt.horizontal.circle.fill",
+                tone: .positive
+            )
+            : GlomerisTerm(
+                token: "false",
+                axis: monitorAxis,
+                title: "Not running",
+                explanation: "Nothing is watching disk space, so you will not be warned before it runs low.",
+                symbolName: "bolt.horizontal.circle",
+                tone: .caution
+            )
+    }
+
+    /// The last heartbeat, as an already-formatted age ("8s", "2h").
+    ///
+    /// Deliberately tone-neutral when a heartbeat exists, even a very old
+    /// one. Deciding that some age counts as "stale" would be a freshness
+    /// threshold, and thresholds are the CLI's to set — inventing one here
+    /// is exactly the kind of judgment the standing rule in
+    /// GlomerisMenuBarApp.swift keeps out of Swift. The age is stated
+    /// plainly and the user can see for themselves.
+    ///
+    /// Absence is different from staleness and is not a threshold, so
+    /// "never checked in" reads as unknown rather than neutral.
+    static func monitorHeartbeat(ageDescription: String?) -> GlomerisTerm {
+        guard let ageDescription, !ageDescription.isEmpty else {
+            return GlomerisTerm(
+                token: "",
+                axis: monitorAxis,
+                title: "No check-in yet",
+                explanation: "The background monitor has never reported in.",
+                symbolName: "heart.slash",
+                tone: .unknown
+            )
+        }
+        return GlomerisTerm(
+            token: ageDescription,
+            axis: monitorAxis,
+            title: "\(ageDescription) ago",
+            explanation: "The background monitor last reported in \(ageDescription) ago.",
+            symbolName: "heart.fill",
+            tone: .neutral
+        )
+    }
+
     // MARK: - Action outcome (`outcome`, shared by execute and the audit log)
 
     static let outcomeAxis = "Outcome"

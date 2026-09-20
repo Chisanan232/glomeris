@@ -274,6 +274,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             GlomerisVocabulary.confidenceAxis,
             GlomerisVocabulary.regenerabilityAxis,
             GlomerisVocabulary.impactAxis,
+            GlomerisVocabulary.monitorAxis,
             GlomerisVocabulary.outcomeAxis,
             GlomerisVocabulary.refusalAxis,
             GlomerisVocabulary.sourceAxis,
@@ -363,6 +364,50 @@ final class GlomerisVocabularyTests: XCTestCase {
                 "\(name) is not a real SF Symbol, so it would render as nothing at all"
             )
         }
+    }
+
+    /// The background-monitor terms are keyed on a Bool and a formatted
+    /// age rather than on a CLI token, so the token-axis sweeps above do
+    /// not reach them. Same two hazards apply: an unreal symbol renders as
+    /// nothing, and two states sharing a symbol would leave them
+    /// separable by colour alone.
+    func testMonitorTermsUseRealAndDistinctSymbols() {
+        let terms = [
+            GlomerisVocabulary.monitorLoaded(true),
+            GlomerisVocabulary.monitorLoaded(false),
+            GlomerisVocabulary.monitorHeartbeat(ageDescription: "8s"),
+            GlomerisVocabulary.monitorHeartbeat(ageDescription: nil),
+        ]
+
+        let symbols = terms.compactMap { $0.symbolName }
+        XCTAssertEqual(symbols.count, terms.count, "every monitor state needs a symbol")
+        XCTAssertEqual(
+            Set(symbols).count,
+            symbols.count,
+            "two monitor states share a symbol: \(symbols)"
+        )
+        for name in symbols {
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                "\(name) is not a real SF Symbol, so it would render as nothing at all"
+            )
+        }
+        for term in terms {
+            XCTAssertEqual(term.axis, GlomerisVocabulary.monitorAxis)
+            XCTAssertFalse(term.title.isEmpty)
+            XCTAssertFalse(term.explanation.isEmpty)
+            XCTAssertLessThanOrEqual(term.title.count, 34)
+        }
+    }
+
+    /// An empty age string is the same fact as no age — the CLI reporting
+    /// `heartbeat_age_secs: null` and a formatter returning "" must not
+    /// produce "ago" with nothing in front of it.
+    func testEmptyHeartbeatAgeIsTreatedAsNoCheckIn() {
+        XCTAssertEqual(
+            GlomerisVocabulary.monitorHeartbeat(ageDescription: ""),
+            GlomerisVocabulary.monitorHeartbeat(ageDescription: nil)
+        )
     }
 
     /// PROTECTED is the system working correctly, not an error. Colouring
