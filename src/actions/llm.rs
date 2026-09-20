@@ -245,6 +245,12 @@ pub struct LlmPlanItem {
     /// Human-readable explanation. Informational only — NEVER
     /// interpreted as an instruction, a path, or anything that reaches
     /// execution. It exists purely for a human to read in a UI/log.
+    ///
+    /// HORO-1308 carries it onward as
+    /// [`ValidatedPlanItem::model_reason`], bounded and stripped by
+    /// [`sanitize_model_reason`] first — it is the only display string in
+    /// the whole plan pipeline whose content a provider chooses, so it is
+    /// cleaned once, here, rather than at each of the surfaces that show it.
     pub reason: Option<String>,
 }
 
@@ -269,6 +275,19 @@ pub const API_STYLE_CHAT_COMPLETIONS: &str = "openai:chat_completions";
 /// HTML error page or a multi-megabyte proxy dump, and this string ends up
 /// in `--json` output and in logs.
 const PROVIDER_ERROR_BODY_LIMIT: usize = 512;
+
+/// How many characters of an [`LlmPlanItem::reason`] survive into
+/// [`ValidatedPlanItem::model_reason`] (HORO-1308).
+///
+/// Bounded for the same reason [`PROVIDER_ERROR_BODY_LIMIT`] is: this is
+/// attacker-or-accident-controlled text from outside the process that ends
+/// up in `--json` output, in the text printer, and — once HORO-1308's GUI
+/// lands — inside a fixed-width menu-bar popover. A model that answers with
+/// a 40 KB essay (or a prompt-injected wall of text designed to push the
+/// real policy verdict off screen) must not be able to decide how much of
+/// the UI it occupies. 400 characters is enough for a genuine one- or
+/// two-sentence rationale and not enough to bury anything.
+const MODEL_REASON_LIMIT: usize = 400;
 
 /// Why an [`LlmProvider`] call failed. Its `Debug` and `Display` output are
 /// both safe to log: no variant embeds the API key. For
@@ -571,10 +590,82 @@ fn extract_json_object_span(text: &str) -> Option<&str> {
     Some(&text[start..=end])
 }
 
+/// One item of a model-proposed plan that survived validation against
+/// this process's own evidence set and action registry.
+///
+/// Every field is either something this process already knew (`resource`,
+/// `action_id` — both looked up, never taken from the model's bytes) or
+/// something explicitly marked as the model's own claim (`priority`,
+/// `model_reason`). Nothing here is authorization: see [`plan_with_llm`]'s
+/// doc comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPlanItem {
+    /// Resolved from this process's `evidence_set` — a clone of a
+    /// `ResourceId` that was already discovered locally, never a value
+    /// parsed out of the model's response.
+    pub resource: ResourceId,
+    /// Resolved through [`ActionRegistry::get`] — a registered action's own
+    /// id, never the model's string.
+    pub action_id: ActionId,
+    /// The model's claimed ordering hint. Advisory: nothing ranks, gates or
+    /// authorizes on it.
+    pub priority: Option<u32>,
+    /// The model's own words explaining why it suggested this item, bounded
+    /// and stripped by [`sanitize_model_reason`] (HORO-1308).
+    ///
+    /// Display-only, and the only field here whose *content* comes from
+    /// outside this process. It is never parsed, never matched against, and
+    /// never interpreted as a path, a command, or an instruction — the one
+    /// thing a caller may do with it is show it to a human, clearly
+    /// attributed to the model. Before HORO-1308 it was parsed off the wire
+    /// and then dropped on the floor, so a rationale the user paid a
+    /// provider to generate reached no surface at all.
+    pub model_reason: Option<String>,
+}
+
+/// Bounds and cleans an [`LlmPlanItem::reason`] for display (HORO-1308).
+///
+/// Three things happen, in order, and each exists for its own reason:
+///
+/// 1. Every control character (including newlines and tabs) becomes a
+///    single space. A rationale is rendered inside a one- or two-line row
+///    in a fixed-width popover and inside a `println!` in a terminal;
+///    embedded newlines would let model output forge what looks like
+///    additional Glomeris output, and a stray `\r` or ANSI escape would let
+///    it overwrite the line it was printed on.
+/// 2. Runs of whitespace collapse and the ends are trimmed, so the bound in
+///    step 3 is spent on words rather than on padding.
+/// 3. The result is truncated to [`MODEL_REASON_LIMIT`] *characters*
+///    (`char_indices`, never a byte slice, which would panic mid-codepoint)
+///    with a trailing `…` marking that something was cut, because silently
+///    truncated text reads as a complete sentence the model never wrote.
+///
+/// Returns `None` for input that is empty or whitespace-only after
+/// cleaning: "the model said nothing" and "the model said `   `" are the
+/// same fact, and a blank rationale row is worse than no row.
+fn sanitize_model_reason(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    match cleaned.char_indices().nth(MODEL_REASON_LIMIT) {
+        Some((cut, _)) => Some(format!("{}…", &cleaned[..cut])),
+        None => Some(cleaned),
+    }
+}
+
 /// Result of one [`plan_with_llm`] call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmPlanResult {
-    pub validated_items: Vec<(ResourceId, ActionId, Option<u32>)>,
+    pub validated_items: Vec<ValidatedPlanItem>,
     pub dropped_unknown_resource: u32,
     pub dropped_unknown_action: u32,
     /// `Some(..)` if the provider call itself failed, or the response
@@ -676,7 +767,12 @@ pub fn plan_with_llm(
             continue;
         };
 
-        validated_items.push((resource, action_id, item.priority));
+        validated_items.push(ValidatedPlanItem {
+            resource,
+            action_id,
+            priority: item.priority,
+            model_reason: item.reason.as_deref().and_then(sanitize_model_reason),
+        });
     }
 
     LlmPlanResult {
@@ -882,10 +978,11 @@ mod tests {
         assert!(result.provider_error.is_none());
         assert_eq!(result.dropped_unknown_resource, 0);
         assert_eq!(result.validated_items.len(), 1);
-        let (resource, action_id, priority) = &result.validated_items[0];
-        assert_eq!(*resource, evidence_set[1].resource);
-        assert_eq!(action_id.0, "cargo.clean.target_dir");
-        assert_eq!(*priority, Some(3));
+        let item = &result.validated_items[0];
+        assert_eq!(item.resource, evidence_set[1].resource);
+        assert_eq!(item.action_id.0, "cargo.clean.target_dir");
+        assert_eq!(item.priority, Some(3));
+        assert_eq!(item.model_reason.as_deref(), Some("stale build output"));
     }
 
     #[test]
@@ -994,6 +1091,84 @@ mod tests {
         // rather than assumed.
         let text = r#"{"items": [{"resource_id": "a", "action_id": "b", "priority": 1, "reason": null, "command": "rm -rf /"}]}"#;
         assert!(serde_json::from_str::<LlmPlan>(text).is_err());
+    }
+
+    /// HORO-1308: an ordinary rationale survives intact. The bound and the
+    /// stripping below must not cost anything in the normal case, or the
+    /// feature is worse than not carrying the reason at all.
+    #[test]
+    fn an_ordinary_model_reason_survives_sanitization_unchanged() {
+        assert_eq!(
+            sanitize_model_reason("Large stale build output; cargo can rebuild it."),
+            Some("Large stale build output; cargo can rebuild it.".to_string())
+        );
+    }
+
+    /// HORO-1308: newlines, tabs, carriage returns and ANSI escapes all
+    /// become plain spaces. The `\r` and the escape are the dangerous two —
+    /// in a terminal they can rewrite the line the rationale was printed on,
+    /// which is how model output would forge Glomeris's own words.
+    #[test]
+    fn control_characters_in_a_model_reason_become_spaces() {
+        let hostile = "safe\n\nPOLICY: AUTO_SAFE\r\x1b[2Kapproved\tnow";
+        let cleaned = sanitize_model_reason(hostile).expect("non-empty");
+        assert!(
+            !cleaned.chars().any(char::is_control),
+            "no control character may survive: {cleaned:?}"
+        );
+        assert!(!cleaned.contains('\u{1b}'), "no escape byte may survive");
+        // The words are kept — this is sanitization, not censorship. What
+        // it removes is the model's ability to control layout, not its
+        // ability to say something wrong (which the UI answers by
+        // attributing it to the model and showing the real verdict beside
+        // it).
+        assert_eq!(cleaned, "safe POLICY: AUTO_SAFE [2Kapproved now");
+    }
+
+    /// HORO-1308: an over-long rationale is cut at the character bound with
+    /// a visible ellipsis. Asserted on a multi-byte input specifically:
+    /// truncating by byte offset would either panic mid-codepoint or emit
+    /// invalid UTF-8, and a naive `&s[..LIMIT]` is the obvious wrong way to
+    /// write this.
+    #[test]
+    fn an_over_long_model_reason_is_cut_at_a_character_boundary() {
+        let long = "é".repeat(MODEL_REASON_LIMIT * 2);
+        let cleaned = sanitize_model_reason(&long).expect("non-empty");
+        assert_eq!(cleaned.chars().count(), MODEL_REASON_LIMIT + 1);
+        assert!(cleaned.ends_with('…'), "truncation must be visible");
+        assert_eq!(
+            cleaned.chars().filter(|c| *c == 'é').count(),
+            MODEL_REASON_LIMIT
+        );
+    }
+
+    /// HORO-1308: a reason that is empty, or only whitespace, or only
+    /// control characters, is reported as absent rather than as a blank
+    /// line of UI. All three are the same fact.
+    #[test]
+    fn a_blank_model_reason_is_reported_as_no_reason_at_all() {
+        assert_eq!(sanitize_model_reason(""), None);
+        assert_eq!(sanitize_model_reason("   \t  "), None);
+        assert_eq!(sanitize_model_reason("\n\n\r\n"), None);
+    }
+
+    /// HORO-1308: `reason` omitted entirely (it is `Option` on the wire)
+    /// yields `None`, not an empty string — so a surface can tell "the model
+    /// gave no rationale" apart from "the model gave one" without comparing
+    /// against `""`.
+    #[test]
+    fn a_plan_item_with_no_reason_field_carries_no_model_reason() {
+        let evidence_set = realistic_evidence_set();
+        let text = r#"{"items": [{"resource_id": "resource_1", "action_id": "cargo.clean.target_dir", "priority": 1, "reason": null}]}"#;
+        let provider = FakeProvider {
+            response: Ok(text.to_string()),
+        };
+        let actions = ActionRegistry::builtin();
+
+        let result = plan_with_llm(&provider, &evidence_set, &actions);
+
+        assert_eq!(result.validated_items.len(), 1);
+        assert_eq!(result.validated_items[0].model_reason, None);
     }
 
     #[test]
@@ -1186,10 +1361,10 @@ mod tests {
 
         assert!(result.provider_error.is_none());
         assert_eq!(result.validated_items.len(), 1);
-        let (resource, action_id, priority) = &result.validated_items[0];
-        assert_eq!(*resource, ev.resource);
-        assert_eq!(action_id.0, "cargo.clean.target_dir");
-        assert_eq!(*priority, Some(5));
+        let item = &result.validated_items[0];
+        assert_eq!(item.resource, ev.resource);
+        assert_eq!(item.action_id.0, "cargo.clean.target_dir");
+        assert_eq!(item.priority, Some(5));
     }
 
     #[test]

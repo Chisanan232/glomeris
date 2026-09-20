@@ -465,12 +465,36 @@ pub struct CleanDryRunReport {
 /// ever derives `Deserialize`. Those two remain the crate's only two
 /// `#[serde(deny_unknown_fields)]` `Deserialize` types; this DTO must never
 /// change that.
+///
+/// ## Which fields are the model's, and which are the machine's
+///
+/// HORO-1308 gave this DTO a GUI consumer, which makes the distinction
+/// load-bearing rather than editorial. Exactly two fields carry anything
+/// the provider chose:
+///
+/// - `priority` — the model's claimed ordering hint.
+/// - `model_reason` — the model's own words, already bounded and stripped
+///   by `crate::actions::llm::sanitize_model_reason`.
+///
+/// Everything else is this machine's own finding, computed from local
+/// evidence and the real policy engine, and would read identically if no
+/// provider had ever been contacted: `resource_id`, `policy_label`,
+/// `explain` and `skip_reason`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LlmPlanItemReport {
     pub resource_id: String,
     pub policy_label: &'static str,
     pub requested_action_id: Option<&'static str>,
     pub priority: Option<u32>,
+    /// The model's own rationale for suggesting this item (HORO-1308),
+    /// bounded and control-character-stripped upstream by
+    /// `crate::actions::llm::sanitize_model_reason`.
+    ///
+    /// `None` when the model gave none, or gave only whitespace. Display
+    /// only, and a surface showing it MUST attribute it to the model rather
+    /// than presenting it as Glomeris's own finding — it is a claim, not
+    /// evidence, and it sits beside `reasons`/`explain`, which are evidence.
+    pub model_reason: Option<String>,
     /// Rendered from the typed `ActionPlan.explain` — `None` for a
     /// `PROTECTED` item (never resolved) or a resolution/dry-run failure
     /// (see `skip_reason` in that case).

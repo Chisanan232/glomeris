@@ -486,8 +486,11 @@ pub fn build_llm_plan_report(
     let result = plan_with_llm(provider, &evidences, actions);
 
     let mut items = Vec::with_capacity(result.validated_items.len());
-    for (resource, action_id, priority) in result.validated_items {
-        let Some((ev, decision)) = candidates.iter().find(|(ev, _)| ev.resource == resource) else {
+    for validated in result.validated_items {
+        let Some((ev, decision)) = candidates
+            .iter()
+            .find(|(ev, _)| ev.resource == validated.resource)
+        else {
             // Unreachable in practice: `resource` came from `evidences`,
             // which is itself derived from `candidates` — but never panic
             // on a defensive fallback, matching this module's style.
@@ -496,6 +499,8 @@ pub fn build_llm_plan_report(
 
         let resource_id = ev.resource.to_string();
         let policy_label = crate::reporting::label_for(decision).as_str();
+        let priority = validated.priority;
+        let model_reason = validated.model_reason;
 
         if decision.class == PolicyClass::Protected {
             items.push(LlmPlanItemReport {
@@ -503,6 +508,7 @@ pub fn build_llm_plan_report(
                 policy_label,
                 requested_action_id: None,
                 priority,
+                model_reason,
                 explain: None,
                 skip_reason: Some(
                     "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
@@ -511,13 +517,14 @@ pub fn build_llm_plan_report(
             continue;
         }
 
-        items.push(match actions.get(action_id.0) {
+        items.push(match actions.get(validated.action_id.0) {
             Some(action) => match dry_run(action, ev) {
                 Ok(plan) => LlmPlanItemReport {
                     resource_id,
                     policy_label,
                     requested_action_id: Some(action.id().0),
                     priority,
+                    model_reason,
                     explain: Some(plan.explain),
                     skip_reason: None,
                 },
@@ -526,6 +533,7 @@ pub fn build_llm_plan_report(
                     policy_label,
                     requested_action_id: Some(action.id().0),
                     priority,
+                    model_reason,
                     explain: None,
                     skip_reason: Some(format!("{e:?}")),
                 },
@@ -535,6 +543,7 @@ pub fn build_llm_plan_report(
                 policy_label,
                 requested_action_id: None,
                 priority,
+                model_reason,
                 explain: None,
                 skip_reason: Some("no registered action for this action id".to_string()),
             },
@@ -887,6 +896,15 @@ pub fn print_llm_plan_report(report: &LlmPlanReport) {
             "[{}] {} action={} priority={}",
             item.policy_label, item.resource_id, action, priority
         );
+        // Attributed, and printed before the explain line rather than after
+        // it: "the model says" has to arrive before the sentence it
+        // qualifies, or the reader has already taken the claim as ours. The
+        // `model says:` prefix is not decoration — it is the only thing
+        // distinguishing a provider's assertion from this machine's finding
+        // on the line below (HORO-1308).
+        if let Some(reason) = &item.model_reason {
+            println!("  model says: {reason}");
+        }
         match (&item.explain, &item.skip_reason) {
             (Some(explain), _) => println!("  {explain}"),
             (None, Some(reason)) => println!("  skipped: {reason}"),
