@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::actions::llm::{build_request_payload, plan_with_llm, LlmProvider};
+use crate::actions::llm::{build_request_payload, plan_with_llm, LlmError, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
@@ -33,8 +33,9 @@ use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserCon
 use crate::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, ActionListItem, ActionListReport,
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmPayloadReport,
-    LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, ProgressEvent, StatusReport,
+    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmCheckReport,
+    LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, ProgressEvent,
+    StatusReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
@@ -668,6 +669,100 @@ pub fn print_llm_payload_report(report: &LlmPayloadReport) {
     }
     for alias in &report.resource_aliases {
         println!("{} = {}", alias.wire_resource_id, alias.local_resource_id);
+    }
+}
+
+/// How many characters of the provider's reply survive into
+/// [`LlmCheckReport::response_excerpt`] (HORO-1309). Far smaller than
+/// `PROVIDER_ERROR_BODY_LIMIT` because a correct answer to
+/// [`CONNECTION_TEST_USER_PROMPT`] is two letters; this only needs to be wide
+/// enough that a gateway answering with a refusal sentence instead is
+/// readable rather than clipped to nothing.
+const CHECK_RESPONSE_EXCERPT_LIMIT: usize = 160;
+
+/// Builds an [`LlmCheckReport`] (HORO-1309) by performing one real, trivial
+/// completion through `provider`.
+///
+/// ## Why this goes through the provider rather than around it
+///
+/// The point of a connection test is that passing it means a real request
+/// will work. So this sends through the same [`LlmProvider::complete`] a
+/// plan does, which means the same URL construction, the same
+/// `Authorization: Bearer` scheme, the same body keys, the same two message
+/// roles and the same response parsing. A leaner bespoke request — a `GET`
+/// of the base URL, say, or a `/models` probe — would be cheaper and would
+/// also be able to pass on a setup where planning fails, which is the one
+/// outcome a connection test must never produce.
+///
+/// What differs from a plan is only the payload: two fixed literals that
+/// describe nothing about this machine (see
+/// [`CONNECTION_TEST_SYSTEM_PROMPT`]). No evidence is collected, no resource
+/// is named, and discovery never runs.
+///
+/// `model` and `endpoint_path` are passed in rather than read off the
+/// provider because [`LlmProvider`] is a trait with neither — which is also
+/// what lets this function be tested against a fake provider for every
+/// failure class without a network.
+pub fn build_llm_check_report(
+    provider: &dyn LlmProvider,
+    model: &str,
+    endpoint_path: &str,
+) -> LlmCheckReport {
+    use crate::actions::llm::{
+        excerpt, CONNECTION_TEST_SYSTEM_PROMPT, CONNECTION_TEST_USER_PROMPT,
+    };
+
+    let report = |outcome, error, response_excerpt| LlmCheckReport {
+        outcome,
+        model: model.to_string(),
+        endpoint_path: endpoint_path.to_string(),
+        error,
+        response_excerpt,
+    };
+
+    match provider.complete(CONNECTION_TEST_SYSTEM_PROMPT, CONNECTION_TEST_USER_PROMPT) {
+        Ok(reply) => report(
+            "ok",
+            None,
+            Some(excerpt(&reply, CHECK_RESPONSE_EXCERPT_LIMIT)),
+        ),
+        // Mapped to a stable token so no UI has to read the prose to find out
+        // what happened, while the prose itself — already secret-free, and
+        // asserted so per variant in `actions::llm`'s tests — carries the
+        // detail a human needs to fix it.
+        Err(e) => {
+            let outcome = match &e {
+                LlmError::NetworkError(_) => "unreachable",
+                LlmError::ProviderStatus { .. } => "rejected",
+                LlmError::InvalidResponse(_) => "unusable_response",
+                // Unreachable via this function: the caller cannot obtain a
+                // provider to pass in without being configured. Reported as a
+                // rejection rather than papered over with a panic, because a
+                // connection test that crashes is worse than one that is
+                // merely wrong about the category.
+                LlmError::NotConfigured => "rejected",
+            };
+            report(outcome, Some(e.to_string()), None)
+        }
+    }
+}
+
+/// Prints an [`LlmCheckReport`] as human-readable text. The endpoint path is
+/// always shown, success or failure: it is the field that answers "did I
+/// configure the API root or the host root", and that question is worth
+/// answering while things work too.
+pub fn print_llm_check_report(report: &LlmCheckReport) {
+    match report.outcome {
+        "ok" => println!("LLM CONNECTION OK"),
+        _ => println!("LLM CONNECTION FAILED ({})", report.outcome),
+    }
+    println!("model: {}", report.model);
+    println!("endpoint path: {}", report.endpoint_path);
+    if let Some(excerpt) = &report.response_excerpt {
+        println!("provider replied: {excerpt}");
+    }
+    if let Some(error) = &report.error {
+        println!("error: {error}");
     }
 }
 
@@ -2282,6 +2377,143 @@ mod tests {
         // placeholder that would always drop as unknown.
         let actions = ActionRegistry::builtin();
         assert!(actions.get(&item.action_id).is_some());
+    }
+
+    /// HORO-1309 AC 4: the four outcomes are distinct tokens, so a UI can
+    /// tell "your gateway is unreachable" from "your gateway refused this
+    /// key" without parsing English.
+    #[test]
+    fn build_llm_check_report_maps_each_failure_class_to_its_own_outcome() {
+        let cases: [(LlmError, &str); 3] = [
+            (
+                LlmError::NetworkError("connection refused".to_string()),
+                "unreachable",
+            ),
+            (
+                LlmError::ProviderStatus {
+                    status: 401,
+                    api_style: crate::actions::llm::API_STYLE_CHAT_COMPLETIONS.to_string(),
+                    endpoint_path: "/v1/chat/completions".to_string(),
+                    request_id: None,
+                    body_excerpt: r#"{"error":{"code":"invalid_api_key"}}"#.to_string(),
+                },
+                "rejected",
+            ),
+            (
+                LlmError::InvalidResponse("no choices[0].message.content".to_string()),
+                "unusable_response",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let provider = FakeLlmPlanProvider {
+                response: Err(error),
+            };
+            let report = build_llm_check_report(&provider, "some-model", "/v1/chat/completions");
+
+            assert_eq!(report.outcome, expected);
+            assert!(
+                report.error.is_some(),
+                "{expected} must carry the human-readable detail too"
+            );
+            assert!(
+                report.response_excerpt.is_none(),
+                "{expected} has no successful reply to excerpt"
+            );
+            assert_eq!(report.model, "some-model");
+            assert_eq!(report.endpoint_path, "/v1/chat/completions");
+        }
+    }
+
+    #[test]
+    fn build_llm_check_report_reports_ok_with_the_reply_and_no_error() {
+        let provider = FakeLlmPlanProvider {
+            response: Ok("ok".to_string()),
+        };
+        let report = build_llm_check_report(&provider, "some-model", "/v1/chat/completions");
+
+        assert_eq!(report.outcome, "ok");
+        assert_eq!(report.error, None);
+        assert_eq!(report.response_excerpt.as_deref(), Some("ok"));
+    }
+
+    /// AC 5, at the boundary where it is cheapest to enforce: a provider that
+    /// echoes the request — which is exactly what a misconfigured proxy or a
+    /// debug endpoint does — must not be able to get an arbitrary amount of
+    /// text into a field the GUI renders and the shell scrolls. The excerpt
+    /// is bounded here rather than by each consumer, so there is one place to
+    /// check instead of one per surface.
+    #[test]
+    fn build_llm_check_report_bounds_a_provider_that_replies_with_a_flood() {
+        let provider = FakeLlmPlanProvider {
+            response: Ok("A".repeat(20_000)),
+        };
+        let report = build_llm_check_report(&provider, "some-model", "/v1/chat/completions");
+        let excerpt = report.response_excerpt.expect("ok carries an excerpt");
+
+        assert_eq!(report.outcome, "ok");
+        assert!(
+            excerpt.len() < CHECK_RESPONSE_EXCERPT_LIMIT + 32,
+            "excerpt grew to {} bytes",
+            excerpt.len()
+        );
+        assert!(excerpt.contains("(truncated)"), "got: {excerpt}");
+    }
+
+    /// The check report is a *reduction* of the configuration, not a copy of
+    /// it: whatever a user pasted into the base-URL field must not come back
+    /// out, because a host may itself be private infrastructure. Only the
+    /// path survives — enough to tell an API root from a host root, which is
+    /// the one thing this field is for. See `LlmCheckReport`'s doc comment.
+    #[test]
+    fn build_llm_check_report_carries_no_base_url_only_its_path() {
+        let provider = FakeLlmPlanProvider {
+            response: Ok("ok".to_string()),
+        };
+        let report = build_llm_check_report(
+            &provider,
+            "some-model",
+            &crate::actions::llm::chat_completions_endpoint_path(
+                "https://gateway.internal.example/v1",
+            ),
+        );
+
+        let serialized = serde_json::to_string(&report).expect("report serializes");
+        for forbidden in ["gateway.internal.example", "https://"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "{forbidden} must not survive into the report: {serialized}"
+            );
+        }
+        assert_eq!(report.endpoint_path, "/v1/chat/completions");
+    }
+
+    /// Defence in depth for the same property against the nastiest input:
+    /// some gateways accept a credential in the query string, so a user may
+    /// paste one into the base-URL field. Such a URL is rejected upstream by
+    /// `validate_base_url`, but if it ever reached here the report still must
+    /// not carry the credential — `diagnostic_endpoint_path` keeps the path
+    /// and drops the query, so it does not.
+    #[test]
+    fn build_llm_check_report_drops_a_query_string_credential_from_the_path() {
+        let provider = FakeLlmPlanProvider {
+            response: Ok("ok".to_string()),
+        };
+        let report = build_llm_check_report(
+            &provider,
+            "some-model",
+            &crate::actions::llm::chat_completions_endpoint_path(
+                "https://gateway.internal.example/v1?access_token=pasted-into-the-url",
+            ),
+        );
+
+        let serialized = serde_json::to_string(&report).expect("report serializes");
+        for forbidden in ["access_token", "pasted-into-the-url"] {
+            assert!(
+                !serialized.contains(forbidden),
+                "{forbidden} must not survive into the report: {serialized}"
+            );
+        }
     }
 }
 
