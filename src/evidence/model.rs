@@ -499,6 +499,27 @@ pub enum EvidenceField {
     ToolLiveness,
 }
 
+/// What each field *is*, in the words a user would use for it.
+///
+/// Needed because `ActionError::MissingRequiredEvidence` is a user-facing
+/// refusal — it reaches a terminal via `clean --dry-run` and a row in the
+/// menu-bar app's AI Plan card — and "OpenByProcess" describes the variant
+/// rather than the missing measurement.
+impl fmt::Display for EvidenceField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let described = match self {
+            Self::LogicalBytes => "how big it is",
+            Self::ReclaimableBytes => "how much space removing it would free",
+            Self::LastModified => "when it was last changed",
+            Self::OpenByProcess => "whether a running process has it open",
+            Self::ProcessCwdMatch => "whether a running process is working inside it",
+            Self::GitState => "the state of its git repository",
+            Self::ToolLiveness => "whether the tool that owns it is running",
+        };
+        write!(f, "{described}")
+    }
+}
+
 /// A single process discovered (via [`crate::evidence::correlate`]) to
 /// have a resource open, or to have it as its current working directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
