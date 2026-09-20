@@ -187,6 +187,20 @@ jobs:
       - name: Check no policy_label branching in Swift
         run: bash scripts/check-no-policy-label-branching.sh
 
+  credential-store-uses-keychain:
+    # HORO-1309: the BYOK API key is the only secret the macOS app holds. This
+    # asserts mechanically that it is keychain-backed and that nothing in the
+    # app persists, logs, argues or visibly renders it.
+    #
+    # A source check rather than a test on purpose: an unsigned xcodebuild
+    # test binary can get errSecMissingEntitlement from SecItemAdd, and a
+    # keychain test that skipped on that would be a permanently green no-op.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the BYOK credential never leaves the keychain
+        run: bash scripts/check-credential-store-uses-keychain.sh
+
   vocabulary-covers-cli-tokens:
     # HORO-1306: the GUI's plain-language wording tables are transcribed from
     # the Rust enums by hand, so the drift that matters is the silent one —
