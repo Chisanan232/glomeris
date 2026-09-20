@@ -204,7 +204,13 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(protected.modelReason, "looks like a stale build directory")
         XCTAssertNil(protected.requestedActionId)
         XCTAssertNil(protected.explain)
-        XCTAssertEqual(protected.skipReason, "PROTECTED: protected_credential_material")
+        // Two different sentences, deliberately: the item-level skip reason
+        // says why no action was rendered at all, the candidate's own refusal
+        // reason names the policy reason code. The card shows both.
+        XCTAssertEqual(
+            protected.skipReason,
+            "PROTECTED — no cleanup action is ever rendered for this resource"
+        )
         XCTAssertFalse(protected.candidate.executable)
         XCTAssertTrue(protected.candidate.offeredActions.isEmpty)
         XCTAssertEqual(

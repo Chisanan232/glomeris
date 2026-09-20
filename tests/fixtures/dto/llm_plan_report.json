@@ -65,7 +65,7 @@
       "priority": 3,
       "model_reason": "looks like a stale build directory",
       "explain": null,
-      "skip_reason": "PROTECTED: protected_credential_material",
+      "skip_reason": "PROTECTED — no cleanup action is ever rendered for this resource",
       "candidate": {
         "resource_id": "cargo_target_dir:/Users/dev/.ssh/id_ed25519",
         "kind": "cargo_target_dir",

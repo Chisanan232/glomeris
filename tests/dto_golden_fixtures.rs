@@ -292,7 +292,16 @@ fn llm_plan_report_matches_golden_fixture() {
                 priority: Some(3),
                 model_reason: Some("looks like a stale build directory".to_string()),
                 explain: None,
-                skip_reason: Some("PROTECTED: protected_credential_material".to_string()),
+                // The item-level sentence `build_llm_plan_report` actually
+                // emits for a PROTECTED resource, verbatim — distinct from the
+                // candidate's own `refusal_reason` below, which is
+                // `executable_fields`' `PROTECTED: <reason code>` form. A
+                // fixture holding a string its producer cannot produce is not a
+                // contract, so both are quoted from the source rather than
+                // paraphrased.
+                skip_reason: Some(
+                    "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
+                ),
                 candidate: DetectCandidateReport {
                     resource_id: "cargo_target_dir:/Users/dev/.ssh/id_ed25519".to_string(),
                     kind: "cargo_target_dir",
