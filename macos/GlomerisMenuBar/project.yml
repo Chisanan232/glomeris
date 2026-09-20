@@ -60,6 +60,8 @@ targets:
       - path: Sources/GlomerisMark.swift
       - path: Sources/ProjectRootsStore.swift
       - path: Sources/GlomerisDtos.swift
+      - path: Sources/GlomerisVocabulary.swift
+      - path: Sources/GlomerisDesignSystem.swift
       - path: Sources/StatusHealthSectionView.swift
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateDetailView.swift
