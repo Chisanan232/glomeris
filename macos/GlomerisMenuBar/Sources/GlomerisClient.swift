@@ -78,8 +78,8 @@ enum GlomerisClientError: Error, Equatable {
 /// without either side blocking a thread (HORO-1304).
 ///
 /// This exists because the two events can happen in either order. The
-/// handler must be installed *before* `Process.run()` — Foundation never
-/// invokes a handler attached to a process that has already terminated — but
+/// handler must be installed *before* `Process.run()`, since a handler
+/// attached after the child has already exited is not guaranteed to run — but
 /// the continuation to resume only exists later, once someone awaits. So the
 /// status may arrive before there is anybody to give it to, or somebody may
 /// be waiting before it arrives. Storing the status and the waiters under one
@@ -257,12 +257,14 @@ struct GlomerisClient {
 
         // Never `process.waitUntilExit()`. That call blocks the calling
         // thread, and the calling thread here belongs to the Swift
-        // concurrency cooperative pool — where it deadlocked outright,
-        // roughly one invocation in twenty, long after the child had exited
-        // and been reaped. A popover fetch that lost that race never
-        // returned, so the section sat on "loading…" forever with no error
-        // and no timeout (HORO-1304). Awaiting the relay suspends instead of
-        // blocking, so the thread stays available and the wait always ends.
+        // concurrency cooperative pool — where it deadlocked outright, long
+        // after the child had exited and been reaped. Measured on the host
+        // this was fixed on, that was about one run in six of
+        // `GlomerisClientTests`, i.e. of roughly 27 invocations. A popover
+        // fetch that lost the race never returned, so the section sat on
+        // "loading…" forever with no error and no timeout (HORO-1304).
+        // Awaiting the relay suspends instead of blocking, so the thread
+        // stays available and the wait always ends.
         let exitCode = await exitStatus.wait()
 
         return GlomerisRawResult(
