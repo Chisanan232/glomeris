@@ -70,8 +70,15 @@ final class GlomerisVocabularyTests: XCTestCase {
         "ask_no_consent", "ask_consent_mismatch", "auto_safe_contract_violation", "busy",
     ]
 
-    /// `src/monitor/persistence.rs` — `AuditRecord::source`.
-    private static let sourceTokens = ["execute", "free", "emergency"]
+    /// `src/monitor/persistence.rs` — `AuditRecord::source`. The two
+    /// `autopilot_*` values are written by `src/autopilot/run.rs`
+    /// (HORO-1310); this list is transcribed by hand because that field has
+    /// no single canonical producer for
+    /// `check-vocabulary-covers-cli-tokens.sh` to diff against, which is
+    /// precisely how they were missed once already.
+    private static let sourceTokens = [
+        "execute", "free", "emergency", "autopilot_auto_safe", "autopilot_preauthorized_ask",
+    ]
 
     /// `src/evidence/model.rs` — `ResourceKind::tag`.
     private static let kindTokens = [

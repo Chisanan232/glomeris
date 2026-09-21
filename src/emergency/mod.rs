@@ -349,6 +349,8 @@ fn append_emergency_audit_record(
         abort_reason,
         actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
         source: "emergency".to_string(),
+        // Emergency mode never calls a model (see this module's docs).
+        model_rank: None,
     };
     let _ = append_audit_record(audit_log_path, &record);
 }

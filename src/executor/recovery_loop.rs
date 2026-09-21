@@ -501,6 +501,8 @@ fn append_recovery_audit_record(
         abort_reason,
         actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
         source: "free".to_string(),
+        // The recovery loop ranks by rule, never by model.
+        model_rank: None,
     };
     let _ = append_audit_record(audit_log_path, &record);
 }

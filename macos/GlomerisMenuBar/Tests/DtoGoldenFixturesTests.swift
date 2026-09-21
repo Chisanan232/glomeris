@@ -239,7 +239,7 @@ final class DtoGoldenFixturesTests: XCTestCase {
     func testDecodesActionHistoryReport() throws {
         let dto = try decodeFixture("action_history_report.json", as: ActionHistoryReportDto.self)
 
-        XCTAssertEqual(dto.events.count, 2)
+        XCTAssertEqual(dto.events.count, 3)
 
         let succeeded = dto.events[0]
         XCTAssertEqual(succeeded.actionId, "cargo.clean.target_dir")
@@ -257,6 +257,44 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(aborted.actualReclaimedBytes)
         XCTAssertNil(aborted.actualReclaimedHuman)
         XCTAssertEqual(aborted.source, "free")
+
+        // HORO-1310. An Autopilot run writes the same record shape as the
+        // interactive paths, with one difference this app has to survive:
+        // `source` names an authority nobody typed. The decode must not be
+        // all-or-nothing about it — a client that failed here would blank
+        // the whole history panel because one row came from Autopilot.
+        let byAutopilot = dto.events[2]
+        XCTAssertEqual(byAutopilot.actionId, "node.clean.node_modules")
+        XCTAssertEqual(byAutopilot.policyLabel, "AUTO_SAFE")
+        XCTAssertEqual(byAutopilot.outcome, "succeeded")
+        XCTAssertEqual(byAutopilot.actualReclaimedBytes, 524_288_000)
+        XCTAssertEqual(byAutopilot.actualReclaimedHuman, "500.0 MB")
+        XCTAssertEqual(byAutopilot.source, "autopilot_auto_safe")
+
+        // `AUTO_SAFE` on a row a model ranked first is still policy's own
+        // verdict: the plan reorders candidates and never reaches
+        // `classify`. Pinned here so a later reader of this fixture cannot
+        // mistake the two axes for one.
+        XCTAssertEqual(byAutopilot.policyLabel, dto.events[0].policyLabel)
+    }
+
+    /// `model_rank` is asserted on the raw JSON, not on the Swift model,
+    /// because `ActionHistoryEventReportDto` deliberately has no property
+    /// for it — this app renders no Autopilot surface yet (HORO-1310), and
+    /// a mirror silently dropping a key proves nothing about what Rust
+    /// emits. What matters here is that the number in the log is the same
+    /// 1-based one `glomeris autopilot run` printed as `[AI rank 1]`.
+    func testAutopilotHistoryEventCarriesAOneBasedModelRank() throws {
+        let data = try loadFixture("action_history_report.json")
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let events = try XCTUnwrap(json["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 3)
+
+        XCTAssertTrue(events[0]["model_rank"] is NSNull)
+        XCTAssertTrue(events[1]["model_rank"] is NSNull)
+        XCTAssertEqual(events[2]["model_rank"] as? Int, 1)
     }
 
     // MARK: - LlmCheckReport (HORO-1309)

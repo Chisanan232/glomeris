@@ -150,3 +150,23 @@ pre-registered `ActionId`, whose real `Action::plan` implementation then
 decides the actual steps from `Evidence` it independently trusts. See
 [BYOK LLM Planner](byok.md) for how this applies to the optional LLM path
 specifically.
+
+## An envelope narrows this model; it never widens it
+
+`glomeris autopilot` adds the one thing the rest of this page does not
+describe: a grant that outlives the moment you typed it. It changes nothing
+above. An Autopilot candidate is classified by the same `classify()`,
+authorized by the same `policy::approval::authorize`, and revalidated by the
+same deletion-time TOCTOU check, in that order.
+
+What the envelope adds is a filter *in front of* authorization, not an
+alternative to it. Its allowlist can only remove kinds from consideration;
+`PROTECTED` is refused whatever it says; `UNKNOWN_INCOMPLETE` is refused
+whatever it says; an `ASK` reason it has not been given by name is refused. The
+budgets — actions, bytes, wall clock, and an optional disk-pressure floor —
+bound a run's total effect, so the worst case of an unattended run is a number
+you read before you granted it.
+
+The clause this adds to the invariant is the last one: *AI can recommend.
+Policy decides. Executor verifies. Filesystem reality wins — and the envelope
+bounds the outcome.* See [Autopilot](autopilot.md).

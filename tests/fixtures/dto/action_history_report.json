@@ -9,7 +9,8 @@
       "abort_reason": null,
       "actual_reclaimed_bytes": 2147483648,
       "actual_reclaimed_human": "2.0 GB",
-      "source": "execute"
+      "source": "execute",
+      "model_rank": null
     },
     {
       "timestamp": 1700000600,
@@ -20,7 +21,20 @@
       "abort_reason": "ResourceIdentityChanged",
       "actual_reclaimed_bytes": null,
       "actual_reclaimed_human": null,
-      "source": "free"
+      "source": "free",
+      "model_rank": null
+    },
+    {
+      "timestamp": 1700001200,
+      "action_id": "node.clean.node_modules",
+      "resource_id": "node_modules:/Users/dev/proj/node_modules",
+      "policy_label": "AUTO_SAFE",
+      "outcome": "succeeded",
+      "abort_reason": null,
+      "actual_reclaimed_bytes": 524288000,
+      "actual_reclaimed_human": "500.0 MB",
+      "source": "autopilot_auto_safe",
+      "model_rank": 1
     }
   ]
 }

@@ -756,6 +756,50 @@ actions declined/skipped, bytes freed, and free space before/after. See
 [Known Limitations](known_limitations.md) for what this loop can and cannot
 currently do end to end.
 
+## `glomeris autopilot <show|enable|revoke|run>`
+
+The subcommand is optional and defaults to `show`, so a bare
+`glomeris autopilot` reads the grant rather than acting on it. `run` is macOS
+only (exits 1 with an error message on other platforms); the other three verbs
+work anywhere.
+
+| Verb | What it does | Can it delete? |
+|---|---|---|
+| `show` | Prints the stored envelope and its path. Does not create the file it reads. | No |
+| `enable` | Writes a new envelope from this command line's flags and turns Autopilot on. Requires `--kinds`. | No |
+| `revoke` | Turns Autopilot off, keeping the limits. Effective for the next run; nothing to restart. | No |
+| `run` | Considers discovered candidates within the envelope. Deletes unless `--dry-run`. Holds the execution lock. | Yes |
+
+The flags, their defaults and their hard ceilings are documented in
+[Autopilot](autopilot.md), which is also where the argument for why an LLM
+plan file cannot expand authority lives. What this page adds:
+
+- `--max-bytes` takes raw bytes only — unlike `free --target`, there is no
+  `GB`/`MB` suffix parsing here, because an envelope is written once and read
+  many times and an exact number is easier to audit than a rounded one.
+- `--min-pressure` accepts any `PressureState` name case-insensitively
+  (`healthy`, `warn`, `pressured`, `critical`, `emergency`) plus the literal
+  `none`. An unobservable reading fails any floor you set, rather than passing
+  it.
+- `--preauthorize-ask` is repeatable and takes `kind:reason` using the same
+  tags `glomeris actions list` and `glomeris explain` print.
+- `run` prints an `AutopilotReport`: one line per candidate with its kind,
+  policy label, model rank and outcome, then the run totals (actions
+  attempted, actions succeeded, bytes freed, whether a budget stopped it
+  early) and the envelope it ran under. Refusals appear here and nowhere
+  else — `glomeris history` is a log of what happened to the filesystem, and
+  a refusal did not touch it.
+
+Exit codes: `0` success, including a run that found nothing it was allowed to
+do; `1` an action failed, or the envelope file could not be read or written;
+`2` usage error, including an unknown resource kind, a limit above its ceiling,
+or `enable` without `--kinds`; `3` Autopilot is not enabled, so nothing was
+attempted; `75` another invocation holds the execution lock.
+
+`3` exists so that "no grant" is distinguishable from "granted, ran, found
+nothing" in a script — both of which are quiet, and only one of which means
+the user has something to configure.
+
 ## Exit codes
 
 Also available as `glomeris help exit-codes`, which is the copy to trust — it
@@ -773,8 +817,10 @@ cannot drift between its own `--help` and the summary.
   specifically) an unrecognized argument, a missing flag value, missing
   live-mode LLM environment configuration, a base URL that cannot work, or an
   `--api-key`/`--key`/`--token` flag.
-- `75` — (`free`/`emergency`/`execute` only) the HORO-1054 execution lock
-  is already held by another `glomeris` invocation.
+- `3` — (`autopilot run` only) Autopilot is not enabled, so nothing was
+  attempted.
+- `75` — (`free`/`emergency`/`execute`/`autopilot run` only) the HORO-1054
+  execution lock is already held by another `glomeris` invocation.
 
 `glomeris execute` has its own, more specific set of exit codes (`0`–`5`
 plus `75`) — see its own section above for the full table; a couple of

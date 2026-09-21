@@ -54,6 +54,7 @@ fn main() {
         Some("emergency") => run_emergency_command(&args[1..]),
         Some("history") => run_history_command(&args[1..]),
         Some("free") => run_free_command(&args[1..]),
+        Some("autopilot") => run_autopilot_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             eprintln!("{}", help::render_unknown_command_hint());
@@ -1185,6 +1186,427 @@ fn run_free_command(args: &[String]) {
     };
 
     free_run(target, project_roots);
+}
+
+/// `glomeris autopilot [show|enable|revoke|run]` (HORO-1310).
+///
+/// Four verbs rather than a flag soup on one command, because the thing a
+/// reader most needs certainty about here is which invocations can delete
+/// something. `show` — the default, so a bare `glomeris autopilot` reads
+/// rather than acts — and `revoke` never can. `enable` writes a grant and
+/// performs no action. Only `run` executes, and only inside the grant that
+/// `show` just printed.
+fn run_autopilot_command(args: &[String]) {
+    let sub = args.first().map(String::as_str).unwrap_or("show");
+    let rest: &[String] = if args.is_empty() { &[] } else { &args[1..] };
+
+    match sub {
+        "show" => autopilot_show(rest),
+        "enable" => autopilot_enable(rest),
+        "revoke" => autopilot_revoke(rest),
+        "run" => autopilot_run(rest),
+        other => {
+            eprintln!("glomeris autopilot: unknown subcommand '{other}'");
+            print_command_usage("autopilot");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Exits 1 with the store's own message. One function so that a read
+/// failure and a write failure cannot drift into different exit codes.
+fn autopilot_store_error_exit(what: &str, e: glomeris::autopilot::StoreError) -> ! {
+    eprintln!("glomeris autopilot: failed to {what} the envelope: {e}");
+    std::process::exit(1);
+}
+
+fn autopilot_usage_exit(message: &str) -> ! {
+    eprintln!("glomeris autopilot: {message}");
+    print_command_usage("autopilot");
+    std::process::exit(2);
+}
+
+fn autopilot_reject_extra_args(sub: &str, args: &[String]) {
+    if let Some(unexpected) = args.first() {
+        autopilot_usage_exit(&format!("{sub} takes no arguments (got '{unexpected}')"));
+    }
+}
+
+/// Reads the value that must follow `args[i]`, or exits 2.
+fn autopilot_flag_value<'a>(args: &'a [String], i: usize, flag: &str) -> &'a str {
+    match args.get(i + 1) {
+        Some(value) => value.as_str(),
+        None => autopilot_usage_exit(&format!("{flag} needs a value")),
+    }
+}
+
+/// Prints the stored envelope. AC 6: what Autopilot is authorized to do,
+/// readable before anything is enabled and without running anything.
+fn autopilot_show(args: &[String]) {
+    autopilot_reject_extra_args("show", args);
+
+    let envelope = match glomeris::autopilot::load_envelope() {
+        Ok(envelope) => envelope,
+        Err(e) => autopilot_store_error_exit("read", e),
+    };
+
+    for line in envelope.describe() {
+        println!("{line}");
+    }
+    if let Ok(path) = glomeris::autopilot::store::default_envelope_path() {
+        println!("stored at:         {}", path.display());
+    }
+}
+
+/// `glomeris autopilot enable --kinds <tag,...> [limits]`.
+///
+/// Builds the new envelope from [`AutopilotEnvelope::revoked`] plus the
+/// flags on *this* command line — deliberately not from whatever is already
+/// on disk. An `enable` that accumulated onto the previous grant would make
+/// the authority in force the union of every `enable` ever run, which is
+/// precisely the thing nobody can hold in their head. One invocation states
+/// the whole grant; anything unstated is the conservative default.
+fn autopilot_enable(args: &[String]) {
+    use glomeris::autopilot::AutopilotEnvelope;
+    use glomeris::evidence::ResourceKind;
+    use glomeris::monitor::PressureState;
+    use glomeris::policy::ReasonCode;
+    use std::time::Duration;
+
+    let mut envelope = AutopilotEnvelope::revoked();
+    let mut kinds_given = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        match flag {
+            "--kinds" => {
+                let raw = autopilot_flag_value(args, i, flag);
+                for tag in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+                    let Some(kind) = ResourceKind::from_tag(tag) else {
+                        let known: Vec<&str> = ResourceKind::ALL.iter().map(|k| k.tag()).collect();
+                        autopilot_usage_exit(&format!(
+                            "'{tag}' is not a resource kind. Known kinds: {}",
+                            known.join(", ")
+                        ));
+                    };
+                    if let Err(e) = envelope.allow_kind(kind) {
+                        autopilot_usage_exit(&format!("--kinds {tag}: {e}"));
+                    }
+                    kinds_given = true;
+                }
+                i += 2;
+            }
+            "--max-actions" => {
+                let raw = autopilot_flag_value(args, i, flag);
+                let Ok(value) = raw.parse::<u32>() else {
+                    autopilot_usage_exit(&format!("--max-actions {raw:?} is not a whole number"));
+                };
+                if let Err(e) = envelope.set_max_actions(value) {
+                    autopilot_usage_exit(&format!("--max-actions: {e}"));
+                }
+                i += 2;
+            }
+            "--max-bytes" => {
+                let raw = autopilot_flag_value(args, i, flag);
+                let Ok(value) = raw.parse::<u64>() else {
+                    autopilot_usage_exit(&format!("--max-bytes {raw:?} is not a whole number"));
+                };
+                if let Err(e) = envelope.set_max_bytes(value) {
+                    autopilot_usage_exit(&format!("--max-bytes: {e}"));
+                }
+                i += 2;
+            }
+            "--max-duration" => {
+                let raw = autopilot_flag_value(args, i, flag);
+                let Ok(secs) = raw.parse::<u64>() else {
+                    autopilot_usage_exit(&format!(
+                        "--max-duration {raw:?} is not a whole number of seconds"
+                    ));
+                };
+                if let Err(e) = envelope.set_max_duration(Duration::from_secs(secs)) {
+                    autopilot_usage_exit(&format!("--max-duration: {e}"));
+                }
+                i += 2;
+            }
+            "--min-pressure" => {
+                let raw = autopilot_flag_value(args, i, flag);
+                let state = if raw.eq_ignore_ascii_case("none") {
+                    None
+                } else {
+                    match PressureState::ALL
+                        .iter()
+                        .copied()
+                        .find(|s| s.as_str().eq_ignore_ascii_case(raw))
+                    {
+                        Some(state) => Some(state),
+                        None => {
+                            let known: Vec<String> = PressureState::ALL
+                                .iter()
+                                .map(|s| s.as_str().to_lowercase())
+                                .collect();
+                            autopilot_usage_exit(&format!(
+                                "--min-pressure {raw:?} is not a pressure state. \
+                                 Known states: none, {}",
+                                known.join(", ")
+                            ));
+                        }
+                    }
+                };
+                envelope.set_min_pressure(state);
+                i += 2;
+            }
+            "--preauthorize-ask" => {
+                let raw = autopilot_flag_value(args, i, flag);
+                let Some((kind_tag, reason_tag)) = raw.split_once(':') else {
+                    autopilot_usage_exit(&format!(
+                        "--preauthorize-ask {raw:?} must be <kind>:<reason>, \
+                         e.g. node_modules:rebuild_cost_high"
+                    ));
+                };
+                let Some(kind) = ResourceKind::from_tag(kind_tag.trim()) else {
+                    autopilot_usage_exit(&format!(
+                        "--preauthorize-ask: '{kind_tag}' is not a resource kind"
+                    ));
+                };
+                let Some(reason) = ReasonCode::from_tag(reason_tag.trim()) else {
+                    autopilot_usage_exit(&format!(
+                        "--preauthorize-ask: '{reason_tag}' is not a policy reason code"
+                    ));
+                };
+                // The envelope refuses any reason that is not pre-authorizable
+                // — every PROTECTED reason, and every evidence-quality reason —
+                // so a typo here cannot become a grant.
+                if let Err(e) = envelope.preauthorize_ask(kind, reason) {
+                    autopilot_usage_exit(&format!("--preauthorize-ask: {e}"));
+                }
+                i += 2;
+            }
+            other => autopilot_usage_exit(&format!("unrecognized argument '{other}'")),
+        }
+    }
+
+    if !kinds_given {
+        autopilot_usage_exit(
+            "enable requires --kinds <tag,...>. An enabled envelope with an empty \
+             allowlist can execute nothing, so it is a usage error rather than a \
+             silent no-op",
+        );
+    }
+
+    envelope.enable();
+    if let Err(e) = glomeris::autopilot::save_envelope(&envelope) {
+        autopilot_store_error_exit("write", e);
+    }
+
+    println!("Autopilot is now ENABLED, authorized to:");
+    for line in envelope.describe() {
+        println!("  {line}");
+    }
+    println!();
+    println!("Revoke it at any time with `glomeris autopilot revoke`.");
+    println!("See what it would do, without doing it: `glomeris autopilot run --dry-run`.");
+}
+
+/// `glomeris autopilot revoke` — AC 7. One bit, and every run re-reads the
+/// file, so this takes effect on the next run with nothing to restart.
+fn autopilot_revoke(args: &[String]) {
+    autopilot_reject_extra_args("revoke", args);
+
+    let mut envelope = match glomeris::autopilot::load_envelope() {
+        Ok(envelope) => envelope,
+        Err(e) => autopilot_store_error_exit("read", e),
+    };
+    let was_enabled = envelope.is_enabled();
+    envelope.revoke();
+    if let Err(e) = glomeris::autopilot::save_envelope(&envelope) {
+        autopilot_store_error_exit("write", e);
+    }
+
+    if was_enabled {
+        println!("Autopilot revoked. No run can execute anything until it is enabled again.");
+    } else {
+        println!("Autopilot was already revoked. Nothing changed.");
+    }
+    // The limits survive revocation on purpose, so a later `enable` cannot
+    // come back with limits the user never read. Printing them here is how
+    // that stops being a surprise.
+    for line in envelope.describe() {
+        println!("  {line}");
+    }
+}
+
+/// `glomeris autopilot run [--dry-run] [--plan-file <path>]
+/// [--project-root <path>]...`
+///
+/// The only Autopilot verb that can delete. Every candidate it considers was
+/// discovered by this process's own detectors, is re-classified by
+/// [`glomeris::policy::classify`], must pass the envelope gate, must be
+/// authorized through [`glomeris::policy::approval::authorize`], and is then
+/// executed through the same TOCTOU revalidation every other deletion in
+/// this binary goes through.
+///
+/// `--plan-file` is the only way a model's output reaches this command, and
+/// it can do exactly one thing with it: change the order candidates are
+/// considered in. There is deliberately no live-provider mode here — asking
+/// a provider is `llm-plan`'s job, and keeping the network out of the
+/// executing command means no deletion in this product can be blocked on, or
+/// hurried by, a network call.
+#[cfg(target_os = "macos")]
+fn autopilot_run(args: &[String]) {
+    use glomeris::actions::llm::{plan_with_llm, FilePlanProvider, ValidatedPlanItem};
+    use glomeris::actions::ActionRegistry;
+    use glomeris::autopilot::{
+        load_envelope, run_autopilot, AutopilotItemOutcome, AutopilotRunRequest,
+    };
+    use glomeris::evidence::correlate::DefaultEvidenceCollector;
+    use glomeris::monitor::{FsStat, ThresholdConfig};
+    use glomeris::platform::macos::MacosFsStat;
+    use glomeris::policy::PolicyConfig;
+    use std::time::{Instant, SystemTime};
+
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
+        Ok(v) => v,
+        Err(e) => autopilot_usage_exit(&format!("run: {e}")),
+    };
+
+    let mut dry_run = false;
+    let mut plan_file: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < remaining.len() {
+        match remaining[i].as_str() {
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            "--plan-file" => {
+                plan_file = Some(PathBuf::from(autopilot_flag_value(
+                    &remaining,
+                    i,
+                    "--plan-file",
+                )));
+                i += 2;
+            }
+            other => autopilot_usage_exit(&format!("run: unrecognized argument '{other}'")),
+        }
+    }
+
+    let envelope = match load_envelope() {
+        Ok(envelope) => envelope,
+        Err(e) => autopilot_store_error_exit("read", e),
+    };
+
+    // The grant is printed before anything runs, so the output of a real run
+    // opens with the authority it acted under rather than asking the reader
+    // to go and look it up afterwards.
+    println!("Autopilot envelope:");
+    for line in envelope.describe() {
+        println!("  {line}");
+    }
+    println!();
+
+    if !envelope.is_enabled() {
+        println!("Autopilot is not enabled. Nothing was attempted.");
+        println!("Enable a narrow envelope first, e.g.");
+        println!("  glomeris autopilot enable --kinds node_modules --max-actions 1");
+        std::process::exit(3);
+    }
+
+    // The lock is held only by a run that can delete. A dry run mutates
+    // nothing, so it has no business blocking a real `free` in another
+    // terminal.
+    let _execution_lock = if dry_run {
+        None
+    } else {
+        Some(acquire_execution_lock_or_exit("autopilot", false))
+    };
+
+    let candidates: Vec<glomeris::evidence::Evidence> =
+        discover_and_classify_now(project_roots.clone())
+            .into_iter()
+            .map(|(evidence, _decision)| evidence)
+            .collect();
+
+    let actions = ActionRegistry::builtin();
+
+    let model_order: Vec<ValidatedPlanItem> = match &plan_file {
+        None => Vec::new(),
+        Some(path) => {
+            let result = plan_with_llm(
+                &FilePlanProvider { path: path.clone() },
+                &candidates,
+                &actions,
+            );
+            // A plan that could not be read or parsed is not a failure of the
+            // run: ordering falls back to local discovery order, which is
+            // exactly what a run with no plan file does. Said out loud rather
+            // than swallowed, because "my plan was ignored" is otherwise
+            // indistinguishable from "my plan was followed".
+            if let Some(e) = &result.provider_error {
+                eprintln!(
+                    "glomeris autopilot run: the plan file was not usable ({e}) — \
+                     continuing in local discovery order"
+                );
+            }
+            if result.dropped_unknown_resource > 0 || result.dropped_unknown_action > 0 {
+                eprintln!(
+                    "glomeris autopilot run: dropped {} plan item(s) naming a resource \
+                     this machine does not have, and {} naming an action this binary \
+                     does not register",
+                    result.dropped_unknown_resource, result.dropped_unknown_action
+                );
+            }
+            result.validated_items
+        }
+    };
+
+    let observed_pressure = match MacosFsStat.stat(std::path::Path::new("/")) {
+        Ok(usage) => {
+            Some(ThresholdConfig::default().classify(usage.used_percent(), usage.free_bytes))
+        }
+        // Unobserved, not "fine": the gate treats a missing observation as
+        // failing any configured pressure floor.
+        Err(e) => {
+            eprintln!(
+                "glomeris autopilot run: could not read disk usage ({e}) — \
+                 pressure is unobserved"
+            );
+            None
+        }
+    };
+
+    let collector = DefaultEvidenceCollector::default();
+    let policy = PolicyConfig::default();
+
+    let report = run_autopilot(AutopilotRunRequest {
+        envelope: &envelope,
+        candidates,
+        model_order: &model_order,
+        collector: &collector,
+        actions: &actions,
+        policy: &policy,
+        observed_pressure,
+        now: SystemTime::now(),
+        started_at: Instant::now(),
+        audit_log_path: &actions_jsonl_path(),
+        dry_run,
+    });
+
+    print!("{report}");
+
+    if report
+        .items
+        .iter()
+        .any(|item| matches!(item.outcome, AutopilotItemOutcome::Failed(_)))
+    {
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn autopilot_run(_args: &[String]) {
+    eprintln!("glomeris autopilot run: only supported on macOS");
+    std::process::exit(1);
 }
 
 fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryReport) {

@@ -132,6 +132,7 @@ pub fn build_action_history_report(records: &[AuditRecord]) -> ActionHistoryRepo
                     .actual_reclaimed_bytes
                     .map(crate::reporting::human_bytes),
                 source: record.source.clone(),
+                model_rank: record.model_rank,
             })
             .collect(),
     }
@@ -1239,6 +1240,9 @@ fn record_audit(
         abort_reason,
         actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
         source: source.to_string(),
+        // `execute`/`free` act on a resource the user named, never on a
+        // model's ranking — only `autopilot` ever sets this.
+        model_rank: None,
     };
     let _ = crate::monitor::append_audit_record(audit_log_path, &record);
 }

@@ -106,6 +106,28 @@ codebase yet. Real interactive approval UX is scoped to a separate ticket
 (HORO-955) and is deliberately out of scope here — this book documents the
 CLI surface that exists on `main` today, not what HORO-955 may add.
 
+## A pre-authorized `ASK` under Autopilot cannot complete (HORO-1310)
+
+Autopilot's `--preauthorize-ask <kind>:<reason>` grants narrow advance consent
+for one `ASK` reason on one kind. The gate admits such a candidate,
+`policy::approval::authorize` issues a real `Approval` for it, and then
+`executor::execute`'s deletion-time revalidation *always* aborts it with
+`AbortReason::PolicyClassDowngraded`. Nothing is deleted.
+
+The cause is upstream of Autopilot and shared by every deleting command.
+`Ask`/`RebuildCostHigh` arises only from a **per-instance**
+`Regenerability::NotRegenerable`, while `executor::build_fresh_evidence`
+rebuilds regenerability from the resource *kind*'s static default — so the
+fresh classification lands on `AutoSafe` and the class comparison trips.
+
+Left as-is deliberately: the failure direction is the safe one (refuse, mutate
+nothing), and changing `build_fresh_evidence` changes the TOCTOU anchor
+`execute`, `free`, `emergency` and `autopilot run` all depend on. It is pinned
+by `src/autopilot/run.rs`'s
+`a_preauthorized_ask_still_aborts_at_deletion_time_revalidation`, so the fix
+starts from a failing test that names the cause. See
+[Autopilot](autopilot.md).
+
 ## Correlation depends on `lsof`/`git`/`pgrep` being present and stable
 
 Runtime correlation is subprocess-based. CI validates this against

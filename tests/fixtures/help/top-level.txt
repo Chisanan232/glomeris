@@ -21,6 +21,7 @@ ACT — change this machine. Policy decides every deletion.
   execute       Run one action against one resource, under policy.
   free          Reclaim space until a target is reached.
   emergency     Degraded-path recovery with no network and no LLM.
+  autopilot     Read, grant or revoke a bounded standing authorization.
 
 OBSERVE — what happened before. Nothing is changed.
   history       Recorded disk-pressure transitions.
