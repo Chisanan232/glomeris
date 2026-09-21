@@ -37,25 +37,34 @@ cd glomeris
 cargo build --release
 ```
 
-Prebuilt macOS release artifacts will be published under
-[Releases](https://github.com/Chisanan232/glomeris/releases) once available.
+Prebuilt macOS binaries for `aarch64-apple-darwin` and `x86_64-apple-darwin`
+are published with checksums under
+[Releases](https://github.com/Chisanan232/glomeris/releases).
+
+There is also a menu-bar app (`macos/GlomerisMenuBar`), built from this repo
+with Xcode. It is a thin client over the same binary — see the
+[Menu Bar App](https://chisanan232.github.io/glomeris/menu_bar_app.html) page.
 
 ## Quick start
 
 ```sh
-glomeris detect
-glomeris scan
-glomeris free --target 10GB
+glomeris --help          # every command, grouped by what it can do
+glomeris detect          # what tool caches exist here
+glomeris clean --dry-run # the real plan, executing nothing
 ```
 
-See the [CLI reference](https://chisanan232.github.io/glomeris/cli_reference.html)
-for the full, current command surface — it is still evolving.
+`detect`, `scan`, `explain`, `clean` and `llm-plan` never mutate anything.
+`execute`, `free`, `emergency` and `autopilot run` delete — read the
+[safety model](https://chisanan232.github.io/glomeris/safety_model.html) first.
 
 ## Docs
 
-Full documentation (safety model, evidence model, emergency mode, BYOK
-configuration, architecture) is published at
-[chisanan232.github.io/glomeris](https://chisanan232.github.io/glomeris/).
+Full documentation is published at
+[chisanan232.github.io/glomeris](https://chisanan232.github.io/glomeris/):
+safety model, evidence model, emergency mode, [policy-constrained
+Autopilot](https://chisanan232.github.io/glomeris/autopilot.html), BYOK LLM
+configuration, the menu-bar app, architecture, and a specific accounting of
+[known limitations](https://chisanan232.github.io/glomeris/known_limitations.html).
 
 ## License
 
