@@ -18,6 +18,7 @@
 		3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */; };
 		3ED66478457DDD7A1A300158 /* GlomerisClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47250A5B4D152C9EE65C9F49 /* GlomerisClientTests.swift */; };
 		3F2B44719B74A21F10643721 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
+		4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */; };
 		56F73C2BCC1F258A41649D5E /* StatusHealthSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 702FC176DA9694CDEA648E8A /* StatusHealthSectionView.swift */; };
 		58C4BC24751B58EFB279C852 /* GlomerisDtos.swift in Sources */ = {isa = PBXBuildFile; fileRef = 369DFF13FAF9E42E7B08AF3F /* GlomerisDtos.swift */; };
 		58E636471320C9A52E2E8E57 /* GlomerisDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0D343988045ECE0F0B72093 /* GlomerisDesignSystem.swift */; };
@@ -84,6 +85,7 @@
 		856468BC1E164E5D94FFBC9D /* MenuBarAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarAppearance.swift; sourceTree = "<group>"; };
 		8DD38E68A0373439B59F1F98 /* DtoGoldenFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DtoGoldenFixturesTests.swift; sourceTree = "<group>"; };
 		99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatesSectionView.swift; sourceTree = "<group>"; };
+		9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutopilotPreferencesTests.swift; sourceTree = "<group>"; };
 		9D48A22858E94A17C0A670F4 /* GlomerisVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisVocabulary.swift; sourceTree = "<group>"; };
 		A258960CB7D0D961F0980060 /* HistoryAuditSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAuditSectionViewTests.swift; sourceTree = "<group>"; };
 		A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisExecutableLocator.swift; sourceTree = "<group>"; };
@@ -159,6 +161,7 @@
 			children = (
 				36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */,
 				C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */,
+				9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */,
 				AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */,
 				7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */,
 				8DD38E68A0373439B59F1F98 /* DtoGoldenFixturesTests.swift */,
@@ -274,6 +277,7 @@
 				DB5D8383B59675585CAAAB8A /* AiPlanSectionViewTests.swift in Sources */,
 				EAA07A11FEF627787AF615A7 /* AiProviderPreferencesView.swift in Sources */,
 				24E8F3886E209400E58A9387 /* AiProviderPreferencesViewTests.swift in Sources */,
+				4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */,
 				F74F65D0FD1B4A09F0CD73ED /* AutopilotPreferencesView.swift in Sources */,
 				D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */,
 				3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */,
