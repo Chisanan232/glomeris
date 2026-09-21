@@ -204,16 +204,37 @@ exactly the behaviour this criterion asks for.
 
 Mechanically:
 
-- **Accessibility API coverage is uneven.** Per-file counts of
-  `accessibility*` modifiers: `HistoryAuditSectionView` 7,
-  `AiProviderPreferencesView` 6, `CandidatesSectionView` 6,
-  `AiPlanSectionView` 5, `GlomerisPopoverView` 4, `MenuBarAppearance` 4,
-  `StatusHealthSectionView` 3, `GlomerisMenuBarApp` 1 — and **zero** in both
-  `CandidateDetailView.swift` and `ProjectRootsPreferencesView.swift`. No
-  file uses `.help(` at all, so there are no tooltips either. The
-  candidate-detail view is where the Clean button and the confirmation path
-  live, which makes it the worst file to have no labels. Filed as HORO-1323
-  (see Finding 3).
+- **Accessibility coverage is mostly centralised, and per-file counts are a
+  misleading way to measure it.** Counting `accessibility*` modifiers per file
+  shows `HistoryAuditSectionView` 7, `AiProviderPreferencesView` 6,
+  `CandidatesSectionView` 6, `AiPlanSectionView` 5, `GlomerisPopoverView` 4,
+  `MenuBarAppearance` 4, `StatusHealthSectionView` 3, `GlomerisMenuBarApp` 1,
+  and zero in `CandidateDetailView.swift` and
+  `ProjectRootsPreferencesView.swift` — but that count is not the story. The
+  labels live in `GlomerisDesignSystem`, which is where they belong:
+  `GlomerisBadgeView` is one VoiceOver element with
+  `.accessibilityElement(children: .ignore)`, `.accessibilityLabel(term
+  .accessibilityLabel)` and `.help(term.explanation)`; `GlomerisPathText`
+  carries `.accessibilityLabel("Path: \(path)")` plus a `.help(path)` tooltip
+  so a middle-truncated path is still read in full; card titles get
+  `.accessibilityAddTraits(.isHeader)`. `CandidateDetailView` composes
+  exclusively from those shared components (`GlomerisCard`,
+  `GlomerisDetailRow`, `GlomerisBadgeView`, `GlomerisPathText`,
+  `GlomerisStateMessageView`), so its zero is inheritance, not absence.
+- **Two concrete gaps remain, and they are both on controls.**
+  `CandidateDetailView`'s `Button("Clean")` takes its VoiceOver label from its
+  title, so it is announced — but it has no `.accessibilityHint` saying what
+  will be deleted, and it stacks two independent `.disabled` modifiers
+  (`!viewModel.isCleanEnabled`, then `isExecuting`) with nothing that conveys
+  *which* reason is in force, so a screen-reader user hears an unavailable
+  button and cannot find out why. In
+  `ProjectRootsPreferencesView`, the per-row remove control is an icon-only
+  `Button` whose label is `Image(systemName: "minus.circle")` with no
+  `.accessibilityLabel` — it announces as its symbol rather than as "remove
+  this project root" — and the row's path is a bare `Text(root)` with
+  `.truncationMode(.middle)` instead of `GlomerisPathText`, so it is the one
+  place a truncated path is read as truncated. Filed as HORO-1323 (see
+  Finding 3).
 - **Light/dark is structurally sound.** There are no hardcoded
   `Color(red:…)`, `Color(.sRGB…)` or `Color(white:)` literals anywhere in
   the Swift sources, so nothing is pinned to one appearance.
@@ -332,12 +353,24 @@ unrecognized argument, and `status`/`detect` return 0, `explain` returns 1.
 Root cause is `split_flags` in `src/main.rs`, which pushes any token not in
 `known_flags` into `positionals` instead of rejecting it.
 
-### Finding 3 (non-blocking) — two views have no accessibility labels at all
+### Finding 3 (non-blocking) — two interactive controls are unlabelled or unexplained
 
 Details under AC7. Existing ticket: **HORO-1323**, filed for
-`CandidateDetailView.swift`. This gate found a second file in the same state,
-`ProjectRootsPreferencesView.swift`, which should be added to that ticket's
-scope rather than tracked separately.
+`CandidateDetailView.swift`.
+
+That ticket's premise needs narrowing, and this gate narrowed it. The original
+observation was that `CandidateDetailView.swift` contains zero accessibility
+modifiers. It does — but it composes entirely from `GlomerisDesignSystem`
+components that carry labels, header traits and tooltips centrally, so most of
+that view is in fact labelled. Measuring accessibility by per-file modifier
+count was the wrong instrument.
+
+What survives is narrower and more specific: the Clean button has no hint and
+no conveyed disabled-reason behind two stacked `.disabled` modifiers, and
+`ProjectRootsPreferencesView`'s icon-only remove button has no label while its
+row path bypasses `GlomerisPathText`. Those are the two things to fix, and
+`ProjectRootsPreferencesView` should be added to HORO-1323's scope rather than
+tracked separately.
 
 ### Finding 4 (BLOCKING for a release) — the release pipeline will fail on the next tag, and `brew install glomeris` cannot work
 
@@ -411,7 +444,8 @@ either PASS above with its evidence, or listed here.
 
 Two non-blocking defects are filed and should not gate a tag: **HORO-1322**
 (unknown-flag strictness on `status`/`detect`/`explain`) and **HORO-1323**
-(missing accessibility labels in two views).
+(an unlabelled icon-only remove button, and a Clean button whose
+disabled-reason is not conveyed).
 
 ## Recommended next experiment
 
