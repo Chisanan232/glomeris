@@ -203,16 +203,37 @@ disk.
 and `x86_64-apple-darwin`, published as GitHub Release assets with
 checksums. Building from source remains fully supported.
 
-## No GUI
+## Resolved (HORO-1305 through HORO-1309): there is a GUI
 
-Everything in this book is the `glomeris` CLI binary and its optional
-`launchd` background agent. A SwiftUI (or any other) GUI app is not part of
-this MVP.
+This page used to say a SwiftUI app was not part of this MVP. There is one:
+a `LSUIElement` menu-bar app, documented in [Menu Bar App](menu_bar_app.md).
 
-## The CLI surface itself is still evolving
+What has not changed is where authority lives. The app is a thin client over
+the same CLI — it shells out to `glomeris` and renders what comes back. It
+classifies nothing, decides nothing, and holds no policy logic, which a CI
+guard (`scripts/check-no-policy-label-branching.sh`) enforces mechanically
+rather than by convention. Every screen maps back to a named CLI invocation;
+that table is at the end of the Menu Bar App page.
 
-This book documents `main`'s actual `match` arms as of the time this book
-was written. A separate, in-flight ticket may extend the CLI (new
-subcommands, flags, or output formats) without changing anything in the
-safety model described in this book. If a command described here no longer
-matches `src/main.rs`, trust the source.
+Two things the app deliberately does not surface: `glomeris emergency`, and
+Autopilot's envelope. See [Autopilot](autopilot.md) for why the standing grant
+is CLI-only today.
+
+## What holds this book to the code
+
+Three mechanical checks, because the drift this page is about was found by
+reading rather than by CI:
+
+- `tests/help_golden.rs` pins every rendered help surface byte for byte
+  against committed fixtures, so a command's own help text cannot change
+  silently.
+- `scripts/check-docs-cover-cli-commands.sh` requires
+  [CLI Reference](cli_reference.md) to have a section for every command in
+  `src/cli/help.rs`'s single `COMMANDS` table. A new subcommand now fails CI
+  until it is documented.
+- `scripts/check-vocabulary-covers-cli-tokens.sh` compares the CLI's JSON
+  tokens against the menu-bar app's wording for them, in both directions.
+
+None of that can catch prose that goes stale, which is what the rest of this
+page is for. Where this book and `src/main.rs` disagree, the source is right
+and the disagreement is a bug on this page.
