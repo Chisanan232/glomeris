@@ -1,17 +1,21 @@
 # Quick Start
 
-The commands below are the actual top-level subcommands `src/main.rs`
-dispatches on today. This surface is still evolving — check
-[CLI Reference](cli_reference.md) and `main.rs` itself for the current,
-authoritative list before relying on any specific flag.
+A short tour of the commands worth running first. The complete list, with
+every flag and exit code, is in [CLI Reference](cli_reference.md) — and in the
+binary itself, which is the better habit: `glomeris --help`, then
+`glomeris help <command>` for any one of them.
 
-## See the version
+If you would rather click than type, the menu-bar app covers detect, explain,
+clean and AI Plan over the same binary — see [Menu Bar App](menu_bar_app.md).
+
+## Find out where to start
 
 ```sh
 glomeris
 ```
 
-With no arguments, it just prints `glomeris <version>` and exits.
+Prints the version and one line pointing at `glomeris --help`. Nothing else;
+a bare invocation reads no disks and changes nothing.
 
 ## Discover what tool caches exist on this machine
 
@@ -47,10 +51,32 @@ glomeris free --target 15%
 
 `--target` is required and accepts either an absolute size (`B`/`KB`/`MB`/
 `GB`/`TB`, binary/1024-based) or a percentage of total capacity (`0`–`100`,
-suffixed `%`). See [Safety Model](safety_model.md) and
-[Known Limitations](known_limitations.md) before running this against a real
-machine — as of this ticket, no detector-produced candidate can currently
-complete a real deletion through this path (see Known Limitations for why).
+suffixed `%`).
+
+**This one deletes.** An earlier version of this page said no real deletion
+could complete through this path; that stopped being true in HORO-994. Read
+[Safety Model](safety_model.md) first, and note that `free` declines every
+`ASK` candidate rather than prompting (see
+[Known Limitations](known_limitations.md)) — so it reclaims only what policy
+classified `AUTO_SAFE` on its own.
+
+To see the plan without acting, use `glomeris clean --dry-run` instead.
+
+## Run unattended, inside limits you grant
+
+```sh
+glomeris autopilot                                  # what am I allowing today?
+glomeris autopilot enable --kinds node_modules \
+    --max-actions 1 --max-bytes 1073741824
+glomeris autopilot run --dry-run                    # the real bounded plan
+```
+
+The one command that acts without you watching, so the grant is written to a
+file you can read rather than inferred. It grants nothing until you `enable`
+it, `--kinds` is required, and `--max-bytes` is a plain byte count. `AUTO_SAFE`
+only unless you pre-authorise one specific `ASK` reason on one specific kind;
+`PROTECTED` refuses unconditionally and no flag here changes that. See
+[Autopilot](autopilot.md).
 
 ## Try emergency mode (macOS only)
 
@@ -58,5 +84,6 @@ complete a real deletion through this path (see Known Limitations for why).
 glomeris emergency
 ```
 
-See [Emergency Mode](emergency_mode.md) for exactly what this does and does
-not do today.
+Takes no arguments by design, and acts machine-wide on everything it finds
+`AUTO_SAFE`. See [Emergency Mode](emergency_mode.md) for exactly what it does
+and does not do before running it on a machine you care about.
