@@ -2,9 +2,13 @@
 
 `glomeris emergency` (`src/emergency/mod.rs`, macOS only) is a **degraded**
 recovery path that must produce a useful result even when SQLite/history/log
-writes fail, there is no network, there is no LLM provider configured, and
-there is no GUI. It is not `glomeris free --target` with a flag — its scope
+writes fail, there is no network, there is no LLM provider configured, and no
+GUI is running. It is not `glomeris free --target` with a flag — its scope
 and limitations are deliberately narrower.
+
+The menu-bar app does not expose this command, deliberately: `emergency` takes
+no arguments and acts machine-wide, which is not a thing to put behind a
+one-click control. It is CLI-only.
 
 ## The invariant is unchanged
 
