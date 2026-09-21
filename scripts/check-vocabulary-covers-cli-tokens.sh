@@ -25,20 +25,28 @@
 #
 # COVERAGE — deliberately partial, and it says so in the PASS line
 # ----------------------------------------------------------------
-# Nine of the twelve vocabularies are checked. The other three cannot be,
+# Ten of the twelve vocabularies are checked. The other two cannot be,
 # honestly, because they have no single canonical producer to diff
-# against: `ExecuteReport::outcome`, `ExecuteRefusalReport::reason` and
-# `AuditRecord::source` are built from string literals at their call
-# sites (src/cli/mod.rs, src/emergency/mod.rs, src/main.rs) rather than
-# from one `as_str`-style match. Grepping those literals repo-wide also
-# picks up test assertions and unrelated strings — `"busy"` appears as a
-# temp-lock filename in src/executor/lock.rs — so a set-equality check
-# built on it would produce false failures and, worse, invite someone to
-# loosen it until it passed. Those three stay covered by the transcribed
-# Swift tests only, and this script reports 9/12 rather than printing a
-# bare PASS that reads as "all twelve verified".
+# against: `ExecuteReport::outcome` and `ExecuteRefusalReport::reason` are
+# built from string literals at their call sites (src/cli/mod.rs,
+# src/main.rs) rather than from one `as_str`-style match. Grepping those
+# literals repo-wide also picks up test assertions and unrelated strings
+# — `"busy"` appears as a temp-lock filename in src/executor/lock.rs — so
+# a set-equality check built on it would produce false failures and,
+# worse, invite someone to loosen it until it passed. Those two stay
+# covered by the transcribed Swift tests only, and this script reports
+# 10/12 rather than printing a bare PASS that reads as "all twelve
+# verified".
 #
-# Exit 0 = the nine checked vocabularies match. Exit 1 = drift, or an
+# `AuditRecord::source` was the third such vocabulary until HORO-1312
+# gave it a producer. It did not stay merely unchecked: HORO-1310 added
+# `autopilot_auto_safe` and `autopilot_preauthorized_ask` at new call
+# sites, and nothing here could have told anyone whether the GUI had
+# learned words for them. `ActionSource::as_str` in
+# src/monitor/persistence.rs is now the sole producer, so it is diffed
+# like the rest.
+#
+# Exit 0 = the ten checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -76,6 +84,11 @@ VOCABULARIES=(
   # `build_llm_check_report`, where `"ok"` came from a function call rather
   # than a match arm and so would have been invisible here.
   'llmCheckOutcome;;src/actions/llm.rs;;llm_check_outcome;;LlmCheckOutcome'
+  # HORO-1312. `AuditRecord::source` stays a `String` on the read side, so
+  # that a future version's new source value cannot make `read_audit_tail`
+  # drop a user's history — but every writer now goes through this enum,
+  # which is what makes the set diffable at all.
+  'actionSource;;src/monitor/persistence.rs;;as_str;;ActionSource'
 )
 
 # Print the body of a function, from its `fn <name>` line to the line
@@ -212,5 +225,5 @@ fi
 echo ""
 echo "PASS: ${checked} of 12 vocabularies verified against their Rust producer."
 echo "Not verified here (no single canonical producer to diff — see this script's header):"
-echo "  outcome, refusal, source — covered by the transcribed Swift tests only."
+echo "  outcome, refusal — covered by the transcribed Swift tests only."
 exit 0
