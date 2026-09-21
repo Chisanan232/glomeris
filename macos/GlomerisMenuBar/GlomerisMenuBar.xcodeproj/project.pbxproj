@@ -15,6 +15,7 @@
 		2827AD2ABB4D9B3FF64489F2 /* GlomerisDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0D343988045ECE0F0B72093 /* GlomerisDesignSystem.swift */; };
 		3165A2E5224163803248FF2D /* MenuBarAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */; };
 		316F2E44994F8F44D10C01F6 /* ProjectRootsPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */; };
+		36F60F807942391399DB01D2 /* ProjectRootsPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */; };
 		3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */; };
 		3ED66478457DDD7A1A300158 /* GlomerisClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47250A5B4D152C9EE65C9F49 /* GlomerisClientTests.swift */; };
 		3F2B44719B74A21F10643721 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
@@ -46,6 +47,7 @@
 		BE11AF504111C29A277E925E /* CandidatesSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */; };
 		C49D0E67DB2391025B3E7064 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		C79301D61905D743C5B5B52C /* GlomerisPopoverViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2538D1D665F56D4E896B4CE2 /* GlomerisPopoverViewTests.swift */; };
+		D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */; };
 		D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */; };
 		DB5D8383B59675585CAAAB8A /* AiPlanSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */; };
 		E67F00D16D2CAFE9E74443CB /* CandidatesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */; };
@@ -82,6 +84,7 @@
 		734678C2344EF491614D0692 /* GlomerisMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GlomerisMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatesSectionViewTests.swift; sourceTree = "<group>"; };
 		7FB1194E381928C94F7317F0 /* GlomerisVocabularyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisVocabularyTests.swift; sourceTree = "<group>"; };
+		8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsPreferencesViewTests.swift; sourceTree = "<group>"; };
 		856468BC1E164E5D94FFBC9D /* MenuBarAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarAppearance.swift; sourceTree = "<group>"; };
 		8DD38E68A0373439B59F1F98 /* DtoGoldenFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DtoGoldenFixturesTests.swift; sourceTree = "<group>"; };
 		99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatesSectionView.swift; sourceTree = "<group>"; };
@@ -174,6 +177,7 @@
 				7FB1194E381928C94F7317F0 /* GlomerisVocabularyTests.swift */,
 				A258960CB7D0D961F0980060 /* HistoryAuditSectionViewTests.swift */,
 				C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */,
+				8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */,
 				DA84B79B4966F05DE18D3127 /* ProjectRootsStoreTests.swift */,
 				298ADFCC189E89897778A649 /* StatusHealthSectionViewTests.swift */,
 			);
@@ -303,6 +307,8 @@
 				86AAAE7934B24C3234B3C04D /* HistoryAuditSectionViewTests.swift in Sources */,
 				871C68E0439087303FCBF13E /* MenuBarAppearance.swift in Sources */,
 				3165A2E5224163803248FF2D /* MenuBarAppearanceTests.swift in Sources */,
+				36F60F807942391399DB01D2 /* ProjectRootsPreferencesView.swift in Sources */,
+				D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */,
 				89543AEC87E7A164FB4ABCB1 /* ProjectRootsStore.swift in Sources */,
 				8B353B39BE18016E0CA9624F /* ProjectRootsStoreTests.swift in Sources */,
 				56F73C2BCC1F258A41649D5E /* StatusHealthSectionView.swift in Sources */,
