@@ -7,85 +7,74 @@
 > mdBook and `cargo doc` from Rust source comments) never touches it.
 
 This is the HORO-1313 release gate for the MVP 2.0 iteration (HORO-1305
-through HORO-1312). It is written criterion by criterion against that
-ticket's ten acceptance criteria, and it deliberately separates what was
-*verified on this machine* from what *still needs the founder*. The verdict
-section at the end does not round anything up.
+through HORO-1312, plus HORO-1320 through HORO-1325). It is written criterion
+by criterion against that ticket's ten acceptance criteria, and it deliberately
+separates what was *verified on this machine* from what *still needs the
+founder*. The verdict section at the end does not round anything up.
+
+**This is the second pass.** The first pass (merged as PR #77) ran against
+`main` at `1663bf5`. Four stories have merged since, two of them fixing things
+that pass found, so every criterion was re-verified against a freshly built
+artifact rather than carried forward. Where this pass contradicts the first,
+the contradiction is called out rather than quietly overwritten — including two
+places where the first pass, or work done between the passes, was **wrong**
+(see Findings 4 and 6, and the corrected help line counts under AC8).
 
 ## Metadata
 
 - **Date:** 2026-09-21
 - **Released version/tag tested:** none. This gate ran against `main` at
-  `1663bf5` (`Merge pull request #76 … HORO-1321`), which is ahead of the
-  last tag (`v0.2.0`). There is no MVP 2.0 tag yet — cutting one is what this
-  gate is deciding about.
+  `342da6b` (`Merge pull request #80 … HORO-1325`), which is 330 commits ahead
+  of the last tag (`v0.2.0`). There is no MVP 2.0 tag yet — cutting one is what
+  this gate is deciding about, and Finding 5 is about why one cannot currently
+  be cut at all.
 - **Exact artifact tested:** `GlomerisMenuBar.app` built from `main` at
-  `1663bf5` with the release CLI embedded at
-  `Contents/MacOS/glomeris`, ad-hoc re-signed
-  (`codesign --force --deep --sign -`), staged at a scratch path outside any
-  git working tree. `Identifier=dev.glomeris.GlomerisMenuBar`,
-  `Signature=adhoc`, `TeamIdentifier=not set`. The embedded CLI reports
-  `glomeris 0.2.0`. This is deliberately the same shape
-  `macos-app-release.yml` produces in CI — bundle plus embedded CLI, ad-hoc
-  signed — rather than a dev `target/release` binary run by hand.
+  `342da6b` with the release CLI embedded at `Contents/MacOS/glomeris`, ad-hoc
+  re-signed (`codesign --force --deep --sign -`), staged at
+  `~/glomeris-dogfood-mvp2-final/`, outside any git working tree.
+  `Identifier=dev.glomeris.GlomerisMenuBar`, `Signature=adhoc`,
+  `TeamIdentifier=not set`. The embedded CLI reports `glomeris 0.2.0` (see
+  Finding 5 — that string is stale, not wrong). This is deliberately the same
+  shape `macos-app-release.yml` produces in CI — bundle plus embedded CLI,
+  ad-hoc signed — rather than a dev `target/release` binary run by hand.
 - **Host/platform:** macOS 15.7.7 (build 24G720), Apple M1 Pro, arm64.
-  Disk at gate time: `WARN`, 78.0% used, 101.1 GB free of 460.4 GB.
+  Disk at gate time: `WARN`, 80.0% used, 92.2 GB free of 460.4 GB.
 - **Surfaces exercised:** `glomeris --help`; `--help` for `status`, `scan`,
-  `detect`, `explain`, `clean`, `llm-plan`, `llm-check`, `history`,
-  `actions`; `glomeris help exit-codes`; `glomeris status`; `glomeris
-  llm-plan --project-root <fixture> --json` against a loopback HTTP listener;
-  `glomeris execute` and `glomeris autopilot run` against disposable `/tmp`
-  fixtures (earlier in this pass); the menu-bar item and popover via the
-  accessibility API.
+  `detect`, `explain`, `clean`, `llm-plan`, `llm-check`, `history`, `actions`;
+  `glomeris help exit-codes`; `status`; `detect`; `explain`; `llm-check`;
+  `llm-plan --json` against a loopback HTTP listener; `execute` on `AUTO_SAFE`,
+  `PROTECTED` and `ASK` fixtures across five flag combinations; `autopilot
+  show`/`enable`/`revoke`/`run` including `--dry-run`, all against disposable
+  fixtures under a temporary directory; the menu-bar item and popover via the
+  accessibility API; an isolated `.app`-bundled SwiftUI probe for the sheet
+  keyboard measurement under AC7.
 - **Real LLM API call count:** 0 to any external provider. One
-  OpenAI-compatible request was issued to `http://127.0.0.1:19731`, a local
+  OpenAI-compatible request was issued to `http://127.0.0.1:19741`, a local
   capture listener, with a self-invented placeholder key. No real credential
   was used and nothing left this machine.
 - **Model name:** `fake-capture-model` (the placeholder sent to the loopback
   listener).
 - **Approximate API cost:** $0.00 — no external provider was contacted.
 
-## Artifact under test, and why it had to be rebuilt
+## Artifact under test, and why it was rebuilt again
 
-The first thing this gate found was about itself rather than the product.
+The first pass rebuilt the rig because the then-running dogfood instance had no
+embedded CLI and was falling back to stale on-`PATH` binaries. That reasoning
+still holds and is not repeated here. This pass rebuilt again for a simpler
+reason: four stories merged after `1663bf5`, two of which (HORO-1310's GUI
+surface, HORO-1325's accessibility labels) change what a founder would be
+looking at. Observing an artifact three stories behind `main` is what the first
+pass called out, so it was not repeated.
 
-The dogfood instance that had been running since 2026-09-20 (from an older
-scratch bundle) has **no embedded CLI** — its `Contents/MacOS/` contains only
-`GlomerisMenuBar`. `GlomerisExecutableLocator` therefore falls through to
-`PATH` and then to `knownInstallDirectories`, and both on-`PATH` copies on
-this machine (`/opt/homebrew/bin/glomeris`, mtime 2026-09-20 17:45, and
-`/usr/local/bin/glomeris`, mtime 2026-09-19 20:05) predate HORO-1311 — both
-answer `glomeris: unknown command '--version'`. That instance was three
-stories behind `main` and would have produced observations about code that is
-no longer what ships.
-
-So the rig was rebuilt at a new path rather than repaired in place: nothing
-was deleted, the old bundle is still on disk untouched, and neither on-`PATH`
-binary was overwritten (`/usr/local/bin` is root-owned and was left alone).
-
-Resolution was then confirmed empirically rather than assumed from the
-locator's source order. Sampling `ps` for spawned children missed them — the
-CLI invocations the popover makes are too short-lived for a `ps` loop to
-catch reliably — so the check used access times instead. After opening the
-popover through the accessibility API, the **bundled** CLI's atime had moved
-to 11:27:40 (its mtime is 11:21:05, so it was executed after being staged),
-while both on-`PATH` binaries still showed atime 11:17:08, the moment they
-were last interrogated by hand. The app runs its own bundled, version-matched
-CLI and did not touch the stale ones.
-
-Popover reachability was also confirmed through the accessibility API:
-`menu bar 2` holds exactly one item, `description = "status menu"`,
-`enabled = true`, 36×24; clicking it brings up one `AXWindow` with subrole
-`AXSystemDialog`. All four sections (`StatusHealthSectionView`,
-`CandidatesSectionView`, `AiPlanSectionView`, `HistoryAuditSectionView`) are
-rendered eagerly inside the popover's `ScrollView`, so their `.task` blocks
-fire on open.
+Nothing was deleted to make room. The older rig is still on disk untouched, and
+neither on-`PATH` binary was overwritten — which turns out to matter, because
+one of them is now shadowing a real Homebrew install (Finding 6).
 
 ## Acceptance criteria
 
 ### AC1 — all implementation stories merged with CI green: **PASS**
 
-Ten PRs for this iteration are merged into `main`:
+Fourteen PRs for this iteration are merged into `main`:
 
 | PR | Branch |
 |---|---|
@@ -99,20 +88,26 @@ Ten PRs for this iteration are merged into `main`:
 | #74 | `v0.0.1/HORO-1310/feat/autopilot_envelope` |
 | #75 | `v0.0.1/HORO-1312/docs/reconcile_terminology` |
 | #76 | `v0.0.1/HORO-1321/docs/correct_install_claims` |
+| #77 | `v0.0.1/HORO-1313/docs/release_readiness_record` |
+| #78 | `v0.0.1/HORO-1320/docs/homebrew_tap_live` |
+| #79 | `v0.0.1/HORO-1310/feat/autopilot_gui_surface` |
+| #80 | `v0.0.1/HORO-1325/fix/a11y_project_roots` |
 
-On `main` at `1663bf5` both workflows are `completed/success`, and every job
-in the `CI` run is green: `test`, `deny`, `macos-app`, `no-policy-in-swift`,
-`xcodeproj-drift`, `app-icon-drift`, `vocabulary-covers-cli-tokens`,
-`docs-cover-cli-commands`, `credential-store-uses-keychain`.
+On `main` at `342da6b` all eleven check runs are `completed/success`: `test`,
+`build`, `deny`, `macos-app`, `no-policy-in-swift`, `xcodeproj-drift`,
+`app-icon-drift`, `vocabulary-covers-cli-tokens`, `docs-cover-cli-commands`,
+`credential-store-uses-keychain`, `deploy`.
 
 ### AC2 — Swift remains a thin client, confirmed mechanically and adversarially: **PASS**
 
-The CI guard is green, and it was also re-run directly against this tree:
+All six guard scripts were re-run directly against this tree and pass,
+including:
 
 ```
 PASS: no policyLabel/policy_label branching detected under macos/GlomerisMenuBar/Sources.
 PASS: macos/GlomerisMenuBar/Sources/GlomerisVocabulary.swift is display-only
       (no SwiftUI/AppKit, no control, no gating field).
+PASS: 10 of 12 vocabularies verified against their Rust producer.
 ```
 
 The adversarial half asked the opposite question — not "does the guard pass"
@@ -123,15 +118,20 @@ but "what authority could Swift exercise if it wanted to":
   `macos/GlomerisMenuBar/Sources`. The GUI has no code path that can delete
   anything at all; every deletion it appears to offer is the CLI's.
 - **Arbitrary execution:** the only process-spawning site is
-  `GlomerisClient.swift:386-387`, `Process()` with
+  `GlomerisClient.swift`, `Process()` with
   `process.executableURL = try resolveExecutableURL()`. There is no
   `launchPath`, no `/bin/sh`, no `/bin/bash`, no `system(`, no
-  `NSAppleScript`. The client is constructed with a *pinned* executable URL
-  (`init(executableURL:environment:)`, "always spawns exactly
-  `executableURL`, never resolving anything").
+  `NSAppleScript`. The client is constructed with a *pinned* executable URL.
 - **Policy:** no policy label is branched on, which is what the guard proves;
   combined with the two points above, the GUI cannot classify, cannot
   override, and cannot act outside the CLI.
+
+One methodological note, because it produced a wrong answer first: an
+unanchored grep for `system(` matches `.system(.headline, …)` font calls. The
+count above comes from anchored patterns (`(^|[^.[:alnum:]_])system\(`). The
+loose version reports authority the GUI does not have.
+
+That `10 of 12` line is not a pass with a footnote; it is Finding 7.
 
 ### AC3 — real founder dogfood recording blocking and non-blocking observations: **INCOMPLETE — requires the founder**
 
@@ -142,108 +142,219 @@ whether the status wording is *understood*, whether the candidate ranking
 something this pass can honestly self-certify. The rig is built, current, and
 running for that pass.
 
-### AC4 — at least one AI Plan against disposable fixtures with a real provider: **INCOMPLETE — requires the founder's own key**
+### AC4 — at least one AI Plan against disposable fixtures with a real provider: **INCOMPLETE — genuinely blocked on a provider credential**
 
-An AI Plan *was* produced end to end against a disposable fixture, through
-the real provider code path (`OpenAiCompatibleProvider`, real HTTP request,
-real response parsing) — but pointed at a loopback listener with a
-placeholder key, because a real provider needs a credential that is the
-founder's to supply. No credential on this workstation may be repurposed as
-an LLM API key, so the live-provider half of this criterion is deliberately
-left open rather than satisfied with the wrong key.
+This criterion was re-examined specifically to separate two things that could
+be confused: a provider-credential boundary, and an unrelated tooling quota
+interruption that happened mid-campaign. **It is the former.** The quota
+recovered; this did not change, because it was never the cause.
 
-What that loopback run *does* establish is the egress contract, which is AC9
-below.
+All three places the product can hold a BYOK configuration were probed,
+presence-only, never reading a value:
+
+| Location | Key | Result |
+|---|---|---|
+| Environment | `GLOMERIS_LLM_API_KEY` | not set |
+| Environment | `GLOMERIS_LLM_BASE_URL` | not set |
+| Environment | `GLOMERIS_LLM_MODEL` | not set |
+| Keychain, service `dev.glomeris.GlomerisMenuBar` | account `llmApiKey` | no item |
+| UserDefaults suite `dev.glomeris.GlomerisMenuBar` | `llmBaseUrl` | absent |
+| UserDefaults suite `dev.glomeris.GlomerisMenuBar` | `llmModel` | absent |
+
+The product's own diagnostic agrees, which is the check that matters because it
+is the one a user would run:
+
+```
+$ glomeris llm-check
+glomeris llm-check: missing LLM configuration — set GLOMERIS_LLM_API_KEY,
+GLOMERIS_LLM_BASE_URL, and GLOMERIS_LLM_MODEL
+exit 2
+```
+
+Everything on the near side of that boundary is done. An AI Plan *was* produced
+end to end against a disposable fixture through the real provider code path —
+`OpenAiCompatibleProvider`, a real HTTP request, a real 200 response, real
+response parsing, a real plan applied as ordering — but pointed at a loopback
+listener with a placeholder key. What remains is exactly one thing: a real
+endpoint and a real key, which are the founder's to supply.
+
+No credential on this workstation may be repurposed as an LLM API key, and that
+is not a formality here. The one candidate that exists is a corporate gateway
+credential, and routing it into a product's BYOK slot would make this machine's
+employer the unwitting provider for a personal project. It stays declined. The
+live-provider half of this criterion is left open rather than satisfied with the
+wrong key.
+
+What the loopback run *does* establish is the egress contract, which is AC9.
 
 ### AC5 — one safe manual action and one bounded Autopilot action execute successfully: **PASS**
 
-Both are recorded in the product's own audit log
-(`~/Library/Application Support/Glomeris/actions.jsonl`), on disposable
-`/tmp` fixtures, not on real machine resources:
+Re-run this pass against a fresh disposable fixture set, with the product's own
+audit log (`~/Library/Application Support/Glomeris/actions.jsonl`) as the
+evidence rather than this document's own narration:
 
-| When | Source | Resource | Class | Outcome | Reclaimed |
-|---|---|---|---|---|---|
-| 2026-09-21 10:33:13 | `execute` | `node_modules:/private/tmp/horo1313/proj-a/node_modules` | `AUTO_SAFE` | `succeeded` | 9,437,184 B |
-| 2026-09-21 10:34:55 | `autopilot_auto_safe` | `node_modules:/private/tmp/horo1313/proj-b/node_modules` | `AUTO_SAFE` | `succeeded` | 4,194,304 B |
+| Source | Resource | Class | Outcome | Reclaimed |
+|---|---|---|---|---|
+| `execute` | `node_modules:…/gate1313b/proj-a/node_modules` | `AUTO_SAFE` | `succeeded` | 9,437,184 B |
+| `execute` | `cargo_target_dir:…/gate1313b/ask-cargo/target` | `ASK` | `succeeded` | not measured — see below |
+| `autopilot_auto_safe` | `node_modules:…/gate1313b/proj-b/node_modules` | `AUTO_SAFE` | `succeeded` | 4,194,304 B |
 
-The Autopilot run was bounded by a real envelope, and the bound was the
-binding constraint rather than decoration: `allowed_kinds = node_modules`,
-`max_actions = 1`, `max_bytes = 5242880` (5 MiB — the 4 MiB fixture fits, a
-larger one would not have), `max_duration_secs = 60`, `min_pressure = none`.
-The envelope was revoked afterwards and is still revoked: `autopilot.conf`
-reads `enabled = false` today.
+The Autopilot half was exercised as a sequence rather than a single success,
+because a bound that is never tested is not a bound:
+
+1. **Default-deny.** With the envelope revoked, `autopilot run` exits 3,
+   prints "Autopilot is not enabled. Nothing was attempted", and touches
+   nothing.
+2. **A bound that bites.** Envelope granted at `max_bytes = 1048576` against a
+   4 MiB fixture. `--dry-run` and then a real run both refuse it by name:
+   `refused: would reclaim 4.0 MB with 1.0 MB left in the byte budget`.
+   Actions attempted 0, bytes freed 0, and **no ledger line was written** —
+   the refusal left the audit log untouched because nothing executed.
+3. **The kind allowlist gating real machine resources.** In the same runs, this
+   machine's real Homebrew cache (`AUTO_SAFE`) and real Xcode DerivedData were
+   both discovered and both refused: `refused: homebrew_cache is not on the
+   Autopilot allowlist`. The allowlist, not luck, is what kept a bounded
+   Autopilot run off real user data.
+4. **In-bounds execution.** Envelope widened to `max_bytes = 5242880` with
+   `max_actions = 1`. One action, 4.0 MB, `source = autopilot_auto_safe`,
+   `actual_reclaimed_bytes = 4194304`.
+5. **Revoked again.** `autopilot revoke`, then `autopilot run` exits 3 once
+   more. Limits are retained in the file, which is the documented behaviour so
+   that a later `enable` cannot return with limits nobody read.
+
+Two things about the `ASK` row are worth stating precisely, because both look
+like defects and neither is:
+
+- `actual_reclaimed_bytes` is `null` on a **succeeded** cargo action, while the
+  `node_modules` actions report a measured figure. This is deliberate and
+  documented at `src/executor/mod.rs`: a `RunTool` step delegates to an
+  external tool, "there is no general way to know what the external tool
+  actually freed, so that is honestly reported as `Unavailable` rather than
+  estimated". Only an all-`DeletePath` plan gets a measured total. The user is
+  shown an expectation with no verified actual — which is the correct answer on
+  the evidence-confidence axis, not a gap on the storage-impact axis.
+- The first attempt at this row **failed**, with `cargo exited with exit status:
+  101: no targets specified in the manifest`. That was a defect in the fixture,
+  not the product, and the product's behaviour on it was the point: `outcome:
+  failed`, `actual_reclaimed_bytes: null`, `expected_reclaimed_bytes` still
+  3,145,728 — it did not claim bytes it had not reclaimed. Both the failed and
+  the succeeded attempt are in the ledger; neither was tidied away.
 
 ### AC6 — one PROTECTED/UNKNOWN case proves fail-closed behaviour: **PASS**
 
-Two independent fail-closed refusals were observed on this machine.
+Five distinct execute-time refusals were observed on the shipping artifact this
+pass, covering three of the seven reason codes plus two argument-level
+rejections. Every one left the target on disk.
 
-**A live detector reaching `PROTECTED`.** A real `node_modules` tree created
+| Attempt | Reason | Exit |
+|---|---|---|
+| `PROTECTED`, plain `execute` | `protected` | 3 |
+| `PROTECTED`, valid `--confirm-ask` + freshly matching fingerprint | `protected` | 3 |
+| `ASK`, no consent flags | `ask_no_consent` | 3 |
+| `ASK`, consent flag with a fingerprint observed for a *different* resource | `ask_consent_mismatch` | 3 |
+| `ASK`, malformed fingerprint token | argument error | 2 |
+
+The `PROTECTED` pair is the load-bearing one. A real `node_modules` tree created
 under a path containing an `.ssh` component was discovered by the live Node
-detector, classified `Protected` with reason
-`protected_credential_material` and `executable: false`, and refused by the
-real executor twice — once by a plain `execute`, once with a valid
-`--confirm-ask` and a matching `--observed-fingerprint`. Exit 3 both times,
-nothing deleted. This disproved a standing claim in
-`book/src/known_limitations.md` that no live detector could reach a protected
-path; that page has since been corrected (`ba30c9b`, merged in PR #76), and
-the safety conclusion came out *stronger*, not weaker: a protected
-pattern matches a path *component*, so anything discoverable beneath one is
-protected.
+detector, classified `PROTECTED` with reason `protected_credential_material` and
+`executable: false`, and refused with a message that states the rule rather than
+the instance: *"no flag combination can authorize executing against it"*.
+Supplying a genuinely valid consent token changed nothing, which is the whole
+claim. The payload file is still on disk.
 
-**An unscoped `RunTool` step refused on the real machine.** Four `emergency`
-invocations earlier in this pass each reached
-`homebrew.cleanup.cache` on the real Homebrew cache, classified `AUTO_SAFE`,
-and each logged `"outcome":"failed"` with
-`"actual_reclaimed_bytes":null` — HORO-957's unconditional refusal of a
-`RunTool` step with `scoped_path: None`, holding on a real machine, against a
-real `AUTO_SAFE` classification, four times in a row. Nothing was cleaned.
-See Finding 1 for why those four runs happened at all; the refusal itself is
-exactly the behaviour this criterion asks for.
+This also re-confirms the correction the first pass made to
+`book/src/known_limitations.md` (merged in PR #76): a protected pattern matches
+a path *component*, so anything discoverable beneath one is protected, and the
+safety conclusion comes out stronger rather than weaker.
+
+Separately, and from earlier in the campaign rather than this pass: four
+`emergency` invocations each reached `homebrew.cleanup.cache` on the real
+Homebrew cache, classified `AUTO_SAFE`, and each logged `"outcome":"failed"`
+with `"actual_reclaimed_bytes":null` — HORO-957's unconditional refusal of a
+`RunTool` step with `scoped_path: None`, holding on a real machine against a
+real `AUTO_SAFE` classification, four times in a row. Nothing was cleaned. See
+Finding 1 for why those four runs happened at all.
+
+One observation that is not a refusal but belongs here: `xcode_derived_data`
+was classified `ASK` on one pass and `UNKNOWN_INCOMPLETE` on a later one, on
+the same real resource, because a build was writing to it in between. The
+classification moved on the evidence-quality axis while the safety outcome did
+not move at all — both passes refused it. That is the axis separation working,
+observed live rather than argued.
 
 ### AC7 — VoiceOver/keyboard/accessibility and light/dark exercised: **PARTIAL — mechanical half done, subjective half requires the founder**
 
-Mechanically:
+HORO-1325 merged since the first pass and closed half of what that pass found.
+What follows is the state *after* it.
 
-- **Accessibility coverage is mostly centralised, and per-file counts are a
-  misleading way to measure it.** Counting `accessibility*` modifiers per file
-  shows `HistoryAuditSectionView` 7, `AiProviderPreferencesView` 6,
-  `CandidatesSectionView` 6, `AiPlanSectionView` 5, `GlomerisPopoverView` 4,
-  `MenuBarAppearance` 4, `StatusHealthSectionView` 3, `GlomerisMenuBarApp` 1,
-  and zero in `CandidateDetailView.swift` and
-  `ProjectRootsPreferencesView.swift` — but that count is not the story. The
-  labels live in `GlomerisDesignSystem`, which is where they belong:
+- **Accessibility coverage is centralised, and per-file counts are a misleading
+  way to measure it.** The labels live in `GlomerisDesignSystem`:
   `GlomerisBadgeView` is one VoiceOver element with
   `.accessibilityElement(children: .ignore)`, `.accessibilityLabel(term
   .accessibilityLabel)` and `.help(term.explanation)`; `GlomerisPathText`
   carries `.accessibilityLabel("Path: \(path)")` plus a `.help(path)` tooltip
   so a middle-truncated path is still read in full; card titles get
   `.accessibilityAddTraits(.isHeader)`. `CandidateDetailView` composes
-  exclusively from those shared components (`GlomerisCard`,
-  `GlomerisDetailRow`, `GlomerisBadgeView`, `GlomerisPathText`,
-  `GlomerisStateMessageView`), so its zero is inheritance, not absence.
-- **Two concrete gaps remain, and they are both on controls.**
-  `CandidateDetailView`'s `Button("Clean")` takes its VoiceOver label from its
-  title, so it is announced — but it has no `.accessibilityHint` saying what
-  will be deleted, and it stacks two independent `.disabled` modifiers
-  (`!viewModel.isCleanEnabled`, then `isExecuting`) with nothing that conveys
-  *which* reason is in force, so a screen-reader user hears an unavailable
-  button and cannot find out why. In
-  `ProjectRootsPreferencesView`, the per-row remove control is an icon-only
-  `Button` whose label is `Image(systemName: "minus.circle")` with no
-  `.accessibilityLabel` — it announces as its symbol rather than as "remove
-  this project root" — and the row's path is a bare `Text(root)` with
-  `.truncationMode(.middle)` instead of `GlomerisPathText`, so it is the one
-  place a truncated path is read as truncated. Filed as HORO-1323 (see
-  Finding 3).
-- **Light/dark is structurally sound.** There are no hardcoded
-  `Color(red:…)`, `Color(.sRGB…)` or `Color(white:)` literals anywhere in
-  the Swift sources, so nothing is pinned to one appearance.
+  exclusively from those shared components, so its zero per-file count is
+  inheritance, not absence. The first pass reached this conclusion only after
+  first reaching the wrong one; it is restated here so the count is not
+  re-misread later.
+- **`ProjectRootsPreferencesView` is fixed** (HORO-1325, PR #80). Its icon-only
+  remove button, its placeholder-only text field and its Add button now carry
+  accessible names from a `ProjectRootsWording` enum, and seven new tests pin
+  the wording — including that two rows read *differently*, which was the
+  actual defect: "Remove" alone is read identically on every row, which on a
+  list of paths says nothing. A new design-system test
+  (`testNoIconOnlyControlShipsWithoutAName`) now guards the class of defect
+  rather than the instance.
+- **One gap remains, and it is on a control that deletes.**
+  `CandidateDetailView`'s `Button("Clean")` is announced from its title, but has
+  no `.accessibilityHint` saying what will be deleted, and it stacks two
+  independent `.disabled` modifiers (`!viewModel.isCleanEnabled`, then
+  `isExecuting`) with nothing conveying *which* reason is in force — so a
+  screen-reader user hears an unavailable button and cannot find out why. This
+  is what is left of HORO-1323.
+- **A related observation on the same view, recorded not filed.** The cleanup
+  confirmation alert's `Confirm` button is the alert's default keyboard action
+  and is the only file-deleting control in the target without
+  `role: .destructive`. The `Cancel` beside it does carry `role: .cancel`. This
+  is a one-line change, but it changes a confirmation dialog's default
+  behaviour, so it is left for the founder's AC3 pass to judge rather than
+  changed under a documentation ticket.
+- **Keyboard: a suspected trap, measured and dismissed.** The AI-provider
+  settings sheet presents from the menu-bar popover with no visible dismiss
+  control, no `Environment(\.dismiss)` and no `.keyboardShortcut(.cancelAction)`
+  — which reads like a keyboard dead end. It is not. Measured on macOS 13+, a
+  SwiftUI `.sheet` presented from a
+  `MenuBarExtra(…).menuBarExtraStyle(.window)` popover **is** dismissed by
+  Escape, and Escape dismisses only the sheet, leaving the popover open. The
+  measurement used a control run first — six seconds idle with no keystroke,
+  `sheets=1` — so a sheet that dismissed itself could not have been misread as
+  a keyboard success. Downgraded from a possible blocker to a discoverability
+  point for the founder's pass: it works, but nothing on screen says so.
+- **Light/dark is structurally sound.** No hardcoded `Color(red:…)`,
+  `Color(.sRGB…)` or `Color(white:)` literals anywhere in the Swift sources, so
+  nothing is pinned to one appearance.
 - **Colour is never load-bearing.** `GlomerisDesignSystem` renders every
-  vocabulary chip as symbol **and** word, with the tint as the third channel
-  — "The symbol and the word are both always present. The tint is the third
-  signal", and "a distinct symbol per state precisely so the tint is never
-  load-bearing". This satisfies the standing "do not rely on colour alone"
-  rule by construction rather than by review.
+  vocabulary chip as symbol **and** word, with the tint as the third channel.
+  This satisfies the standing "do not rely on colour alone" rule by
+  construction rather than by review.
+- **The GUI has wording for every refusal the CLI can emit.** All seven reason
+  codes documented on `ExecuteReport` resolve to a distinct title and
+  explanation in `GlomerisVocabulary.refusal`, plus a `busy` case and a
+  `default`, and all seven are asserted in the Swift tests. Three of them were
+  driven end to end against the shipping artifact under AC6. One of the seven
+  explains only one of its two causes — filed as HORO-1326, and the structural
+  reason this could drift unnoticed is Finding 7.
+
+A note on method, because it bounds what the above is worth: the accessibility
+API cannot read SwiftUI `Button` labels — six popover buttons all report an
+empty `name`, and a plainly-titled control does too, so absence proves nothing
+there. It also stops being able to coerce `entire contents of window 1` once a
+SwiftUI tree re-renders. Claims about the real app's accessibility therefore
+rest on source and tests; the one live keyboard measurement above was taken
+against an isolated `.app`-bundled probe built for that single question, which
+was then removed.
 
 The subjective half — an actual VoiceOver pass, actual keyboard-only
 navigation, and an eyes-on light/dark comparison — needs the founder.
@@ -251,66 +362,97 @@ navigation, and an eyes-on light/dark comparison — needs the founder.
 ### AC8 — CLI help validated from a clean install: **PASS, with one contradiction found**
 
 Validated against the *shipping artifact* (the CLI embedded in the freshly
-built bundle), not a dev binary. `glomeris --help` renders 45 lines,
-exit 0, and groups all fourteen commands by intent — INSPECT / PLAN / ACT /
-OBSERVE / SERVICE — with a "Start here" block naming four concrete first
-commands. Every non-destructive subcommand renders its own help at exit 0:
-`status` (18 lines), `scan` (25), `detect` (29), `explain` (31), `clean`
-(25), `llm-plan` (45), `llm-check` (28), `history` (20), `actions` (27).
-`glomeris help exit-codes` renders 19 lines and correctly calls out
-`execute` as the one worth reading in full.
+built bundle), not a dev binary. `glomeris --help` renders 45 lines, exit 0,
+and groups all fourteen commands into five bands by intent — INSPECT (4) /
+PLAN (3) / ACT (4) / OBSERVE (2) / SERVICE (1) — with a "Start here" block
+naming four concrete first commands.
+
+Every non-destructive subcommand renders its own help at exit 0:
+
+| Surface | Lines |
+|---|---|
+| `status --help` | 19 |
+| `scan --help` | 26 |
+| `detect --help` | 30 |
+| `explain --help` | 32 |
+| `clean --help` | 26 |
+| `llm-plan --help` | 46 |
+| `llm-check --help` | 29 |
+| `history --help` | 21 |
+| `actions --help` | 28 |
+| `help exit-codes` | 20 |
+
+**These counts correct the first pass**, which reported each of them one line
+short (18/25/29/31/25/45/28/20/27, and 19 for `help exit-codes`). The first
+pass measured them through an unquoted shell variable; zsh does not word-split
+an unquoted `$VAR`, so `$G $c` with `c="status --help"` passed *one* argument
+and every surface was measured wrong in the same direction. The counts here
+come from `${=c}` and were cross-checked against the committed golden fixtures
+in `tests/fixtures/help/`, which all eleven surfaces match byte for byte —
+except `top-level.txt`, whose single differing line is the deliberate
+`{VERSION}` placeholder that `help_golden.rs` substitutes at test time. A dev
+`target/release` binary produces the identical one-line difference, which is
+how the placeholder was distinguished from a real regression.
 
 `--help` was **deliberately not run** for `emergency`, `execute`, `free`,
-`autopilot` or `daemon`. Invoking a destructive-capable command merely to
-test its help surface is the exact mistake Finding 1 is about; those five are
-covered by `tests/help_golden.rs`, which pins every rendered help surface
-byte for byte and is green in the CI run cited under AC1.
+`autopilot` or `daemon`. Invoking a destructive-capable command merely to test
+its help surface is the exact mistake Finding 1 is about; those five are
+covered by `tests/help_golden.rs`, which pins every rendered help surface byte
+for byte and is green in the CI run cited under AC1. (`autopilot --help` *was*
+read this pass, as part of exercising the envelope under AC5 — reading the help
+of a command whose bounded behaviour is being tested against disposable
+fixtures is not the pattern Finding 1 prohibits.)
 
 The contradiction: `help exit-codes` promises that exit 2 means "an unknown
 command or subcommand, a missing or **unrecognized argument**". Measured
 against the same binary:
 
 ```
-status   --definitely-not-a-flag  -> exit 0
-detect   --definitely-not-a-flag  -> exit 0
-explain  --definitely-not-a-flag  -> exit 1
-llm-check --definitely-not-a-flag -> exit 2
+status    --definitely-not-a-flag  -> exit 0
+detect    --definitely-not-a-flag  -> exit 0
+explain   --definitely-not-a-flag  -> exit 1
+llm-check --definitely-not-a-flag  -> exit 2
+execute   --definitely-not-a-flag  -> exit 2
 ```
 
-`llm-check` honours the contract; `status` and `detect` silently swallow an
-unrecognized flag and report success, and `explain` treats it as a positional
-resource id and fails with "not found" rather than a usage error. This is
-HORO-1322, already filed — but the new help text now *asserts* the contract
-those three break, which strengthens the case (see Finding 2).
+`llm-check` and `execute` honour the contract; `status` and `detect` silently
+swallow an unrecognized flag and report success, and `explain` treats it as a
+positional resource id and fails with "not found" rather than a usage error.
+This is HORO-1322, already filed — and this pass found the same leniency in a
+*released* artifact, which makes it more than a main-branch inconsistency: the
+brew-installed `v0.2.0` binary answers `glomeris help exit-codes` by printing a
+one-line flat usage string and exiting **0**. Users on the released version get
+a success exit for a command that did not run. See Finding 2.
 
 ### AC9 — no secrets or absolute-path privacy regressions: **PASS, verified on the wire**
 
-Rather than trusting the unit tests, the actual egress was captured. A
-loopback HTTP listener stood in for the provider; `glomeris llm-plan
---project-root <disposable fixture> --json` was pointed at it with a
-placeholder key and ran to exit 0 against a real 200 response.
+Rather than trusting the unit tests, the actual egress was captured again this
+pass against the *shipping artifact*. A loopback HTTP listener stood in for the
+provider; `glomeris llm-plan --project-root <disposable fixture> --json` was
+pointed at it with a placeholder key and ran to exit 0 against a real 200
+response.
 
-The captured request was `POST /chat/completions`, `content-length: 1379`,
-`user-agent: ureq/3.4.1`. Against the **full captured bytes**, headers
-included:
+The captured request was `POST /chat/completions`, 1597 bytes total,
+`content-length: 1379`. Against the **full captured bytes**, headers included:
 
 | Probe | Occurrences |
 |---|---|
 | `/Users/` | 0 |
 | this machine's username | 0 |
 | `/private/tmp` | 0 |
-| the fixture path | 0 |
+| the fixture directory name | 0 |
 | this machine's hostname | 0 |
 | the working-tree directory name | 0 |
+| the string `glomeris` | 0 |
 
 The JSON body has exactly two top-level keys, `messages` and `model`. Each
 resource is described by exactly seven fields — `resource_id`, `kind`,
 `reclaimable_bytes`, `age_days`, `regenerability`, `completeness`,
-`offered_action_ids` — and `resource_id` is an **opaque alias**
-(`resource_1` … `resource_4`), not a path. No file contents, no file names,
-no user or host identity. The placeholder key appeared exactly once in the
-capture, in the `Authorization` header, which is where a credential sent to
-an endpoint the user named is supposed to be; it does not appear in the body.
+`offered_action_ids` — and `resource_id` is an **opaque alias** (`resource_1` …
+`resource_4`), not a path. No file contents, no file names, no user or host
+identity. The placeholder key appeared exactly once in the capture, in the
+`Authorization` header, which is where a credential sent to an endpoint the
+user named is supposed to be; it does not appear in the body.
 
 One thing worth stating plainly rather than filing: `--project-root` does not
 scope the payload. The captured body described the fixture's `node_modules`
@@ -321,7 +463,8 @@ is documented behaviour, not a regression: `src/cli/help.rs` already says
 `--project-root` does not "bound every detector, so it is not a privacy
 control". It is recorded here because it is the kind of thing a first-time
 BYOK user could reasonably misread, and the privacy preview in the GUI is the
-place that has to carry the point.
+place that has to carry the point. It is also the single most useful thing for
+the founder to judge before entering a real key.
 
 ### AC10 — release-readiness record ends in `READY_FOR_NEXT_STAGE` or lists exact blocking defects: **this record; verdict below**
 
@@ -329,155 +472,287 @@ place that has to carry the point.
 
 ### Finding 1 (process, non-blocking for the product) — destructive commands were executed to test dispatch
 
-Four `glomeris emergency` runs happened during this campaign for the purpose
+Four `glomeris emergency` runs happened earlier in this campaign for the purpose
 of exercising command dispatch and help behaviour, not because a fixture
 required them. They are visible in `actions.jsonl` at 03:30:05, 03:31:42,
 03:33:45 and 03:35:45 on 2026-09-21, and one `EMERGENCY` transition is in
-`history.tsv` (pressure 79.58%, 94.0 GiB free). Nothing was deleted — every
-one was refused by HORO-957's unscoped-`RunTool` guard — so the product's
-safety held, but the process was wrong: the real Homebrew cache was the
-target, and the only reason this is a non-event is that a guard caught it.
+`history.tsv`. Nothing was deleted — every one was refused by HORO-957's
+unscoped-`RunTool` guard — so the product's safety held, but the process was
+wrong: the real Homebrew cache was the target, and the only reason this is a
+non-event is that a guard caught it.
 
-The corrective rule now in force for the rest of this campaign, and applied
-throughout this gate: destructive-capable commands are not invoked to test
-dispatch or help; destructive paths are exercised only against disposable
-fixtures; `emergency` is not run at all. AC8 above documents the five help
-surfaces deliberately left to `help_golden.rs` for exactly this reason.
+The corrective rule remains in force and was applied throughout this pass:
+destructive-capable commands are not invoked to test dispatch or help;
+destructive paths are exercised only against disposable fixtures; `emergency` is
+not run at all. Every deletion recorded under AC5 this pass was inside a
+temporary fixture directory, and the two real resources Autopilot discovered
+were refused by its allowlist.
 
-### Finding 2 (non-blocking) — the new help text asserts a strictness contract three commands break
+### Finding 2 (non-blocking) — the strictness contract is broken in a released binary, not just on main
 
-Details under AC8. Existing ticket: **HORO-1322**. Worth re-scoping there
-that the defect is now a *documented-contract* violation, not just an
-inconsistency: `help exit-codes` shipped in HORO-1311 promises exit 2 for an
-unrecognized argument, and `status`/`detect` return 0, `explain` returns 1.
-Root cause is `split_flags` in `src/main.rs`, which pushes any token not in
-`known_flags` into `positionals` instead of rejecting it.
+Details under AC8. Existing ticket: **HORO-1322**.
 
-### Finding 3 (non-blocking) — two interactive controls are unlabelled or unexplained
+The first pass framed this as the new help text asserting a contract three
+commands break. This pass found the more concrete version: the released
+`v0.2.0` binary, installed via the now-live Homebrew tap, prints a one-line
+usage string and exits **0** for `glomeris help exit-codes`. That is not a
+main-branch inconsistency a user will never meet; it is the behaviour of the
+artifact the install instructions currently produce. Root cause is unchanged —
+`split_flags` in `src/main.rs` pushes any token not in `known_flags` into
+`positionals` instead of rejecting it.
 
-Details under AC7. Existing ticket: **HORO-1323**, filed for
-`CandidateDetailView.swift`.
+Worth recording as a method note too: this was nearly missed because the exit
+code was checked before the output. `help exit-codes` returning 0 looked like
+support for the command. It is the absence of support, expressed as leniency —
+which is the defect itself, arriving disguised as evidence against itself.
 
-That ticket's premise needs narrowing, and this gate narrowed it. The original
-observation was that `CandidateDetailView.swift` contains zero accessibility
-modifiers. It does — but it composes entirely from `GlomerisDesignSystem`
-components that carry labels, header traits and tooltips centrally, so most of
-that view is in fact labelled. Measuring accessibility by per-file modifier
-count was the wrong instrument.
+### Finding 3 (non-blocking) — one interactive control remains unexplained
 
-What survives is narrower and more specific: the Clean button has no hint and
-no conveyed disabled-reason behind two stacked `.disabled` modifiers, and
-`ProjectRootsPreferencesView`'s icon-only remove button has no label while its
-row path bypasses `GlomerisPathText`. Those are the two things to fix, and
-`ProjectRootsPreferencesView` should be added to HORO-1323's scope rather than
-tracked separately.
+Details under AC7. Existing ticket: **HORO-1323**, now narrower than when it
+was filed, and narrower than the first pass left it.
 
-### Finding 4 (BLOCKING for a release) — the release pipeline will fail on the next tag, and `brew install glomeris` cannot work
+Its original premise — that `CandidateDetailView.swift` contains zero
+accessibility modifiers — was true but misleading, because that view composes
+from shared components that carry labels centrally. The first pass corrected
+that and widened the ticket to cover `ProjectRootsPreferencesView`. HORO-1325
+has since **fixed** the `ProjectRootsPreferencesView` half and merged (PR #80).
 
-`dist-workspace.toml` carries `installers = ["homebrew"]`, `tap =
-"Chisanan232/homebrew-tap"` and `publish-jobs = ["homebrew"]`. On this state:
+What is left is one thing: the Clean button has no hint saying what will be
+deleted, and no conveyed disabled-reason behind two stacked `.disabled`
+modifiers. HORO-1323 should be rescoped to exactly that. The confirmation
+alert's non-destructive-role `Confirm` button is recorded under AC7 for the
+founder's judgement rather than folded into this ticket.
 
-- The tap repository does not exist (404).
-- The repository has no `HOMEBREW_TAP_TOKEN` secret (`actions/secrets`
-  reports `total_count: 0`), and there is no organization to inherit one from.
-- `publish-homebrew-formula` in the generated `release.yml` is guarded only
-  by a prerelease check, so it *will* run on a real tag, and its first step
-  is `actions/checkout` against that nonexistent repository with that missing
-  token.
-- `announce` is conditioned on
-  `needs.publish-homebrew-formula.result == 'skipped' || 'success'`, so a
-  failed homebrew job leaves `announce` unrun and the whole release run red —
-  even though `host` will already have created the GitHub Release with its
-  CLI tarballs attached.
+### Finding 4 (BLOCKING for a release) — the Homebrew publish job still has no credential
 
-CI never caught this because on pull-request runs the homebrew job reports
+This finding replaces the first pass's version of it, which is now partly
+obsolete and was partly wrong.
+
+**What has changed since:** `Chisanan232/homebrew-tap` now exists,
+`brew tap chisanan232/tap` resolves, and `brew install glomeris` installs
+formula 0.2.0 from it (6 files, 3.3 MB). The tap is no longer a 404, and the
+bootstrap formula's download URLs and SHA-256 sums point at real `v0.2.0`
+release assets. The first pass's "the tap repository does not exist" is
+resolved, and the documentation half was fixed and merged earlier (HORO-1321,
+PR #76).
+
+**What has not changed, and still blocks:** the repository has no
+`HOMEBREW_TAP_TOKEN` secret. `actions/secrets` reports `total_count: 0`, and
+there is no organization to inherit one from. In the generated `release.yml`,
+`publish-homebrew-formula` is guarded only by a prerelease check, so it *will*
+run on a real tag, and its first step is `actions/checkout` against
+`Chisanan232/homebrew-tap` with `token: ${{ secrets.HOMEBREW_TAP_TOKEN }}`
+followed by a `git push`. `announce` is conditioned on that job's result being
+`skipped` or `success`, so a failed homebrew job leaves `announce` unrun and
+the whole release run red — even though `host` will already have created the
+GitHub Release with its CLI tarballs attached.
+
+CI never catches this because on pull-request runs the homebrew job reports
 `skipping`.
 
-Importantly, `v0.2.0` itself was clean: `git show v0.2.0:dist-workspace.toml`
-has `installers = []`, and that release's run had no homebrew job. This is a
-post-`v0.2.0` regression introduced with the installer configuration, not a
-long-standing breakage.
+`v0.2.0` itself was clean: `git show v0.2.0:dist-workspace.toml` has
+`installers = []`, and that release's run had no homebrew job. This is a
+post-`v0.2.0` regression introduced with the installer configuration.
 
-Tracked as **HORO-1320**, and it needs a founder decision rather than an
-implementation: either create `Chisanan232/homebrew-tap` and mint a
-`HOMEBREW_TAP_TOKEN`, or back the Homebrew installer out of MVP 2.0. Both
-creating a repository and minting a credential are the founder's to do, and
-choosing the second option would pre-empt the first, so neither was done
-here.
+Tracked as **HORO-1320**. The remaining step is a credential, which is the
+founder's to mint and is stated exactly in the hand-back rather than guessed
+at here. `release.yml` is generated by cargo-dist and was deliberately not
+hand-edited: the `plan` job would drift against it, and editing generated CI
+definitions is out of bounds regardless.
 
-The documentation half was fixed autonomously and is already merged
-(**HORO-1321**, PR #76): `book/src/installation.md` no longer presents the
-tap as the recommended install, states in the future tense that it does not
-work yet, and the prebuilt-archive path is now the recommended one. The book
-had been telling users to run a `brew install` that could not succeed.
+### Finding 5 (BLOCKING for a release) — no MVP 2.0 tag can be cut from the current state
+
+New this pass, and not visible in the first one. Filed as **HORO-1328**.
+
+`Cargo.toml` on `main` still declares `version = "0.2.0"` — the same version as
+an existing tag — 330 commits later. `v0.2.0` cannot be reused, and any other
+tag names a version the workspace does not declare, which on a tag push is fed
+straight to `dist host --steps=create --tag=$GITHUB_REF_NAME`.
+
+This also explains a smaller thing that looks like a bug and is not: the
+shipping artifact's embedded CLI answers `--version` with `glomeris 0.2.0`
+while being 330 commits ahead of that release. The string is stale rather than
+wrong, and it means a dogfood build is indistinguishable by `--version` from
+the released one — which is worth knowing when reading any report that cites a
+version.
+
+What this needs is one value, not an implementation. 0.3.0 is the conventional
+pre-1.0 choice; 1.0.0 is the alternative if MVP 2.0 is meant to be the first
+stable public release, which is a product-identity decision. It is sequenced
+*before* HORO-1320's formula work, because the formula's URLs name the release
+tag.
+
+cargo-dist's exact failure mode for a tag/version mismatch was **not**
+reproduced locally: installing cargo-dist means piping a remote script into a
+shell, which this workstation does not permit without explicit authorization.
+The blocking conclusion does not depend on that detail — the tag collision
+alone is sufficient — and the unverified part is flagged rather than presented
+as measured.
+
+### Finding 6 (non-blocking; corrects an earlier claim in this campaign) — the Homebrew install is installed but not linked
+
+Also new this pass, and it narrows a claim made between the two passes.
+
+`brew install glomeris` genuinely succeeded: the keg is in the Cellar at
+`/opt/homebrew/Cellar/glomeris/0.2.0/bin/glomeris`, dated 13 Sep, and invoking
+it directly works (`status` exits 0 and reports real disk pressure; `detect
+--json` returns three candidates). But the keg was **never linked** —
+`/opt/homebrew/var/homebrew/linked/glomeris` does not exist — and brew says why
+in its own caveat:
+
+```
+The following glomeris executables are shadowed by other commands earlier in your PATH:
+  glomeris (shadowed by /opt/homebrew/bin/glomeris)
+```
+
+`/opt/homebrew/bin/glomeris` is a hand-placed **regular file** from 20 Sep,
+3,398,432 bytes, not a symlink into the Cellar, and it predates HORO-1311 (it
+answers `unknown command '--version'`). So `which glomeris` on this machine
+resolves to a stale hand-placed binary, not the brew-installed one, and
+`brew link --overwrite --dry-run` reports it "would remove"
+`/opt/homebrew/bin/glomeris`.
+
+Two consequences, kept separate:
+
+- **For this campaign's record:** the earlier claim of a *clean* brew
+  tap/install/CLI verification is too strong and is narrowed here. What is
+  verified is that the tap resolves, the formula installs, and the installed
+  binary runs. What is *not* verified is a clean first-time install path
+  end to end, because on this machine the result is shadowed.
+- **For the product:** this is local machine state created by this campaign's
+  own earlier steps, not a product defect. It is recorded rather than fixed
+  because fixing it means deleting a binary, and nothing gets deleted here
+  without the founder saying so. It is on the housekeeping list.
+
+There is a real user-facing point inside it, though: anyone who installed
+Glomeris by hand before tapping will silently keep running the old binary, with
+only a `brew` caveat to say so. Worth a line in `book/src/installation.md` when
+HORO-1320 is settled.
+
+### Finding 7 (non-blocking) — refusal reason codes are the one user-facing vocabulary the drift guard cannot check
+
+New this pass. Filed as **HORO-1327**.
+
+`scripts/check-vocabulary-covers-cli-tokens.sh` verifies 10 of 12 vocabularies
+against their Rust producer and names the two it cannot: `outcome` and
+`refusal`, "covered by the transcribed Swift tests only". The guard can only
+diff a vocabulary with a single `as_str`-style producer, and the seven refusal
+reason codes have none — they are documented in a doc comment on
+`ExecuteReport` and then written as separate string literals at distinct call
+sites in `src/main.rs`.
+
+This is not hypothetical. `ActionSource` had the same shape — five strings at
+four call sites — and HORO-1310 then added `autopilot_auto_safe` and
+`autopilot_preauthorized_ask` without the GUI learning words for them. Nothing
+failed loudly; the history panel would simply have called Autopilot's own rows
+an unrecognised trigger. HORO-1312 gave `ActionSource` a single producer, and
+the guard now verifies it — that line is in the AC2 output above.
+
+`refusal` is the vocabulary where silence costs most: an unrecognised reason
+renders as "The CLI refused for a reason this app has no wording for" at
+exactly the moment a user is being told they may not delete something. All
+seven codes are correctly worded and test-pinned *today*, which is why this is
+a drift risk rather than an outage.
+
+Related but distinct, filed separately as **HORO-1326**: the GUI's wording for
+`ask_consent_mismatch` explains only one of that code's two documented causes.
+It says "The resource changed after you confirmed" — but the reason also fires
+for a fingerprint observed against a *different* resource, which was reproduced
+under AC6, and in that case nothing changed. Safety is unaffected (exit 3,
+nothing deleted, and the GUI's own flow cannot reach that cause today); the
+statement is simply untrue in one branch.
 
 ## Cost
 
 $0.00 in API spend — no external provider was contacted (AC4's live-provider
-half is what remains). Machine cost: one CLI release build, one Xcode release
-build, four refused `emergency` runs, two real deletions totalling 13.6 MB
-inside `/tmp` fixtures.
+half is what remains). Machine cost this pass: one CLI release build, one Xcode
+release build, six real deletions totalling roughly 20 MB, all inside a
+temporary fixture directory, plus one isolated SwiftUI probe app built and
+removed.
 
 ## Verdict
 
 **NOT `READY_FOR_NEXT_STAGE`.**
 
-One blocking defect, stated exactly:
+Two blocking defects, stated exactly, and they are sequenced:
 
-1. **HORO-1320** — `dist-workspace.toml` configures a Homebrew installer
-   against a tap repository that does not exist, with no credential to push
-   to it. Tagging MVP 2.0 in this state produces a red release run and a
-   documented install path that cannot work. Needs a founder decision (create
-   the tap and mint the token, or remove the installer from this milestone).
+1. **HORO-1328** — `Cargo.toml` declares `0.2.0`, which is already a released
+   tag, 330 commits behind `main`. No MVP 2.0 tag can be cut from this state
+   whatever number is chosen. Needs one decision (0.3.0 or 1.0.0), then a bump.
+   **First**, because the Homebrew formula's URLs name the release tag.
+2. **HORO-1320** — `dist-workspace.toml` configures a Homebrew installer whose
+   publish job checks out `Chisanan232/homebrew-tap` with
+   `secrets.HOMEBREW_TAP_TOKEN`, and that secret does not exist
+   (`total_count: 0`). The tap itself now exists and installs, so this has
+   narrowed from "two things missing" to exactly one: a credential the founder
+   must mint. Tagging in this state produces a red release run with `announce`
+   unrun.
 
-Three criteria are **incomplete rather than failed**, and none of them can be
-closed by more of this kind of work:
+Three criteria are **incomplete rather than failed**, and none can be closed by
+more of this kind of work:
 
-- **AC3** — the subjective founder dogfood pass. Rig is built and running.
-- **AC4** — one AI Plan through a real provider, which needs the founder's own
-  API key.
-- **AC7** — the VoiceOver / keyboard-only / eyes-on light-dark pass.
+- **AC3** — the subjective founder dogfood pass. Rig is built, current, running.
+- **AC4** — one AI Plan through a real provider. Genuinely blocked at a
+  provider-credential boundary, verified in all three storage locations and by
+  the product's own `llm-check` (exit 2). Everything on the near side of that
+  boundary is done.
+- **AC7** — the VoiceOver / keyboard-only / eyes-on light-dark pass. Its
+  mechanical half is done and one suspected keyboard trap was measured and
+  dismissed.
 
 No threshold was waived to produce this verdict. Every criterion that could be
 verified on this machine was verified against the shipping artifact and is
-either PASS above with its evidence, or listed here.
+either PASS above with its evidence, or listed here. Two places where an earlier
+claim in this campaign was too strong are corrected rather than left standing:
+the help line counts under AC8, and the brew install verification in Finding 6.
 
-Two non-blocking defects are filed and should not gate a tag: **HORO-1322**
-(unknown-flag strictness on `status`/`detect`/`explain`) and **HORO-1323**
-(an unlabelled icon-only remove button, and a Clean button whose
-disabled-reason is not conveyed).
+Four non-blocking defects are filed and should not gate a tag: **HORO-1322**
+(unknown-flag strictness, now shown to affect a released binary), **HORO-1323**
+(the Clean button's missing hint and unconveyed disabled-reason, rescoped),
+**HORO-1326** (one refusal reason's wording covers one of two causes) and
+**HORO-1327** (refusal reason codes have no single producer, so the drift guard
+skips them).
 
 ## Recommended next experiment
 
-Decide HORO-1320 first, because it is cheap either way and it is the only
-thing standing between this state and a tag. Then run the founder pass on the
-rig as built — its value is concentrated in three questions this gate cannot
-answer: is the menu-bar icon findable without being told where it is, does
-the candidate ordering match what the founder would have chosen by hand, and
-does the privacy preview make the "inventory leaves, paths do not" distinction
-land before a key is entered.
+Settle HORO-1328 then HORO-1320, in that order — both are single decisions, and
+together they are the only thing standing between this state and a tag. Then run
+the founder pass on the rig as built. Its value is concentrated in four
+questions this gate cannot answer:
+
+- Is the menu-bar icon findable without being told where it is?
+- Does the candidate ordering match what the founder would have chosen by hand?
+- Does the privacy preview make the "inventory leaves, paths do not"
+  distinction land *before* a key is entered? AC9 establishes that the
+  distinction is real; whether it is legible is the open question.
+- Does the Autopilot surface make "AI recommends, policy decides, executor
+  verifies" visible, given that AC5 shows the allowlist is what actually kept a
+  bounded run off real user data?
 
 ## Explicitly not tested / uncertain
 
-- **`emergency` was not exercised deliberately.** Its dispatch and its
-  refusal behaviour are both evidenced above (Finding 1), but no `emergency`
-  run was performed *for* this gate, and none should be.
-- **`--help` for `emergency`, `execute`, `free`, `autopilot`, `daemon`** was
-  not invoked; those surfaces rest on `tests/help_golden.rs`.
-- **No live external LLM call.** The provider path is exercised end to end,
-  but against a loopback listener.
-- **Install from published instructions was not performed end to end.** The
-  instructions themselves were corrected in HORO-1321, and the reason a real
-  `brew install` was not attempted is Finding 4 — there is nothing to install
-  from yet. Downloading and verifying a release tarball was covered by the
-  2026-09-13 pass against `v0.2.0`.
+- **`emergency` was not exercised.** Its dispatch and its refusal behaviour are
+  both evidenced above (Finding 1, AC6), but no `emergency` run was performed
+  *for* this gate, and none should be.
+- **`--help` for `emergency`, `execute`, `free`, `daemon`** was not invoked;
+  those surfaces rest on `tests/help_golden.rs`.
+- **No live external LLM call.** The provider path is exercised end to end, but
+  against a loopback listener. This is AC4.
+- **cargo-dist behaviour was not reproduced locally** (Finding 5). Installing
+  it requires piping a remote script into a shell.
+- **A clean first-time `brew install` was not verified end to end** (Finding 6).
+  The formula installs; the result is shadowed on this machine by a
+  pre-existing hand-placed binary that was deliberately not removed.
 - **`GlomerisMenuBar.app.zip` has never been published.**
   `macos-app-release.yml` landed after `v0.2.0` was tagged, so releases so far
-  carry only CLI tarballs. The workflow is therefore unproven in a real
-  `release: published` run; the bundle shape it produces is what this gate
-  built by hand, but CI has never executed it.
+  carry only CLI tarballs. The bundle shape it produces is what this gate built
+  by hand, but CI has never executed it in a real `release: published` run.
 - **Gatekeeper quarantine flow was not walked.** The rig was built locally, so
-  it carries no `com.apple.quarantine` flag; the documented System Settings
-  path in `book/src/installation.md` has not been re-walked in this pass.
+  it carries no `com.apple.quarantine` flag.
+- **VoiceOver was not driven programmatically.** The accessibility API cannot
+  read SwiftUI `Button` labels, so an automated pass would produce empty names
+  for correctly-labelled controls and prove nothing. Claims under AC7 rest on
+  source and tests, except the one keyboard measurement taken against an
+  isolated probe app.
 - **Single host only.** macOS 15.7.7 on Apple M1 Pro. The `x86_64` target is
   built but was not run.
