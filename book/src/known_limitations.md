@@ -97,14 +97,21 @@ repeatable `--project-root <path>` flag is now wired into `detect`/
 `explain`/`clean`/`free` (deliberately not `emergency`, which takes no
 arguments by design).
 
-## `ASK` has no interactive handling in this MVP
+## `glomeris free` still declines every `ASK` candidate
 
-`RecoveryConfig::auto_approve_ask` is `false` in the CLI's wiring — every
-`Ask`-classified candidate is reported as declined/skipped, never executed,
-because there is no interactive prompt implemented anywhere in this
-codebase yet. Real interactive approval UX is scoped to a separate ticket
-(HORO-955) and is deliberately out of scope here — this book documents the
-CLI surface that exists on `main` today, not what HORO-955 may add.
+This section used to say `Ask` had no handling at all, because no interactive
+prompt existed. Narrower than that now: `glomeris execute --confirm-ask
+--observed-fingerprint <token>`, the menu-bar app's Clean button, and
+Autopilot's `--preauthorize-ask` all supply a real `UserConsent` — see
+[Safety Model](safety_model.md).
+
+What remains is specific to one command. `glomeris free`'s recovery loop wires
+`RecoveryConfig::auto_approve_ask: false` (`src/main.rs`), so every
+`Ask`-classified candidate inside that loop is reported as declined/skipped
+and never executed, however much of the target it would have reclaimed. There
+is still no TTY prompt anywhere in this codebase; a `free` run cannot ask you
+mid-loop, so it does not ask at all. To act on an `Ask` candidate, use
+`explain --json` to read its `fingerprint_token` and then `execute`.
 
 ## A pre-authorized `ASK` under Autopilot cannot complete (HORO-1310)
 
