@@ -48,13 +48,21 @@ places where the first pass, or work done between the passes, was **wrong**
   fixtures under a temporary directory; the menu-bar item and popover via the
   accessibility API; an isolated `.app`-bundled SwiftUI probe for the sheet
   keyboard measurement under AC7.
-- **Real LLM API call count:** 0 to any external provider. One
-  OpenAI-compatible request was issued to `http://127.0.0.1:19741`, a local
-  capture listener, with a self-invented placeholder key. No real credential
-  was used and nothing left this machine.
-- **Model name:** `fake-capture-model` (the placeholder sent to the loopback
-  listener).
-- **Approximate API cost:** $0.00 — no external provider was contacted.
+- **LLM API call count:** 0 served. Requests were issued to a local proxy on
+  `127.0.0.1:15721`, which forwarded them to an external gateway and received
+  HTTP 401 for every one — so an external provider *was* reached at the
+  transport level but never answered a prompt. Separately, several requests went
+  to purely local capture listeners (`127.0.0.1:19741`, `127.0.0.1:19742`) with
+  self-invented placeholder keys; those never left the host.
+- **Model name:** `gpt-6-astra` for the proxied attempts (the name the founder
+  specified, confirmed on the wire, never served); `fake-capture-model` for the
+  loopback captures.
+- **Approximate API cost:** $0.00 — every proxied request was refused upstream
+  before any token was generated, and nothing else contacted an external
+  provider.
+- **What left the machine:** only the metadata-only payload verified under AC9 —
+  opaque `resource_N` aliases, no paths, no file contents, no account name, no
+  repository names — describing disposable synthetic fixtures. See AC4 and AC9.
 
 ## Artifact under test, and why it was rebuilt again
 
@@ -142,50 +150,105 @@ whether the status wording is *understood*, whether the candidate ranking
 something this pass can honestly self-certify. The rig is built, current, and
 running for that pass.
 
-### AC4 — at least one AI Plan against disposable fixtures with a real provider: **INCOMPLETE — genuinely blocked on a provider credential**
+### AC4 — at least one AI Plan against disposable fixtures with a real provider: **INCOMPLETE — the configured provider route refuses every request upstream**
 
-This criterion was re-examined specifically to separate two things that could
-be confused: a provider-credential boundary, and an unrelated tooling quota
-interruption that happened mid-campaign. **It is the former.** The quota
-recovered; this did not change, because it was never the cause.
+**This section supersedes an earlier version of itself, which said the criterion
+was blocked because no provider credential existed on the workstation. That was
+wrong.** A credential does exist, the founder authorised its use, and the run was
+attempted. It failed for an entirely different reason, and the corrected reason is
+worth more than the original claim was.
 
-All three places the product can hold a BYOK configuration were probed,
-presence-only, never reading a value:
+The route under test is the one the founder specified: a local proxy on
+`127.0.0.1:15721`, model `gpt-6-astra`, with the credential passed by environment
+*reference* so its expanded value never entered a command line, a file, or shell
+history.
 
-| Location | Key | Result |
-|---|---|---|
-| Environment | `GLOMERIS_LLM_API_KEY` | not set |
-| Environment | `GLOMERIS_LLM_BASE_URL` | not set |
-| Environment | `GLOMERIS_LLM_MODEL` | not set |
-| Keychain, service `dev.glomeris.GlomerisMenuBar` | account `llmApiKey` | no item |
-| UserDefaults suite `dev.glomeris.GlomerisMenuBar` | `llmBaseUrl` | absent |
-| UserDefaults suite `dev.glomeris.GlomerisMenuBar` | `llmModel` | absent |
+#### The decisive finding: the client's credential is not used at all
 
-The product's own diagnostic agrees, which is the check that matters because it
-is the one a user would run:
+Three requests were sent to the proxy, identical but for authentication — the real
+environment credential, a self-invented placeholder string, and no authorization
+header whatsoever. **All three responses were byte-identical (same md5).** The
+proxy discards the client's credential and authenticates upstream with its own
+stored one.
+
+That single result reframes the whole criterion. Which key Glomeris is configured
+with has no bearing on this route, so no client-side configuration change — and no
+different credential — can affect the outcome.
+
+#### The refusal is model-independent and endpoint-independent
+
+| Request | Result |
+|---|---|
+| `POST /v1/chat/completions`, model `gpt-6-astra` | upstream HTTP 401 |
+| `POST /v1/chat/completions`, model `gpt-5.6-sol` (the model the local Codex config uses) | upstream HTTP 401 |
+| `POST /v1/responses`, model `gpt-6-astra` | upstream HTTP 401 |
+| `GET /v1/models` | HTTP 200, empty catalogue |
+| `GET /health` | HTTP 200, `healthy` |
+
+The versioned and unversioned chat-completions paths normalise onto the same
+upstream endpoint, so `chat_completions_url()` appending `/chat/completions` to a
+bare origin is correct here and needed no adjustment.
+
+The proxy's own status endpoint is the clearest evidence, and it indicts nothing in
+this repository: `success_requests: 0`, `failed_requests: 11`, success rate `0.0`,
+`failover_count: 0`, an empty `active_targets` list, and
+`last_error: 所有供应商都失败` — *all providers failed*. The proxy process is
+healthy and has no working upstream target.
+
+So the three candidate explanations are all excluded. Not a Glomeris defect; not a
+wrong or unavailable model name; not a missing or malformed client credential.
+
+#### What the product did at that boundary, which is a positive result
 
 ```
-$ glomeris llm-check
-glomeris llm-check: missing LLM configuration — set GLOMERIS_LLM_API_KEY,
-GLOMERIS_LLM_BASE_URL, and GLOMERIS_LLM_MODEL
-exit 2
+{
+  "items": [],
+  "dropped_unknown_resource": 0,
+  "dropped_unknown_action": 0,
+  "provider_error": "provider returned HTTP 401 for openai:chat_completions
+                     POST /chat/completions: {…upstream body…}"
+}
 ```
 
-Everything on the near side of that boundary is done. An AI Plan *was* produced
-end to end against a disposable fixture through the real provider code path —
-`OpenAiCompatibleProvider`, a real HTTP request, a real 200 response, real
-response parsing, a real plan applied as ordering — but pointed at a loopback
-listener with a placeholder key. What remains is exactly one thing: a real
-endpoint and a real key, which are the founder's to supply.
+Exit 1, empty plan, and a `provider_error` carrying the api style, the request
+**path only**, and the upstream body verbatim — with no credential material, no key
+prefix, and no echoed header. This is HORO-1299's `ProviderStatus` variant meeting
+a real non-2xx from a real gateway for the first time rather than a test stub, and
+it held.
 
-No credential on this workstation may be repurposed as an LLM API key, and that
-is not a formality here. The one candidate that exists is a corporate gateway
-credential, and routing it into a product's BYOK slot would make this machine's
-employer the unwitting provider for a personal project. It stays declined. The
-live-provider half of this criterion is left open rather than satisfied with the
-wrong key.
+#### What is now positively established, and what is not
 
-What the loopback run *does* establish is the egress contract, which is AC9.
+| Requirement | Status |
+|---|---|
+| Proxy request succeeds | **NO** — upstream 401 on every request |
+| `gpt-6-astra` genuinely reached | **NO** — correct model name on the wire, never served |
+| Glomeris parses a provider response | **YES** — loopback 200 → 2 validated items, `provider_error: null`, exit 0 |
+| Plan non-empty where appropriate | **YES** under loopback; unverifiable against the refusing provider |
+| Hallucinated ids cannot bypass policy | **YES** — see below |
+| No destructive action executed | **YES** — audit log empty for the run |
+| No secret or identifying metadata leaves | **YES** — see AC9 |
+
+The hallucination test is the strongest result of the pass. A plan containing one
+nonexistent `resource_id` and one invented `action_id`, mixed with two valid
+entries, produced `dropped_unknown_resource: 1` and `dropped_unknown_action: 1`;
+the two survivors were labelled `ASK` and `AUTO_SAFE` **locally from the
+filesystem**, not from anything the plan asserted. A model's ranking never becomes
+authority, which is the invariant this whole design exists to hold.
+
+Nothing executed: the run's audit log holds zero events, the machine's real audit
+log is unchanged with its newest entry predating the attempt by an hour, and both
+fixtures are intact (29 files under the cargo target, 1055 under `node_modules`).
+
+#### What would close it
+
+One step, on the proxy rather than on this product: restore a working upstream
+target for its `default` provider. That was not attempted — it is shared tooling
+holding a company credential, and breaking it would affect other tools on this
+machine rather than just this run. The gateway was also not probed directly to
+determine whether the stored credential is merely expired, because that would have
+sent a corporate credential off the host and bypassed the proxy the founder
+directed all traffic through. Once `active_targets` is non-empty the remaining
+three requirements take under a minute.
 
 ### AC5 — one safe manual action and one bounded Autopilot action execute successfully: **PASS**
 
@@ -664,9 +727,10 @@ statement is simply untrue in one branch.
 
 ## Cost
 
-$0.00 in API spend — no external provider was contacted (AC4's live-provider
-half is what remains). Machine cost this pass: one CLI release build, one Xcode
-release build, six real deletions totalling roughly 20 MB, all inside a
+$0.00 in API spend. An external gateway *was* contacted, through the local proxy,
+but it returned HTTP 401 to every request, so no prompt was ever served and no
+tokens were billed (AC4). Machine cost this pass: one CLI release build, one
+Xcode release build, six real deletions totalling roughly 20 MB, all inside a
 temporary fixture directory, plus one isolated SwiftUI probe app built and
 removed.
 
@@ -692,10 +756,13 @@ Three criteria are **incomplete rather than failed**, and none can be closed by
 more of this kind of work:
 
 - **AC3** — the subjective founder dogfood pass. Rig is built, current, running.
-- **AC4** — one AI Plan through a real provider. Genuinely blocked at a
-  provider-credential boundary, verified in all three storage locations and by
-  the product's own `llm-check` (exit 2). Everything on the near side of that
-  boundary is done.
+- **AC4** — one AI Plan through a real provider. Attempted with the existing
+  authorised credential and refused: the local proxy discards the client's
+  credential (three byte-identical responses across a real key, a placeholder
+  and no header) and every forwarded request 401s upstream regardless of model
+  or endpoint, with the proxy reporting 0 of 11 successes and no active targets.
+  Not a defect in this product, and not closable from this side; four of the
+  seven requirements are nonetheless positively established.
 - **AC7** — the VoiceOver / keyboard-only / eyes-on light-dark pass. Its
   mechanical half is done and one suspected keyboard trap was measured and
   dismissed.
@@ -736,8 +803,15 @@ questions this gate cannot answer:
   *for* this gate, and none should be.
 - **`--help` for `emergency`, `execute`, `free`, `daemon`** was not invoked;
   those surfaces rest on `tests/help_golden.rs`.
-- **No live external LLM call.** The provider path is exercised end to end, but
-  against a loopback listener. This is AC4.
+- **No completed external LLM call.** The provider path is exercised end to end
+  against a loopback listener, and against a real gateway through the local proxy
+  — where it reached the transport and was refused 401 without a prompt ever
+  being served. The response-handling half is therefore proven only against
+  loopback. This is AC4.
+- **Whether the proxy's stored upstream credential is expired, revoked, or
+  misrouted was not determined.** Distinguishing them means probing the gateway
+  directly, which would send a company credential off this host and bypass the
+  proxy all traffic was directed through. Deliberately not done.
 - **cargo-dist behaviour was not reproduced locally** (Finding 5). Installing
   it requires piping a remote script into a shell.
 - **A clean first-time `brew install` was not verified end to end** (Finding 6).
