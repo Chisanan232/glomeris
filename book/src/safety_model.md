@@ -89,10 +89,28 @@ private, unconstructible-outside-the-module marker type, so nothing outside
   instance at the same path, or to the same resource after its underlying
   fingerprint has changed.
 
-**There is no interactive prompt implemented in this MVP.** The CLI's
-recovery loop (`glomeris free`) runs with `auto_approve_ask: false` — `Ask`
-candidates are reported as declined/skipped, never executed. A future ticket
-(HORO-955) owns real interactive approval UX.
+**There is no TTY prompt, but consent is no longer unreachable.** Three
+surfaces supply a `UserConsent` today, and none of them is a prompt:
+
+- `glomeris execute --confirm-ask --observed-fingerprint <token>` — you pass
+  back the exact `fingerprint_token` a prior `explain --json` printed on that
+  same resource. Mismatched or missing, it is a usage error rather than a
+  silent approval.
+- The menu-bar app's Clean button, which builds precisely those two flags
+  (`CandidateDetailView.buildExecuteArguments`) and nothing else. The GUI is
+  the confirmation step; the consent still travels as a fingerprint.
+- `glomeris autopilot enable --preauthorize-ask <kind>:<reason>` — narrow
+  advance consent for one `Ask` reason on one resource kind, recorded in the
+  envelope. It is a flag on `enable`, not on `run`: the consent is written down
+  before the run and `autopilot run` rejects the flag outright, so the run
+  cannot grant itself anything the stored envelope does not already say. See
+  [Autopilot](autopilot.md), and the limitation on that path in
+  [Known Limitations](known_limitations.md).
+
+What has not changed is `glomeris free`'s recovery loop: it wires
+`auto_approve_ask: false` (`src/main.rs`), so inside that loop `Ask`
+candidates are still reported as declined/skipped and never executed. That is
+the loop's own choice, not an absence of machinery.
 
 ## Deletion-time TOCTOU revalidation
 

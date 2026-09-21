@@ -294,6 +294,65 @@ pub struct AuditRecord {
     pub model_rank: Option<u32>,
 }
 
+/// The single producer of every [`AuditRecord::source`] value (HORO-1312).
+///
+/// These five strings used to be written as literals at four separate call
+/// sites — `src/cli/mod.rs`, `src/executor/recovery_loop.rs`,
+/// `src/emergency/mod.rs`, `src/autopilot/run.rs`. That had a specific
+/// consequence rather than a stylistic one:
+/// `scripts/check-vocabulary-covers-cli-tokens.sh` compares each CLI token set
+/// against the menu-bar app's wording for it, and can only do so where one
+/// `as_str`-style match is the sole producer. `source` had none, so it was one
+/// of three vocabularies the guard had to skip — and HORO-1310 then added
+/// `autopilot_auto_safe` and `autopilot_preauthorized_ask` without the GUI
+/// learning words for them, exactly the drift the guard exists to catch.
+/// Nothing failed; the history panel would simply have called Autopilot's own
+/// rows an unrecognised trigger.
+///
+/// [`AuditRecord::source`] stays a `String` rather than becoming this type.
+/// The field is read back by `glomeris actions history` from a file an
+/// arbitrarily newer build may have written, and
+/// [`read_audit_tail`] drops any line it cannot deserialize — so a typed field
+/// would make a future version's new source value silently erase history a
+/// user can still read today. Writing is where the closed set belongs;
+/// reading has to stay tolerant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionSource {
+    /// `glomeris execute` — one resource the user named.
+    Execute,
+    /// `glomeris free`'s bounded recovery loop.
+    Free,
+    /// `glomeris emergency`'s degraded path.
+    Emergency,
+    /// `glomeris autopilot run`, on a resource policy classified `AUTO_SAFE`
+    /// on its own.
+    AutopilotAutoSafe,
+    /// `glomeris autopilot run`, on a resource policy would have asked about,
+    /// under a pre-authorization granted in advance for that exact kind and
+    /// reason. Distinct from [`ActionSource::AutopilotAutoSafe`] because
+    /// "Autopilot did this" and "Autopilot did this under a standing consent"
+    /// are the two different facts someone auditing the log is looking for.
+    AutopilotPreauthorizedAsk,
+}
+
+impl ActionSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActionSource::Execute => "execute",
+            ActionSource::Free => "free",
+            ActionSource::Emergency => "emergency",
+            ActionSource::AutopilotAutoSafe => "autopilot_auto_safe",
+            ActionSource::AutopilotPreauthorizedAsk => "autopilot_preauthorized_ask",
+        }
+    }
+}
+
+impl std::fmt::Display for ActionSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Safety-valve size cap for `actions.jsonl` — this is a rotation trigger,
 /// not a log-management system (see this ticket's scope notes). 10 MiB is
 /// generous for a one-line-per-action JSONL file; ordinary use would take
@@ -387,6 +446,59 @@ impl PersistenceBackend for AlwaysFailingPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HORO-1312. The values are a wire vocabulary: `glomeris history`
+    /// prints them, the menu-bar app looks them up in
+    /// `GlomerisVocabulary.actionSource`, and
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` diffs this match
+    /// against that lookup. Renaming one is a breaking change to already
+    /// written audit files, so pin the strings here rather than letting a
+    /// refactor quietly rewrite them.
+    #[test]
+    fn action_source_strings_are_the_ones_the_gui_and_history_expect() {
+        assert_eq!(ActionSource::Execute.as_str(), "execute");
+        assert_eq!(ActionSource::Free.as_str(), "free");
+        assert_eq!(ActionSource::Emergency.as_str(), "emergency");
+        assert_eq!(
+            ActionSource::AutopilotAutoSafe.as_str(),
+            "autopilot_auto_safe"
+        );
+        assert_eq!(
+            ActionSource::AutopilotPreauthorizedAsk.as_str(),
+            "autopilot_preauthorized_ask"
+        );
+    }
+
+    /// The two Autopilot sources are deliberately distinct: one records
+    /// work policy allowed on its own, the other records work that only
+    /// ran because the operator pre-authorized an `ASK` kind by name. An
+    /// audit trail that collapsed them would lose the answer to "who
+    /// permitted this".
+    #[test]
+    fn action_source_strings_are_distinct_and_non_empty() {
+        let all = [
+            ActionSource::Execute,
+            ActionSource::Free,
+            ActionSource::Emergency,
+            ActionSource::AutopilotAutoSafe,
+            ActionSource::AutopilotPreauthorizedAsk,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for source in all {
+            let token = source.as_str();
+            assert!(!token.is_empty(), "{source:?} produced an empty token");
+            assert!(
+                seen.insert(token),
+                "{source:?} duplicates an existing token: {token}"
+            );
+            assert_eq!(
+                source.to_string(),
+                token,
+                "Display must agree with as_str, or the two writing paths diverge"
+            );
+        }
+        assert_eq!(seen.len(), 5);
+    }
 
     #[test]
     fn file_persistence_appends_a_line_per_event() {

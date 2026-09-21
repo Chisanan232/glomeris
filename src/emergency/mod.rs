@@ -36,25 +36,18 @@
 //!   should be rejected or deferred without reliable measured evidence —
 //!   and that building that evidence is itself out of scope for this
 //!   pass. This module does not implement it.
-//! - **The candidate loop still frees nothing via a real detector-produced
-//!   candidate today (HORO-992 update).** Detectors now populate
-//!   `Evidence::reclaimable_bytes` (xcode/cargo/node/homebrew via a real
-//!   bounded recursive size estimate, docker via `docker system df`'s own reported
-//!   figure), so that specific gap is closed. What remains open is
-//!   `executor::execute`'s own deletion-time revalidation: it rebuilds
-//!   `Evidence` via `executor::build_fresh_evidence`, which does not reuse
-//!   a detector's reclaimable-bytes estimate and always reports
-//!   `Unavailable(NotAttempted)` for that field regardless of what the
-//!   originating detector observed. So a synthetically constructed
-//!   `AutoSafe` approval still aborts inside that revalidation step. This
-//!   is a pre-existing upstream gap in `executor`, not introduced or
-//!   worked around here — this module reuses `executor::execute` exactly
-//!   as-is, per its own constraints. The self-owned-disposable-state step
-//!   (step 1) is therefore still the only path that actually reclaims
-//!   bytes today; the candidate-iteration wiring is correct and will
-//!   start reclaiming bytes automatically the moment a future ticket
-//!   teaches `executor::build_fresh_evidence` to reuse a detector's
-//!   reclaimable-bytes estimate, with no change needed here.
+//! - ~~**The candidate loop still frees nothing via a real
+//!   detector-produced candidate today.**~~ Resolved upstream by HORO-994,
+//!   with no change needed here, exactly as this bullet predicted:
+//!   `executor::build_fresh_evidence` now reuses the same bounded size
+//!   estimate for `reclaimable_bytes` that it already used for
+//!   `logical_bytes`, instead of hardcoding that field back to
+//!   `Unavailable(NotAttempted)` and so aborting every real `AutoSafe`
+//!   approval inside deletion-time revalidation. The candidate loop
+//!   therefore reclaims real bytes today, and the
+//!   self-owned-disposable-state step (step 1) is no longer the only path
+//!   that does. Proven end to end against a disposable fixture by
+//!   `tests/golden_chain_execute.rs`.
 //! - **Near-zero-real-disk-space testing was not performed.** Actually
 //!   driving a test machine's free space to near zero is destructive to
 //!   that machine and was judged not worth the risk for this pass. Fault
@@ -74,7 +67,8 @@ use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::fs_stat::FsStat;
 use crate::monitor::persistence::{
-    append_audit_record, unix_now_secs, AuditRecord, PersistenceBackend, PressureEvent,
+    append_audit_record, unix_now_secs, ActionSource, AuditRecord, PersistenceBackend,
+    PressureEvent,
 };
 use crate::monitor::pressure::PressureState;
 use crate::policy::approval::authorize;
@@ -348,7 +342,7 @@ fn append_emergency_audit_record(
         outcome: outcome.to_string(),
         abort_reason,
         actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
-        source: "emergency".to_string(),
+        source: ActionSource::Emergency.to_string(),
         // Emergency mode never calls a model (see this module's docs).
         model_rank: None,
     };

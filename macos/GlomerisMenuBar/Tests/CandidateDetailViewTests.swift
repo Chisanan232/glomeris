@@ -609,9 +609,41 @@ final class CandidateDetailViewTests: XCTestCase {
     }
 
     func testHumanByteCountFormatsRealBytesAndHandlesNil() {
-        XCTAssertEqual(humanByteCount(nil), "unknown")
-        XCTAssertFalse(humanByteCount(987_654).isEmpty)
-        XCTAssertNotEqual(humanByteCount(987_654), "unknown")
+        XCTAssertEqual(humanByteCount(nil, rendered: nil), "unknown")
+        XCTAssertFalse(humanByteCount(987_654, rendered: nil).isEmpty)
+        XCTAssertNotEqual(humanByteCount(987_654, rendered: nil), "unknown")
+    }
+
+    /// HORO-1312. Rust's string wins whenever there is one, and the
+    /// fallback for an older binary is deliberately NOT a locally scaled
+    /// figure.
+    ///
+    /// The bug this replaces was not a crash: `ByteCountFormatter` with
+    /// `countStyle = .file` is 1000-based, so 2 GiB measured came back as
+    /// "2.15 GB" next to Rust's own 1024-based "2.0 GB" estimate for the
+    /// same bytes, in the same panel. Both looked finished; one was wrong.
+    /// Asserting on the exact "2.0 GB" here is what pins the convention to
+    /// the producer — a client that started scaling bytes again would have
+    /// to change this line to do it.
+    func testHumanByteCountPrefersTheStringRustRendered() {
+        XCTAssertEqual(
+            humanByteCount(2_147_483_648, rendered: "2.0 GB"),
+            "2.0 GB"
+        )
+
+        // Empty is treated as absent: a blank label is not a byte count, and
+        // showing nothing at all where a result belongs reads as a failure.
+        XCTAssertEqual(
+            humanByteCount(2_147_483_648, rendered: ""),
+            "2147483648 bytes"
+        )
+
+        // No `*_human` key at all — an older `glomeris` on PATH. Unformatted
+        // on purpose: it is visibly raw, so it cannot be mistaken for a
+        // scaled figure, and it is still exactly the number Rust measured.
+        let fallback = humanByteCount(2_147_483_648, rendered: nil)
+        XCTAssertEqual(fallback, "2147483648 bytes")
+        XCTAssertFalse(fallback.contains("GB"))
     }
 
     // MARK: - HORO-1306: the sheet leads with the verdict, not the fields

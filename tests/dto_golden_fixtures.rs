@@ -193,6 +193,12 @@ fn execute_report_succeeded_matches_golden_fixture() {
         abort_reason: None,
         expected_reclaimed_bytes: Some(2_147_483_648),
         actual_reclaimed_bytes: Some(2_147_483_648),
+        // Via `human_bytes` rather than a literal, so this fixture cannot
+        // assert a conversion the product does not perform — which is the
+        // mistake the history fixture made ("524.3 MB" for a 1024-based
+        // 524_288_000, HORO-1310).
+        expected_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
+        actual_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
     };
     assert_matches_fixture(&report, "execute_report_succeeded.json");
 }
@@ -207,6 +213,11 @@ fn execute_report_aborted_by_revalidation_matches_golden_fixture() {
         abort_reason: Some("ResourceIdentityChanged".to_string()),
         expected_reclaimed_bytes: Some(2_147_483_648),
         actual_reclaimed_bytes: None,
+        expected_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
+        // An abort reclaimed nothing because it deleted nothing, which is not
+        // the same claim as "0 B". Pinned as null so a client rendering this
+        // row cannot report a successful zero-byte cleanup.
+        actual_reclaimed_human: None,
     };
     assert_matches_fixture(&report, "execute_report_aborted.json");
 }

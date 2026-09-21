@@ -97,14 +97,21 @@ repeatable `--project-root <path>` flag is now wired into `detect`/
 `explain`/`clean`/`free` (deliberately not `emergency`, which takes no
 arguments by design).
 
-## `ASK` has no interactive handling in this MVP
+## `glomeris free` still declines every `ASK` candidate
 
-`RecoveryConfig::auto_approve_ask` is `false` in the CLI's wiring — every
-`Ask`-classified candidate is reported as declined/skipped, never executed,
-because there is no interactive prompt implemented anywhere in this
-codebase yet. Real interactive approval UX is scoped to a separate ticket
-(HORO-955) and is deliberately out of scope here — this book documents the
-CLI surface that exists on `main` today, not what HORO-955 may add.
+This section used to say `Ask` had no handling at all, because no interactive
+prompt existed. Narrower than that now: `glomeris execute --confirm-ask
+--observed-fingerprint <token>`, the menu-bar app's Clean button, and
+Autopilot's `--preauthorize-ask` all supply a real `UserConsent` — see
+[Safety Model](safety_model.md).
+
+What remains is specific to one command. `glomeris free`'s recovery loop wires
+`RecoveryConfig::auto_approve_ask: false` (`src/main.rs`), so every
+`Ask`-classified candidate inside that loop is reported as declined/skipped
+and never executed, however much of the target it would have reclaimed. There
+is still no TTY prompt anywhere in this codebase; a `free` run cannot ask you
+mid-loop, so it does not ask at all. To act on an `Ask` candidate, use
+`explain --json` to read its `fingerprint_token` and then `execute`.
 
 ## A pre-authorized `ASK` under Autopilot cannot complete (HORO-1310)
 
@@ -203,16 +210,40 @@ disk.
 and `x86_64-apple-darwin`, published as GitHub Release assets with
 checksums. Building from source remains fully supported.
 
-## No GUI
+## Resolved (HORO-1305 through HORO-1309): there is a GUI
 
-Everything in this book is the `glomeris` CLI binary and its optional
-`launchd` background agent. A SwiftUI (or any other) GUI app is not part of
-this MVP.
+This page used to say a SwiftUI app was not part of this MVP. There is one:
+a `LSUIElement` menu-bar app, documented in [Menu Bar App](menu_bar_app.md).
 
-## The CLI surface itself is still evolving
+What has not changed is where authority lives. The app is a thin client over
+the same CLI — it shells out to `glomeris` and renders what comes back. It
+classifies nothing, decides nothing, and holds no policy logic, which a CI
+guard (`scripts/check-no-policy-label-branching.sh`) enforces mechanically
+rather than by convention. Every screen maps back to a named CLI invocation;
+that table is at the end of the Menu Bar App page.
 
-This book documents `main`'s actual `match` arms as of the time this book
-was written. A separate, in-flight ticket may extend the CLI (new
-subcommands, flags, or output formats) without changing anything in the
-safety model described in this book. If a command described here no longer
-matches `src/main.rs`, trust the source.
+Two things the app deliberately offers no way to invoke: `glomeris emergency`,
+and Autopilot. It does carry wording for both — an Autopilot or emergency run
+started from the terminal shows up in the app's history like any other, which
+is the point of a shared audit trail — but neither has a button, and Autopilot's
+envelope can only be granted or revoked on the command line. See
+[Autopilot](autopilot.md) for why the standing grant is CLI-only today.
+
+## What holds this book to the code
+
+Three mechanical checks, because the drift this page is about was found by
+reading rather than by CI:
+
+- `tests/help_golden.rs` pins every rendered help surface byte for byte
+  against committed fixtures, so a command's own help text cannot change
+  silently.
+- `scripts/check-docs-cover-cli-commands.sh` requires
+  [CLI Reference](cli_reference.md) to have a section for every command in
+  `src/cli/help.rs`'s single `COMMANDS` table. A new subcommand now fails CI
+  until it is documented.
+- `scripts/check-vocabulary-covers-cli-tokens.sh` compares the CLI's JSON
+  tokens against the menu-bar app's wording for them, in both directions.
+
+None of that can catch prose that goes stale, which is what the rest of this
+page is for. Where this book and `src/main.rs` disagree, the source is right
+and the disagreement is a bug on this page.

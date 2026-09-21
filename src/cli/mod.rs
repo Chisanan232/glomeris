@@ -29,7 +29,9 @@ use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, Disco
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
 use crate::executor::{dry_run, execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::{AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig};
+use crate::monitor::{
+    ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
+};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
@@ -1192,7 +1194,13 @@ pub fn resolve_and_execute(
             // why an audit-write failure must never change `report`'s
             // own outcome, which is exactly what's returned below
             // regardless of whether this line succeeded.
-            record_audit(&report, policy_label, "execute", audit_log_path, now);
+            record_audit(
+                &report,
+                policy_label,
+                ActionSource::Execute,
+                audit_log_path,
+                now,
+            );
             ExecuteResolution::Executed(report)
         }
         None => match decision.class {
@@ -1216,7 +1224,7 @@ pub fn resolve_and_execute(
 fn record_audit(
     report: &ExecutionReport,
     policy_label: &'static str,
-    source: &'static str,
+    source: ActionSource,
     audit_log_path: &Path,
     now: SystemTime,
 ) {
@@ -1260,14 +1268,23 @@ pub fn build_execute_report(report: &ExecutionReport) -> ExecuteReport {
         ExecutionOutcome::DryRun => ("dry_run", None, None),
     };
 
+    let expected_reclaimed_bytes = report.expected_reclaimed_bytes.observed().copied();
+    let actual_reclaimed_bytes = report.actual_reclaimed_bytes.observed().copied();
+
     ExecuteReport {
         action_id: report.action.0,
         resource_id: report.resource.to_string(),
         outcome,
         failure_message,
         abort_reason,
-        expected_reclaimed_bytes: report.expected_reclaimed_bytes.observed().copied(),
-        actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
+        expected_reclaimed_bytes,
+        actual_reclaimed_bytes,
+        // Rendered here rather than by the caller: `human_bytes` is
+        // 1024-based, and a client guessing otherwise renders a different
+        // number for the same bytes (HORO-1312). `None` stays `None` — an
+        // unavailable probe is not zero bytes, and "0 B" would claim it was.
+        expected_reclaimed_human: expected_reclaimed_bytes.map(crate::reporting::human_bytes),
+        actual_reclaimed_human: actual_reclaimed_bytes.map(crate::reporting::human_bytes),
     }
 }
 
@@ -1282,18 +1299,21 @@ pub fn print_execute_report(report: &ExecuteReport) {
     if let Some(reason) = &report.abort_reason {
         println!("abort reason:        {reason}");
     }
+    // Reads the `*_human` fields rather than re-rendering the bytes, so the
+    // text output and the `--json` output cannot drift apart into two
+    // conventions the way the CLI and the GUI once did (HORO-1312).
     println!(
         "expected reclaimed:  {}",
         report
-            .expected_reclaimed_bytes
-            .map(crate::reporting::human_bytes)
+            .expected_reclaimed_human
+            .clone()
             .unwrap_or_else(|| "unavailable".to_string())
     );
     println!(
         "actual reclaimed:    {}",
         report
-            .actual_reclaimed_bytes
-            .map(crate::reporting::human_bytes)
+            .actual_reclaimed_human
+            .clone()
             .unwrap_or_else(|| "unavailable".to_string())
     );
 }

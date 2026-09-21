@@ -55,6 +55,35 @@ all thirteen commands, a 13-line, 146-column wall in answer to one mistyped
 word. And a usage error inside a command prints only that command's usage, so
 getting a `free` flag wrong no longer tells you about `daemon`.
 
+## Byte counts: 1024-based, with `KB`/`MB`/`GB` labels
+
+Every byte count this product renders — `free_human`, `total_human`,
+`logical_human`, `reclaimable_human`, `expected_reclaimed_human`,
+`actual_reclaimed_human`, and the same numbers in text output — comes from one
+function, `reporting::human_bytes`. It divides by **1024** and labels the result
+`B`/`KB`/`MB`/`GB`/`TB`/`PB`. So `2147483648` renders as `2.0 GB`, where a
+1000-based formatter would say `2.15 GB`. Counts below 1024 are a bare integer
+and `B`, with no decimal point.
+
+The labels are not the IEC `KiB`/`MiB`/`GiB` spelling that strictly matches the
+arithmetic. That is a deliberate, documented inconsistency rather than an
+oversight: these are the units `du -h` and `df -h` print for the same
+arithmetic, and the alternative is renaming every unit in every report and
+fixture to spell out a distinction most readers of a storage tool do not draw.
+
+`--target` parses the same way, so what you type and what you read back agree:
+`glomeris free --target 5GB` means 5 × 1024³ bytes. A bare number or a `B`
+suffix is raw bytes; a trailing `%` is a percentage of total capacity instead.
+
+**Clients should render the `*_human` string rather than scale the byte count
+themselves.** The menu-bar app did the latter with `ByteCountFormatter`, which
+is 1000-based, so a 2 GiB cleanup appeared as a `2.0 GB` estimate and a
+`2.15 GB` result in the same panel (fixed in HORO-1312). Where a report offers
+both fields, the raw `*_bytes` value is for arithmetic and the `*_human` string
+is for display. A `*_human` field is `null`, never `"0 B"`, when the underlying
+probe produced no number — an aborted execution reclaimed nothing, which is a
+different claim from having freed zero bytes.
+
 ## `glomeris daemon <subcommand>`
 
 macOS only (exits 1 with an error message on other platforms).
@@ -531,9 +560,14 @@ glomeris execute --action-id cargo.clean.target_dir \
   "failure_message": null,
   "abort_reason": null,
   "expected_reclaimed_bytes": 2147483648,
-  "actual_reclaimed_bytes": 2147483648
+  "actual_reclaimed_bytes": 2147483648,
+  "expected_reclaimed_human": "2.0 GB",
+  "actual_reclaimed_human": "2.0 GB"
 }
 ```
+
+The two `*_human` strings are new in HORO-1312 and are what a UI should
+display — see [Byte counts](#byte-counts-1024-based-with-kbmbgb-labels).
 
 An `ASK`-classified resource requires `--confirm-ask` plus the exact
 `--observed-fingerprint` token captured from a prior `explain --json` call
@@ -559,9 +593,14 @@ If the resource's identity changed between the `explain` call and this
   "failure_message": null,
   "abort_reason": "ResourceIdentityChanged",
   "expected_reclaimed_bytes": 2147483648,
-  "actual_reclaimed_bytes": null
+  "actual_reclaimed_bytes": null,
+  "expected_reclaimed_human": "2.0 GB",
+  "actual_reclaimed_human": null
 }
 ```
+
+Note both `actual_*` fields are `null` rather than `0`/`"0 B"`. Nothing was
+deleted, which is not the same report as a cleanup that freed no bytes.
 
 Every refusal path (e.g. `PROTECTED`, no consent supplied, a stale
 fingerprint) prints an `ExecuteRefusalReport` instead, with `--json`:
@@ -679,12 +718,12 @@ glomeris actions list --json
 ### `glomeris actions history [--json] [--limit <N>]`
 
 Reads back a bounded, oldest-first tail of `actions.jsonl` (HORO-1057) — the
-real-execution audit trail that `execute`, `free`, and `emergency` each
-append to, best-effort, after their own outcome is already decided. Unlike
-`history.tsv` (which records pressure transitions only), this is the audit
-trail of what was actually executed: action id, resource id, the policy
-label it was authorized under, outcome, abort reason (when applicable),
-actual reclaimed bytes, and which of the three real-execution paths
+real-execution audit trail that `execute`, `free`, `emergency` and
+`autopilot run` each append to, best-effort, after their own outcome is
+already decided. Unlike `history.tsv` (which records pressure transitions
+only), this is the audit trail of what was actually executed: action id,
+resource id, the policy label it was authorized under, outcome, abort reason
+(when applicable), actual reclaimed bytes, and which real-execution path
 produced it.
 
 `--limit <N>` is optional and defaults to 20, same bounding/malformed-line-
@@ -695,8 +734,32 @@ best-effort and its result is never surfaced to the caller.
 With `--json`, prints an `ActionHistoryReport` (`{"events": [...]}`); each
 event has `timestamp`, `action_id`, `resource_id`, `policy_label`,
 `outcome`, `abort_reason`, `actual_reclaimed_bytes`, `actual_reclaimed_human`,
-and `source` (`"execute"`, `"free"`, or `"emergency"`). Without `--json`,
-prints one line per event as plain text.
+and `source`. Without `--json`, prints one line per event as plain text.
+
+`source` is one of five values, produced by `ActionSource::as_str` in
+`src/monitor/persistence.rs`:
+
+| `source` | The path that executed it |
+|---|---|
+| `execute` | `glomeris execute`, one action against one named resource |
+| `free` | `glomeris free --target`, the recovery loop |
+| `emergency` | `glomeris emergency`, machine-wide, `AUTO_SAFE` only |
+| `autopilot_auto_safe` | `glomeris autopilot run`, action policy allowed on its own |
+| `autopilot_preauthorized_ask` | `glomeris autopilot run`, action attempted only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
+
+The last two are deliberately distinct rather than one `autopilot` value: the
+question an audit trail has to answer is not just *what ran* but *who
+permitted it*, and a pre-authorized `ASK` was permitted by the operator
+naming that resource kind, not by policy alone.
+
+Note "attempted" in that last row. A record is written for a failed or aborted
+attempt too — not for a *refused* one, which never reached the filesystem and
+so appears in `autopilot run`'s own report instead. Today every
+pre-authorized `ASK` aborts at
+deletion-time revalidation — so `autopilot_preauthorized_ask` currently only
+ever appears alongside `outcome: "aborted_by_revalidation"`. That is a known
+limitation with a named cause and a pinning test, not the intended end state:
+see [Known Limitations](known_limitations.md).
 
 ```sh
 glomeris actions history --json --limit 2
@@ -782,7 +845,10 @@ plan file cannot expand authority lives. What this page adds:
   `none`. An unobservable reading fails any floor you set, rather than passing
   it.
 - `--preauthorize-ask` is repeatable and takes `kind:reason` using the same
-  tags `glomeris actions list` and `glomeris explain` print.
+  tags `glomeris actions list` and `glomeris explain` print. Like the four
+  limit flags above it, it belongs to `enable` — `run` accepts only
+  `--dry-run`, `--plan-file` and `--project-root`, and exits 2 on anything
+  else, so a run cannot widen its own grant on the command line.
 - `run` prints an `AutopilotReport`: one line per candidate with its kind,
   policy label, model rank and outcome, then the run totals (actions
   attempted, actions succeeded, bytes freed, whether a budget stopped it
