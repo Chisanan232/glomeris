@@ -41,8 +41,13 @@
 
 pub mod envelope;
 pub mod gate;
+pub mod run;
 pub mod store;
 
 pub use envelope::{AskPreauthorization, AutopilotEnvelope, EnvelopeError};
 pub use gate::{admit, admits_pressure, Admission, BudgetLedger, RefusalReason};
+pub use run::{
+    order_candidates, run_autopilot, AutopilotItemOutcome, AutopilotReport, AutopilotRunItem,
+    AutopilotRunRequest,
+};
 pub use store::{load_envelope, save_envelope, StoreError};
