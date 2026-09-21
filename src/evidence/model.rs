@@ -125,6 +125,46 @@ impl ResourceKind {
             ResourceKind::Unknown => "unknown",
         }
     }
+
+    /// Every kind, in declaration order. Exhaustive by construction: the
+    /// `every_variant_round_trips_through_its_tag` test below fails if a
+    /// new variant is added to the enum without being added here, because
+    /// [`from_tag`](Self::from_tag)'s own match arms and this list are
+    /// checked against each other.
+    pub const ALL: &'static [ResourceKind] = &[
+        ResourceKind::XcodeDerivedData,
+        ResourceKind::HomebrewCache,
+        ResourceKind::CargoTargetDir,
+        ResourceKind::CargoRegistryCache,
+        ResourceKind::NodeModules,
+        ResourceKind::NodePackageManagerCache,
+        ResourceKind::DockerBuildCache,
+        ResourceKind::DockerImageCache,
+        ResourceKind::Unknown,
+    ];
+
+    /// Parses a [`tag`](Self::tag) back into its kind, or `None` for any
+    /// string that is not exactly one of them (HORO-1310).
+    ///
+    /// Deliberately NOT lenient: no case folding, no trimming, no
+    /// hyphen/underscore equivalence, no prefix matching. This is the
+    /// parser an Autopilot resource-kind allowlist is built through — both
+    /// from a CLI flag and from a persisted envelope file — so a typo must
+    /// fail loudly rather than resolve to a neighbouring kind. An
+    /// unrecognized tag naming a kind that does not exist is a smaller
+    /// problem than `cargo_target` silently meaning
+    /// [`ResourceKind::CargoTargetDir`].
+    ///
+    /// `"unknown"` does round-trip here — this function's job is parsing,
+    /// not authorization. [`ResourceKind::Unknown`] is refused where it
+    /// matters (it is unconditionally `PROTECTED` in
+    /// [`crate::policy::classify`], and
+    /// `crate::autopilot::AutopilotEnvelope` refuses to allowlist it at
+    /// all), and a tag that parses to it is far better than one that
+    /// silently parses to nothing.
+    pub fn from_tag(tag: &str) -> Option<ResourceKind> {
+        ResourceKind::ALL.iter().copied().find(|k| k.tag() == tag)
+    }
 }
 
 /// Tool that owns/manages a resource.
@@ -677,6 +717,77 @@ pub enum Confidence {
 mod tests {
     use super::*;
     use crate::evidence::probe::ProbeReason;
+
+    /// Compile-time guard in both directions. The `match` is exhaustive, so
+    /// adding a variant to [`ResourceKind`] without adding it to
+    /// [`ResourceKind::ALL`] fails to build here — which matters because
+    /// [`ResourceKind::from_tag`] searches `ALL`, so a missing entry would
+    /// silently make the new kind unparseable (and therefore impossible to
+    /// name in an Autopilot allowlist) rather than loudly wrong. The length
+    /// assertion catches the opposite mistake: an entry in `ALL` for a
+    /// variant that no longer exists, or a duplicate.
+    #[test]
+    fn all_lists_every_variant_exactly_once_in_declaration_order() {
+        for (index, kind) in ResourceKind::ALL.iter().enumerate() {
+            let expected_index = match kind {
+                ResourceKind::XcodeDerivedData => 0,
+                ResourceKind::HomebrewCache => 1,
+                ResourceKind::CargoTargetDir => 2,
+                ResourceKind::CargoRegistryCache => 3,
+                ResourceKind::NodeModules => 4,
+                ResourceKind::NodePackageManagerCache => 5,
+                ResourceKind::DockerBuildCache => 6,
+                ResourceKind::DockerImageCache => 7,
+                ResourceKind::Unknown => 8,
+            };
+            assert_eq!(
+                index,
+                expected_index,
+                "{} is at index {index} of ResourceKind::ALL, expected {expected_index}",
+                kind.tag()
+            );
+        }
+        assert_eq!(
+            ResourceKind::ALL.len(),
+            9,
+            "ResourceKind::ALL has gained, lost, or duplicated an entry"
+        );
+    }
+
+    #[test]
+    fn every_variant_round_trips_through_its_tag() {
+        for kind in ResourceKind::ALL {
+            assert_eq!(
+                ResourceKind::from_tag(kind.tag()),
+                Some(*kind),
+                "tag {:?} did not round-trip",
+                kind.tag()
+            );
+        }
+    }
+
+    /// `from_tag` is the parser an Autopilot allowlist is built through, so
+    /// near-misses must fail rather than resolve to a neighbouring kind.
+    #[test]
+    fn from_tag_rejects_near_misses_rather_than_guessing() {
+        for near_miss in [
+            "",
+            " cargo_target_dir",
+            "cargo_target_dir ",
+            "cargo_target",
+            "cargo-target-dir",
+            "CARGO_TARGET_DIR",
+            "CargoTargetDir",
+            "cargo_target_dirs",
+            "not_a_kind",
+        ] {
+            assert_eq!(
+                ResourceKind::from_tag(near_miss),
+                None,
+                "{near_miss:?} must not parse as a resource kind"
+            );
+        }
+    }
 
     fn base_evidence(kind: ResourceKind) -> Evidence {
         Evidence {
