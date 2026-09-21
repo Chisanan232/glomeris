@@ -14,31 +14,50 @@ Two macOS targets are built for every release: `aarch64-apple-darwin`
 (Apple Silicon) and `x86_64-apple-darwin` (Intel, cross-compiled) — see
 `dist-workspace.toml`. Pick by architecture; nothing selects it for you.
 
-## Homebrew tap (configured, not usable yet)
-
-`dist-workspace.toml` tells `cargo-dist` to generate a Homebrew formula and
-push it to a
-[`Chisanan232/homebrew-tap`](https://github.com/Chisanan232/homebrew-tap)
-repository (HORO-1069), and an earlier version of this page presented that
-as the recommended way to install. It does not work today, so it is written
-here in the future tense on purpose:
-
-- The tap repository does not exist yet. That link 404s.
-- The release workflow has no credential to push to it, so no formula has
-  ever been published anywhere.
-- `brew install glomeris` therefore finds no formula of that name.
-
-Creating the tap is a pending one-time action, tracked in HORO-1320. Once it
-exists, installing will be:
+## Homebrew tap
 
 ```sh
-brew tap chisanan232/tap
+brew tap Chisanan232/tap
+brew trust --tap chisanan232/tap   # Homebrew 7 and later only; see below
 brew install glomeris
 ```
 
-and `brew upgrade glomeris` will pick up new releases the same way, with
-Homebrew selecting the right architecture automatically. Until then, use a
-prebuilt archive above or build from source below.
+`brew upgrade glomeris` picks up later releases the same way, and Homebrew
+selects the right architecture automatically.
+
+The tap is [`Chisanan232/homebrew-tap`](https://github.com/Chisanan232/homebrew-tap),
+and `dist-workspace.toml` points `cargo-dist` at it so each release can publish
+a regenerated formula there (HORO-1069, HORO-1320).
+
+Three things about this path are worth knowing before you use it.
+
+**Homebrew 7 will not load a third-party tap until you trust it.** On Homebrew
+7.0 and later, `brew install glomeris` straight after `brew tap` fails with
+`Refusing to load formula chisanan232/tap/glomeris from untrusted tap`. That is
+Homebrew protecting you from arbitrary Ruby in a tap you have not vouched for,
+not a broken formula. `brew trust --tap chisanan232/tap` records the decision in
+`~/.homebrew/trust.json` (or under `$XDG_CONFIG_HOME/homebrew/`) and only needs
+doing once. Older Homebrew versions have no `brew trust` and do not need this
+step.
+
+**A manually copied binary already on your `PATH` blocks the symlink.** If you
+previously followed the prebuilt-archive instructions above and copied
+`glomeris` into `/opt/homebrew/bin` or `/usr/local/bin`, Homebrew installs into
+its Cellar but refuses to link over your file, and warns that the Homebrew copy
+is shadowed. Remove your manual copy, or let Homebrew take ownership:
+
+```sh
+brew link --overwrite glomeris --dry-run   # lists exactly what it would remove
+brew link --overwrite glomeris
+```
+
+**The formula currently tracks `v0.2.0` and is updated by hand.** The release
+workflow's `publish-homebrew-formula` job needs a credential for the tap
+repository that does not exist yet, so no release has regenerated the formula
+automatically. That credential is the remaining half of HORO-1320. Until it is
+configured, the tap can lag the newest tagged release — check the
+[releases page](https://github.com/Chisanan232/glomeris/releases) if you need
+the very latest, or use a prebuilt archive above.
 
 ## Build from source
 
