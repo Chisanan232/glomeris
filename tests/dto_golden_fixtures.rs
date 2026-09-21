@@ -344,6 +344,7 @@ fn action_history_report_matches_golden_fixture() {
                 actual_reclaimed_bytes: Some(2_147_483_648),
                 actual_reclaimed_human: Some("2.0 GB".to_string()),
                 source: "execute".to_string(),
+                model_rank: None,
             },
             ActionHistoryEventReport {
                 timestamp: 1_700_000_600,
@@ -355,6 +356,26 @@ fn action_history_report_matches_golden_fixture() {
                 actual_reclaimed_bytes: None,
                 actual_reclaimed_human: None,
                 source: "free".to_string(),
+                model_rank: None,
+            },
+            // HORO-1310. A third event only because this is the one shape the
+            // other two cannot express: `source` naming which authority ran
+            // the action (an Autopilot run, not a command the user typed) and
+            // `model_rank` recording that a model put this resource first.
+            // Both are separate axes from `policy_label` — a model's
+            // suggestion never reaches `classify`, so AUTO_SAFE here is still
+            // policy's own verdict.
+            ActionHistoryEventReport {
+                timestamp: 1_700_001_200,
+                action_id: "node.clean.node_modules".to_string(),
+                resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                policy_label: "AUTO_SAFE".to_string(),
+                outcome: "succeeded".to_string(),
+                abort_reason: None,
+                actual_reclaimed_bytes: Some(524_288_000),
+                actual_reclaimed_human: Some("524.3 MB".to_string()),
+                source: "autopilot_auto_safe".to_string(),
+                model_rank: Some(0),
             },
         ],
     };

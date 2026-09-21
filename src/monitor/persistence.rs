@@ -260,9 +260,35 @@ pub struct AuditRecord {
     /// Populated only when `outcome == "aborted_by_revalidation"`.
     pub abort_reason: Option<String>,
     pub actual_reclaimed_bytes: Option<u64>,
-    /// Which real-execution path produced this record: `"execute"`,
-    /// `"free"`, or `"emergency"`.
+    /// Which real-execution path produced this record, and — for
+    /// `autopilot` — under what authority: `"execute"`, `"free"`,
+    /// `"emergency"`, `"autopilot_auto_safe"`, or
+    /// `"autopilot_preauthorized_ask"`. The two `autopilot_*` values are
+    /// distinct on purpose (HORO-1310): "Autopilot did this" and "Autopilot
+    /// did this to an `ASK` resource under a pre-authorization the user
+    /// granted in advance" are different facts, and an audit trail that
+    /// collapsed them would lose the one a user would actually go looking
+    /// for.
     pub source: String,
+    /// Where the model's plan ranked this resource, 0-based, or `None` if
+    /// no model named it (HORO-1310).
+    ///
+    /// This is the record of what the model *suggested*, kept deliberately
+    /// separate from `policy_label` (what policy *decided*) and `source`
+    /// (what *authorized* it) so a reader can see all three independently —
+    /// a model suggestion that policy then refused leaves no record here at
+    /// all, because nothing was executed.
+    ///
+    /// `None` conflates "there was no model" with "the model did not name
+    /// this resource". Both read correctly as "not model-suggested", which
+    /// is the only question this field exists to answer.
+    ///
+    /// `#[serde(default)]` so the `actions.jsonl` lines written before this
+    /// field existed still parse — [`read_audit_tail`] silently drops a line
+    /// it cannot deserialize, and a schema addition must not quietly erase a
+    /// user's existing audit history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_rank: Option<u32>,
 }
 
 /// Safety-valve size cap for `actions.jsonl` — this is a rotation trigger,
@@ -532,6 +558,7 @@ mod tests {
             abort_reason: None,
             actual_reclaimed_bytes: Some(1_024),
             source: "execute".to_string(),
+            model_rank: None,
         }
     }
 
@@ -550,6 +577,66 @@ mod tests {
         assert_eq!(tail[0].action_id, "action.one");
         assert_eq!(tail[1].action_id, "action.two");
         assert_eq!(tail[0], sample_audit_record("action.one"));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A schema addition must not erase existing audit history:
+    /// `read_audit_tail` silently drops any line it cannot deserialize, so a
+    /// `model_rank`-less line written by an earlier build has to keep
+    /// parsing (HORO-1310).
+    #[test]
+    fn an_audit_line_written_before_model_rank_existed_still_parses() {
+        let path = unique_audit_test_path("pre-model-rank");
+        std::fs::write(
+            &path,
+            "{\"timestamp\":1700000000,\"action_id\":\"cargo.clean.target_dir\",\
+             \"resource_id\":\"/tmp/some/target\",\"policy_label\":\"AUTO_SAFE\",\
+             \"outcome\":\"succeeded\",\"abort_reason\":null,\
+             \"actual_reclaimed_bytes\":1024,\"source\":\"execute\"}\n",
+        )
+        .expect("write");
+
+        let tail = read_audit_tail(&path, 10);
+
+        assert_eq!(tail.len(), 1, "an older line must not be dropped");
+        assert_eq!(tail[0].model_rank, None);
+        assert_eq!(tail[0].action_id, "cargo.clean.target_dir");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_model_suggested_action_records_its_rank() {
+        let path = unique_audit_test_path("model-rank");
+        let mut record = sample_audit_record("cargo.clean.target_dir");
+        record.source = "autopilot_auto_safe".to_string();
+        record.model_rank = Some(0);
+
+        append_audit_record(&path, &record).expect("append");
+        let tail = read_audit_tail(&path, 10);
+
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0], record);
+        assert_eq!(tail[0].model_rank, Some(0));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `skip_serializing_if` keeps the common case (nothing model-suggested)
+    /// exactly as it was on disk, so a user's audit log does not grow a
+    /// `"model_rank":null` on every line.
+    #[test]
+    fn a_rule_ranked_action_writes_no_model_rank_key_at_all() {
+        let path = unique_audit_test_path("no-model-rank-key");
+        append_audit_record(&path, &sample_audit_record("cargo.clean.target_dir")).expect("append");
+
+        let written = std::fs::read_to_string(&path).expect("read");
+
+        assert!(
+            !written.contains("model_rank"),
+            "expected no model_rank key in {written:?}"
+        );
 
         let _ = std::fs::remove_file(&path);
     }
