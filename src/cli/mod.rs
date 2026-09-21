@@ -1260,14 +1260,23 @@ pub fn build_execute_report(report: &ExecutionReport) -> ExecuteReport {
         ExecutionOutcome::DryRun => ("dry_run", None, None),
     };
 
+    let expected_reclaimed_bytes = report.expected_reclaimed_bytes.observed().copied();
+    let actual_reclaimed_bytes = report.actual_reclaimed_bytes.observed().copied();
+
     ExecuteReport {
         action_id: report.action.0,
         resource_id: report.resource.to_string(),
         outcome,
         failure_message,
         abort_reason,
-        expected_reclaimed_bytes: report.expected_reclaimed_bytes.observed().copied(),
-        actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
+        expected_reclaimed_bytes,
+        actual_reclaimed_bytes,
+        // Rendered here rather than by the caller: `human_bytes` is
+        // 1024-based, and a client guessing otherwise renders a different
+        // number for the same bytes (HORO-1312). `None` stays `None` — an
+        // unavailable probe is not zero bytes, and "0 B" would claim it was.
+        expected_reclaimed_human: expected_reclaimed_bytes.map(crate::reporting::human_bytes),
+        actual_reclaimed_human: actual_reclaimed_bytes.map(crate::reporting::human_bytes),
     }
 }
 
@@ -1282,18 +1291,21 @@ pub fn print_execute_report(report: &ExecuteReport) {
     if let Some(reason) = &report.abort_reason {
         println!("abort reason:        {reason}");
     }
+    // Reads the `*_human` fields rather than re-rendering the bytes, so the
+    // text output and the `--json` output cannot drift apart into two
+    // conventions the way the CLI and the GUI once did (HORO-1312).
     println!(
         "expected reclaimed:  {}",
         report
-            .expected_reclaimed_bytes
-            .map(crate::reporting::human_bytes)
+            .expected_reclaimed_human
+            .clone()
             .unwrap_or_else(|| "unavailable".to_string())
     );
     println!(
         "actual reclaimed:    {}",
         report
-            .actual_reclaimed_bytes
-            .map(crate::reporting::human_bytes)
+            .actual_reclaimed_human
+            .clone()
             .unwrap_or_else(|| "unavailable".to_string())
     );
 }

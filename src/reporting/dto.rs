@@ -661,6 +661,17 @@ pub struct ExecuteReport {
     pub abort_reason: Option<String>,
     pub expected_reclaimed_bytes: Option<u64>,
     pub actual_reclaimed_bytes: Option<u64>,
+    /// HORO-1312. The same two numbers as
+    /// [`crate::reporting::human_bytes`] renders them, for the same reason
+    /// [`ActionHistoryEventReport::actual_reclaimed_human`] exists: a client
+    /// that formats the byte count itself will disagree with this product's
+    /// own text output. The menu-bar app did exactly that, with
+    /// `ByteCountFormatter(countStyle: .file)` — 1000-based — so one panel
+    /// showed a 1024-based estimate from Rust beside a 1000-based measured
+    /// result from Swift, and the difference read as bytes that went
+    /// missing. Whoever owns the convention has to emit the string.
+    pub expected_reclaimed_human: Option<String>,
+    pub actual_reclaimed_human: Option<String>,
 }
 
 /// Structured `--json` rendering for every non-`Executed` branch of

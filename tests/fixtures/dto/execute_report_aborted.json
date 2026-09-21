@@ -5,5 +5,7 @@
   "failure_message": null,
   "abort_reason": "ResourceIdentityChanged",
   "expected_reclaimed_bytes": 2147483648,
-  "actual_reclaimed_bytes": null
+  "actual_reclaimed_bytes": null,
+  "expected_reclaimed_human": "2.0 GB",
+  "actual_reclaimed_human": null
 }
