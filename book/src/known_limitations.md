@@ -191,18 +191,35 @@ Remaining, deliberate scope cuts for this subcommand specifically:
 - Not wired into `glomeris free`'s recovery loop — that remains a future
   ticket's optional enhancement, per `actions::llm`'s own module docs.
 
-Separately, and independently of the LLM planner: no live detector
-(Xcode/Homebrew/Cargo/Node/Docker build cache) ever emits a resource whose
-path matches any `policy::protected` pattern, or the unconditionally
-`Protected` `DockerImageCache` kind — `PolicyClass::Protected` is real and
-enforced at the code level (`policy::approval::authorize` unconditionally
-refuses it; `Approval` is unconstructible outside that module), but it is
-not reachable or observable by a real evaluator driving only the shipped
-product's *detectors*. The new golden test above reaches `Protected`
-through a hand-built `Evidence` fixture (mirroring
-`policy::engine`'s own test fixtures), the same way `llm_plan_item_never_bypasses_policy`
-always did — not through a live detector finding real SSH key material on
-disk.
+Separately, and independently of the LLM planner: a previous version of this
+section claimed that no live detector could ever emit a resource whose path
+matches a `policy::protected` pattern, and that `PolicyClass::Protected` was
+therefore enforced at the code level but not reachable by an evaluator
+driving only the shipped product's *detectors*. The first half of that is
+wrong, and HORO-1313's release-gate pass disproved it on a disposable
+fixture.
+
+What a protected pattern matches is a *path component*, not an installed
+location, so anything a detector can discover underneath one is protected.
+A real `node_modules` tree created under a path containing an `.ssh`
+component was found by the live Node detector, classified `Protected` with
+reason `protected_credential_material` and `executable: false`, and then
+refused by the real executor twice — once by a plain `execute`, once with a
+valid `--confirm-ask` and matching `--observed-fingerprint` — exiting 3 both
+times with nothing deleted.
+
+So the accurate statement is narrower, and the safety conclusion is
+stronger rather than weaker. The conventional locations of the tool caches
+Glomeris knows about do not normally sit under a protected path, which is
+why `Protected` is uncommon in day-to-day use; a project root that does sit
+under one reaches it through ordinary discovery, and the refusal holds when
+it happens. `--project-root` is the usual way to get there, deliberately or
+by accident.
+
+`tests/golden_llm_plan_protected_refusal.rs` still reaches `Protected`
+through a hand-built `Evidence` fixture, and that remains the right shape
+for a hermetic test — it does not depend on a tree existing on the machine
+running CI.
 
 ## Resolved (HORO-957): prebuilt release artifacts
 
