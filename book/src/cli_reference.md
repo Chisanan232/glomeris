@@ -55,6 +55,35 @@ all thirteen commands, a 13-line, 146-column wall in answer to one mistyped
 word. And a usage error inside a command prints only that command's usage, so
 getting a `free` flag wrong no longer tells you about `daemon`.
 
+## Byte counts: 1024-based, with `KB`/`MB`/`GB` labels
+
+Every byte count this product renders — `free_human`, `total_human`,
+`logical_human`, `reclaimable_human`, `expected_reclaimed_human`,
+`actual_reclaimed_human`, and the same numbers in text output — comes from one
+function, `reporting::human_bytes`. It divides by **1024** and labels the result
+`B`/`KB`/`MB`/`GB`/`TB`/`PB`. So `2147483648` renders as `2.0 GB`, where a
+1000-based formatter would say `2.15 GB`. Counts below 1024 are a bare integer
+and `B`, with no decimal point.
+
+The labels are not the IEC `KiB`/`MiB`/`GiB` spelling that strictly matches the
+arithmetic. That is a deliberate, documented inconsistency rather than an
+oversight: these are the units `du -h` and `df -h` print for the same
+arithmetic, and the alternative is renaming every unit in every report and
+fixture to spell out a distinction most readers of a storage tool do not draw.
+
+`--target` parses the same way, so what you type and what you read back agree:
+`glomeris free --target 5GB` means 5 × 1024³ bytes. A bare number or a `B`
+suffix is raw bytes; a trailing `%` is a percentage of total capacity instead.
+
+**Clients should render the `*_human` string rather than scale the byte count
+themselves.** The menu-bar app did the latter with `ByteCountFormatter`, which
+is 1000-based, so a 2 GiB cleanup appeared as a `2.0 GB` estimate and a
+`2.15 GB` result in the same panel (fixed in HORO-1312). Where a report offers
+both fields, the raw `*_bytes` value is for arithmetic and the `*_human` string
+is for display. A `*_human` field is `null`, never `"0 B"`, when the underlying
+probe produced no number — an aborted execution reclaimed nothing, which is a
+different claim from having freed zero bytes.
+
 ## `glomeris daemon <subcommand>`
 
 macOS only (exits 1 with an error message on other platforms).
@@ -531,9 +560,14 @@ glomeris execute --action-id cargo.clean.target_dir \
   "failure_message": null,
   "abort_reason": null,
   "expected_reclaimed_bytes": 2147483648,
-  "actual_reclaimed_bytes": 2147483648
+  "actual_reclaimed_bytes": 2147483648,
+  "expected_reclaimed_human": "2.0 GB",
+  "actual_reclaimed_human": "2.0 GB"
 }
 ```
+
+The two `*_human` strings are new in HORO-1312 and are what a UI should
+display — see [Byte counts](#byte-counts-1024-based-with-kbmbgb-labels).
 
 An `ASK`-classified resource requires `--confirm-ask` plus the exact
 `--observed-fingerprint` token captured from a prior `explain --json` call
@@ -559,9 +593,14 @@ If the resource's identity changed between the `explain` call and this
   "failure_message": null,
   "abort_reason": "ResourceIdentityChanged",
   "expected_reclaimed_bytes": 2147483648,
-  "actual_reclaimed_bytes": null
+  "actual_reclaimed_bytes": null,
+  "expected_reclaimed_human": "2.0 GB",
+  "actual_reclaimed_human": null
 }
 ```
+
+Note both `actual_*` fields are `null` rather than `0`/`"0 B"`. Nothing was
+deleted, which is not the same report as a cleanup that freed no bytes.
 
 Every refusal path (e.g. `PROTECTED`, no consent supplied, a stale
 fingerprint) prints an `ExecuteRefusalReport` instead, with `--json`:
