@@ -59,6 +59,9 @@ targets:
       - path: Sources/MenuBarAppearance.swift
       - path: Sources/GlomerisMark.swift
       - path: Sources/ProjectRootsStore.swift
+      # HORO-1325: the view, not just its store, so ProjectRootsWording's
+      # labels can be asserted rather than read.
+      - path: Sources/ProjectRootsPreferencesView.swift
       - path: Sources/GlomerisDtos.swift
       - path: Sources/GlomerisVocabulary.swift
       - path: Sources/GlomerisDesignSystem.swift

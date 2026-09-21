@@ -373,6 +373,85 @@ final class GlomerisDesignSystemTests: XCTestCase {
         )
     }
 
+    /// A control whose entire content is a glyph has no name unless one is
+    /// given to it (HORO-1325).
+    ///
+    /// This is the same class of defect as the two scans above — invisible on
+    /// screen, and only findable by reading — and it shipped for real: the
+    /// project-roots pane's remove button was an `Image(systemName:)` and
+    /// nothing else, so VoiceOver could say what glyph was there and not what
+    /// pressing it would do, or to which of several paths.
+    ///
+    /// Only the `} label: {` form is examined, because that is the form a
+    /// control takes when its label is not already text. `Button("Add")` names
+    /// itself and needs nothing.
+    ///
+    /// `accessibilityHidden(` counts as satisfying the rule: an image that is
+    /// genuinely decorative — because something adjacent already says the same
+    /// thing — is correctly removed from the tree rather than named twice. What
+    /// is never acceptable is neither.
+    func testNoIconOnlyControlShipsWithoutAName() throws {
+        var iconOnlyControlsExamined = 0
+
+        for (name, code) in try Self.sourceFiles() {
+            let lines = code.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+
+            // Line numbers below are positions in the comment-stripped text,
+            // not in the file — `sourceFiles()` drops comment lines, so they
+            // are an ordinal ("the second such control in this file"), not
+            // somewhere to jump to.
+            for (index, line) in lines.enumerated() where line.contains("} label: {") {
+                // Brace-count from the end of the `label: {` to find where the
+                // closure actually closes, rather than guessing a window: a
+                // fixed window can spill into the next view and find a `Text(`
+                // that belongs to something else, which would silently excuse
+                // the very control this is meant to catch.
+                var depth = 1
+                var closingLine: Int?
+                for candidate in (index + 1)..<lines.count {
+                    depth += lines[candidate].filter { $0 == "{" }.count
+                    depth -= lines[candidate].filter { $0 == "}" }.count
+                    if depth <= 0 {
+                        closingLine = candidate
+                        break
+                    }
+                }
+                let end = try XCTUnwrap(
+                    closingLine,
+                    "\(name): the label closure opened at line \(index + 1) never closes — the "
+                        + "brace scan is wrong, so this guard is not checking anything"
+                )
+
+                let body = lines[(index + 1)...end].joined(separator: "\n")
+                guard body.contains("Image("), !body.contains("Text(") else { continue }
+                iconOnlyControlsExamined += 1
+
+                // The name may sit inside the closure, on the image, or after
+                // the closure as a modifier on the control. Both are correct
+                // and both appear in this target.
+                let trailing = lines[end..<min(end + 8, lines.count)].joined(separator: "\n")
+                let named = (body + trailing).contains(".accessibilityLabel(")
+                    || (body + trailing).contains(".accessibilityHidden(")
+
+                XCTAssertTrue(
+                    named,
+                    "\(name): the control whose label closure opens at line \(index + 1) is a "
+                        + "glyph and nothing else, and carries no accessibilityLabel — VoiceOver "
+                        + "has no way to say what it does"
+                )
+            }
+        }
+
+        // Without this the whole test passes by finding nothing, which is
+        // exactly how a scan-shaped guard goes quietly dead.
+        XCTAssertGreaterThanOrEqual(
+            iconOnlyControlsExamined,
+            3,
+            "the icon-only control scan matched \(iconOnlyControlsExamined) controls — it used to "
+                + "match more, so the pattern it looks for has probably changed"
+        )
+    }
+
     // MARK: - Helpers
 
     /// Every Swift file in the app target, comment-stripped, as
