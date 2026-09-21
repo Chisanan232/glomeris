@@ -270,8 +270,11 @@ pub struct AuditRecord {
     /// collapsed them would lose the one a user would actually go looking
     /// for.
     pub source: String,
-    /// Where the model's plan ranked this resource, 0-based, or `None` if
-    /// no model named it (HORO-1310).
+    /// Where the model's plan ranked this resource, or `None` if no model
+    /// named it (HORO-1310). 1-based, so `1` is the model's first choice and
+    /// `0` never appears — the number here is the same one
+    /// `glomeris autopilot run` printed, and a log offset by one from the
+    /// report it came from would be worse than no log at all.
     ///
     /// This is the record of what the model *suggested*, kept deliberately
     /// separate from `policy_label` (what policy *decided*) and `source`
@@ -611,14 +614,14 @@ mod tests {
         let path = unique_audit_test_path("model-rank");
         let mut record = sample_audit_record("cargo.clean.target_dir");
         record.source = "autopilot_auto_safe".to_string();
-        record.model_rank = Some(0);
+        record.model_rank = Some(1);
 
         append_audit_record(&path, &record).expect("append");
         let tail = read_audit_tail(&path, 10);
 
         assert_eq!(tail.len(), 1);
         assert_eq!(tail[0], record);
-        assert_eq!(tail[0].model_rank, Some(0));
+        assert_eq!(tail[0].model_rank, Some(1));
 
         let _ = std::fs::remove_file(&path);
     }

@@ -251,7 +251,7 @@ pub struct ActionHistoryEventReport {
     pub actual_reclaimed_bytes: Option<u64>,
     pub actual_reclaimed_human: Option<String>,
     pub source: String,
-    /// `Some(rank)` when a model's plan named this resource, 0-based — see
+    /// `Some(rank)` when a model's plan named this resource, 1-based — see
     /// [`crate::monitor::AuditRecord::model_rank`]. Projected so `glomeris
     /// actions history --json` can answer "what did Autopilot do because a
     /// model suggested it?" without a second file or a second command.

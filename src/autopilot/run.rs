@@ -158,9 +158,13 @@ pub struct AutopilotRunItem {
     /// — including `UNKNOWN_INCOMPLETE`, which is a label rather than a
     /// [`crate::policy::PolicyClass`] variant.
     pub policy_label: &'static str,
-    /// Where the model ranked this resource, 0-based, or `None` if no model
-    /// named it. Separate axis from `policy_label`: a model's ranking never
-    /// reaches `classify`.
+    /// Where the model ranked this resource, or `None` if no model named
+    /// it. 1-based: `Some(1)` is the model's first choice, because this
+    /// number is printed in a report and written to the audit log, and a
+    /// rank that starts at zero invites exactly one bug — a display that
+    /// adds one and a log that does not, disagreeing about the same action.
+    /// Separate axis from `policy_label`: a model's ranking never reaches
+    /// `classify`.
     pub model_rank: Option<u32>,
     /// What the *evidence* says would be reclaimed — never a model's
     /// estimate, never the action's claim.
@@ -229,7 +233,10 @@ impl std::fmt::Display for AutopilotReport {
             writeln!(f, "  candidates ({}):", self.items.len())?;
             for item in &self.items {
                 let rank = match item.model_rank {
-                    Some(rank) => format!(" [AI rank {}]", rank + 1),
+                    // Printed verbatim. The audit log records this same
+                    // number, and a reader comparing the two must not have
+                    // to know which one is offset.
+                    Some(rank) => format!(" [AI rank {rank}]"),
                     None => String::new(),
                 };
                 writeln!(f, "    {} ({}){rank}", item.resource_id, item.policy_label)?;
@@ -306,7 +313,7 @@ pub struct AutopilotRunRequest<'a> {
 }
 
 /// Reorders `candidates` so the ones a model named come first, in the
-/// model's order, and returns each with its 0-based model rank.
+/// model's order, and returns each with its 1-based model rank.
 ///
 /// Pure, and a permutation by construction: it sorts the vector it was
 /// given and never pushes to or removes from it, so no model plan — however
@@ -316,6 +323,14 @@ pub struct AutopilotRunRequest<'a> {
 /// Unranked candidates keep their original relative order (the sort is
 /// stable), so a run with no model behaves exactly like a run whose model
 /// returned an empty plan.
+///
+/// "The model's order" means the order of `items` in the plan, not the
+/// `priority` field on them. `ValidatedPlanItem::priority` is documented as
+/// advisory with nothing ranking on it, and nothing in this codebase — no
+/// prompt, no schema doc — ever pinned down whether 1 means most urgent or
+/// least. Sorting on a number whose direction was never specified would be
+/// inventing a semantics and then depending on it; the array a provider
+/// returned is unambiguous.
 pub fn order_candidates(
     mut candidates: Vec<Evidence>,
     model_order: &[ValidatedPlanItem],
@@ -332,7 +347,9 @@ pub fn order_candidates(
         ranked
             .iter()
             .position(|candidate| *candidate == id)
-            .map(|position| position as u32)
+            // 1-based: the rank is printed and logged, so it is the
+            // human's ordinal, not an index into anything.
+            .map(|position| position as u32 + 1)
     };
 
     candidates.sort_by_key(|evidence| match rank_of(evidence) {
@@ -792,7 +809,7 @@ mod tests {
         let ordered = order_candidates(vec![a, b], &plan);
 
         assert_eq!(ids(&ordered), expected);
-        assert_eq!(ordered[0].0, Some(0));
+        assert_eq!(ordered[0].0, Some(1), "the model's first choice is rank 1");
         assert_eq!(ordered[1].0, None);
 
         fs::remove_dir_all(&root_a).ok();
@@ -834,7 +851,7 @@ mod tests {
             "a duplicate must not duplicate a candidate"
         );
         assert_eq!(ids(&ordered), expected);
-        assert_eq!(ordered[0].0, Some(0), "the FIRST mention sets the rank");
+        assert_eq!(ordered[0].0, Some(1), "the FIRST mention sets the rank");
 
         fs::remove_dir_all(&root_a).ok();
         fs::remove_dir_all(&root_b).ok();
@@ -862,7 +879,7 @@ mod tests {
         let mut after = ids(&ordered);
         after.sort();
         assert_eq!(after, before, "the candidate set must be unchanged");
-        assert_eq!(ordered[0].0, Some(2), "b keeps its own index in the plan");
+        assert_eq!(ordered[0].0, Some(3), "b keeps its own place in the plan");
 
         for root in [&root_a, &root_b, &root_ghost1, &root_ghost2] {
             fs::remove_dir_all(root).ok();
@@ -1167,9 +1184,21 @@ mod tests {
 
         let report = run(&fixture, &envelope, vec![evidence], &plan, false);
 
-        assert_eq!(report.items[0].model_rank, Some(0));
+        // 1-based on purpose: the report prints this number verbatim and
+        // the audit line stores the same one, so the two cannot drift.
+        assert_eq!(report.items[0].model_rank, Some(1));
         let audit = read_audit_tail(&fixture.audit_log, 8);
-        assert_eq!(audit[0].model_rank, Some(0));
+        assert_eq!(audit[0].model_rank, Some(1));
+
+        // Pinned at the rendering boundary too. A dogfood run of an earlier
+        // build printed `[AI rank 2]` for an action the log recorded as
+        // `model_rank: 1`, because the report added one to a 0-based index
+        // and the log did not. One of those two numbers had to go.
+        let rendered = report.to_string();
+        assert!(
+            rendered.contains("[AI rank 1]"),
+            "the report must print the number the log stores, got:\n{rendered}"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -1224,7 +1253,7 @@ mod tests {
 
         // The model did get its way about ORDER — and that changed nothing
         // about authority.
-        assert_eq!(report.items[0].model_rank, Some(0));
+        assert_eq!(report.items[0].model_rank, Some(1));
         assert_eq!(
             report.items[0].outcome,
             AutopilotItemOutcome::Refused(RefusalReason::ProtectedRefused)

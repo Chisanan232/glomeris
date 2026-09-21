@@ -375,7 +375,7 @@ fn action_history_report_matches_golden_fixture() {
                 actual_reclaimed_bytes: Some(524_288_000),
                 actual_reclaimed_human: Some("524.3 MB".to_string()),
                 source: "autopilot_auto_safe".to_string(),
-                model_rank: Some(0),
+                model_rank: Some(1),
             },
         ],
     };

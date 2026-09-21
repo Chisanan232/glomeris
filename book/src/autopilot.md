@@ -137,9 +137,16 @@ do not populate:
 - `source` — `autopilot_auto_safe` or `autopilot_preauthorized_ask`, so the
   authority an action ran under is recoverable from the log rather than
   inferred. Interactive records read `execute`, `free` or `emergency`.
-- `model_rank` — the position the plan gave that candidate, or `null` when no
-  plan was involved. This is how you tell "the model suggested it and policy
-  allowed it" from "policy allowed it and no model was consulted."
+- `model_rank` — where the plan ranked that candidate, or `null` when no plan
+  was involved. This is how you tell "the model suggested it and policy allowed
+  it" from "policy allowed it and no model was consulted." It is 1-based, and
+  it is the same number the run's own report printed as `[AI rank N]` — a log
+  offset by one from the report it came from would be worse than no log.
+
+"Where the plan ranked it" means its position in the plan's `items` array, not
+its `priority` field. `priority` is advisory and its direction was never
+specified anywhere — nothing says whether `1` means most urgent or least — so
+ordering on it would mean inventing a semantics and then depending on it.
 
 Refusals are **not** written to `actions.jsonl` — it is a log of what was done
 to the filesystem, and a refusal did nothing to the filesystem. They are in the
