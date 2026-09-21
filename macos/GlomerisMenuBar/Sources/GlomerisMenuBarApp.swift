@@ -52,6 +52,14 @@ struct GlomerisMenuBarApp: App {
         // subcommands from button actions (`llm-check`, `llm-plan
         // --print-payload`) and renders the tokens they print. Neither
         // classifies anything — see that file's header.
+        //
+        // HORO-1310 added the third. Autopilot is the one feature that grants
+        // standing permission to delete without asking again, so it cannot be
+        // CLI-only: the person granting it is the least likely to be reading
+        // `--help`. That pane renders `autopilot show --json` and writes
+        // through `autopilot enable|revoke`; every choice it offers — the
+        // kinds, the ceilings, the refusals — arrives from the CLI as data,
+        // and there is no way to start a run from it.
         Settings {
             TabView {
                 ProjectRootsPreferencesView()
@@ -61,6 +69,10 @@ struct GlomerisMenuBarApp: App {
                 AiProviderPreferencesView()
                     .tabItem {
                         Label("AI Provider", systemImage: "sparkles")
+                    }
+                AutopilotPreferencesView()
+                    .tabItem {
+                        Label("Autopilot", systemImage: "bolt.badge.automatic")
                     }
             }
         }

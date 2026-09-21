@@ -487,3 +487,120 @@ struct LlmPayloadResourceAliasDto: Decodable, Equatable, Identifiable {
         case localResourceId = "local_resource_id"
     }
 }
+
+/// Mirrors `reporting::dto::AutopilotAskPreauthorizationReport` (HORO-1310):
+/// one standing consent, naming exactly one resource kind and exactly one
+/// policy reason.
+///
+/// Both are canonical CLI tokens, not prose. `GlomerisVocabulary.kind` and
+/// `.reason` are what turn them into the words on screen, and
+/// `scripts/check-vocabulary-covers-cli-tokens.sh` is what keeps those two
+/// tables covering every token Rust can emit.
+///
+/// `Identifiable` by the pair, because the pair is what the envelope stores
+/// and two entries can share a kind.
+struct AutopilotAskPreauthorizationDto: Decodable, Equatable, Identifiable {
+    let kind: String
+    let reason: String
+
+    var id: String { "\(kind):\(reason)" }
+}
+
+/// Mirrors `reporting::dto::AutopilotCeilingsReport` (HORO-1310): the limits
+/// above which `autopilot enable` refuses a value outright.
+///
+/// Read from the CLI rather than written here so a stepper's maximum cannot
+/// disagree with what `enable` accepts. A control offering a value the CLI
+/// then rejects would read as the app lying about its own limits.
+struct AutopilotCeilingsDto: Decodable, Equatable {
+    let maxActions: UInt32
+    let maxBytes: UInt64
+    let maxBytesHuman: String
+    let maxDurationSecs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case maxActions = "max_actions"
+        case maxBytes = "max_bytes"
+        case maxBytesHuman = "max_bytes_human"
+        case maxDurationSecs = "max_duration_secs"
+    }
+}
+
+/// Mirrors `reporting::dto::AutopilotEnvelopeReport` (HORO-1310) — the whole
+/// of what Autopilot is authorized to do, and the whole of what no
+/// authorization can ever cover.
+///
+/// Every list here is data, including the refusals and the available choices.
+/// That is the point: the Autopilot settings screen has to tell a user what
+/// Glomeris will always refuse, and under the standing project rule at the top
+/// of `GlomerisMenuBarApp.swift` it must not be the thing that decides what
+/// that is. A Swift array of resource kinds would also go stale the first time
+/// a detector is added, and the failure would be invisible — a kind the CLI
+/// accepts that the GUI cannot offer.
+///
+/// Nothing on this type is `Encodable`. Changing an envelope goes through
+/// `autopilot enable`/`revoke`, whose argument parsing runs the envelope's own
+/// checked setters; there is no path by which this app hands Rust an envelope
+/// to trust.
+struct AutopilotEnvelopeDto: Decodable, Equatable {
+    /// Whether Autopilot may run at all. Not the only thing that stops it: an
+    /// enabled envelope with no allowed kinds, or a `maxActions` of zero,
+    /// executes nothing either — so the screen must not present `enabled` on
+    /// its own as "it will act".
+    let enabled: Bool
+    let allowedKinds: [String]
+    let askPreauthorizations: [AutopilotAskPreauthorizationDto]
+    let maxActions: UInt32
+    let maxBytes: UInt64
+    /// Rust's own rendering of `maxBytes`, for the same reason
+    /// `ExecuteReportDto.actualReclaimedHuman` carries one: every number the
+    /// CLI prints is 1024-based and `ByteCountFormatter` is not, so formatting
+    /// it here would disagree with the CLI's own output for the same bytes.
+    let maxBytesHuman: String
+    let maxDurationSecs: UInt64
+    /// The disk-pressure state a run must have reached, or `nil` when a run is
+    /// not gated on pressure at all — which is the default, and is the more
+    /// permissive of the two, so the screen must say which one is in force
+    /// rather than leaving a blank row.
+    let minPressure: String?
+    let ceilings: AutopilotCeilingsDto
+    let allowlistableKinds: [String]
+    /// Kinds that can never be allowlisted, whatever is asked for.
+    let neverAllowlistableKinds: [String]
+    let preauthorizableReasons: [String]
+    /// Reasons a resource can be held back by that can never be
+    /// pre-authorized. Narrower than "everything not in
+    /// `preauthorizableReasons`" — the Rust producer leaves out the reasons
+    /// that justify letting something through, since listing those would be a
+    /// warning about nothing.
+    let neverPreauthorizableReasons: [String]
+    let pressureStates: [String]
+    /// The policy labels no envelope can make executable.
+    let neverExecutableLabels: [String]
+    /// What the model's authority is, one sentence per fact, written in Rust
+    /// because each is a claim about Rust's behaviour.
+    let aiAuthority: [String]
+    /// Where the envelope file lives, or `nil` if the path could not be
+    /// resolved. Local, and never part of any provider request.
+    let storedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case allowedKinds = "allowed_kinds"
+        case askPreauthorizations = "ask_preauthorizations"
+        case maxActions = "max_actions"
+        case maxBytes = "max_bytes"
+        case maxBytesHuman = "max_bytes_human"
+        case maxDurationSecs = "max_duration_secs"
+        case minPressure = "min_pressure"
+        case ceilings
+        case allowlistableKinds = "allowlistable_kinds"
+        case neverAllowlistableKinds = "never_allowlistable_kinds"
+        case preauthorizableReasons = "preauthorizable_reasons"
+        case neverPreauthorizableReasons = "never_preauthorizable_reasons"
+        case pressureStates = "pressure_states"
+        case neverExecutableLabels = "never_executable_labels"
+        case aiAuthority = "ai_authority"
+        case storedAt = "stored_at"
+    }
+}

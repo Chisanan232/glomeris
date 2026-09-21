@@ -40,7 +40,8 @@ use std::path::PathBuf;
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
 use glomeris::reporting::dto::{
-    ActionHistoryEventReport, ActionHistoryReport, DaemonStatusReport, DetectCandidateReport,
+    ActionHistoryEventReport, ActionHistoryReport, AutopilotAskPreauthorizationReport,
+    AutopilotCeilingsReport, AutopilotEnvelopeReport, DaemonStatusReport, DetectCandidateReport,
     DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, LlmCheckReport,
     LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, OfferedAction,
     StatusReport,
@@ -497,4 +498,88 @@ fn llm_payload_report_matches_golden_fixture() {
         );
     }
     assert_matches_fixture(&report, "llm_payload_report.json");
+}
+
+/// HORO-1310's envelope report, surfaced in the GUI by the Autopilot settings
+/// screen. Constructed literally rather than through
+/// `autopilot::envelope_report`, like every other fixture here: the contract
+/// under test is the field names and JSON types the Swift mirror decodes, and
+/// routing it through the producer would make this fail whenever a sentence
+/// in `ai_authority` is reworded — a change that breaks nothing.
+///
+/// `autopilot::report`'s own unit tests are what assert the producer fills
+/// these fields from the right functions.
+///
+/// The fixture carries a grant rather than a revoked envelope so that every
+/// optional and every list is populated: `min_pressure` set, one ASK
+/// pre-authorization, and both refusal lists non-empty. A fixture of empty
+/// arrays would decode successfully on the Swift side no matter what the
+/// element types were.
+#[test]
+fn autopilot_envelope_report_matches_golden_fixture() {
+    let report = AutopilotEnvelopeReport {
+        enabled: true,
+        allowed_kinds: vec!["node_modules", "cargo_target_dir"],
+        ask_preauthorizations: vec![AutopilotAskPreauthorizationReport {
+            kind: "node_modules",
+            reason: "rebuild_cost_high",
+        }],
+        max_actions: 2,
+        max_bytes: 2_147_483_648,
+        max_bytes_human: "2.0 GB".to_string(),
+        max_duration_secs: 120,
+        min_pressure: Some("PRESSURED"),
+        ceilings: AutopilotCeilingsReport {
+            max_actions: 25,
+            max_bytes: 68_719_476_736,
+            max_bytes_human: "64.0 GB".to_string(),
+            max_duration_secs: 900,
+        },
+        allowlistable_kinds: vec![
+            "xcode_derived_data",
+            "homebrew_cache",
+            "cargo_target_dir",
+            "cargo_registry_cache",
+            "node_modules",
+            "node_package_manager_cache",
+            "docker_build_cache",
+            "docker_image_cache",
+        ],
+        never_allowlistable_kinds: vec!["unknown"],
+        preauthorizable_reasons: vec!["rebuild_cost_high"],
+        never_preauthorizable_reasons: vec![
+            "protected_credential_material",
+            "protected_git_internals",
+            "protected_infra_state",
+            "protected_persistent_volume",
+            "protected_user_documents",
+            "protected_system_path",
+            "protected_unsafe_mount_or_symlink",
+            "protected_unknown_resource_kind",
+            "evidence_incomplete",
+            "evidence_stale",
+            "evidence_probe_failed",
+            "resource_in_active_use",
+            "git_worktree_dirty",
+            "owning_tool_live",
+        ],
+        pressure_states: vec!["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"],
+        never_executable_labels: vec!["PROTECTED", "UNKNOWN_INCOMPLETE"],
+        ai_authority: vec![
+            "AI can recommend. Policy decides. Executor verifies. Filesystem reality wins.",
+            "The model's only influence is the order candidates are considered in.",
+        ],
+        stored_at: Some(
+            "/Users/dev/Library/Application Support/Glomeris/autopilot.conf".to_string(),
+        ),
+    };
+
+    // The one cross-field invariant a client would be wrong to assume it can
+    // derive: a kind on the refused list must never also be offered.
+    for refused in &report.never_allowlistable_kinds {
+        assert!(!report.allowlistable_kinds.contains(refused));
+        assert!(!report.allowed_kinds.contains(refused));
+    }
+
+    assert_matches_fixture(&report, "autopilot_envelope_report.json");
 }

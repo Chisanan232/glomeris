@@ -22,8 +22,10 @@ gains one clause here:
 An `AutopilotEnvelope` is the complete statement of what Autopilot may do. It
 is a small file of `key = value` lines at
 `~/Library/Application Support/Glomeris/autopilot.conf`, and nothing else
-grants authority — not an environment variable, not a GUI toggle, not the
-plan you hand `run`.
+grants authority — not an environment variable, not the plan you hand `run`,
+and not the menu-bar app's Autopilot tab, which grants by running
+`autopilot enable` and keeps no second copy of the answer. There is one grant
+and it is that file.
 
 | Field | Default | Hard ceiling | What it bounds |
 |---|---|---|---|
@@ -162,6 +164,35 @@ later `enable` cannot come back carrying limits you never read.
 `enable` replaces the previous envelope rather than merging into it, for the
 same reason. A grant should be one line you can read out loud, never the
 accumulated union of every `enable` you have ever typed.
+
+Nothing here expires on its own. The envelope is a file: it survives quitting,
+restarting and logging out, and it stays in force until it is revoked. That is
+a deliberate omission rather than a missing feature — a grant that lapsed on a
+timer would mean the honest answer to "what may Autopilot do right now" depended
+on the clock, and `show` would have to be read differently depending on when you
+read it.
+
+## Granting it without a terminal
+
+Everything above can also be read, granted and revoked in the menu-bar app,
+under Settings → Autopilot (`Cmd+,`). Reading a standing deletion grant only
+from `--help` and a config file would have meant that in practice most people
+who enabled it had never read it, so the GUI is part of the feature rather than
+a convenience on top of it.
+
+It changes nothing about where authority lives. The tab renders
+`autopilot show --json` — the same envelope, the same ceilings, the same lists
+of what can never be allowlisted, pre-authorized or executed — and writes by
+running `autopilot enable` or `autopilot revoke`. It holds no policy logic, and
+it offers no choice that did not arrive from the CLI as data, which is the
+project-wide rule for that app and is checked in CI rather than trusted.
+
+Two things it deliberately does not do: it cannot start a run (`autopilot run`
+has no `--json` for the same reason), and it cannot construct a grant the CLI
+would reject. See
+[Menu Bar App](menu_bar_app.md#preferences--autopilot) for the screen itself,
+including why its form is pre-filled from the envelope in force and why its
+byte budget rounds up.
 
 ## Known limitation: a pre-authorized `ASK` cannot complete today
 

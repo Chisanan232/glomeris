@@ -423,4 +423,65 @@ final class DtoGoldenFixturesTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - AutopilotEnvelopeReport
+
+    func testDecodesAutopilotEnvelopeReport() throws {
+        let dto = try decodeFixture("autopilot_envelope_report.json", as: AutopilotEnvelopeDto.self)
+
+        XCTAssertTrue(dto.enabled)
+        XCTAssertEqual(dto.allowedKinds, ["node_modules", "cargo_target_dir"])
+        XCTAssertEqual(dto.maxActions, 2)
+        XCTAssertEqual(dto.maxBytes, 2_147_483_648)
+        XCTAssertEqual(dto.maxBytesHuman, "2.0 GB")
+        XCTAssertEqual(dto.maxDurationSecs, 120)
+        XCTAssertEqual(dto.minPressure, "PRESSURED")
+        XCTAssertEqual(dto.storedAt, "/Users/dev/Library/Application Support/Glomeris/autopilot.conf")
+
+        XCTAssertEqual(dto.askPreauthorizations.count, 1)
+        let consent = try XCTUnwrap(dto.askPreauthorizations.first)
+        XCTAssertEqual(consent.kind, "node_modules")
+        XCTAssertEqual(consent.reason, "rebuild_cost_high")
+        // What `ForEach` keys on, and why it is the pair rather than the kind:
+        // two consents can name the same kind.
+        XCTAssertEqual(consent.id, "node_modules:rebuild_cost_high")
+
+        XCTAssertEqual(dto.ceilings.maxActions, 25)
+        XCTAssertEqual(dto.ceilings.maxBytes, 68_719_476_736)
+        XCTAssertEqual(dto.ceilings.maxBytesHuman, "64.0 GB")
+        XCTAssertEqual(dto.ceilings.maxDurationSecs, 900)
+
+        XCTAssertEqual(dto.allowlistableKinds.count, 8)
+        XCTAssertEqual(dto.neverAllowlistableKinds, ["unknown"])
+        XCTAssertEqual(dto.preauthorizableReasons, ["rebuild_cost_high"])
+        XCTAssertEqual(dto.neverPreauthorizableReasons.count, 14)
+        XCTAssertEqual(dto.pressureStates, ["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"])
+        XCTAssertEqual(dto.neverExecutableLabels, ["PROTECTED", "UNKNOWN_INCOMPLETE"])
+        XCTAssertEqual(dto.aiAuthority.count, 2)
+    }
+
+    /// The screen's whole reason for carrying the refusal lists: a control it
+    /// builds from `allowlistableKinds` must never be able to offer something
+    /// the CLI refuses. Asserted on the decoded report rather than on the view,
+    /// because this is a property of the data the view is built from.
+    func testAutopilotRefusedKindsAreNeverOffered() throws {
+        let dto = try decodeFixture("autopilot_envelope_report.json", as: AutopilotEnvelopeDto.self)
+
+        for refused in dto.neverAllowlistableKinds {
+            XCTAssertFalse(
+                dto.allowlistableKinds.contains(refused),
+                "\(refused) is offered as allowlistable despite being refused"
+            )
+            XCTAssertFalse(
+                dto.allowedKinds.contains(refused),
+                "\(refused) is reported as granted despite being refused"
+            )
+        }
+        for refused in dto.neverPreauthorizableReasons {
+            XCTAssertFalse(
+                dto.preauthorizableReasons.contains(refused),
+                "\(refused) is offered as pre-authorizable despite being refused"
+            )
+        }
+    }
 }

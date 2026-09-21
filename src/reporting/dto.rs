@@ -721,6 +721,121 @@ pub struct ActionListReport {
     pub actions: Vec<ActionListItem>,
 }
 
+/// One standing `ASK` pre-authorization, as reported by
+/// `glomeris autopilot show --json` (HORO-1310, GUI surface added under
+/// HORO-1310's reopened scope).
+///
+/// Both fields are the canonical tokens — [`crate::evidence::ResourceKind::tag`]
+/// and [`crate::policy::ReasonCode::as_str`] — rather than prose, because the
+/// menu-bar app already has a plain-language table for both and
+/// `scripts/check-vocabulary-covers-cli-tokens.sh` diffs that table against
+/// those two producers. Sending prose instead would put the wording somewhere
+/// nothing checks.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AutopilotAskPreauthorizationReport {
+    pub kind: &'static str,
+    pub reason: &'static str,
+}
+
+/// The hard ceilings no Autopilot envelope can exceed, from
+/// [`crate::autopilot::envelope`]'s constants.
+///
+/// Reported rather than hardcoded in the client for the reason the whole
+/// envelope is enforced in Rust: a GUI that knew the ceilings independently
+/// could offer a slider position the CLI then refuses, and the user would
+/// read that as the app lying about its own limits.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AutopilotCeilingsReport {
+    pub max_actions: u32,
+    pub max_bytes: u64,
+    pub max_bytes_human: String,
+    pub max_duration_secs: u64,
+}
+
+/// `glomeris autopilot show|enable|revoke --json` report (HORO-1310): the
+/// complete statement of what Autopilot is authorized to do, plus the
+/// complete statement of what no envelope can ever authorize.
+///
+/// ## Why the refusals are in the same report
+///
+/// Because they are the half a reader cannot infer from a list of settings,
+/// and a client that rendered only the settings would be describing the
+/// grant as larger than it is. `allowed_kinds` says what was granted;
+/// `never_allowlistable_kinds`, `never_preauthorizable_reasons` and
+/// `never_executable_labels` say what the grant could not have included even
+/// if someone had tried. Both halves come from the same Rust functions the
+/// gate itself consults ([`crate::autopilot::envelope::is_preauthorizable`],
+/// [`crate::autopilot::AutopilotEnvelope::allow_kind`]), so there is no
+/// second copy to drift.
+///
+/// ## Why the choices are enumerated here too
+///
+/// `allowlistable_kinds`, `preauthorizable_reasons` and `pressure_states`
+/// exist so a client can build its controls from this report instead of from
+/// a transcribed list. A hardcoded Swift list of resource kinds would go
+/// stale the first time a detector is added, and the failure would be
+/// invisible: a kind the CLI accepts that the GUI cannot offer.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment. Nothing a client sends can construct an envelope; the only way
+/// to change one is `autopilot enable`, whose own argument parsing runs the
+/// envelope's checked setters.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AutopilotEnvelopeReport {
+    /// Whether Autopilot may run at all. False is not the only thing that
+    /// stops it: an enabled envelope with an empty `allowed_kinds` or a
+    /// `max_actions` of zero also executes nothing.
+    pub enabled: bool,
+    pub allowed_kinds: Vec<&'static str>,
+    pub ask_preauthorizations: Vec<AutopilotAskPreauthorizationReport>,
+    pub max_actions: u32,
+    pub max_bytes: u64,
+    /// The same number as [`crate::reporting::human_bytes`] renders it, for
+    /// the reason [`ExecuteReport::actual_reclaimed_human`] carries one:
+    /// this product's byte convention is 1024-based and a client that
+    /// formats it independently will disagree with the CLI's own output.
+    pub max_bytes_human: String,
+    pub max_duration_secs: u64,
+    /// The pressure state a run must have reached, or `null` when the run is
+    /// not gated on disk pressure at all. A [`crate::monitor::PressureState`]
+    /// token, upper case, as `as_str` produces it.
+    pub min_pressure: Option<&'static str>,
+    pub ceilings: AutopilotCeilingsReport,
+    /// Every resource kind that may be allowlisted, in
+    /// [`crate::evidence::ResourceKind::ALL`] order.
+    pub allowlistable_kinds: Vec<&'static str>,
+    /// Every resource kind that never may be — today exactly the unknown
+    /// kind, which [`crate::policy::classify`] treats as unconditionally
+    /// protected.
+    pub never_allowlistable_kinds: Vec<&'static str>,
+    /// Every policy reason an `ASK` decision may be pre-authorized for.
+    pub preauthorizable_reasons: Vec<&'static str>,
+    /// Every reason a decision can be held back by that never may be
+    /// pre-authorized: live use, a dirty worktree, a live owning tool, all
+    /// three evidence-quality reasons, and every protected reason.
+    ///
+    /// Narrower than "every reason not in `preauthorizable_reasons`" on
+    /// purpose. The three `AUTO_SAFE` justifications are also not
+    /// pre-authorizable, and saying so would be a warning about nothing —
+    /// they are why a decision needed no consent in the first place. See
+    /// `crate::autopilot::report`'s `is_refusal_reason`.
+    pub never_preauthorizable_reasons: Vec<&'static str>,
+    /// Every pressure state, so a client can offer the threshold choices
+    /// without knowing what they are.
+    pub pressure_states: Vec<&'static str>,
+    /// The policy labels no envelope can make executable, as
+    /// [`crate::reporting::PolicyLabel::as_str`] tokens.
+    pub never_executable_labels: Vec<&'static str>,
+    /// What the model's authority actually is, one sentence per fact, in
+    /// Rust because it is a statement about Rust's behaviour. A client that
+    /// wrote these sentences itself would be describing an implementation it
+    /// cannot see.
+    pub ai_authority: Vec<&'static str>,
+    /// Where the envelope file lives, or `null` if the path could not be
+    /// resolved. Local, and never part of any provider request.
+    pub stored_at: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

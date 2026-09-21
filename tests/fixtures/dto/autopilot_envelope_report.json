@@ -1,0 +1,56 @@
+{
+  "enabled": true,
+  "allowed_kinds": ["node_modules", "cargo_target_dir"],
+  "ask_preauthorizations": [
+    {
+      "kind": "node_modules",
+      "reason": "rebuild_cost_high"
+    }
+  ],
+  "max_actions": 2,
+  "max_bytes": 2147483648,
+  "max_bytes_human": "2.0 GB",
+  "max_duration_secs": 120,
+  "min_pressure": "PRESSURED",
+  "ceilings": {
+    "max_actions": 25,
+    "max_bytes": 68719476736,
+    "max_bytes_human": "64.0 GB",
+    "max_duration_secs": 900
+  },
+  "allowlistable_kinds": [
+    "xcode_derived_data",
+    "homebrew_cache",
+    "cargo_target_dir",
+    "cargo_registry_cache",
+    "node_modules",
+    "node_package_manager_cache",
+    "docker_build_cache",
+    "docker_image_cache"
+  ],
+  "never_allowlistable_kinds": ["unknown"],
+  "preauthorizable_reasons": ["rebuild_cost_high"],
+  "never_preauthorizable_reasons": [
+    "protected_credential_material",
+    "protected_git_internals",
+    "protected_infra_state",
+    "protected_persistent_volume",
+    "protected_user_documents",
+    "protected_system_path",
+    "protected_unsafe_mount_or_symlink",
+    "protected_unknown_resource_kind",
+    "evidence_incomplete",
+    "evidence_stale",
+    "evidence_probe_failed",
+    "resource_in_active_use",
+    "git_worktree_dirty",
+    "owning_tool_live"
+  ],
+  "pressure_states": ["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"],
+  "never_executable_labels": ["PROTECTED", "UNKNOWN_INCOMPLETE"],
+  "ai_authority": [
+    "AI can recommend. Policy decides. Executor verifies. Filesystem reality wins.",
+    "The model's only influence is the order candidates are considered in."
+  ],
+  "stored_at": "/Users/dev/Library/Application Support/Glomeris/autopilot.conf"
+}
