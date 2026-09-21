@@ -745,7 +745,7 @@ and `source`. Without `--json`, prints one line per event as plain text.
 | `free` | `glomeris free --target`, the recovery loop |
 | `emergency` | `glomeris emergency`, machine-wide, `AUTO_SAFE` only |
 | `autopilot_auto_safe` | `glomeris autopilot run`, action policy allowed on its own |
-| `autopilot_preauthorized_ask` | `glomeris autopilot run`, action that ran only because an `ASK` kind was pre-authorized by name via `--preauthorize-ask` |
+| `autopilot_preauthorized_ask` | `glomeris autopilot run`, action that ran only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
 
 The last two are deliberately distinct rather than one `autopilot` value: the
 question an audit trail has to answer is not just *what ran* but *who
@@ -836,7 +836,10 @@ plan file cannot expand authority lives. What this page adds:
   `none`. An unobservable reading fails any floor you set, rather than passing
   it.
 - `--preauthorize-ask` is repeatable and takes `kind:reason` using the same
-  tags `glomeris actions list` and `glomeris explain` print.
+  tags `glomeris actions list` and `glomeris explain` print. Like the four
+  limit flags above it, it belongs to `enable` — `run` accepts only
+  `--dry-run`, `--plan-file` and `--project-root`, and exits 2 on anything
+  else, so a run cannot widen its own grant on the command line.
 - `run` prints an `AutopilotReport`: one line per candidate with its kind,
   policy label, model rank and outcome, then the run totals (actions
   attempted, actions succeeded, bytes freed, whether a budget stopped it

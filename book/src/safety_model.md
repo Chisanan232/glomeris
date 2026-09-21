@@ -99,10 +99,13 @@ surfaces supply a `UserConsent` today, and none of them is a prompt:
 - The menu-bar app's Clean button, which builds precisely those two flags
   (`CandidateDetailView.buildExecuteArguments`) and nothing else. The GUI is
   the confirmation step; the consent still travels as a fingerprint.
-- `glomeris autopilot run --preauthorize-ask <kind>:<reason>` — narrow advance
-  consent for one `Ask` reason on one resource kind, granted before the run
-  rather than during it. See [Autopilot](autopilot.md), and the limitation on
-  that path in [Known Limitations](known_limitations.md).
+- `glomeris autopilot enable --preauthorize-ask <kind>:<reason>` — narrow
+  advance consent for one `Ask` reason on one resource kind, recorded in the
+  envelope. It is a flag on `enable`, not on `run`: the consent is written down
+  before the run and `autopilot run` rejects the flag outright, so the run
+  cannot grant itself anything the stored envelope does not already say. See
+  [Autopilot](autopilot.md), and the limitation on that path in
+  [Known Limitations](known_limitations.md).
 
 What has not changed is `glomeris free`'s recovery loop: it wires
 `auto_approve_ask: false` (`src/main.rs`), so inside that loop `Ask`
