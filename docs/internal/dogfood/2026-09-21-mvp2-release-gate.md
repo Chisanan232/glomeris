@@ -180,7 +180,7 @@ different credential — can affect the outcome.
 | Request | Result |
 |---|---|
 | `POST /v1/chat/completions`, model `gpt-6-astra` | upstream HTTP 401 |
-| `POST /v1/chat/completions`, model `gpt-5.6-sol` (the model the local Codex config uses) | upstream HTTP 401 |
+| `POST /v1/chat/completions`, a second model name the same proxy also fronts | upstream HTTP 401 |
 | `POST /v1/responses`, model `gpt-6-astra` | upstream HTTP 401 |
 | `GET /v1/models` | HTTP 200, empty catalogue |
 | `GET /health` | HTTP 200, `healthy` |
