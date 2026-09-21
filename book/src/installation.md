@@ -1,36 +1,44 @@
 # Installation
 
-## Homebrew tap (recommended)
+## Prebuilt release archives (recommended)
 
 Every tagged release is built and published automatically by
 [`cargo-dist`](https://github.com/axodotdev/cargo-dist)
-(`.github/workflows/release.yml`), which also generates and pushes a
-Homebrew formula to the
+(`.github/workflows/release.yml`), which attaches the binary tarballs
+directly to each [GitHub
+Release](https://github.com/Chisanan232/glomeris/releases) with checksums.
+Download the one matching your Mac's architecture, extract it, and copy the
+`glomeris` binary onto your `PATH` (e.g. `/usr/local/bin`).
+
+Two macOS targets are built for every release: `aarch64-apple-darwin`
+(Apple Silicon) and `x86_64-apple-darwin` (Intel, cross-compiled) — see
+`dist-workspace.toml`. Pick by architecture; nothing selects it for you.
+
+## Homebrew tap (configured, not usable yet)
+
+`dist-workspace.toml` tells `cargo-dist` to generate a Homebrew formula and
+push it to a
 [`Chisanan232/homebrew-tap`](https://github.com/Chisanan232/homebrew-tap)
-repository (HORO-1069). This is the simplest way to install and update the
-`glomeris` CLI:
+repository (HORO-1069), and an earlier version of this page presented that
+as the recommended way to install. It does not work today, so it is written
+here in the future tense on purpose:
+
+- The tap repository does not exist yet. That link 404s.
+- The release workflow has no credential to push to it, so no formula has
+  ever been published anywhere.
+- `brew install glomeris` therefore finds no formula of that name.
+
+Creating the tap is a pending one-time action, tracked in HORO-1320. Once it
+exists, installing will be:
 
 ```sh
 brew tap chisanan232/tap
 brew install glomeris
 ```
 
-`brew upgrade glomeris` picks up new releases the same way. The formula
-installs the `glomeris` binary onto your `PATH` — no separate `cargo
-build` step needed.
-
-Two macOS targets are built for every release: `aarch64-apple-darwin`
-(Apple Silicon) and `x86_64-apple-darwin` (Intel, cross-compiled) — see
-`dist-workspace.toml`. Homebrew selects the right one automatically.
-
-## Prebuilt release archives
-
-If you'd rather not use Homebrew, the same `aarch64-apple-darwin`/
-`x86_64-apple-darwin` tarballs `cargo-dist` builds for the formula above
-are also attached directly to each [GitHub
-Release](https://github.com/Chisanan232/glomeris/releases) — download the
-one matching your Mac's architecture, extract it, and copy the `glomeris`
-binary onto your `PATH` (e.g. `/usr/local/bin`).
+and `brew upgrade glomeris` will pick up new releases the same way, with
+Homebrew selecting the right architecture automatically. Until then, use a
+prebuilt archive above or build from source below.
 
 ## Build from source
 
@@ -59,9 +67,15 @@ instructions above. [Menu Bar
 App](menu_bar_app.md#how-the-app-finds-the-glomeris-cli) documents the exact
 order and why `PATH` alone is not enough for a GUI app.
 
-`GlomerisMenuBar.app.zip` is published as an extra asset on each [GitHub
+From the next tagged release onward, `GlomerisMenuBar.app.zip` is published
+as an extra asset on that [GitHub
 Release](https://github.com/Chisanan232/glomeris/releases) alongside the CLI
-tarball. It's built and ad-hoc signed automatically
+tarball, by a separate `macos-app-release.yml` workflow that fires once the
+release is published. That workflow landed after the current latest release
+was tagged, so releases published so far carry only the CLI tarballs — to
+get the app before the next tag, build
+`macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj` yourself. It's built and
+ad-hoc signed automatically
 (`codesign --force --deep --sign -`, identity `-`) — this seals the bundle
 well enough to run, but it is **not** signed with an Apple Developer ID and
 **not** notarized. Developer ID notarization is tracked as a future
