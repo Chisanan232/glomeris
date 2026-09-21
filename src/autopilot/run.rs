@@ -76,7 +76,7 @@ use crate::actions::ActionRegistry;
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, ResourceKind};
 use crate::executor::{execute, AbortReason, ExecutionOutcome};
-use crate::monitor::persistence::{append_audit_record, AuditRecord};
+use crate::monitor::persistence::{append_audit_record, ActionSource, AuditRecord};
 use crate::monitor::PressureState;
 use crate::policy::approval::{authorize, UserConsent};
 use crate::policy::{classify, PolicyConfig};
@@ -615,9 +615,9 @@ fn append_autopilot_audit_record(
         // facts about authority, and a single `autopilot` tag would make
         // them indistinguishable.
         source: if requires_consent {
-            "autopilot_preauthorized_ask".to_string()
+            ActionSource::AutopilotPreauthorizedAsk.to_string()
         } else {
-            "autopilot_auto_safe".to_string()
+            ActionSource::AutopilotAutoSafe.to_string()
         },
         model_rank,
     };

@@ -29,7 +29,9 @@ use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, Disco
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
 use crate::executor::{dry_run, execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::{AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig};
+use crate::monitor::{
+    ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
+};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
@@ -1192,7 +1194,13 @@ pub fn resolve_and_execute(
             // why an audit-write failure must never change `report`'s
             // own outcome, which is exactly what's returned below
             // regardless of whether this line succeeded.
-            record_audit(&report, policy_label, "execute", audit_log_path, now);
+            record_audit(
+                &report,
+                policy_label,
+                ActionSource::Execute,
+                audit_log_path,
+                now,
+            );
             ExecuteResolution::Executed(report)
         }
         None => match decision.class {
@@ -1216,7 +1224,7 @@ pub fn resolve_and_execute(
 fn record_audit(
     report: &ExecutionReport,
     policy_label: &'static str,
-    source: &'static str,
+    source: ActionSource,
     audit_log_path: &Path,
     now: SystemTime,
 ) {

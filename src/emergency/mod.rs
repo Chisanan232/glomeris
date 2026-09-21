@@ -67,7 +67,8 @@ use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::fs_stat::FsStat;
 use crate::monitor::persistence::{
-    append_audit_record, unix_now_secs, AuditRecord, PersistenceBackend, PressureEvent,
+    append_audit_record, unix_now_secs, ActionSource, AuditRecord, PersistenceBackend,
+    PressureEvent,
 };
 use crate::monitor::pressure::PressureState;
 use crate::policy::approval::authorize;
@@ -341,7 +342,7 @@ fn append_emergency_audit_record(
         outcome: outcome.to_string(),
         abort_reason,
         actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
-        source: "emergency".to_string(),
+        source: ActionSource::Emergency.to_string(),
         // Emergency mode never calls a model (see this module's docs).
         model_rank: None,
     };

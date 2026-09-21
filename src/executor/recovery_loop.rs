@@ -32,7 +32,7 @@ use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{ActionId, Evidence, NativeCleanup, ResourceId};
 use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::{append_audit_record, AuditRecord, Clock, FsStat, FsUsage};
+use crate::monitor::{append_audit_record, ActionSource, AuditRecord, Clock, FsStat, FsUsage};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::policy_label::label_for;
@@ -500,7 +500,7 @@ fn append_recovery_audit_record(
         outcome: outcome.to_string(),
         abort_reason,
         actual_reclaimed_bytes: report.actual_reclaimed_bytes.observed().copied(),
-        source: "free".to_string(),
+        source: ActionSource::Free.to_string(),
         // The recovery loop ranks by rule, never by model.
         model_rank: None,
     };
