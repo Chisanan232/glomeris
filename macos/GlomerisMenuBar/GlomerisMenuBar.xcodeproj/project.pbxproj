@@ -457,6 +457,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.glomeris.GlomerisMenuBar;
 				SDKROOT = macosx;
 			};
@@ -534,6 +535,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
+				MARKETING_VERSION = 0.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = dev.glomeris.GlomerisMenuBar;
 				SDKROOT = macosx;
 			};
