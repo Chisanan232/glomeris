@@ -1232,6 +1232,40 @@ fn autopilot_reject_extra_args(sub: &str, args: &[String]) {
     }
 }
 
+/// Splits `--json` off an autopilot argument list, returning whether it was
+/// present and whatever else was there.
+///
+/// Separate from [`split_flags`] because the autopilot verbs reject anything
+/// they do not recognize rather than collecting it, so the remainder has to
+/// stay `String` for the existing rejection paths to keep reporting the
+/// offending token.
+fn autopilot_take_json_flag(args: &[String]) -> (bool, Vec<String>) {
+    let mut json = false;
+    let mut rest = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg == "--json" {
+            json = true;
+        } else {
+            rest.push(arg.clone());
+        }
+    }
+    (json, rest)
+}
+
+/// Prints an envelope report as JSON, resolving the store path the same way
+/// the human output does.
+///
+/// One function for all three verbs, because `show`, `enable` and `revoke`
+/// differ only in what they did before reporting; a client that had to parse
+/// three shapes to learn one thing would end up with three chances to be
+/// wrong about it.
+fn autopilot_print_json(envelope: &glomeris::autopilot::AutopilotEnvelope) {
+    let stored_at = glomeris::autopilot::store::default_envelope_path()
+        .ok()
+        .map(|path| path.display().to_string());
+    print_json_or_exit(&glomeris::autopilot::envelope_report(envelope, stored_at));
+}
+
 /// Reads the value that must follow `args[i]`, or exits 2.
 fn autopilot_flag_value<'a>(args: &'a [String], i: usize, flag: &str) -> &'a str {
     match args.get(i + 1) {
@@ -1243,12 +1277,18 @@ fn autopilot_flag_value<'a>(args: &'a [String], i: usize, flag: &str) -> &'a str
 /// Prints the stored envelope. AC 6: what Autopilot is authorized to do,
 /// readable before anything is enabled and without running anything.
 fn autopilot_show(args: &[String]) {
-    autopilot_reject_extra_args("show", args);
+    let (json, rest) = autopilot_take_json_flag(args);
+    autopilot_reject_extra_args("show", &rest);
 
     let envelope = match glomeris::autopilot::load_envelope() {
         Ok(envelope) => envelope,
         Err(e) => autopilot_store_error_exit("read", e),
     };
+
+    if json {
+        autopilot_print_json(&envelope);
+        return;
+    }
 
     for line in envelope.describe() {
         println!("{line}");
@@ -1275,11 +1315,16 @@ fn autopilot_enable(args: &[String]) {
 
     let mut envelope = AutopilotEnvelope::revoked();
     let mut kinds_given = false;
+    let mut json = false;
 
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
         match flag {
+            "--json" => {
+                json = true;
+                i += 1;
+            }
             "--kinds" => {
                 let raw = autopilot_flag_value(args, i, flag);
                 for tag in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
@@ -1399,6 +1444,14 @@ fn autopilot_enable(args: &[String]) {
         autopilot_store_error_exit("write", e);
     }
 
+    // Reported after the write, not before it: the point of `--json` here is
+    // to tell a client what is now in force, and what is in force is what
+    // reached the file.
+    if json {
+        autopilot_print_json(&envelope);
+        return;
+    }
+
     println!("Autopilot is now ENABLED, authorized to:");
     for line in envelope.describe() {
         println!("  {line}");
@@ -1411,7 +1464,8 @@ fn autopilot_enable(args: &[String]) {
 /// `glomeris autopilot revoke` — AC 7. One bit, and every run re-reads the
 /// file, so this takes effect on the next run with nothing to restart.
 fn autopilot_revoke(args: &[String]) {
-    autopilot_reject_extra_args("revoke", args);
+    let (json, rest) = autopilot_take_json_flag(args);
+    autopilot_reject_extra_args("revoke", &rest);
 
     let mut envelope = match glomeris::autopilot::load_envelope() {
         Ok(envelope) => envelope,
@@ -1421,6 +1475,11 @@ fn autopilot_revoke(args: &[String]) {
     envelope.revoke();
     if let Err(e) = glomeris::autopilot::save_envelope(&envelope) {
         autopilot_store_error_exit("write", e);
+    }
+
+    if json {
+        autopilot_print_json(&envelope);
+        return;
     }
 
     if was_enabled {

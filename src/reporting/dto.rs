@@ -810,8 +810,15 @@ pub struct AutopilotEnvelopeReport {
     pub never_allowlistable_kinds: Vec<&'static str>,
     /// Every policy reason an `ASK` decision may be pre-authorized for.
     pub preauthorizable_reasons: Vec<&'static str>,
-    /// Every policy reason that never may be: live use, incomplete
-    /// evidence, and every protected reason.
+    /// Every reason a decision can be held back by that never may be
+    /// pre-authorized: live use, a dirty worktree, a live owning tool, all
+    /// three evidence-quality reasons, and every protected reason.
+    ///
+    /// Narrower than "every reason not in `preauthorizable_reasons`" on
+    /// purpose. The three `AUTO_SAFE` justifications are also not
+    /// pre-authorizable, and saying so would be a warning about nothing —
+    /// they are why a decision needed no consent in the first place. See
+    /// `crate::autopilot::report`'s `is_refusal_reason`.
     pub never_preauthorizable_reasons: Vec<&'static str>,
     /// Every pressure state, so a client can offer the threshold choices
     /// without knowing what they are.

@@ -118,7 +118,7 @@ pub fn envelope_report(
             .collect(),
         never_preauthorizable_reasons: ReasonCode::ALL
             .iter()
-            .filter(|reason| !is_preauthorizable(**reason))
+            .filter(|reason| is_refusal_reason(**reason) && !is_preauthorizable(**reason))
             .map(|reason| reason.as_str())
             .collect(),
         pressure_states: PressureState::ALL.iter().map(|s| s.as_str()).collect(),
@@ -141,6 +141,43 @@ pub fn envelope_report(
 /// worse than no report.
 fn is_allowlistable(kind: ResourceKind) -> bool {
     AutopilotEnvelope::revoked().allow_kind(kind).is_ok()
+}
+
+/// Whether `reason` is one a decision can be held back *by*, as opposed to
+/// one that justifies letting it through.
+///
+/// `never_preauthorizable_reasons` exists to answer "what could I not consent
+/// to in advance, even if I wanted to". The three `AUTO_SAFE` justifications
+/// are true answers to that question and useless ones: they are why something
+/// needed no consent in the first place, so listing them alongside
+/// `protected_credential_material` would present a reader with warnings about
+/// nothing and bury the ones that matter.
+///
+/// Written as an exhaustive `match` rather than a list, so a nineteenth reason
+/// code cannot be added without someone deciding which side it falls on — the
+/// build stops here until they do.
+fn is_refusal_reason(reason: ReasonCode) -> bool {
+    match reason {
+        ReasonCode::EvidenceFreshAndComplete
+        | ReasonCode::RegenerableByTool
+        | ReasonCode::NoActiveUseObserved => false,
+
+        ReasonCode::ProtectedCredentialMaterial
+        | ReasonCode::ProtectedGitInternals
+        | ReasonCode::ProtectedInfraState
+        | ReasonCode::ProtectedPersistentVolume
+        | ReasonCode::ProtectedUserDocuments
+        | ReasonCode::ProtectedSystemPath
+        | ReasonCode::ProtectedUnsafeMountOrSymlink
+        | ReasonCode::ProtectedUnknownResourceKind
+        | ReasonCode::EvidenceIncomplete
+        | ReasonCode::EvidenceStale
+        | ReasonCode::EvidenceProbeFailed
+        | ReasonCode::ResourceInActiveUse
+        | ReasonCode::GitWorktreeDirty
+        | ReasonCode::RebuildCostHigh
+        | ReasonCode::OwningToolLive => true,
+    }
 }
 
 #[cfg(test)]
@@ -239,18 +276,29 @@ mod tests {
     /// Same property for reasons, and the one that matters most: a client
     /// offering a pre-authorization the envelope refuses would be offering
     /// consent to something that cannot be consented to.
+    ///
+    /// The two lists together cover every reason a decision can be held back
+    /// by, not every reason code — the `AUTO_SAFE` justifications are
+    /// deliberately in neither, see [`is_refusal_reason`].
     #[test]
-    fn reason_lists_partition_every_reason_the_way_the_predicate_does() {
+    fn reason_lists_partition_every_refusal_reason_the_way_the_predicate_does() {
         let report = envelope_report(&AutopilotEnvelope::revoked(), None);
 
         let mut union = report.preauthorizable_reasons.clone();
         union.extend(report.never_preauthorizable_reasons.iter().copied());
         union.sort_unstable();
-        let mut all: Vec<&str> = ReasonCode::ALL.iter().map(|r| r.as_str()).collect();
-        all.sort_unstable();
-        assert_eq!(union, all, "every reason must appear in exactly one list");
+        let mut refusals: Vec<&str> = ReasonCode::ALL
+            .iter()
+            .filter(|r| is_refusal_reason(**r))
+            .map(|r| r.as_str())
+            .collect();
+        refusals.sort_unstable();
+        assert_eq!(
+            union, refusals,
+            "every refusal reason must appear in exactly one list"
+        );
 
-        for reason in ReasonCode::ALL {
+        for reason in ReasonCode::ALL.iter().filter(|r| is_refusal_reason(**r)) {
             assert_eq!(
                 is_preauthorizable(*reason),
                 report.preauthorizable_reasons.contains(&reason.as_str()),
@@ -258,6 +306,48 @@ mod tests {
                 reason.as_str()
             );
         }
+    }
+
+    /// Every pre-authorizable reason must be a refusal reason, or the report
+    /// would be offering consent to something that was never blocking
+    /// anything. This is the direction the narrowing above could get wrong.
+    #[test]
+    fn nothing_preauthorizable_is_an_auto_safe_justification() {
+        for reason in ReasonCode::ALL {
+            if is_preauthorizable(*reason) {
+                assert!(
+                    is_refusal_reason(*reason),
+                    "{} is pre-authorizable but not a refusal reason",
+                    reason.as_str()
+                );
+            }
+        }
+    }
+
+    /// The omitted reasons are exactly the three `AUTO_SAFE` justifications,
+    /// named here so that silently dropping a fourth — a real refusal reason
+    /// a user would never learn they cannot consent to — fails.
+    #[test]
+    fn only_the_auto_safe_justifications_are_omitted() {
+        let report = envelope_report(&AutopilotEnvelope::revoked(), None);
+
+        let omitted: Vec<&str> = ReasonCode::ALL
+            .iter()
+            .map(|r| r.as_str())
+            .filter(|tag| {
+                !report.preauthorizable_reasons.contains(tag)
+                    && !report.never_preauthorizable_reasons.contains(tag)
+            })
+            .collect();
+
+        assert_eq!(
+            omitted,
+            vec![
+                "evidence_fresh_and_complete",
+                "regenerable_by_tool",
+                "no_active_use_observed"
+            ]
+        );
     }
 
     /// Both protected reasons and both evidence-quality reasons must be on

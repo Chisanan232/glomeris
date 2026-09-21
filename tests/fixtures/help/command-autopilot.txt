@@ -3,7 +3,7 @@ glomeris autopilot — Read, grant or revoke a bounded standing authorization.
 usage: glomeris autopilot <show|enable|revoke|run> [--kinds <tag,...>]
                 [--max-actions <N>] [--max-bytes <N>] [--max-duration <secs>]
                 [--min-pressure <state|none>]
-                [--preauthorize-ask <kind>:<reason>] [--dry-run]
+                [--preauthorize-ask <kind>:<reason>] [--json] [--dry-run]
                 [--plan-file <path>] [--project-root <path>]...
 
 Can delete data — every deletion is policy-gated.
@@ -61,6 +61,12 @@ Options
       node_modules:rebuild_cost_high. Repeatable. Every PROTECTED reason
       and every evidence-quality reason is refused here, so this cannot
       become a blanket consent.
+  --json
+      For `show`, `enable` and `revoke`: print the envelope as JSON —
+      the grant, the hard ceilings, every choice `enable` would accept,
+      and what no envelope can ever authorize. The same shape from all
+      three, always describing what is in force after the command ran.
+      This is what the menu-bar app reads.
   --dry-run
       For `run`: show the real bounded plan, including where a budget cuts
       it off, and delete nothing.

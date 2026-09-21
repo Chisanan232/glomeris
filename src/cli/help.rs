@@ -660,6 +660,7 @@ pub const COMMANDS: &[CommandSpec] = &[
             "[--max-duration <secs>]",
             "[--min-pressure <state|none>]",
             "[--preauthorize-ask <kind>:<reason>]",
+            "[--json]",
             "[--dry-run]",
             "[--plan-file <path>]",
             "[--project-root <path>]...",
@@ -737,6 +738,14 @@ pub const COMMANDS: &[CommandSpec] = &[
                               e.g. node_modules:rebuild_cost_high. Repeatable. Every \
                               PROTECTED reason and every evidence-quality reason is refused \
                               here, so this cannot become a blanket consent.",
+            },
+            OptionSpec {
+                syntax: "--json",
+                description: "For `show`, `enable` and `revoke`: print the envelope as JSON — \
+                              the grant, the hard ceilings, every choice `enable` would accept, \
+                              and what no envelope can ever authorize. The same shape from all \
+                              three, always describing what is in force after the command ran. \
+                              This is what the menu-bar app reads.",
             },
             OptionSpec {
                 syntax: "--dry-run",
