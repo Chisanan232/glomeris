@@ -849,6 +849,19 @@ plan file cannot expand authority lives. What this page adds:
   limit flags above it, it belongs to `enable` — `run` accepts only
   `--dry-run`, `--plan-file` and `--project-root`, and exits 2 on anything
   else, so a run cannot widen its own grant on the command line.
+- `--json` belongs to `show`, `enable` and `revoke`, and prints one shape from
+  all three: the grant (`enabled`, `allowed_kinds`, `ask_preauthorizations`,
+  the four limits, `min_pressure`), the hard `ceilings`, every choice `enable`
+  would accept (`allowlistable_kinds`, `preauthorizable_reasons`,
+  `pressure_states`), what no envelope can authorize
+  (`never_allowlistable_kinds`, `never_preauthorizable_reasons`,
+  `never_executable_labels`), the `ai_authority` sentences, and `stored_at`.
+  It always describes what is in force *after* the command ran — `enable`
+  reports from what reached the file, not from what it was about to write — so
+  a client reads one shape to learn one thing. `run` does not take it: the one
+  reason to add it would be to make triggering a run from a GUI easier, and
+  [Menu Bar App](menu_bar_app.md#preferences--autopilot) explains why there is
+  no such button.
 - `run` prints an `AutopilotReport`: one line per candidate with its kind,
   policy label, model rank and outcome, then the run totals (actions
   attempted, actions succeeded, bytes freed, whether a budget stopped it
