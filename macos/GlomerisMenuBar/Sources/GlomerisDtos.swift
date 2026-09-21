@@ -383,6 +383,19 @@ struct ExecuteReportDto: Decodable, Equatable {
     let abortReason: String?
     let expectedReclaimedBytes: UInt64?
     let actualReclaimedBytes: UInt64?
+    /// HORO-1312. Rust's own rendering of the two byte counts above. This app
+    /// used to format the measured one itself with `ByteCountFormatter`, which
+    /// is 1000-based, while every number Rust prints is 1024-based — so one
+    /// panel showed a 2.1 GB result beside a 2.0 GB estimate for the same
+    /// bytes.
+    ///
+    /// Optional because the binary on `PATH` is not necessarily the one this
+    /// app was built alongside: an older `glomeris` omits these keys, and a
+    /// non-optional field would fail the whole decode and blank the result
+    /// rather than losing one string. See `describeExecuteOutcome` for what
+    /// is shown when they are absent.
+    let expectedReclaimedHuman: String?
+    let actualReclaimedHuman: String?
 
     enum CodingKeys: String, CodingKey {
         case actionId = "action_id"
@@ -392,6 +405,8 @@ struct ExecuteReportDto: Decodable, Equatable {
         case abortReason = "abort_reason"
         case expectedReclaimedBytes = "expected_reclaimed_bytes"
         case actualReclaimedBytes = "actual_reclaimed_bytes"
+        case expectedReclaimedHuman = "expected_reclaimed_human"
+        case actualReclaimedHuman = "actual_reclaimed_human"
     }
 }
 

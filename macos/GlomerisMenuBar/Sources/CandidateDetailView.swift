@@ -556,7 +556,10 @@ func describeExecuteOutcome(exitCode: Int32, stdout: Data, stderrText: String) -
         switch report.outcome {
         case "succeeded":
             let bytes = report.actualReclaimedBytes
-            return .succeeded(actualReclaimedBytes: bytes, human: humanByteCount(bytes))
+            return .succeeded(
+                actualReclaimedBytes: bytes,
+                human: humanByteCount(bytes, rendered: report.actualReclaimedHuman)
+            )
         case "failed":
             return .message("Execution failed: \(report.failureMessage ?? "no failure detail was reported")")
         case "aborted_by_revalidation":
@@ -584,15 +587,24 @@ func describeExecuteOutcome(exitCode: Int32, stdout: Data, stderrText: String) -
     return .message("execute did not complete (exit \(exitCode))" + (detail.isEmpty ? "." : ": \(detail)"))
 }
 
-/// Human-readable byte count for the measured `actual_reclaimed_bytes`
-/// — Rust supplies only the raw byte count for this field (unlike the
-/// pre-execute estimate, which already carries a `*_human` string), so
-/// this view formats it itself.
-func humanByteCount(_ bytes: UInt64?) -> String {
+/// Human-readable byte count for the measured `actual_reclaimed_bytes`,
+/// preferring the string Rust rendered (HORO-1312).
+///
+/// This used to call `ByteCountFormatter` with `countStyle = .file`, which is
+/// 1000-based. Every other number in this panel comes from Rust's
+/// `human_bytes`, which is 1024-based with the same KB/MB/GB labels — so a
+/// 2 GiB cleanup rendered as an estimate of "2.0 GB" and a result of "2.15 GB",
+/// and the honest reading of that is that 150 MB went missing.
+///
+/// The fallback for an older binary on `PATH` that emits no `*_human` key is
+/// the raw count with an explicit unit, deliberately: it looks unformatted,
+/// which is a truthful signal, where a locally-scaled "2.15 GB" would look
+/// finished and be wrong. This app does not reimplement the convention —
+/// whoever owns it emits the string.
+func humanByteCount(_ bytes: UInt64?, rendered: String?) -> String {
+    if let rendered, !rendered.isEmpty { return rendered }
     guard let bytes else { return "unknown" }
-    let formatter = ByteCountFormatter()
-    formatter.countStyle = .file
-    return formatter.string(fromByteCount: Int64(bytes))
+    return "\(bytes) bytes"
 }
 
 #Preview {

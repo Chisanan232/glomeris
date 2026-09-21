@@ -146,6 +146,15 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(dto.abortReason)
         XCTAssertEqual(dto.expectedReclaimedBytes, 2_147_483_648)
         XCTAssertEqual(dto.actualReclaimedBytes, 2_147_483_648)
+
+        // HORO-1312. 2 GiB is "2.0 GB" because `human_bytes` is 1024-based
+        // with decimal-style labels. This app formatted the measured figure
+        // itself and got "2.15 GB" for the same number — so the two rows of
+        // one panel disagreed. Both strings asserted, because the estimate
+        // and the result agreeing is the whole point.
+        XCTAssertEqual(dto.expectedReclaimedHuman, "2.0 GB")
+        XCTAssertEqual(dto.actualReclaimedHuman, "2.0 GB")
+        XCTAssertEqual(dto.expectedReclaimedHuman, dto.actualReclaimedHuman)
     }
 
     func testDecodesExecuteReportAbortedByRevalidation() throws {
@@ -155,6 +164,36 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.abortReason, "ResourceIdentityChanged")
         XCTAssertNil(dto.actualReclaimedBytes)
         XCTAssertEqual(dto.expectedReclaimedBytes, 2_147_483_648)
+
+        // Null, not "0 B". An abort deleted nothing, which is a different
+        // claim from having freed zero bytes successfully.
+        XCTAssertNil(dto.actualReclaimedHuman)
+        XCTAssertEqual(dto.expectedReclaimedHuman, "2.0 GB")
+    }
+
+    /// HORO-1312. The `*_human` keys are new, and the binary on `PATH` is not
+    /// necessarily the one this app was built beside. An older `glomeris`
+    /// omits them, and the decode has to survive that with the rest of the
+    /// report intact — a non-optional field here would have blanked the whole
+    /// result panel over a missing display string.
+    func testDecodesExecuteReportFromAnOlderBinaryWithNoHumanFields() throws {
+        let json = """
+        {
+          "action_id": "cargo.clean.target_dir",
+          "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+          "outcome": "succeeded",
+          "failure_message": null,
+          "abort_reason": null,
+          "expected_reclaimed_bytes": 2147483648,
+          "actual_reclaimed_bytes": 2147483648
+        }
+        """
+        let dto = try JSONDecoder().decode(ExecuteReportDto.self, from: Data(json.utf8))
+
+        XCTAssertEqual(dto.outcome, "succeeded")
+        XCTAssertEqual(dto.actualReclaimedBytes, 2_147_483_648)
+        XCTAssertNil(dto.actualReclaimedHuman)
+        XCTAssertNil(dto.expectedReclaimedHuman)
     }
 
     // MARK: - LlmPlanReport
