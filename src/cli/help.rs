@@ -647,6 +647,158 @@ pub const COMMANDS: &[CommandSpec] = &[
         exit_codes: &[],
         see_also: &["free", "status"],
     },
+    CommandSpec {
+        name: "autopilot",
+        group: Group::Act,
+        safety: Safety::Destructive,
+        summary: "Read, grant or revoke a bounded standing authorization.",
+        usage: &[
+            "autopilot <show|enable|revoke|run>",
+            "[--kinds <tag,...>]",
+            "[--max-actions <N>]",
+            "[--max-bytes <N>]",
+            "[--max-duration <secs>]",
+            "[--min-pressure <state|none>]",
+            "[--preauthorize-ask <kind>:<reason>]",
+            "[--dry-run]",
+            "[--plan-file <path>]",
+            "[--project-root <path>]...",
+        ],
+        details: "A standing grant with limits, written down where you can read it. \
+                  Only `run` can delete anything, and only what the grant already allowed: \
+                  an envelope authorizes resource kinds, a number of actions, a byte total, \
+                  a wall-clock budget and optionally a disk-pressure floor, and every \
+                  candidate is still classified by policy and revalidated immediately before \
+                  deletion. \
+                  \n\nDefaults grant nothing: with no envelope file, Autopilot is revoked \
+                  and `run` executes nothing. AUTO_SAFE resources are the only ones a grant \
+                  reaches by default; PROTECTED refuses unconditionally and no flag here can \
+                  change that; ASK refuses unless that exact kind and reason were \
+                  pre-authorized. \
+                  \n\nAn LLM's only possible influence is --plan-file, which reorders \
+                  candidates this machine already found. It cannot add a candidate, choose \
+                  an action, supply a path, or raise a limit. There is no live-provider mode: \
+                  asking a model is `llm-plan`'s job, so no deletion here waits on a network \
+                  call.",
+        options: &[
+            OptionSpec {
+                syntax: "show",
+                description: "Print the stored envelope and where it lives. The default, so a \
+                              bare `glomeris autopilot` reads rather than acts.",
+            },
+            OptionSpec {
+                syntax: "enable",
+                description: "Write a new envelope from the flags on this command line and \
+                              turn Autopilot on. Requires --kinds. Replaces the previous \
+                              envelope rather than adding to it, so one line states the whole \
+                              grant.",
+            },
+            OptionSpec {
+                syntax: "revoke",
+                description: "Turn Autopilot off. Takes effect on the next run — every run \
+                              re-reads the file, so there is nothing to restart. Limits are \
+                              kept so a later enable cannot return with limits you never read.",
+            },
+            OptionSpec {
+                syntax: "run",
+                description: "Consider the discovered candidates within the envelope. Without \
+                              --dry-run this deletes. Holds the execution lock, so it exits 75 \
+                              if another invocation already holds it.",
+            },
+            OptionSpec {
+                syntax: "--kinds <tag,...>",
+                description: "For `enable`: the resource kinds the grant covers, by the tags \
+                              `actions list` prints, comma-separated. `unknown` is refused.",
+            },
+            OptionSpec {
+                syntax: "--max-actions <N>",
+                description: "For `enable`: how many actions one run may perform. Defaults to \
+                              3 and cannot exceed 25.",
+            },
+            OptionSpec {
+                syntax: "--max-bytes <N>",
+                description: "For `enable`: the byte total one run may reclaim. Defaults to \
+                              5 GiB and cannot exceed 64 GiB.",
+            },
+            OptionSpec {
+                syntax: "--max-duration <secs>",
+                description: "For `enable`: the wall-clock budget for one run, in whole \
+                              seconds. Defaults to 60 and cannot exceed 900.",
+            },
+            OptionSpec {
+                syntax: "--min-pressure <state|none>",
+                description: "For `enable`: refuse to run unless disk pressure is at least \
+                              this state. `none` (the default) does not require any. \
+                              Unobservable pressure fails any floor you set.",
+            },
+            OptionSpec {
+                syntax: "--preauthorize-ask <kind>:<reason>",
+                description: "For `enable`: narrowly authorize one ASK reason for one kind, \
+                              e.g. node_modules:rebuild_cost_high. Repeatable. Every \
+                              PROTECTED reason and every evidence-quality reason is refused \
+                              here, so this cannot become a blanket consent.",
+            },
+            OptionSpec {
+                syntax: "--dry-run",
+                description: "For `run`: show the real bounded plan, including where a budget \
+                              cuts it off, and delete nothing.",
+            },
+            OptionSpec {
+                syntax: "--plan-file <path>",
+                description: "For `run`: read an LLM plan (see `llm-plan --schema`) and use it \
+                              to order candidates. Ordering is its entire authority.",
+            },
+            OptionSpec {
+                syntax: "--project-root <path>",
+                description: "Same meaning as for `detect`. Repeatable.",
+            },
+        ],
+        examples: &[
+            ExampleSpec {
+                command: "glomeris autopilot",
+                purpose: "What is Autopilot allowed to do right now?",
+            },
+            ExampleSpec {
+                command: "glomeris autopilot enable --kinds node_modules \\\n    \
+                          --max-actions 1 --max-bytes 1073741824",
+                purpose: "Grant one narrow thing, and nothing else.",
+            },
+            ExampleSpec {
+                command: "glomeris autopilot run --dry-run",
+                purpose: "What would it do, before letting it do anything?",
+            },
+            ExampleSpec {
+                command: "glomeris autopilot revoke",
+                purpose: "Stop it, now.",
+            },
+        ],
+        exit_codes: &[
+            ExitCodeSpec {
+                code: 0,
+                meaning: "the run finished inside its envelope, including when it found \
+                          nothing it was allowed to do.",
+            },
+            ExitCodeSpec {
+                code: 1,
+                meaning: "an action executed and failed, or the envelope file could not be \
+                          read or written.",
+            },
+            ExitCodeSpec {
+                code: 2,
+                meaning: "usage error, including an unknown resource kind, a limit above its \
+                          ceiling, or `enable` without --kinds.",
+            },
+            ExitCodeSpec {
+                code: 3,
+                meaning: "Autopilot is not enabled, so nothing was attempted.",
+            },
+            ExitCodeSpec {
+                code: 75,
+                meaning: "another glomeris invocation holds the execution lock.",
+            },
+        ],
+        see_also: &["execute", "free", "llm-plan", "actions"],
+    },
     // ----------------------------------------------------------------- Observe
     CommandSpec {
         name: "history",
@@ -1203,10 +1355,15 @@ mod tests {
         }
     }
 
-    /// AC 3. Every command states its consequence class, and the three
-    /// destructive ones are exactly the three that can delete — asserted as a
-    /// set so that classifying a new command wrongly, or forgetting to, fails
-    /// here rather than in a user's terminal.
+    /// AC 3. Every command states its consequence class, and the destructive
+    /// ones are exactly the ones that can delete — asserted as a set so that
+    /// classifying a new command wrongly, or forgetting to, fails here rather
+    /// than in a user's terminal.
+    ///
+    /// `autopilot` is in this list (HORO-1310) because `autopilot run` without
+    /// `--dry-run` deletes. Three of its four verbs cannot, but a command's
+    /// safety class has to describe the worst thing typing its name can do,
+    /// not the most common thing.
     #[test]
     fn exactly_the_deleting_commands_are_marked_destructive() {
         let destructive: Vec<&str> = COMMANDS
@@ -1215,7 +1372,10 @@ mod tests {
             .map(|c| c.name)
             .collect();
 
-        assert_eq!(destructive, vec!["execute", "free", "emergency"]);
+        assert_eq!(
+            destructive,
+            vec!["execute", "free", "emergency", "autopilot"]
+        );
     }
 
     /// AC 4, stated as a property rather than as a substring of one sentence:

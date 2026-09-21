@@ -13,6 +13,7 @@ Commands that give these codes more specific meanings:
   llm-plan    1, 2                  `glomeris llm-plan --help`
   llm-check   0, 1, 2               `glomeris llm-check --help`
   execute     0, 1, 2, 3, 4, 5, 75  `glomeris execute --help`
+  autopilot   0, 1, 2, 3, 75        `glomeris autopilot --help`
 
 `execute` is the one worth reading in full before scripting against it: its
 codes distinguish a policy refusal from a revalidation abort from a plan that
