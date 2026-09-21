@@ -239,12 +239,20 @@ guard (`scripts/check-no-policy-label-branching.sh`) enforces mechanically
 rather than by convention. Every screen maps back to a named CLI invocation;
 that table is at the end of the Menu Bar App page.
 
-Two things the app deliberately offers no way to invoke: `glomeris emergency`,
-and Autopilot. It does carry wording for both — an Autopilot or emergency run
-started from the terminal shows up in the app's history like any other, which
-is the point of a shared audit trail — but neither has a button, and Autopilot's
-envelope can only be granted or revoked on the command line. See
-[Autopilot](autopilot.md) for why the standing grant is CLI-only today.
+What the app offers no way to invoke is *running* something without being
+asked: `glomeris emergency` has no button, and neither does `glomeris autopilot
+run`. Both still show up in the app's history when run from a terminal, which
+is the point of a shared audit trail.
+
+Autopilot's **grant** is a different question, and this page used to get it
+wrong too: it said the envelope could only be granted or revoked on the command
+line. That is no longer true. Settings → Autopilot reads
+`autopilot show --json` and writes through `autopilot enable`/`autopilot
+revoke`, so the one authorization in this product that lets something delete
+without asking again can be read and withdrawn by someone who never opens a
+terminal — see [Menu Bar App](menu_bar_app.md#preferences--autopilot). The
+distinction the app keeps is between authorizing and acting, not between the
+terminal and the GUI.
 
 ## What holds this book to the code
 

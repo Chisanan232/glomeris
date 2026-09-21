@@ -20,8 +20,9 @@ Swift source (`macos/GlomerisMenuBar/Sources/GlomerisMenuBarApp.swift`):
 
 In practice this means every screen below is a formatting step over one of
 `glomeris`'s own `--json` reports (`status`, `daemon status`, `detect`,
-`explain`, `history`, `actions history`, `execute`), spawned as a
-subprocess. The app never re-derives "is this safe to clean" from
+`explain`, `history`, `actions history`, `execute`, `autopilot
+show|enable|revoke`), spawned as a subprocess. The app never re-derives "is
+this safe to clean" from
 `policy_label` or `reasons` — it reads the already-computed `executable`,
 `offered_actions`, and `refusal_reason` fields the CLI provides for exactly
 this purpose (see [CLI Reference](cli_reference.md)). If you trust the CLI's
@@ -327,6 +328,98 @@ that runs *without* the credential in its environment. Neither button does
 anything until pressed: there is no timer, nothing runs when the window opens,
 and nothing retries.
 
+## Preferences — Autopilot
+
+Settings' third tab (HORO-1310). [Autopilot](autopilot.md) is the one feature
+that grants standing permission to delete without being asked again, and the
+person granting it is the least likely to be reading `--help` — so a grant that
+could only be made and read on the command line would be a grant most users
+would never read. This tab is where AC 6 of that ticket ("see exactly what
+Autopilot is authorized to do *before* enabling it") and AC 7 ("revoke
+immediately") are met for someone who never opens a terminal.
+
+It is still a thin client. Every choice it offers arrives as data from
+`glomeris autopilot show --json`: the checkboxes are `allowlistable_kinds`, the
+steppers' upper bounds are `ceilings`, the picker's options are
+`pressure_states`, the one question that may be answered in advance is
+`preauthorizable_reasons`, and the "never available" lists are
+`never_allowlistable_kinds`, `never_preauthorizable_reasons` and
+`never_executable_labels` verbatim. If the CLI cannot be reached the tab draws
+no form at all and says so, rather than falling back on its own idea of what
+Autopilot allows — a settings screen offering a limit it invented would be a
+policy decision made in Swift.
+
+Eight cards, in the order the questions arrive:
+
+- **Autopilot** — on or off, then what is in force right now in the CLI's own
+  figures (including `max_bytes_human`, so the number you read is formatted by
+  the thing that enforces it), the envelope's path, a **Revoke now** button and
+  a **Refresh**. An enabled grant is drawn in the caution tone, never the
+  critical one: a standing authorization you chose is not a fault.
+- **What It May Reclaim** — one checkbox per allowlistable kind, in the CLI's
+  own order, each with its plain-language name and what it is. Below them, the
+  kinds that are never available whatever is granted here.
+- **How Much, Per Run** — three steppers (actions, whole gigabytes, seconds),
+  described as three independent budgets a run stops at whichever it reaches
+  first, with the hard ceilings quoted underneath.
+- **When It May Act** — the disk-pressure floor, including "Whenever there is
+  something to reclaim" for no floor at all.
+- **Answering In Advance** — the narrow `ASK` pre-authorization, one
+  `kind:reason` pair at a time. Until a kind is ticked there is nothing to
+  answer, and the card says that instead of offering a consent that would apply
+  to nothing.
+- **Grant This** / **Change This Authorization** — the write. Disabled until at
+  least one kind is ticked, and it says so.
+- **What the AI Decides** — the `ai_authority` sentences, quoted rather than
+  paraphrased, and the labels Glomeris will never delete whatever is authorized
+  here and whatever a model recommends.
+- **See What It Would Do** — a copyable `glomeris autopilot run --dry-run`.
+
+Five properties of this screen are worth stating outright, because each is a
+way it could have been quietly wrong:
+
+**The form is pre-filled from what is in force, because `enable` replaces the
+whole envelope.** `glomeris autopilot enable` does not merge into the previous
+grant (see [Autopilot](autopilot.md#revocation) for why), so a form that
+started from defaults would let you narrow one field and silently reset the
+other five. Pressing Enable without touching anything re-grants exactly what
+was already there. For the same reason the byte budget rounds **up** to the
+next whole gigabyte: a 1.5 GiB grant shown as "1 GB" would mean that merely
+opening this window and saving shrank a budget nobody touched.
+
+**The floors here are this screen's, and they only narrow.** The steppers stop
+at 1 action, 1 GB and 5 seconds. The CLI accepts `--max-actions 0` — an enabled
+grant that can do nothing — which is coherent as an API and pointless as a
+setting, so this window does not offer it. Nothing here can ask for more than
+the CLI's ceilings, which is a property of the values the report carries rather
+than of a number typed in Swift.
+
+**Withdrawing a kind withdraws its advance consent with it.** Unticking a kind
+prunes any `kind:reason` pre-authorization that named it, so consent cannot
+outlive the kind it applied to, or quietly come back when the kind is re-ticked.
+
+**There is no way to start a run from this window.** Not a Run button, not a
+dry-run button, no timer, nothing on appear: the only thing that runs
+automatically is the read. `autopilot run` is also the one autopilot verb with
+no `--json`, so the thin client has nothing to parse if someone adds a button
+later without thinking about it. A run deletes, and the argument for keeping
+deletion on a command you typed is the same one that keeps `glomeris emergency`
+out of the app.
+
+**A revocation that failed is never reported quietly.** The two write
+directions fail in opposite ways — a failed enable leaves you with less
+authority than you asked for, a failed revoke leaves standing deletion
+authority in force — so they have separate wording, and every failed revoke
+says that the authorization still is in force and how to withdraw it with
+`glomeris autopilot revoke`. Exit 0 with output this app cannot read is treated
+as a *successful* write in both directions, because the CLI prints its report
+after the envelope has been saved.
+
+The grant does not expire on its own. It is a file, it survives quitting and
+restarting, and it stays in force until it is revoked here or on the command
+line — which the card that grants it says in those words, because an
+authorization the user believes is temporary would be the worst kind of quiet.
+
 ## How the app finds the `glomeris` CLI
 
 Every screen spawns the CLI, so the app has to decide which binary that is.
@@ -369,6 +462,9 @@ searched, rather than failing silently or naming a path it only assumed.
 | AI Plan — Ask AI for a plan | `glomeris llm-plan --json --progress-json` |
 | Settings → AI Provider — Test connection | `glomeris llm-check --json` |
 | Settings → AI Provider — Show what would be sent | `glomeris llm-plan --print-payload --json` (no provider contacted) |
+| Settings → Autopilot — on appear, Refresh | `glomeris autopilot show --json` |
+| Settings → Autopilot — Enable / Save changes | `glomeris autopilot enable --kinds <tag,...> --max-actions <N> --max-bytes <N> --max-duration <secs> --min-pressure <state\|none> [--preauthorize-ask <kind>:<reason>]... --json` |
+| Settings → Autopilot — Revoke now | `glomeris autopilot revoke --json` |
 | Candidate detail | `glomeris explain <resource_id> --json --progress-json` |
 | Clean (with confirmation) | `glomeris execute --action-id <id> --resource-id <id> [--confirm-ask --observed-fingerprint <token>] --json --progress-json` |
 | Disk space history | `glomeris history --json` |
