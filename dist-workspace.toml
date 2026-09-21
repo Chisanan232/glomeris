@@ -10,8 +10,11 @@ ci = "github"
 # The installers to generate for each app
 installers = ["homebrew"]
 # The GitHub repository to publish the Homebrew formula to (HORO-1069).
-# This repo does not exist yet — its creation and the HOMEBREW_TAP_TOKEN
-# secret are a one-time founder action tracked outside this ticket.
+# The tap now exists and carries a hand-written bootstrap formula pinned to
+# v0.2.0. What is still missing is the HOMEBREW_TAP_TOKEN secret the publish
+# job below authenticates with, so no release has regenerated the formula yet
+# — see HORO-1320. Until that secret exists, tagging a release still reddens
+# the release run at `publish-homebrew-formula`.
 tap = "Chisanan232/homebrew-tap"
 # Actually run the Homebrew publish job (pushes the generated formula to the
 # tap repo above) as part of releases, not just generate the formula file.
