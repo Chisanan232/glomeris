@@ -36,8 +36,10 @@ Concretely, as implemented today:
   Linux support, and the `platform::macos` module is compiled out entirely on
   other operating systems.
 - **Not a cloud service.** There is no backend, no telemetry, and no account
-  system. Everything runs locally as a CLI binary and (optionally) a
-  per-user `launchd` agent.
+  system. Everything runs locally: a CLI binary, an optional per-user
+  `launchd` agent, and an optional menu-bar app. The one thing that can leave
+  your machine is a BYOK LLM request you configure yourself, to an endpoint
+  you name — bounded and previewable (see [BYOK LLM Planner](byok.md)).
 - **Not a generic system optimizer.** Glomeris only understands a fixed,
   named set of developer-tool-owned resource kinds (Cargo, npm/pnpm/yarn,
   Homebrew, Xcode, Docker). It does not attempt to clean arbitrary "junk"
@@ -47,15 +49,35 @@ Concretely, as implemented today:
   tool; an unrecognized resource kind (`ResourceKind::Unknown`) is
   classified `PROTECTED` unconditionally rather than falling through to any
   default treated as safe.
-- **No SwiftUI app in this MVP.** Everything documented here is the `glomeris`
-  command-line binary and its optional `launchd` background daemon. A GUI is
-  out of scope for the current milestone.
+- **Not a GUI with authority of its own.** There *is* a SwiftUI menu-bar app
+  (see [Menu Bar App](menu_bar_app.md)) — an earlier version of this page said
+  there was not. It is a thin client: it shells out to the same `glomeris`
+  binary and renders what comes back. It classifies nothing and decides
+  nothing, and a CI guard enforces that rather than trusting convention.
+
+## Two meanings of "autopilot"
+
+Both are used in this book, so they are worth separating once:
+
+- The **product** is a storage autopilot in the sense above — it discovers,
+  explains and verifies on its own rather than asking you to audit paths by
+  hand. That is what the first paragraph means.
+- **`glomeris autopilot`** is one specific command: an unattended run inside a
+  policy envelope you set on the command line — byte, action, time and
+  resource-kind limits, `AUTO_SAFE` only unless you pre-authorise otherwise.
+  See [Autopilot](autopilot.md).
+
+Nothing else in this book runs unattended. `detect`, `explain`, `clean`,
+`execute` and `free` all need you to invoke them.
 
 ## Project status
 
 This is an experimental MVP, not a stable release — see
 [Known Limitations](known_limitations.md) for a specific, current accounting
-of what is and is not implemented. The CLI surface described in this book
-reflects `main`'s actual `match` arms as of this writing and is still
-evolving (a dedicated CLI-ergonomics ticket may extend it further without
-changing the safety model above).
+of what is and is not implemented.
+
+The command set described here is held to the code mechanically:
+`tests/help_golden.rs` pins every help surface byte for byte, and
+`scripts/check-docs-cover-cli-commands.sh` fails CI if a command ships without
+a section in [CLI Reference](cli_reference.md). Prose can still go stale, which
+is what [Known Limitations](known_limitations.md) is for.
