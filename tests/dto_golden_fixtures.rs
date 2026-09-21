@@ -373,7 +373,12 @@ fn action_history_report_matches_golden_fixture() {
                 outcome: "succeeded".to_string(),
                 abort_reason: None,
                 actual_reclaimed_bytes: Some(524_288_000),
-                actual_reclaimed_human: Some("524.3 MB".to_string()),
+                // `human_bytes` is 1024-based, so 524_288_000 bytes is
+                // "500.0 MB", not the 1000-based "524.3 MB" this fixture
+                // carried first. A golden fixture is a claim about what the
+                // product emits; a pair of fields that disagree teaches a
+                // client reading it the wrong conversion.
+                actual_reclaimed_human: Some(glomeris::reporting::human_bytes(524_288_000)),
                 source: "autopilot_auto_safe".to_string(),
                 model_rank: Some(1),
             },

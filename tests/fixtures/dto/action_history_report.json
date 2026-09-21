@@ -32,7 +32,7 @@
       "outcome": "succeeded",
       "abort_reason": null,
       "actual_reclaimed_bytes": 524288000,
-      "actual_reclaimed_human": "524.3 MB",
+      "actual_reclaimed_human": "500.0 MB",
       "source": "autopilot_auto_safe",
       "model_rank": 1
     }
