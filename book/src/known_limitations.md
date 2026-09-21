@@ -222,9 +222,12 @@ guard (`scripts/check-no-policy-label-branching.sh`) enforces mechanically
 rather than by convention. Every screen maps back to a named CLI invocation;
 that table is at the end of the Menu Bar App page.
 
-Two things the app deliberately does not surface: `glomeris emergency`, and
-Autopilot's envelope. See [Autopilot](autopilot.md) for why the standing grant
-is CLI-only today.
+Two things the app deliberately offers no way to invoke: `glomeris emergency`,
+and Autopilot. It does carry wording for both — an Autopilot or emergency run
+started from the terminal shows up in the app's history like any other, which
+is the point of a shared audit trail — but neither has a button, and Autopilot's
+envelope can only be granted or revoked on the command line. See
+[Autopilot](autopilot.md) for why the standing grant is CLI-only today.
 
 ## What holds this book to the code
 

@@ -53,7 +53,9 @@ Concretely, as implemented today:
   (see [Menu Bar App](menu_bar_app.md)) — an earlier version of this page said
   there was not. It is a thin client: it shells out to the same `glomeris`
   binary and renders what comes back. It classifies nothing and decides
-  nothing, and a CI guard enforces that rather than trusting convention.
+  nothing; a CI guard (`scripts/check-no-policy-label-branching.sh`) fails the
+  build if Swift code branches on a policy label, so the one way the GUI could
+  quietly grow its own safety opinion is checked rather than trusted.
 
 ## Two meanings of "autopilot"
 
@@ -67,8 +69,11 @@ Both are used in this book, so they are worth separating once:
   resource-kind limits, `AUTO_SAFE` only unless you pre-authorise otherwise.
   See [Autopilot](autopilot.md).
 
-Nothing else in this book runs unattended. `detect`, `explain`, `clean`,
-`execute` and `free` all need you to invoke them.
+`glomeris autopilot run` is the only thing that *deletes* unattended.
+`detect`, `explain`, `clean`, `execute`, `free` and `emergency` all need you to
+invoke them. The optional `launchd` agent does run unattended, but it only
+polls disk pressure and notifies — it executes no action and never touches the
+filesystem it is watching (see [Daemon Lifecycle](daemon_lifecycle.md)).
 
 ## Project status
 

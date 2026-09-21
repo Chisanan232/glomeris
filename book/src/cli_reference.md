@@ -745,12 +745,21 @@ and `source`. Without `--json`, prints one line per event as plain text.
 | `free` | `glomeris free --target`, the recovery loop |
 | `emergency` | `glomeris emergency`, machine-wide, `AUTO_SAFE` only |
 | `autopilot_auto_safe` | `glomeris autopilot run`, action policy allowed on its own |
-| `autopilot_preauthorized_ask` | `glomeris autopilot run`, action that ran only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
+| `autopilot_preauthorized_ask` | `glomeris autopilot run`, action attempted only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
 
 The last two are deliberately distinct rather than one `autopilot` value: the
 question an audit trail has to answer is not just *what ran* but *who
 permitted it*, and a pre-authorized `ASK` was permitted by the operator
 naming that resource kind, not by policy alone.
+
+Note "attempted" in that last row. A record is written for a failed or aborted
+attempt too — not for a *refused* one, which never reached the filesystem and
+so appears in `autopilot run`'s own report instead. Today every
+pre-authorized `ASK` aborts at
+deletion-time revalidation — so `autopilot_preauthorized_ask` currently only
+ever appears alongside `outcome: "aborted_by_revalidation"`. That is a known
+limitation with a named cause and a pinning test, not the intended end state:
+see [Known Limitations](known_limitations.md).
 
 ```sh
 glomeris actions history --json --limit 2
