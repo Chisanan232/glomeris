@@ -498,9 +498,16 @@ enum AutopilotRevokeWording {
             )
 
         case .failed(let detail):
+            // The likely cause here is a store write that failed, so the
+            // retry route is named even though it is the same route that
+            // just failed: whatever stopped the write — a full disk, a
+            // permission — has to be dealt with, and the user needs to know
+            // there is something left to do rather than only that this
+            // press did not work.
             return .failure(
-                "Autopilot was NOT revoked — any authorization that was in force still is. "
-                    + "glomeris said: \(detail)"
+                "Autopilot was NOT revoked — any authorization that was in force still is. Deal "
+                    + "with what it reported and revoke it again here or with `glomeris autopilot "
+                    + "revoke`. glomeris said: \(detail)"
             )
         }
     }
