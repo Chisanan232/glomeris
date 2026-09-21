@@ -239,6 +239,31 @@ Nothing executed: the run's audit log holds zero events, the machine's real audi
 log is unchanged with its newest entry predating the attempt by an hour, and both
 fixtures are intact (29 files under the cargo target, 1055 under `node_modules`).
 
+#### Which binary produced this, and why that had to be re-checked
+
+The first pass at this criterion ran `/opt/homebrew/bin/glomeris` — the stale
+hand-placed binary that Finding 6 of this very record flags as shadowing the brew
+keg. That binary predates `llm-check` entirely. So the evidence above was
+re-established from scratch against the artifact this gate is about, the current
+release build (md5 `b3025f92d987770358997d51df5bcdf3`, `glomeris 0.2.0`):
+
+| Check | Stale `/opt/homebrew/bin/glomeris` | Current release build |
+|---|---|---|
+| `llm-check` with no config | `unknown command 'llm-check'`, exit 2 | `missing LLM configuration — set …`, exit 2 |
+| `--version` | `unknown command '--version'` | `glomeris 0.2.0` |
+| Loopback plan | 2 items, 1+1 dropped, exit 0 | same, plus `model_reason` / `candidate` / `completeness` / `confidence` fields |
+| Proxied request | upstream 401, sanitized `provider_error` | identical |
+| Captured payload | 947 bytes, all 13 probes 0 | byte-for-byte the same shape, all 13 probes 0 |
+
+Every conclusion held. One of them could not have been trusted otherwise, and it
+is worth stating as a trap rather than a footnote: **`exit 2` is returned both for
+"unknown command" and for "missing LLM configuration"**, so an exit-code-only probe
+of `llm-check` reads as a correct negative result even against a binary that has no
+such command. The first version of this section did exactly that. `--version` is
+the discriminator — it is the one call that distinguishes a current binary from a
+stale one in a single step, and it is now what this record uses before quoting any
+CLI behaviour.
+
 #### What would close it
 
 One step, on the proxy rather than on this product: restore a working upstream
@@ -725,6 +750,30 @@ under AC6, and in that case nothing changed. Safety is unaffected (exit 3,
 nothing deleted, and the GUI's own flow cannot reach that cause today); the
 statement is simply untrue in one branch.
 
+### Finding 8 (should be fixed before the MVP 2.0 tag) — the app bundle ships a hardcoded `0.1.0`, unlinked to the CLI
+
+Found while re-verifying the dogfood rig after the AC4 re-run, and filed as
+**HORO-1329**.
+
+`macos/GlomerisMenuBar/Sources/Info.plist` hardcodes `CFBundleShortVersionString`
+as `0.1.0` and `CFBundleVersion` as `1`. Nothing derives either from the crate
+version: `project.yml` sets no `MARKETING_VERSION`, so XcodeGen does not override
+the plist; `macos-app-release.yml` does not stamp a version at build time and never
+references the tag it is building; and no CI guard compares the two, unlike the icon
+and xcodeproj drift guards that already exist. The locally built dogfood bundle
+shows the effect plainly — `0.1.0` in the plist, `glomeris 0.2.0` from the CLI
+beside it.
+
+It has never shipped, because `macos-app-release.yml` landed after `v0.2.0` was
+tagged, so no release so far carries the app bundle at all. That is exactly why it
+matters now: the first MVP 2.0 tag is the first time the number becomes
+user-visible. If HORO-1328's version decision is applied only to `Cargo.toml`, the
+released app claims `0.1.0` — the number a user reads back when asked what they are
+running, which makes every subsequent bug report ambiguous.
+
+Sequenced with HORO-1328 rather than independent of it: pick the number once, then
+apply it to both, then add the guard that stops them diverging again.
+
 ## Cost
 
 $0.00 in API spend. An external gateway *was* contacted, through the local proxy,
@@ -752,6 +801,12 @@ Two blocking defects, stated exactly, and they are sequenced:
    must mint. Tagging in this state produces a red release run with `announce`
    unrun.
 
+**HORO-1329 rides on item 1 and must not be separated from it** (Finding 8): the
+app bundle's version is a hardcoded `0.1.0` with no link to the crate version and
+no stamp at release time. Bumping only `Cargo.toml` satisfies item 1 while
+shipping an app that reports two minor versions behind the CLI in the same
+release. The version decision has to be applied to both, and then guarded.
+
 Three criteria are **incomplete rather than failed**, and none can be closed by
 more of this kind of work:
 
@@ -769,11 +824,20 @@ more of this kind of work:
 
 No threshold was waived to produce this verdict. Every criterion that could be
 verified on this machine was verified against the shipping artifact and is
-either PASS above with its evidence, or listed here. Two places where an earlier
-claim in this campaign was too strong are corrected rather than left standing:
-the help line counts under AC8, and the brew install verification in Finding 6.
+either PASS above with its evidence, or listed here. Three places where an earlier
+claim in this campaign was too strong are corrected rather than left standing: the
+help line counts under AC8, the brew install verification in Finding 6, and AC4 —
+twice, first for naming the wrong blocker and then for having measured it with the
+stale shadowing binary Finding 6 describes.
 
-Four non-blocking defects are filed and should not gate a tag: **HORO-1322**
+One process note worth carrying forward, because it nearly produced a clean-looking
+false result: this record's own Finding 6 identified the stale on-`PATH` binary, and
+the first AC4 pass then used it anyway. Both facts were in the same document. The
+cheap guard is to print `glomeris --version` in any script that quotes CLI
+behaviour, which is now done.
+
+Five defects are filed. One of them, **HORO-1329**, should be fixed before the tag
+for the reason given above. The other four should not gate a tag: **HORO-1322**
 (unknown-flag strictness, now shown to affect a released binary), **HORO-1323**
 (the Clean button's missing hint and unconveyed disabled-reason, rescoped),
 **HORO-1326** (one refusal reason's wording covers one of two causes) and
@@ -782,8 +846,10 @@ skips them).
 
 ## Recommended next experiment
 
-Settle HORO-1328 then HORO-1320, in that order — both are single decisions, and
-together they are the only thing standing between this state and a tag. Then run
+Settle HORO-1328 (applying the chosen number to the app bundle too, HORO-1329)
+then HORO-1320, in that order — the first two are one decision plus the mechanical
+work it implies, the third is one credential, and together they are the only thing
+standing between this state and a tag. Then run
 the founder pass on the rig as built. Its value is concentrated in four
 questions this gate cannot answer:
 
