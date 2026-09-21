@@ -718,12 +718,12 @@ glomeris actions list --json
 ### `glomeris actions history [--json] [--limit <N>]`
 
 Reads back a bounded, oldest-first tail of `actions.jsonl` (HORO-1057) — the
-real-execution audit trail that `execute`, `free`, and `emergency` each
-append to, best-effort, after their own outcome is already decided. Unlike
-`history.tsv` (which records pressure transitions only), this is the audit
-trail of what was actually executed: action id, resource id, the policy
-label it was authorized under, outcome, abort reason (when applicable),
-actual reclaimed bytes, and which of the three real-execution paths
+real-execution audit trail that `execute`, `free`, `emergency` and
+`autopilot run` each append to, best-effort, after their own outcome is
+already decided. Unlike `history.tsv` (which records pressure transitions
+only), this is the audit trail of what was actually executed: action id,
+resource id, the policy label it was authorized under, outcome, abort reason
+(when applicable), actual reclaimed bytes, and which real-execution path
 produced it.
 
 `--limit <N>` is optional and defaults to 20, same bounding/malformed-line-
@@ -734,8 +734,23 @@ best-effort and its result is never surfaced to the caller.
 With `--json`, prints an `ActionHistoryReport` (`{"events": [...]}`); each
 event has `timestamp`, `action_id`, `resource_id`, `policy_label`,
 `outcome`, `abort_reason`, `actual_reclaimed_bytes`, `actual_reclaimed_human`,
-and `source` (`"execute"`, `"free"`, or `"emergency"`). Without `--json`,
-prints one line per event as plain text.
+and `source`. Without `--json`, prints one line per event as plain text.
+
+`source` is one of five values, produced by `ActionSource::as_str` in
+`src/monitor/persistence.rs`:
+
+| `source` | The path that executed it |
+|---|---|
+| `execute` | `glomeris execute`, one action against one named resource |
+| `free` | `glomeris free --target`, the recovery loop |
+| `emergency` | `glomeris emergency`, machine-wide, `AUTO_SAFE` only |
+| `autopilot_auto_safe` | `glomeris autopilot run`, action policy allowed on its own |
+| `autopilot_preauthorized_ask` | `glomeris autopilot run`, action that ran only because an `ASK` kind was pre-authorized by name via `--preauthorize-ask` |
+
+The last two are deliberately distinct rather than one `autopilot` value: the
+question an audit trail has to answer is not just *what ran* but *who
+permitted it*, and a pre-authorized `ASK` was permitted by the operator
+naming that resource kind, not by policy alone.
 
 ```sh
 glomeris actions history --json --limit 2
