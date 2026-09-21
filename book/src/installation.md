@@ -67,9 +67,15 @@ instructions above. [Menu Bar
 App](menu_bar_app.md#how-the-app-finds-the-glomeris-cli) documents the exact
 order and why `PATH` alone is not enough for a GUI app.
 
-`GlomerisMenuBar.app.zip` is published as an extra asset on each [GitHub
+From the next tagged release onward, `GlomerisMenuBar.app.zip` is published
+as an extra asset on that [GitHub
 Release](https://github.com/Chisanan232/glomeris/releases) alongside the CLI
-tarball. It's built and ad-hoc signed automatically
+tarball, by a separate `macos-app-release.yml` workflow that fires once the
+release is published. That workflow landed after the current latest release
+was tagged, so releases published so far carry only the CLI tarballs — to
+get the app before the next tag, build
+`macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj` yourself. It's built and
+ad-hoc signed automatically
 (`codesign --force --deep --sign -`, identity `-`) — this seals the bundle
 well enough to run, but it is **not** signed with an Apple Developer ID and
 **not** notarized. Developer ID notarization is tracked as a future
