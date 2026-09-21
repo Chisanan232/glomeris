@@ -633,6 +633,30 @@ enum GlomerisVocabulary {
                 "Run by the emergency path, after ordinary recovery was not enough.",
                 "exclamationmark.octagon.fill", .warning
             )
+        // HORO-1310. Two tokens rather than one, because the interesting
+        // question about an unattended deletion is which authority it ran
+        // under: policy's own AUTO_SAFE verdict, or a standing consent you
+        // granted in advance for a resource policy wanted asked about.
+        // Collapsing them to "Autopilot" would lose the only part a reader
+        // auditing the log afterwards actually needs.
+        case "autopilot_auto_safe":
+            return term(
+                token, sourceAxis, "Autopilot",
+                """
+                Run without you present, inside the limits `glomeris autopilot` \
+                grants. Policy classified this resource AUTO_SAFE on its own.
+                """,
+                "wand.and.stars", .neutral
+            )
+        case "autopilot_preauthorized_ask":
+            return term(
+                token, sourceAxis, "Autopilot, pre-authorised",
+                """
+                Run without you present, on a resource policy would have asked \
+                about — you pre-authorised this kind and reason in advance.
+                """,
+                "checkmark.shield.fill", .warning
+            )
         default:
             return unrecognised(
                 token, sourceAxis, "Unrecognised trigger",
