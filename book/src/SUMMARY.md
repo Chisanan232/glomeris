@@ -11,6 +11,7 @@
 - [Safety Model](safety_model.md)
 - [Emergency Mode](emergency_mode.md)
 - [BYOK LLM Planner](byok.md)
+- [Autopilot](autopilot.md)
 - [Daemon Lifecycle](daemon_lifecycle.md)
 - [Architecture](architecture.md)
 - [Troubleshooting](troubleshooting.md)
