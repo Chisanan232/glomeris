@@ -308,6 +308,94 @@ fn failed_report(
     }
 }
 
+/// The refusal message for a mutating `RunTool` step carrying no
+/// `scoped_path`. A function rather than a literal at each site so
+/// [`structural_refusal`] and [`execute_plan`] cannot drift apart in what
+/// they say about the same refusal.
+fn unscoped_run_tool_refusal(program: &str) -> String {
+    format!(
+        "refusing to run {program}: this step has no scoped_path, so its identity cannot be \
+         revalidated before mutation — an unscoped mutating action is never executed regardless \
+         of policy class"
+    )
+}
+
+/// The refusal message for a `scoped_path` that is not one of the values the
+/// same step passes to the tool (HORO-1005). See
+/// [`unscoped_run_tool_refusal`] for why this is a function.
+fn decoy_scoped_path_refusal(program: &str, scoped: &Path) -> String {
+    format!(
+        "refusing to run {program}: scoped_path {} does not appear in this step's own args — the \
+         executor cannot confirm what this command will actually mutate",
+        scoped.display()
+    )
+}
+
+/// Every reason [`execute_plan`] refuses `plan` outright, *before* mutating
+/// anything, or `None` if the plan clears all of them.
+///
+/// This is the single source of truth for "would execution refuse this plan
+/// on sight?", and it exists so that the actionability a candidate is
+/// *offered* with can be derived from the same rule execution enforces
+/// rather than restated independently. `execute_plan` returns these
+/// verbatim, and [`crate::reporting::dto`] consults it to decide
+/// `executable`/`offered_actions`/`refusal_reason` — so the product can no
+/// longer present a Clean action whose execution is already known to be
+/// impossible (HORO-1358).
+///
+/// Deliberately **structural only**: it reads the shape of the plan's steps
+/// and nothing else — never a policy class, never a policy label, never
+/// live filesystem state. That matters in both directions:
+///
+/// - It is not a policy check, so consulting it from reporting does not
+///   move any policy decision out of [`crate::policy`].
+/// - Refusals that depend on runtime state (a missing identity snapshot, a
+///   fingerprint that changed under us, a tool that fails to spawn) are
+///   deliberately **not** here. Reporting cannot honestly predict those, and
+///   a candidate that clears this predicate is therefore "not already
+///   refused", never "guaranteed to succeed".
+pub fn structural_refusal(plan: &ActionPlan) -> Option<String> {
+    if plan.steps.is_empty() {
+        return Some(
+            "refusing to execute an empty plan: a plan with zero steps would otherwise fall \
+             through to a false ExecutionOutcome::Succeeded report despite mutating nothing"
+                .to_string(),
+        );
+    }
+    if plan.steps.len() > 1 {
+        return Some(format!(
+            "refusing to execute a {}-step plan: multi-step plans are not yet supported \
+             (partial-deletion byte accounting would be discarded on a later-step failure)",
+            plan.steps.len()
+        ));
+    }
+    // Checked for every step, not just the first, so this stays correct if
+    // multi-step plans are ever supported: nothing may mutate until every
+    // step in the plan has cleared its structural gate.
+    for step in &plan.steps {
+        match step {
+            ActionStep::RunTool {
+                tool,
+                args,
+                scoped_path,
+            } => match scoped_path {
+                None => return Some(unscoped_run_tool_refusal(tool.program())),
+                Some(scoped) => {
+                    let scoped_str = scoped.to_string_lossy();
+                    if !args.iter().any(|a| a.as_str() == scoped_str) {
+                        return Some(decoy_scoped_path_refusal(tool.program(), scoped));
+                    }
+                }
+            },
+            // A `DeletePath` step's guards (`delete_path_with_guard`) are
+            // all runtime-state checks, so by the rule above none of them
+            // belongs here.
+            ActionStep::DeletePath { .. } => {}
+        }
+    }
+    None
+}
+
 /// Runs every step of `plan` for real. No `unwrap()`/`panic!` — every
 /// fallible step produces `ExecutionOutcome::Failed(reason)` instead of
 /// crashing.
@@ -325,25 +413,14 @@ fn failed_report(
 /// one step today; this is a guard against that invariant silently
 /// breaking in the future, not a currently-reachable path.
 fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -> ExecutionReport {
-    if plan.steps.is_empty() {
+    // Every structural refusal, evaluated over the whole plan before any
+    // step runs — see [`structural_refusal`], which reporting consults too
+    // so a candidate is never offered as executable when this would fire.
+    if let Some(message) = structural_refusal(&plan) {
         return failed_report(
             plan.action,
             plan.resource,
-            "refusing to execute an empty plan: a plan with zero steps would otherwise fall \
-             through to a false ExecutionOutcome::Succeeded report despite mutating nothing"
-                .to_string(),
-            plan.expected_reclaimed_bytes,
-        );
-    }
-    if plan.steps.len() > 1 {
-        return failed_report(
-            plan.action,
-            plan.resource,
-            format!(
-                "refusing to execute a {}-step plan: multi-step plans are not yet supported \
-                 (partial-deletion byte accounting would be discarded on a later-step failure)",
-                plan.steps.len()
-            ),
+            message,
             plan.expected_reclaimed_bytes,
         );
     }
@@ -373,15 +450,18 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                         // built-in action that hits this) genuinely can't
                         // be scoped to a path, so it is refused here
                         // unconditionally rather than executed unguarded.
+                        //
+                        // `structural_refusal` above already rejected this
+                        // plan, so this arm is unreachable today. It stays
+                        // as the last line of defence rather than becoming
+                        // an `unreachable!()`: the invariant this protects
+                        // is "no unguarded mutation, ever", and a panic —
+                        // or a fallthrough — would be a worse answer than a
+                        // refusal if the two ever diverge.
                         return failed_report(
                             plan.action,
                             plan.resource,
-                            format!(
-                                "refusing to run {}: this step has no scoped_path, so its \
-                                 identity cannot be revalidated before mutation — an unscoped \
-                                 mutating action is never executed regardless of policy class",
-                                tool.program()
-                            ),
+                            unscoped_run_tool_refusal(tool.program()),
                             plan.expected_reclaimed_bytes,
                         );
                     }
@@ -399,18 +479,14 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                 // `target_dir.to_string_lossy().into_owned()`) rather than
                 // some other `Path`/`PathBuf` comparison that could differ
                 // in representation despite denoting the same path.
+                // As with the `None` arm above, `structural_refusal` has
+                // already rejected this case; kept here as defence in depth.
                 let scoped_str = scoped.to_string_lossy();
                 if !args.iter().any(|a| a.as_str() == scoped_str) {
                     return failed_report(
                         plan.action,
                         plan.resource,
-                        format!(
-                            "refusing to run {}: scoped_path {} does not appear in this \
-                             step's own args — the executor cannot confirm what this command \
-                             will actually mutate",
-                            tool.program(),
-                            scoped.display()
-                        ),
+                        decoy_scoped_path_refusal(tool.program(), scoped),
                         plan.expected_reclaimed_bytes,
                     );
                 }
