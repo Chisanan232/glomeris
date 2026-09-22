@@ -203,6 +203,37 @@ final class GlomerisPopoverViewTests: XCTestCase {
         )
     }
 
+    /// The first in-panel drill-down swapped `sections` out for the detail, and
+    /// that quietly undid the fix it was part of: the candidates card holds a
+    /// completed scan in its own `@State`, so taking it out of the hierarchy
+    /// discarded it, and pressing back landed on "No scan yet" with the scan to
+    /// run again. The sheet this replaced did not do that — a sheet leaves the
+    /// view underneath it in place — so the overview has to stay in the
+    /// hierarchy, hidden, rather than be removed from it.
+    ///
+    /// Asserted on the three modifiers together, because each one covers a
+    /// different way a merely-invisible view still misbehaves: it must not be
+    /// visible, it must not take the scroll events meant for the detail, and it
+    /// must not be read out by a screen reader.
+    func testTheOverviewIsHiddenNotRemovedWhileTheDetailIsShown() {
+        XCTAssertTrue(
+            code.contains("ZStack"),
+            "the detail is layered over the overview, not swapped in for it"
+        )
+        XCTAssertTrue(
+            code.contains("opacity(navigation.isShowingDetail ? 0 : 1)"),
+            "the overview must stay in the hierarchy, or the candidates card loses its scan"
+        )
+        XCTAssertTrue(
+            code.contains("allowsHitTesting(!navigation.isShowingDetail)"),
+            "a hidden scroll view must not take the scroll events meant for the detail"
+        )
+        XCTAssertTrue(
+            code.contains("accessibilityHidden(navigation.isShowingDetail)"),
+            "a screen reader must not read out a list the user cannot see"
+        )
+    }
+
     /// A drill-down with no way out of it is the same dead end
     /// `testThePanelIsNotADeadEnd` exists to prevent, one level down: the
     /// sheet this replaced could at least be dismissed with Escape.

@@ -184,6 +184,11 @@ struct CandidateDetailNavigation: Equatable {
     /// site that means something else by it.
     private(set) var resourceId: String?
 
+    /// Whether the detail is on screen. Read by the popover shell to hide the
+    /// overview it is layered over — three modifiers there ask the same
+    /// question, and `resourceId != nil` repeated three times says less.
+    var isShowingDetail: Bool { resourceId != nil }
+
     /// Opening a candidate while another is already open replaces it, rather
     /// than stacking. There is no navigation stack here on purpose: the panel
     /// is one level deep, and "back" therefore always means the overview.

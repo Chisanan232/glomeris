@@ -58,10 +58,11 @@
 //  So this shell owns the one level of navigation there is
 //  (`CandidateDetailNavigation`, defined in CandidateDetailView.swift),
 //  the two cards report a tapped resource id upward through
-//  `onOpenDetail`, and the detail replaces the scrolling body in place —
+//  `onOpenDetail`, and the detail opens over the scrolling body in place —
 //  same panel, same window, no presentation at all. The header and footer
 //  stay put, so the route out of the panel never disappears behind a
-//  drill-down.
+//  drill-down. `scrollingBody` explains why the overview it covers is
+//  hidden rather than removed.
 //
 //  This is also why the sections and the detail are threaded the same
 //  `client`/`projectRootsStore`: the detail is now a sibling of the cards
@@ -97,15 +98,41 @@ struct GlomerisPopoverView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            if let resourceId = navigation.resourceId {
-                detail(resourceId)
-            } else {
-                sections
-            }
+            scrollingBody
             Divider()
             footer
         }
         .frame(width: GlomerisDesign.popoverWidth)
+    }
+
+    /// The overview and the detail share one place in the panel, and the
+    /// overview is *hidden* there rather than removed.
+    ///
+    /// It was removed at first — `if detail else sections` — and that quietly
+    /// undid the fix it was part of. `CandidatesSectionView` keeps a completed
+    /// scan in its own `@State`, so taking it out of the hierarchy discards it:
+    /// drilling into a candidate and pressing back landed on "No scan yet", and
+    /// the user had to run the scan again to reach any other candidate. The
+    /// sheet this replaced did not have that problem, because a sheet leaves the
+    /// view it is presented over in place.
+    ///
+    /// So the detail is layered over the overview instead. `opacity` keeps the
+    /// overview alive and out of sight, `allowsHitTesting(false)` keeps its
+    /// scroll view from taking the wheel events meant for the detail, and
+    /// `accessibilityHidden` keeps a screen reader from reading a list the user
+    /// cannot see. The panel therefore stays as tall as the overview while a
+    /// detail is open, which is the cost of this, and a steady height is no
+    /// worse than one that jumps on every drill-down.
+    private var scrollingBody: some View {
+        ZStack(alignment: .top) {
+            sections
+                .opacity(navigation.isShowingDetail ? 0 : 1)
+                .allowsHitTesting(!navigation.isShowingDetail)
+                .accessibilityHidden(navigation.isShowingDetail)
+            if let resourceId = navigation.resourceId {
+                detail(resourceId)
+            }
+        }
     }
 
     // MARK: - Header
@@ -168,7 +195,7 @@ struct GlomerisPopoverView: View {
 
     // MARK: - Detail
 
-    /// One candidate, in place of the overview. `CandidateDetailView` brings
+    /// One candidate, over the hidden overview. `CandidateDetailView` brings
     /// its own inner `ScrollView`, so this is deliberately not wrapped in a
     /// second one — nested scroll views inside a 480pt panel are a worse
     /// reading experience than the sheet this replaced.
