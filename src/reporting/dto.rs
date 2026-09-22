@@ -101,9 +101,39 @@ pub struct OfferedAction {
 /// from an already-computed [`PolicyDecision`] and the [`Action`] (if
 /// any) [`crate::cli::resolve_action_for`] resolved for this resource.
 /// Never reimplements policy logic — `decision.class` and
-/// [`label_for`]'s `UNKNOWN_INCOMPLETE` derivation are the only inputs
-/// consulted.
+/// [`label_for`]'s `UNKNOWN_INCOMPLETE` derivation are the only policy
+/// inputs consulted.
+///
+/// # Why this plans the action (HORO-1358)
+///
+/// A registered action *existing* for a resource kind is not the same claim
+/// as that action being *runnable*. `homebrew.cleanup.cache` is registered
+/// for `HomebrewCache`, but `brew cleanup -s` takes no path to scope, so its
+/// step carries `scoped_path: None` and
+/// [`crate::executor::structural_refusal`] rejects it on sight — every time,
+/// regardless of policy class. Reporting only the first two facts produced a
+/// candidate labelled `AUTO_SAFE` with `executable: true` whose Clean button
+/// was guaranteed to fail with a refusal the user could not have predicted.
+///
+/// So this asks the action for its plan and puts that plan to the executor's
+/// own structural rule. That keeps the two answers in agreement *by
+/// construction* rather than by comment: there is one definition of
+/// "execution would refuse this outright", and both the offer and the
+/// execution read it.
+///
+/// Clearing that check means "not already refused", **not** "guaranteed to
+/// succeed" — `structural_refusal` is deliberately blind to runtime state,
+/// and revalidation at execution time may still abort. That is the honest
+/// direction for this field to err in: it can no longer promise something
+/// impossible, and it never promises something merely uncertain.
+///
+/// Costs one `Action::plan` call per candidate. Of the three registered
+/// actions only `cargo.clean.target_dir` touches the filesystem while
+/// planning, and only for a single `is_file` stat on `Cargo.toml` — so a
+/// cargo target dir whose manifest has since vanished now also reports
+/// honestly as non-executable instead of failing at the Clean button.
 fn executable_fields(
+    ev: &Evidence,
     decision: &PolicyDecision,
     resolved_action: Option<&dyn Action>,
 ) -> (bool, Vec<OfferedAction>, Option<String>) {
@@ -123,6 +153,28 @@ fn executable_fields(
             Some("no registered cleanup action for this resource kind".to_string()),
         );
     };
+
+    // An action that cannot even produce a plan for this resource certainly
+    // cannot run against it. Reported with the planner's own words rather
+    // than a generic phrase, since `ActionError` already explains itself.
+    let plan = match action.plan(ev) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return (
+                false,
+                Vec::new(),
+                Some(format!(
+                    "{} cannot be planned for this resource: {e}",
+                    action.id().0
+                )),
+            );
+        }
+    };
+
+    // The executor's rule, not a restatement of it.
+    if let Some(refusal) = crate::executor::structural_refusal(&plan) {
+        return (false, Vec::new(), Some(refusal));
+    }
 
     let requires_confirmation = matches!(
         label_for(decision),
@@ -319,7 +371,7 @@ impl DetectCandidateReport {
     ) -> Self {
         let reclaimable = ev.reclaimable_bytes.observed().copied();
         let (executable, offered_actions, refusal_reason) =
-            executable_fields(decision, resolved_action);
+            executable_fields(ev, decision, resolved_action);
         Self {
             resource_id: ev.resource.to_string(),
             kind: ev.resource.kind_tag(),
@@ -421,7 +473,7 @@ impl ExplainReport {
             None
         };
         let (executable, offered_actions, refusal_reason) =
-            executable_fields(decision, resolved_action);
+            executable_fields(ev, decision, resolved_action);
 
         Self {
             resource_id: ev.resource.to_string(),
@@ -1090,13 +1142,44 @@ mod tests {
     // `find_for_kind_returns_none_for_a_kind_with_no_registered_action`
     // test) — used here for the "no resolvable action at all" case.
 
-    fn cargo_action() -> &'static dyn Action {
+    fn action_for(kind: ResourceKind) -> &'static dyn Action {
         use std::sync::OnceLock;
         static REGISTRY: OnceLock<crate::actions::ActionRegistry> = OnceLock::new();
         REGISTRY
             .get_or_init(crate::actions::ActionRegistry::builtin)
-            .find_for_kind(ResourceKind::CargoTargetDir)
-            .expect("cargo_target_dir must have a registered action")
+            .find_for_kind(kind)
+            .expect("kind must have a registered action")
+    }
+
+    fn cargo_action() -> &'static dyn Action {
+        action_for(ResourceKind::CargoTargetDir)
+    }
+
+    /// HORO-1358: the policy-class → `requires_confirmation` mapping tests
+    /// below need a resource whose action really does produce an executable
+    /// plan, because `executable_fields` now puts that plan to the
+    /// executor's own structural rule. `node.clean.node_modules` is the one
+    /// registered action whose planner is a pure function of `Evidence`
+    /// (a single `DeletePath` step — see `actions::node`), so these tests
+    /// isolate the mapping they are actually about instead of depending on
+    /// whether a `Cargo.toml` happens to exist on the test host.
+    ///
+    /// `cargo_action()`/[`base_evidence`] are still used by the tests that
+    /// are specifically about plan-time failure and about PROTECTED and
+    /// no-action-resolved, none of which reach the plan-shape check.
+    fn node_action() -> &'static dyn Action {
+        action_for(ResourceKind::NodeModules)
+    }
+
+    /// [`base_evidence`] with a kind whose planner touches no filesystem.
+    /// See [`node_action`].
+    fn plannable_evidence() -> Evidence {
+        let mut ev = base_evidence();
+        ev.resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(PathBuf::from("/tmp/proj/node_modules")),
+        );
+        ev
     }
 
     #[test]
@@ -1139,12 +1222,12 @@ mod tests {
 
     #[test]
     fn ask_with_resolvable_action_requires_confirmation_detect() {
-        let ev = base_evidence();
+        let ev = plannable_evidence();
         let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
         let report = DetectCandidateReport::from_evidence_and_decision(
             &ev,
             &d,
-            Some(cargo_action()),
+            Some(node_action()),
             ImpactContext::default(),
         );
 
@@ -1152,7 +1235,7 @@ mod tests {
         assert_eq!(report.offered_actions.len(), 1);
         assert_eq!(
             report.offered_actions[0].action_id,
-            "cargo.clean.target_dir"
+            "node.clean.node_modules"
         );
         assert!(report.offered_actions[0].requires_confirmation);
         assert!(report.refusal_reason.is_none());
@@ -1160,9 +1243,9 @@ mod tests {
 
     #[test]
     fn ask_with_resolvable_action_requires_confirmation_explain() {
-        let ev = base_evidence();
+        let ev = plannable_evidence();
         let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(node_action()));
 
         assert!(report.executable);
         assert_eq!(report.offered_actions.len(), 1);
@@ -1175,13 +1258,13 @@ mod tests {
     /// see `reporting::policy_label`'s doc comment.
     #[test]
     fn unknown_incomplete_with_resolvable_action_requires_confirmation_detect() {
-        let ev = base_evidence();
+        let ev = plannable_evidence();
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
         assert_eq!(label_for(&d), PolicyLabel::UnknownIncomplete);
         let report = DetectCandidateReport::from_evidence_and_decision(
             &ev,
             &d,
-            Some(cargo_action()),
+            Some(node_action()),
             ImpactContext::default(),
         );
 
@@ -1193,10 +1276,10 @@ mod tests {
 
     #[test]
     fn unknown_incomplete_with_resolvable_action_requires_confirmation_explain() {
-        let ev = base_evidence();
+        let ev = plannable_evidence();
         let d = decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
         assert_eq!(label_for(&d), PolicyLabel::UnknownIncomplete);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(node_action()));
 
         assert!(report.executable);
         assert_eq!(report.offered_actions.len(), 1);
@@ -1206,12 +1289,12 @@ mod tests {
 
     #[test]
     fn auto_safe_with_resolvable_action_does_not_require_confirmation_detect() {
-        let ev = base_evidence();
+        let ev = plannable_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
         let report = DetectCandidateReport::from_evidence_and_decision(
             &ev,
             &d,
-            Some(cargo_action()),
+            Some(node_action()),
             ImpactContext::default(),
         );
 
@@ -1219,7 +1302,7 @@ mod tests {
         assert_eq!(report.offered_actions.len(), 1);
         assert_eq!(
             report.offered_actions[0].action_id,
-            "cargo.clean.target_dir"
+            "node.clean.node_modules"
         );
         assert!(!report.offered_actions[0].requires_confirmation);
         assert!(report.refusal_reason.is_none());
@@ -1227,9 +1310,9 @@ mod tests {
 
     #[test]
     fn auto_safe_with_resolvable_action_does_not_require_confirmation_explain() {
-        let ev = base_evidence();
+        let ev = plannable_evidence();
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(node_action()));
 
         assert!(report.executable);
         assert_eq!(report.offered_actions.len(), 1);
