@@ -23,11 +23,15 @@
 //  those two are shown only as human-readable context. See the standing
 //  project rule in GlomerisMenuBarApp.swift.
 //
-//  The confirmation prompt is a SwiftUI `.alert`, not a second `.sheet`
-//  — this view is itself already presented as a `.sheet` from a
-//  `MenuBarExtra(.window)` popover, and a sheet-on-a-sheet inside that
-//  host is the riskiest presentation shape available; `.alert` avoids it
-//  entirely.
+//  The confirmation prompt is a SwiftUI `.alert`, and deliberately not a
+//  `.sheet`. HORO-1357 is the reason that distinction is now load-bearing
+//  rather than stylistic: this view used to be presented AS a sheet from
+//  the `MenuBarExtra(.window)` popover, and that never reliably appeared,
+//  because presenting or resizing a sheet over a non-activating panel can
+//  order the panel out. The fix was to stop presenting it — the popover
+//  shell swaps this view in for its own body (see GlomerisPopoverView) —
+//  so this view is now a plain child of the panel, not a modal over it.
+//  An `.alert` is the one prompt shape that host handles, and it stays.
 //
 //  HORO-1064/HORO-1065 boundary: this view builds the detail UI, the
 //  field-driven Clean-button enablement, and the confirmation
@@ -162,9 +166,44 @@ struct CandidateDetailViewModel: Equatable {
     }
 }
 
+/// Which candidate the popover is currently showing in detail, if any
+/// (HORO-1357).
+///
+/// A type rather than a bare `String?` for two reasons. It gives the drill-down
+/// one owner — the popover shell — where before each section presented its own
+/// sheet, so two entry points into the same detail view could disagree about
+/// how it appears. And it makes the navigation this ticket is about directly
+/// assertable: opening a candidate, going back, going back again, and opening a
+/// second candidate while one is already open are all plain function calls with
+/// no SwiftUI rendering in the way. The bug being fixed was a presentation
+/// mechanism that could not be tested at all.
+struct CandidateDetailNavigation: Equatable {
+    /// The resource whose detail is on screen, or `nil` for the candidate
+    /// overview. `private(set)` so the only ways to change it are the two
+    /// intention-named methods below, rather than an assignment at some call
+    /// site that means something else by it.
+    private(set) var resourceId: String?
+
+    /// Opening a candidate while another is already open replaces it, rather
+    /// than stacking. There is no navigation stack here on purpose: the panel
+    /// is one level deep, and "back" therefore always means the overview.
+    mutating func open(_ resourceId: String) {
+        self.resourceId = resourceId
+    }
+
+    /// Idempotent. The back control is only rendered while a detail is open,
+    /// so today it cannot be invoked twice — but nothing about this type
+    /// should depend on that staying true.
+    mutating func back() {
+        resourceId = nil
+    }
+}
+
 /// Detail view for one candidate, driven entirely by one
-/// `glomeris explain <resource_id> --json` call. Opened from
-/// `CandidatesSectionView` by tapping a row.
+/// `glomeris explain <resource_id> --json` call. Reached by tapping a row in
+/// either `CandidatesSectionView` or `AiPlanSectionView`; both report the
+/// tapped resource id up to `GlomerisPopoverView`, which shows this view in
+/// place of its own body rather than presenting it (HORO-1357).
 struct CandidateDetailView: View {
     let resourceId: String
     private let client: GlomerisClient

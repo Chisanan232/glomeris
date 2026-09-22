@@ -44,16 +44,64 @@
 //  dead end has not finished the job. HORO-1309's provider setup will land
 //  in the same Settings scene.
 //
+//  ---------------------------------------------------------------------
+//  HORO-1357: the detail view opens *in* the panel, not in a sheet
+//  ---------------------------------------------------------------------
+//  Both routes into `CandidateDetailView` — a candidates-list row and an
+//  AI Plan row — used to present it as `.sheet(item:)` from inside the
+//  card that owned the row. `MenuBarExtra(.window)` is a non-activating
+//  panel, and presenting or resizing a sheet over one can order the panel
+//  out from under the sheet, which is exactly the "the detail view does
+//  not appear" report. A menu-bar panel is not a window that can host a
+//  modal over itself.
+//
+//  So this shell owns the one level of navigation there is
+//  (`CandidateDetailNavigation`, defined in CandidateDetailView.swift),
+//  the two cards report a tapped resource id upward through
+//  `onOpenDetail`, and the detail replaces the scrolling body in place —
+//  same panel, same window, no presentation at all. The header and footer
+//  stay put, so the route out of the panel never disappears behind a
+//  drill-down.
+//
+//  This is also why the sections and the detail are threaded the same
+//  `client`/`projectRootsStore`: the detail is now a sibling of the cards
+//  rather than something a card presents, so the shell is the place those
+//  dependencies meet. It is presentation wiring only — no policy moved up
+//  here, and the detail still makes its own `explain` call and reads its
+//  own `executable`/`requiresConfirmation`/`fingerprintToken`.
+//
+//  No new `Divider()`: the back control is a labelled button inside the
+//  body, and the two dividers in this file remain the structural
+//  header/footer rules they were.
+//
 
 import AppKit
 import SwiftUI
 
 struct GlomerisPopoverView: View {
+    private let client: GlomerisClient
+    private let projectRootsStore: ProjectRootsStore
+
+    /// The panel is one level deep: the overview, or one candidate's detail.
+    @State private var navigation = CandidateDetailNavigation()
+
+    init(
+        client: GlomerisClient = GlomerisClient(),
+        projectRootsStore: ProjectRootsStore = ProjectRootsStore()
+    ) {
+        self.client = client
+        self.projectRootsStore = projectRootsStore
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            sections
+            if let resourceId = navigation.resourceId {
+                detail(resourceId)
+            } else {
+                sections
+            }
             Divider()
             footer
         }
@@ -99,8 +147,16 @@ struct GlomerisPopoverView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
                 StatusHealthSectionView()
-                CandidatesSectionView()
-                AiPlanSectionView()
+                CandidatesSectionView(
+                    client: client,
+                    projectRootsStore: projectRootsStore,
+                    onOpenDetail: { navigation.open($0) }
+                )
+                AiPlanSectionView(
+                    client: client,
+                    projectRootsStore: projectRootsStore,
+                    onOpenDetail: { navigation.open($0) }
+                )
                 HistoryAuditSectionView()
             }
             .padding(GlomerisDesign.outerPadding)
@@ -108,6 +164,47 @@ struct GlomerisPopoverView: View {
         // `maxHeight`, not `height`: a popover showing one healthy status
         // card should be the size of one healthy status card.
         .frame(maxHeight: GlomerisDesign.maxBodyHeight)
+    }
+
+    // MARK: - Detail
+
+    /// One candidate, in place of the overview. `CandidateDetailView` brings
+    /// its own inner `ScrollView`, so this is deliberately not wrapped in a
+    /// second one — nested scroll views inside a 480pt panel are a worse
+    /// reading experience than the sheet this replaced.
+    private func detail(_ resourceId: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            backBar
+            CandidateDetailView(
+                resourceId: resourceId,
+                client: client,
+                projectRootsStore: projectRootsStore
+            )
+            // `id:` so switching candidates without going back through the
+            // overview rebuilds the view, and its `.task { loadExplain() }`
+            // runs for the resource actually being shown.
+            .id(resourceId)
+        }
+    }
+
+    private var backBar: some View {
+        HStack(spacing: 0) {
+            Button {
+                navigation.back()
+            } label: {
+                Label("All candidates", systemImage: "chevron.left")
+            }
+            .buttonStyle(.borderless)
+            .font(GlomerisDesign.captionFont)
+            // Escape is what a sheet used to answer to, and it is the shortcut
+            // a user who has just drilled in will reach for.
+            .keyboardShortcut(.escape, modifiers: [])
+            .accessibilityLabel("Back to all candidates")
+            .accessibilityHint("Returns to the status, candidates and history overview")
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, GlomerisDesign.outerPadding)
+        .padding(.top, GlomerisDesign.cardPadding)
     }
 
     // MARK: - Footer

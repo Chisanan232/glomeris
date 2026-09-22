@@ -376,18 +376,28 @@ struct AiPlanSectionView: View {
     /// report (HORO-1308).
     @State private var planTask: Task<Void, Never>?
 
-    /// Which suggestion's detail sheet is open, if any. The sheet is the only
-    /// thing a row tap ever opens; no action runs from this list.
-    @State private var selectedItem: LlmPlanItemReportDto?
+    /// What a row tap does: report the suggested resource upward, so the
+    /// popover shell shows the same detail view a candidates-list row leads
+    /// to (HORO-1357). It is the only thing a row tap ever does; no action
+    /// runs from this list.
+    ///
+    /// This was a `.sheet(item:)` presented from this card. Both entry points
+    /// into the detail view now go through the shell, so there is exactly one
+    /// presentation of it to get right — and a sheet, which on a
+    /// `MenuBarExtra(.window)` panel can order the panel out when it appears
+    /// or resizes, is no longer any part of it.
+    private let onOpenDetail: (String) -> Void
 
     init(
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
-        settingsStore: GlomerisLlmSettingsStore = GlomerisLlmSettingsStore()
+        settingsStore: GlomerisLlmSettingsStore = GlomerisLlmSettingsStore(),
+        onOpenDetail: @escaping (String) -> Void = { _ in }
     ) {
         self.client = client
         self.projectRootsStore = projectRootsStore
         self.settingsStore = settingsStore
+        self.onOpenDetail = onOpenDetail
     }
 
     var body: some View {
@@ -410,17 +420,6 @@ struct AiPlanSectionView: View {
             if let lastErrorMessage {
                 GlomerisStateMessageView(message: .failure(lastErrorMessage))
             }
-        }
-        .sheet(item: $selectedItem) { item in
-            // By resource id, into the same detail view a candidates-list row
-            // opens. That view makes its own `explain` call and reads its own
-            // `executable`/`requiresConfirmation`/`fingerprintToken`, so the
-            // plan cannot shortcut consent — see file header.
-            CandidateDetailView(
-                resourceId: item.candidate.resourceId,
-                client: client,
-                projectRootsStore: projectRootsStore
-            )
         }
     }
 
@@ -585,7 +584,11 @@ struct AiPlanSectionView: View {
         let row = AiPlanRowViewModel(item)
 
         Button {
-            selectedItem = item
+            // By resource id, into the same detail view a candidates-list row
+            // leads to. That view makes its own `explain` call and reads its
+            // own `executable`/`requiresConfirmation`/`fingerprintToken`, so
+            // the plan cannot shortcut consent — see file header.
+            onOpenDetail(item.candidate.resourceId)
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {

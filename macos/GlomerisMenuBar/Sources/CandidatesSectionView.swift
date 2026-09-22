@@ -31,8 +31,12 @@
 //  "can this be cleaned" from `policy_label` or `reasons` — those two
 //  fields are shown only as human-readable context, never branched on.
 //
-//  HORO-1064: tapping a row opens `CandidateDetailView`, the SOLE host
-//  of the Clean button — see that file's header for why. There is no
+//  HORO-1064: tapping a row leads to `CandidateDetailView`, the SOLE host
+//  of the Clean button — see that file's header for why. HORO-1357 changed
+//  how it gets there and nothing about what it is: the tap is reported
+//  upward via `onOpenDetail`, and the popover shell shows the detail view
+//  in place of this list, instead of this view presenting it as a sheet
+//  over a panel that a sheet can dismiss. There is no
 //  "Clean" button, and no button of any kind that triggers cleanup,
 //  anywhere in this file's row rendering; see CandidateDetailViewTests'
 //  testNoCleanButtonExistsInCandidatesSectionView and
@@ -315,22 +319,36 @@ struct CandidatesSectionView: View {
     @State private var isScanning = false
     @State private var progressStatusText: String?
     @State private var lastErrorMessage: String?
-    /// HORO-1064: which candidate's detail view is open, if any. Detail
-    /// view (and its Clean button) are the ONLY thing a row tap ever
-    /// opens — no inline action runs from this list.
-    @State private var selectedCandidate: DetectCandidateReportDto?
     /// HORO-1307 view controls. Both default to "show me everything, in the
     /// order Glomeris recommends", so the panel a user opens for the first
     /// time is never silently filtered.
     @State private var sortOrder: CandidateSortOrder = .recommended
     @State private var safetyFilter: CandidateSafetyFilter = .all
 
+    /// HORO-1064/HORO-1357: what a row tap does — report the tapped
+    /// resource upward, so the popover shell can show its detail view in
+    /// place of this list.
+    ///
+    /// This used to be a `.sheet(item:)` presented from right here. A sheet
+    /// on a `MenuBarExtra(.window)` panel is a fragile shape: the panel
+    /// does not take key focus, and presenting or resizing a sheet on it can
+    /// order it out — which is exactly what expanding the detail view's raw
+    /// values did. Reporting the tap upward keeps the whole interaction
+    /// inside the one panel, and leaves this list with no presentation of
+    /// its own to get wrong.
+    ///
+    /// Still the ONLY thing a row tap ever does: no action runs from this
+    /// list, and nothing here decides what may run.
+    private let onOpenDetail: (String) -> Void
+
     init(
         client: GlomerisClient = GlomerisClient(),
-        projectRootsStore: ProjectRootsStore = ProjectRootsStore()
+        projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
+        onOpenDetail: @escaping (String) -> Void = { _ in }
     ) {
         self.client = client
         self.projectRootsStore = projectRootsStore
+        self.onOpenDetail = onOpenDetail
     }
 
     var body: some View {
@@ -356,13 +374,6 @@ struct CandidatesSectionView: View {
             if let lastErrorMessage {
                 GlomerisStateMessageView(message: .failure(lastErrorMessage))
             }
-        }
-        .sheet(item: $selectedCandidate) { candidate in
-            CandidateDetailView(
-                resourceId: candidate.resourceId,
-                client: client,
-                projectRootsStore: projectRootsStore
-            )
         }
     }
 
@@ -530,7 +541,7 @@ struct CandidatesSectionView: View {
     @ViewBuilder
     private func rowView(_ row: CandidateRowViewModel) -> some View {
         Button {
-            selectedCandidate = candidates.first { $0.resourceId == row.id }
+            onOpenDetail(row.id)
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
