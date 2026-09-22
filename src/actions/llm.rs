@@ -2466,6 +2466,105 @@ mod tests {
         );
     }
 
+    /// HORO-1355. The hint fires for exactly the endpoint paths a path-less
+    /// base URL produces, and it is checked *through*
+    /// [`chat_completions_endpoint_path`] rather than against a literal: a test
+    /// that hard-coded `"/chat/completions"` would keep passing if the URL
+    /// rule changed, which is the one way this diagnostic could start lying.
+    #[test]
+    fn host_root_hint_fires_for_exactly_the_paths_a_path_less_base_url_builds() {
+        for host_root in [
+            "https://gateway.example.com",
+            "https://gateway.example.com/",
+            "http://127.0.0.1:11434",
+        ] {
+            let path = chat_completions_endpoint_path(host_root);
+            assert!(
+                host_root_rejection_hint(&path).is_some(),
+                "{host_root} builds {path}, which is the host-root mistake"
+            );
+        }
+
+        for api_root in [
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/v1/",
+            "https://openrouter.ai/api/v1",
+            "http://127.0.0.1:11434/v1",
+        ] {
+            let path = chat_completions_endpoint_path(api_root);
+            assert!(
+                host_root_rejection_hint(&path).is_none(),
+                "{api_root} builds {path}; a configured API root must not be \
+                 blamed for a refusal"
+            );
+        }
+    }
+
+    /// A rejection at a configured API root says nothing about the address —
+    /// a `401` from `…/v1/chat/completions` is about the key, and volunteering
+    /// a guess about the path there would trade one misdirection for another.
+    #[test]
+    fn provider_status_display_stays_silent_about_the_address_at_an_api_root() {
+        let error = LlmError::ProviderStatus {
+            status: 403,
+            api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            request_id: None,
+            body_excerpt: r#"{"error":"forbidden"}"#.to_string(),
+        };
+        let rendered = format!("{error}");
+
+        assert!(!rendered.contains("host root"), "{rendered}");
+        assert!(!rendered.contains("likeliest"), "{rendered}");
+    }
+
+    /// The failure this ticket came from, end to end through the real provider:
+    /// a service that refuses a request posted to its root must be reported in
+    /// a way that names the address as the likely cause. The path-less base URL
+    /// is derived from `serve_one`'s own by removing the segment it adds, so
+    /// this cannot pass by agreeing with a literal that
+    /// [`chat_completions_url`] no longer produces.
+    #[test]
+    fn a_rejection_at_the_host_root_explains_the_address_end_to_end() {
+        let (api_root, handle) = serve_one(
+            "HTTP/1.1 403 Forbidden",
+            "",
+            r#"{"error":"Selected provider is forbidden"}"#,
+        );
+        let host_root = api_root
+            .strip_suffix("/v1")
+            .expect("serve_one hands back an API root ending in /v1")
+            .to_string();
+
+        let provider = OpenAiCompatibleProvider {
+            base_url: host_root,
+            api_key: TEST_KEY.to_string(),
+            model: "example-model".to_string(),
+        };
+
+        let error = provider
+            .complete("s", "u")
+            .expect_err("403 must be an error");
+        let captured = handle.join().expect("server thread");
+
+        assert!(
+            captured.request_line.contains("POST /chat/completions"),
+            "the request itself must show the mistake: {:?}",
+            captured.request_line
+        );
+
+        let rendered = format!("{error}");
+        assert!(rendered.contains("POST /chat/completions"), "{rendered}");
+        // The provider's own words survive, and the hint is added after them
+        // rather than in place of them.
+        assert!(
+            rendered.contains("Selected provider is forbidden"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("has no path"), "{rendered}");
+        assert!(rendered.contains("/v1"), "{rendered}");
+    }
+
     #[test]
     fn provider_bodyless_error_response_yields_provider_status() {
         let (base_url, handle) = serve_one("HTTP/1.1 401 Unauthorized", "", "");
