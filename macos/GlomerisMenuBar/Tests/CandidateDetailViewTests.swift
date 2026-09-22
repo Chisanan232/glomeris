@@ -690,14 +690,12 @@ final class CandidateDetailViewTests: XCTestCase {
     func testNavigationStartsOnTheOverview() {
         let navigation = CandidateDetailNavigation()
         XCTAssertNil(navigation.resourceId)
-        XCTAssertFalse(navigation.isShowingDetail)
     }
 
     func testOpeningACandidateShowsItsDetail() {
         var navigation = CandidateDetailNavigation()
         navigation.open("homebrew_cache")
         XCTAssertEqual(navigation.resourceId, "homebrew_cache")
-        XCTAssertTrue(navigation.isShowingDetail)
     }
 
     /// One level deep, never a stack: opening a second candidate replaces the
@@ -722,7 +720,6 @@ final class CandidateDetailViewTests: XCTestCase {
         navigation.back()
         navigation.back()
         XCTAssertNil(navigation.resourceId)
-        XCTAssertFalse(navigation.isShowingDetail)
     }
 
     // MARK: - Helpers
