@@ -162,6 +162,41 @@ struct CandidateDetailViewModel: Equatable {
     }
 }
 
+/// Which candidate the popover is currently showing in detail, if any
+/// (HORO-1357).
+///
+/// A type rather than a bare `String?` for two reasons. It gives the drill-down
+/// one owner — the popover shell — where before each section presented its own
+/// sheet, so two entry points into the same detail view could disagree about
+/// how it appears. And it makes the navigation this ticket is about directly
+/// assertable: opening a candidate, going back, going back again, and opening a
+/// second candidate while one is already open are all plain function calls with
+/// no SwiftUI rendering in the way. The bug being fixed was a presentation
+/// mechanism that could not be tested at all.
+struct CandidateDetailNavigation: Equatable {
+    /// The resource whose detail is on screen, or `nil` for the candidate
+    /// overview. `private(set)` so the only ways to change it are the two
+    /// intention-named methods below, rather than an assignment at some call
+    /// site that means something else by it.
+    private(set) var resourceId: String?
+
+    var isShowingDetail: Bool { resourceId != nil }
+
+    /// Opening a candidate while another is already open replaces it, rather
+    /// than stacking. There is no navigation stack here on purpose: the panel
+    /// is one level deep, and "back" therefore always means the overview.
+    mutating func open(_ resourceId: String) {
+        self.resourceId = resourceId
+    }
+
+    /// Idempotent. The back control is only rendered while a detail is open,
+    /// so today it cannot be invoked twice — but nothing about this type
+    /// should depend on that staying true.
+    mutating func back() {
+        resourceId = nil
+    }
+}
+
 /// Detail view for one candidate, driven entirely by one
 /// `glomeris explain <resource_id> --json` call. Opened from
 /// `CandidatesSectionView` by tapping a row.
