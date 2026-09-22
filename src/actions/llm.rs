@@ -362,6 +362,13 @@ impl std::fmt::Display for LlmError {
                 if !body_excerpt.is_empty() {
                     write!(f, ": {body_excerpt}")?;
                 }
+                // Last, after the provider's own words: Glomeris's reading of
+                // what the provider said is a different kind of statement from
+                // the quote itself, and putting it first would look like part
+                // of the response. See [`host_root_rejection_hint`].
+                if let Some(hint) = host_root_rejection_hint(endpoint_path) {
+                    write!(f, " — {hint}")?;
+                }
                 Ok(())
             }
             LlmError::InvalidResponse(detail) => {
@@ -476,6 +483,50 @@ pub fn chat_completions_url(base_url: &str) -> String {
 /// [`diagnostic_endpoint_path`] for what is deliberately dropped.
 pub fn chat_completions_endpoint_path(base_url: &str) -> String {
     diagnostic_endpoint_path(&chat_completions_url(base_url))
+}
+
+/// The endpoint path [`chat_completions_url`] produces from a base URL with no
+/// path component at all — i.e. from the host root.
+const HOST_ROOT_ENDPOINT_PATH: &str = "/chat/completions";
+
+/// One sentence naming the host-root misconfiguration, for a rejection whose
+/// endpoint path shows it (HORO-1355), or `None` when the path shows a
+/// configured API root.
+///
+/// `book/src/byok.md` calls configuring the host root the most common BYOK
+/// misconfiguration and prints the resulting 403 with a caret under the
+/// missing segment, and [`validate_base_url`] already refuses the mirror-image
+/// mistake by name. The half the documentation calls most common was the half
+/// that arrived as three equally-weighted possibilities — a key, a path, a
+/// model — with the key first. So a user re-pastes a working credential while
+/// the address is what is wrong, which is exactly what happened on the founder
+/// pass this ticket came from.
+///
+/// ## Why this is a hint and not a refusal
+///
+/// A path-less base URL is deliberately *accepted*: some OpenAI-compatible
+/// services really do serve completions at their root, and AC 6 forbids baking
+/// in any particular host or path shape. So this cannot claim the address is
+/// wrong — only that it is the likeliest explanation for a refusal, which is
+/// true precisely because the alternative (a provider that serves the root and
+/// refused for an unrelated reason) is rarer. Rejections at a configured API
+/// root get nothing: a 401 from `…/v1/chat/completions` is about the key, and
+/// saying otherwise would trade one misdirection for another.
+///
+/// Keyed off the endpoint path rather than the base URL because the path is
+/// what the error already carries — the base URL is deliberately absent from
+/// [`LlmError::ProviderStatus`] (it may be private infrastructure) — and
+/// because that path is derived from the same concatenation the request used.
+pub fn host_root_rejection_hint(endpoint_path: &str) -> Option<&'static str> {
+    if endpoint_path == HOST_ROOT_ENDPOINT_PATH {
+        Some(
+            "the configured address has no path, so this request went to the host \
+             root; most OpenAI-compatible providers serve their API under /v1, so a \
+             missing /v1 is the likeliest cause",
+        )
+    } else {
+        None
+    }
 }
 
 /// The stable outcome token for one connection-test result (HORO-1309):
