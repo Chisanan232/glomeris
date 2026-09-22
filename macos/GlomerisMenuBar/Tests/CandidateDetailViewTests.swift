@@ -680,6 +680,51 @@ final class CandidateDetailViewTests: XCTestCase {
         )
     }
 
+    // MARK: - HORO-1357: CandidateDetailNavigation
+
+    /// The panel opens on the overview. Before this ticket the equivalent
+    /// state was an optional `DetectCandidateReportDto` driving a
+    /// `.sheet(item:)`; the mistake that shipped was not in this state but in
+    /// what consumed it, so the type is kept deliberately dumb and the wiring
+    /// is asserted separately in GlomerisPopoverViewTests.
+    func testNavigationStartsOnTheOverview() {
+        let navigation = CandidateDetailNavigation()
+        XCTAssertNil(navigation.resourceId)
+        XCTAssertFalse(navigation.isShowingDetail)
+    }
+
+    func testOpeningACandidateShowsItsDetail() {
+        var navigation = CandidateDetailNavigation()
+        navigation.open("homebrew_cache")
+        XCTAssertEqual(navigation.resourceId, "homebrew_cache")
+        XCTAssertTrue(navigation.isShowingDetail)
+    }
+
+    /// One level deep, never a stack: opening a second candidate replaces the
+    /// first, so "back" always means the overview and can never strand a user
+    /// partway down a history they did not know they were building.
+    func testOpeningASecondCandidateReplacesRatherThanStacks() {
+        var navigation = CandidateDetailNavigation()
+        navigation.open("homebrew_cache")
+        navigation.open("cargo_target")
+        XCTAssertEqual(navigation.resourceId, "cargo_target")
+
+        navigation.back()
+        XCTAssertNil(navigation.resourceId, "one back must reach the overview, not the previously-open candidate")
+    }
+
+    /// The back control is only rendered while a detail is open, so today this
+    /// cannot happen — but nothing about this type should depend on that
+    /// staying true, and a second Escape press is the obvious way to find out.
+    func testGoingBackIsIdempotent() {
+        var navigation = CandidateDetailNavigation()
+        navigation.open("homebrew_cache")
+        navigation.back()
+        navigation.back()
+        XCTAssertNil(navigation.resourceId)
+        XCTAssertFalse(navigation.isShowingDetail)
+    }
+
     // MARK: - Helpers
 
     private static func readSource(_ fileName: String) throws -> String {
