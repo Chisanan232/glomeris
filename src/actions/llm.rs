@@ -362,6 +362,13 @@ impl std::fmt::Display for LlmError {
                 if !body_excerpt.is_empty() {
                     write!(f, ": {body_excerpt}")?;
                 }
+                // Last, after the provider's own words: Glomeris's reading of
+                // what the provider said is a different kind of statement from
+                // the quote itself, and putting it first would look like part
+                // of the response. See [`host_root_rejection_hint`].
+                if let Some(hint) = host_root_rejection_hint(endpoint_path) {
+                    write!(f, " — {hint}")?;
+                }
                 Ok(())
             }
             LlmError::InvalidResponse(detail) => {
@@ -476,6 +483,51 @@ pub fn chat_completions_url(base_url: &str) -> String {
 /// [`diagnostic_endpoint_path`] for what is deliberately dropped.
 pub fn chat_completions_endpoint_path(base_url: &str) -> String {
     diagnostic_endpoint_path(&chat_completions_url(base_url))
+}
+
+/// The endpoint path [`chat_completions_url`] produces from a base URL with no
+/// path component at all — i.e. from the host root.
+const HOST_ROOT_ENDPOINT_PATH: &str = "/chat/completions";
+
+/// One sentence naming the host-root misconfiguration, for a rejection whose
+/// endpoint path shows it (HORO-1355), or `None` when the path shows a
+/// configured API root.
+///
+/// `book/src/byok.md` calls configuring the host root the most common BYOK
+/// misconfiguration and prints the resulting 403 with a caret under the
+/// missing segment, and [`validate_base_url`] already refuses the mirror-image
+/// mistake by name. The half the documentation calls most common was the half
+/// that arrived as three equally-weighted possibilities — a key, a path, a
+/// model — with the key first. So a user re-pastes a working credential while
+/// the address is what is wrong, which is exactly what happened on the founder
+/// pass this ticket came from.
+///
+/// ## Why this is a hint and not a refusal
+///
+/// A path-less base URL is deliberately *accepted*: some OpenAI-compatible
+/// services really do serve completions at their root, and no particular host
+/// or path shape may be baked in here — the `/v1` below is what providers
+/// usually do, not a rule this code enforces. So this cannot claim the address
+/// is wrong — only that it is the likeliest explanation for a refusal, which is
+/// true precisely because the alternative (a provider that serves the root and
+/// refused for an unrelated reason) is rarer. Rejections at a configured API
+/// root get nothing: a 401 from `…/v1/chat/completions` is about the key, and
+/// saying otherwise would trade one misdirection for another.
+///
+/// Keyed off the endpoint path rather than the base URL because the path is
+/// what the error already carries — the base URL is deliberately absent from
+/// [`LlmError::ProviderStatus`] (it may be private infrastructure) — and
+/// because that path is derived from the same concatenation the request used.
+pub fn host_root_rejection_hint(endpoint_path: &str) -> Option<&'static str> {
+    if endpoint_path == HOST_ROOT_ENDPOINT_PATH {
+        Some(
+            "the configured address has no path, so this request went to the host \
+             root; most OpenAI-compatible providers serve their API under /v1, so a \
+             missing /v1 is the likeliest cause",
+        )
+    } else {
+        None
+    }
 }
 
 /// The stable outcome token for one connection-test result (HORO-1309):
@@ -2413,6 +2465,105 @@ mod tests {
             rendered,
             "provider returned HTTP 401 for openai:chat_completions POST /v1/chat/completions"
         );
+    }
+
+    /// HORO-1355. The hint fires for exactly the endpoint paths a path-less
+    /// base URL produces, and it is checked *through*
+    /// [`chat_completions_endpoint_path`] rather than against a literal: a test
+    /// that hard-coded `"/chat/completions"` would keep passing if the URL
+    /// rule changed, which is the one way this diagnostic could start lying.
+    #[test]
+    fn host_root_hint_fires_for_exactly_the_paths_a_path_less_base_url_builds() {
+        for host_root in [
+            "https://gateway.example.com",
+            "https://gateway.example.com/",
+            "http://127.0.0.1:11434",
+        ] {
+            let path = chat_completions_endpoint_path(host_root);
+            assert!(
+                host_root_rejection_hint(&path).is_some(),
+                "{host_root} builds {path}, which is the host-root mistake"
+            );
+        }
+
+        for api_root in [
+            "https://gateway.example.com/v1",
+            "https://gateway.example.com/v1/",
+            "https://openrouter.ai/api/v1",
+            "http://127.0.0.1:11434/v1",
+        ] {
+            let path = chat_completions_endpoint_path(api_root);
+            assert!(
+                host_root_rejection_hint(&path).is_none(),
+                "{api_root} builds {path}; a configured API root must not be \
+                 blamed for a refusal"
+            );
+        }
+    }
+
+    /// A rejection at a configured API root says nothing about the address —
+    /// a `401` from `…/v1/chat/completions` is about the key, and volunteering
+    /// a guess about the path there would trade one misdirection for another.
+    #[test]
+    fn provider_status_display_stays_silent_about_the_address_at_an_api_root() {
+        let error = LlmError::ProviderStatus {
+            status: 403,
+            api_style: API_STYLE_CHAT_COMPLETIONS.to_string(),
+            endpoint_path: "/v1/chat/completions".to_string(),
+            request_id: None,
+            body_excerpt: r#"{"error":"forbidden"}"#.to_string(),
+        };
+        let rendered = format!("{error}");
+
+        assert!(!rendered.contains("host root"), "{rendered}");
+        assert!(!rendered.contains("likeliest"), "{rendered}");
+    }
+
+    /// The failure this ticket came from, end to end through the real provider:
+    /// a service that refuses a request posted to its root must be reported in
+    /// a way that names the address as the likely cause. The path-less base URL
+    /// is derived from `serve_one`'s own by removing the segment it adds, so
+    /// this cannot pass by agreeing with a literal that
+    /// [`chat_completions_url`] no longer produces.
+    #[test]
+    fn a_rejection_at_the_host_root_explains_the_address_end_to_end() {
+        let (api_root, handle) = serve_one(
+            "HTTP/1.1 403 Forbidden",
+            "",
+            r#"{"error":"Selected provider is forbidden"}"#,
+        );
+        let host_root = api_root
+            .strip_suffix("/v1")
+            .expect("serve_one hands back an API root ending in /v1")
+            .to_string();
+
+        let provider = OpenAiCompatibleProvider {
+            base_url: host_root,
+            api_key: TEST_KEY.to_string(),
+            model: "example-model".to_string(),
+        };
+
+        let error = provider
+            .complete("s", "u")
+            .expect_err("403 must be an error");
+        let captured = handle.join().expect("server thread");
+
+        assert!(
+            captured.request_line.contains("POST /chat/completions"),
+            "the request itself must show the mistake: {:?}",
+            captured.request_line
+        );
+
+        let rendered = format!("{error}");
+        assert!(rendered.contains("POST /chat/completions"), "{rendered}");
+        // The provider's own words survive, and the hint is added after them
+        // rather than in place of them.
+        assert!(
+            rendered.contains("Selected provider is forbidden"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("has no path"), "{rendered}");
+        assert!(rendered.contains("/v1"), "{rendered}");
     }
 
     #[test]

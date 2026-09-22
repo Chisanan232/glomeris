@@ -349,6 +349,32 @@ enum GlomerisLlmSettingSourceWording {
     }
 }
 
+// MARK: - Addressing the provider
+
+/// The one sentence under the Address field (HORO-1355).
+///
+/// An address with no path at all is a valid configuration — some
+/// OpenAI-compatible services really do serve completions at their root, and
+/// the CLI's `validate_base_url` deliberately accepts it — but it is also the
+/// misconfiguration `book/src/byok.md` calls the most common, and the one a
+/// founder pass hit: the address was a host root, the provider answered `403`,
+/// and the credential that was re-pasted in response had never been wrong.
+///
+/// Before this, the `/v1` requirement appeared in exactly one place on this
+/// screen: the field's placeholder, which disappears the moment anyone types.
+/// So the requirement was visible only to someone who had not yet acted on it.
+/// This sentence does not move and is attached to the field it is about.
+///
+/// It is guidance, not a rule the app enforces. This file judges no URL — see
+/// the standing note at the top — so it says what providers usually do and what
+/// Glomeris will append, and leaves the verdict to `llm-check`.
+enum GlomerisLlmAddressWording {
+    static let pathHint =
+        "Include the path your provider serves its API under — usually /v1. "
+        + "Glomeris adds /chat/completions itself, so an address with no path "
+        + "posts to the host root, which most providers refuse."
+}
+
 // MARK: - Revoking the key
 
 /// What to say after a **Remove key** press (AC 8).
@@ -480,6 +506,11 @@ struct AiProviderPreferencesView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(GlomerisDesign.monospacedFont)
                     .accessibilityLabel("Provider API address")
+                    .accessibilityHint(GlomerisLlmAddressWording.pathHint)
+                Text(GlomerisLlmAddressWording.pathHint)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 sourceRow(label: "Address", source: status.endpoint)
             }
 

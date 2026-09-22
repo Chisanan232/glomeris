@@ -369,14 +369,26 @@ whether it works — which is what `glomeris llm-check` is for.
 
 Do not try to identify this mistake from the status code: a gateway may
 answer an unrouted path with `404`, but `403`, `401` and even `400` are all
-things real gateways return instead. Read the **path** in the error message
-— it is the path that was actually requested, so it tells you directly which
-of the two forms you configured:
+things real gateways return instead. The **path** in the error message is the
+path that was actually requested, so it tells you directly which of the two
+forms you configured — and since a path of exactly `/chat/completions` can
+only have come from a base URL with no path at all, Glomeris says so itself
+rather than leaving you to notice:
 
+```text
+provider returned HTTP 403 for openai:chat_completions POST /chat/completions:
+{"error":"..."} — the configured address has no path, so this request went to
+the host root; most OpenAI-compatible providers serve their API under /v1, so a
+missing /v1 is the likeliest cause
 ```
-provider returned HTTP 403 for openai:chat_completions POST /chat/completions
-                                                            ^ no /v1 — host root was configured
-```
+
+(One line in reality; wrapped here to fit.)
+
+The sentence comes after the provider's own words, never instead of them, and
+it is a hint rather than a verdict: the host-root form is valid and some
+providers really do serve their API there, so this cannot be a refusal. A
+rejection at a configured API root — `…/v1/chat/completions` — gets no such
+sentence at all, because a `401` there is about the key.
 
 A full configuration, using placeholders throughout:
 
@@ -424,6 +436,10 @@ alone is what diagnoses a base-URL mistake. The body excerpt is truncated
 to a bounded length and is scrubbed of the configured API key, so a
 provider that echoes the credential it just rejected cannot turn Glomeris's
 diagnostics into the leak.
+
+When that path is exactly `/chat/completions`, the message also names the
+host-root cause described above — the one reading of the path that needs no
+knowledge of the host to make.
 
 `actions::llm::provider_from_env` is the only place `std::env::var` is
 called for these — the key is held just long enough to build the
