@@ -698,6 +698,17 @@ final class CandidateDetailViewTests: XCTestCase {
         XCTAssertEqual(navigation.resourceId, "homebrew_cache")
     }
 
+    /// `isShowingDetail` is what the shell hides the overview by, so it has to
+    /// track `resourceId` in both directions rather than being set alongside it.
+    func testIsShowingDetailTracksWhetherACandidateIsOpen() {
+        var navigation = CandidateDetailNavigation()
+        XCTAssertFalse(navigation.isShowingDetail)
+        navigation.open("homebrew_cache")
+        XCTAssertTrue(navigation.isShowingDetail)
+        navigation.back()
+        XCTAssertFalse(navigation.isShowingDetail)
+    }
+
     /// One level deep, never a stack: opening a second candidate replaces the
     /// first, so "back" always means the overview and can never strand a user
     /// partway down a history they did not know they were building.
