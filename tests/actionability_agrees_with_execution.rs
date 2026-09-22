@@ -14,9 +14,13 @@
 //! executor's own rule.
 //!
 //! Nothing here touches the real Homebrew cache, the real `/opt/homebrew`
-//! prefix, or spawns `brew`. Every fixture is a temporary directory, and the
-//! one test that reaches `execute` is the one proving execution refuses
-//! *before* mutating anything.
+//! prefix, or spawns `brew`. Every fixture is a temporary directory.
+//!
+//! No test in this file calls `executor::execute`, deliberately: these are
+//! about the *offer*, and the executor half is already proven end-to-end by
+//! `executor::tests::execute_refuses_run_tool_step_with_no_scoped_path`, which
+//! drives the real `HomebrewCleanupCache` through the real `execute` and then
+//! asserts the cache directory still exists — i.e. that `brew` never ran.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -99,6 +103,36 @@ fn cargo_project(root: &Path) -> PathBuf {
     fs::create_dir_all(&target).expect("create target dir");
     fs::write(target.join("artifact.bin"), vec![0u8; 4096]).expect("write artifact");
     target
+}
+
+/// An on-disk fixture for one resource kind, under `root`.
+///
+/// Deliberately exhaustive over [`ResourceKind`] with no `_` arm: registering
+/// an action for a new kind must fail to compile here rather than silently
+/// dropping that kind out of the sweep below. Kinds with no registered action
+/// are never passed in, so they panic if they ever are.
+fn fixture_for(kind: ResourceKind, root: &Path) -> PathBuf {
+    match kind {
+        ResourceKind::NodeModules => {
+            let p = root.join("proj/node_modules");
+            fs::create_dir_all(&p).expect("create node_modules");
+            p
+        }
+        ResourceKind::CargoTargetDir => {
+            let project = root.join("cargoproj");
+            fs::create_dir_all(&project).expect("create cargo root");
+            cargo_project(&project)
+        }
+        ResourceKind::HomebrewCache => {
+            let p = root.join("Homebrew");
+            fs::create_dir_all(&p).expect("create brew cache");
+            p
+        }
+        other => panic!(
+            "no fixture for {other:?} — a registered action now applies to it, so add one here \
+             rather than letting this kind drop out of the agreement sweep"
+        ),
+    }
 }
 
 /// Builds the report the menu-bar client actually reads, and asserts on the
@@ -233,37 +267,41 @@ fn explain_agrees_with_detect_about_homebrew_actionability() {
 /// for every registered action, the reporting layer's `executable` must be
 /// exactly "the executor would not refuse this plan on sight".
 ///
-/// Covers all three registered actions in one sweep, including the two that
-/// *are* executable — so this fails both if an unexecutable action gets
-/// offered and if an executable one stops being offered.
+/// Covers every registered action in one sweep, including the ones that *are*
+/// executable — so this fails both if an unexecutable action gets offered and
+/// if an executable one stops being offered.
+///
+/// The kinds are enumerated from [`ActionRegistry::actions`] via each action's
+/// `applies_to`, not from a list written here. A hardcoded list would let a
+/// newly registered action — a Docker cleanup with no scoped path, say — slip
+/// through this sweep entirely while the assertion message still claimed full
+/// coverage. `fixture_for` is what must grow when an action is added, and it
+/// panics rather than skipping if it doesn't.
 #[test]
 fn executable_agrees_with_the_executors_own_rule_for_every_registered_action() {
     let root = make_temp_dir("agreement-sweep");
     let registry = registry();
 
-    // (kind, resource path) pairs covering every registered action.
-    let node_modules = root.join("proj/node_modules");
-    fs::create_dir_all(&node_modules).expect("create node_modules");
-    let cargo_root = root.join("cargoproj");
-    fs::create_dir_all(&cargo_root).expect("create cargo root");
-    let target_dir = cargo_project(&cargo_root);
-    let brew_cache = root.join("Homebrew");
-    fs::create_dir_all(&brew_cache).expect("create brew cache");
+    let mut kinds: Vec<ResourceKind> = registry
+        .actions()
+        .flat_map(|a| a.applies_to().iter().copied())
+        .collect();
+    kinds.sort_by_key(|k| k.tag());
+    kinds.dedup();
+    assert!(
+        !kinds.is_empty(),
+        "the builtin registry must register at least one action"
+    );
 
-    let cases = [
-        (ResourceKind::NodeModules, node_modules.clone()),
-        (ResourceKind::CargoTargetDir, target_dir.clone()),
-        (ResourceKind::HomebrewCache, brew_cache.clone()),
-    ];
-
-    let mut checked = 0;
     let mut offered = 0;
     let mut refused = 0;
 
-    for (kind, path) in cases {
+    for kind in &kinds {
+        let kind = *kind;
         let action = registry
             .find_for_kind(kind)
             .unwrap_or_else(|| panic!("{kind:?} must have a registered action"));
+        let path = fixture_for(kind, &root);
         let ev = auto_safe_evidence(kind, &path, 4096);
         let report = detect_report(&ev, Some(action));
 
@@ -293,7 +331,6 @@ fn executable_agrees_with_the_executors_own_rule_for_every_registered_action() {
             "{kind:?}: refusal_reason must be set exactly when not executable"
         );
 
-        checked += 1;
         if report.executable {
             offered += 1;
         } else {
@@ -301,14 +338,23 @@ fn executable_agrees_with_the_executors_own_rule_for_every_registered_action() {
         }
     }
 
-    assert_eq!(checked, 3, "every registered action must be covered");
-    // Vacuity guards in both directions: this test is worthless if nothing
-    // is offered, and it is not testing HORO-1358 if nothing is refused.
     assert_eq!(
-        offered, 2,
-        "cargo and node must still be offered — a fix that disabled everything is not a fix"
+        offered + refused,
+        kinds.len(),
+        "every kind any registered action applies to must be covered"
     );
-    assert_eq!(refused, 1, "homebrew must be the one refused");
+    // Vacuity guards in both directions, stated as bounds rather than exact
+    // counts so that registering a fourth action does not turn this into a
+    // false alarm — while still failing if the fix ever degenerates into
+    // "refuse everything" or "offer everything".
+    assert!(
+        offered > 0,
+        "something must still be offered — a change that disabled every action is not a fix"
+    );
+    assert!(
+        refused > 0,
+        "something must still be refused, or this is not testing HORO-1358 at all"
+    );
 
     fs::remove_dir_all(&root).ok();
 }
@@ -384,12 +430,16 @@ fn a_cargo_target_dir_is_offered_only_while_its_manifest_exists() {
     fs::remove_dir_all(&root).ok();
 }
 
-/// A decoy `scoped_path` — one that does not appear in the step's own args
-/// — must still be refused, and must be refused by the *same* predicate the
-/// offer consults, so no action can buy itself an offer by attaching a
-/// plausible-looking but unrelated path (HORO-1005 / HORO-1358 AC3).
+/// A decoy `scoped_path` — one that does not appear in the step's own args —
+/// must still be refused (HORO-1005 / HORO-1358 AC3), so no action can buy
+/// itself an offer by attaching a plausible-looking but unrelated path.
+///
+/// Asserted against `structural_refusal` directly rather than through a report,
+/// since no in-crate action can produce a decoyed plan to feed one. That the
+/// offer consults *this* predicate is a fact about `executable_fields`' source,
+/// covered by the agreement sweep above, not by this test.
 #[test]
-fn a_decoy_scoped_path_is_refused_by_the_rule_the_offer_consults() {
+fn a_decoy_scoped_path_is_refused() {
     use glomeris::actions::{ActionPlan, ActionStep, ToolBinary};
 
     let root = make_temp_dir("decoy-scoped-path");
@@ -452,9 +502,10 @@ fn a_decoy_scoped_path_is_refused_by_the_rule_the_offer_consults() {
     fs::remove_dir_all(&root).ok();
 }
 
-/// An unscoped mutating step is refused whatever the policy class says —
-/// asserted here across every class, since the founder's candidate was
-/// `AUTO_SAFE` and the whole point is that the label buys nothing.
+/// An unscoped mutating step is refused whatever the policy class says. The
+/// founder's candidate was `AUTO_SAFE`, and the point is that the label buys
+/// nothing — so what is asserted here is the stronger structural fact that the
+/// rule has no policy input to vary in the first place.
 #[test]
 fn an_unscoped_mutating_step_is_refused_regardless_of_policy_class() {
     use glomeris::actions::{ActionPlan, ActionStep, ToolBinary};
