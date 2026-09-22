@@ -750,7 +750,7 @@ under AC6, and in that case nothing changed. Safety is unaffected (exit 3,
 nothing deleted, and the GUI's own flow cannot reach that cause today); the
 statement is simply untrue in one branch.
 
-### Finding 8 (should be fixed before the MVP 2.0 tag) — the app bundle ships a hardcoded `0.1.0`, unlinked to the CLI
+### Finding 8 (FIXED 2026-09-22, before the tag) — the app bundle shipped a hardcoded `0.1.0`, unlinked to the CLI
 
 Found while re-verifying the dogfood rig after the AC4 re-run, and filed as
 **HORO-1329**.
@@ -773,6 +773,34 @@ running, which makes every subsequent bug report ambiguous.
 
 Sequenced with HORO-1328 rather than independent of it: pick the number once, then
 apply it to both, then add the guard that stops them diverging again.
+
+**Fixed 2026-09-22 in PR #84, merge commit `0c95da6`, all of CI green on `main`
+afterwards.** All three parts landed: `project.yml` declares `MARKETING_VERSION`
+and the plist now carries the reference `$(MARKETING_VERSION)` rather than a
+literal; `macos-app-release.yml` stamps the version read from the CLI binary it is
+about to embed and then asserts the bundle, that CLI and the tag all report the
+same number; and `scripts/check-app-version-matches-crate.sh` runs as an
+`app-version-drift` CI job in the same family as `xcodeproj-drift` and
+`app-icon-drift`.
+
+Two properties of the fix are worth recording, because both were measured rather
+than assumed. A literal version that *happens* to equal the crate version still
+fails the guard — otherwise every other assertion in it could pass vacuously while
+the plist quietly stopped using the setting. And plist variable expansion fails
+*silently*: a deliberately empty `MARKETING_VERSION` produced a successful
+`xcodebuild` and a bundle whose version was a blank string, which is precisely why
+the release workflow verifies the built bundle instead of trusting the stamp.
+
+What this changes about the sequencing above: the coupling to HORO-1328 is now
+enforced mechanically instead of by remembering. Bumping `Cargo.toml` alone fails
+CI, in both directions, so the version decision cannot reach a tag while applying
+to only one of the two artifacts.
+
+One gap left open deliberately. CI asserts the committed version text and the
+release workflow asserts the built bundle; nothing on a PR run builds the app and
+reads the version back out, so a future breakage of plist expansion itself would
+surface at release time rather than on the PR. It works today on the pinned Xcode
+26.2, and that pin is what keeps it so.
 
 ## Cost
 
@@ -801,11 +829,15 @@ Two blocking defects, stated exactly, and they are sequenced:
    must mint. Tagging in this state produces a red release run with `announce`
    unrun.
 
-**HORO-1329 rides on item 1 and must not be separated from it** (Finding 8): the
-app bundle's version is a hardcoded `0.1.0` with no link to the crate version and
-no stamp at release time. Bumping only `Cargo.toml` satisfies item 1 while
-shipping an app that reports two minor versions behind the CLI in the same
-release. The version decision has to be applied to both, and then guarded.
+**HORO-1329 rode on item 1 and has since been fixed** (Finding 8, updated
+2026-09-22). When this verdict was first written, the app bundle's version was a
+hardcoded `0.1.0` with no link to the crate version and no stamp at release time,
+so bumping only `Cargo.toml` would have satisfied item 1 while shipping an app
+reporting two minor versions behind the CLI in the same release. That is now
+prevented mechanically: the bundle version follows the crate version, the release
+workflow stamps and then verifies it, and CI fails if the two drift in either
+direction. The decision in item 1 is still the founder's, but it can no longer be
+applied to half the release by accident.
 
 Three criteria are **incomplete rather than failed**, and none can be closed by
 more of this kind of work:
@@ -836,8 +868,10 @@ the first AC4 pass then used it anyway. Both facts were in the same document. Th
 cheap guard is to print `glomeris --version` in any script that quotes CLI
 behaviour, which is now done.
 
-Five defects are filed. One of them, **HORO-1329**, should be fixed before the tag
-for the reason given above. The other four should not gate a tag: **HORO-1322**
+Five defects were filed. **HORO-1329** was the one that had to be fixed before the
+tag, and it is: merged as `0c95da6` on 2026-09-22 with CI green, so nothing in this
+list now stands between the version decision and a correct release artifact. The
+other four should not gate a tag: **HORO-1322**
 (unknown-flag strictness, now shown to affect a released binary), **HORO-1323**
 (the Clean button's missing hint and unconveyed disabled-reason, rescoped),
 **HORO-1326** (one refusal reason's wording covers one of two causes) and
@@ -846,10 +880,11 @@ skips them).
 
 ## Recommended next experiment
 
-Settle HORO-1328 (applying the chosen number to the app bundle too, HORO-1329)
-then HORO-1320, in that order — the first two are one decision plus the mechanical
-work it implies, the third is one credential, and together they are the only thing
-standing between this state and a tag. Then run
+Settle HORO-1328 then HORO-1320, in that order — one decision and one credential,
+and together they are now the only thing standing between this state and a tag.
+The mechanical work that used to travel with the version decision is done
+(HORO-1329): bumping `Cargo.toml` carries the app bundle with it, and CI fails if
+it does not. Then run
 the founder pass on the rig as built. Its value is concentrated in four
 questions this gate cannot answer:
 
