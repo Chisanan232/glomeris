@@ -297,6 +297,51 @@ final class AiProviderPreferencesViewTests: XCTestCase {
         XCTAssertNil(model.responseExcerpt)
     }
 
+    // MARK: - GlomerisLlmAddressWording
+
+    /// HORO-1355. The address help must say three things, because leaving any
+    /// one of them out is what let a host root be configured and then blamed on
+    /// the key: that a path belongs in the address, what that path usually is,
+    /// and what Glomeris appends to whatever is given.
+    ///
+    /// Asserted on the constant the view renders, so the copy cannot be
+    /// weakened without this failing. That the view *shows* it — rather than
+    /// declaring it unused — is what the accessibility hint and the caption in
+    /// `providerCard` are for, and is verified on the running app.
+    func testTheAddressHelpNamesThePathTheUsualValueAndWhatGlomerisAppends() {
+        let hint = GlomerisLlmAddressWording.pathHint
+
+        XCTAssertTrue(
+            hint.lowercased().contains("path"),
+            "the address help must name the thing that goes wrong: \(hint)")
+        XCTAssertTrue(
+            hint.contains("/v1"),
+            "naming a path requirement without naming the usual path leaves the "
+                + "user guessing: \(hint)")
+        XCTAssertTrue(
+            hint.contains("/chat/completions"),
+            "the user cannot tell an API root from a completions URL without "
+                + "knowing what Glomeris appends: \(hint)")
+    }
+
+    /// The sentence must not read as a refusal. A path-less address is accepted
+    /// by the CLI on purpose — some providers serve completions at their root —
+    /// so wording it as a rule would contradict `validate_base_url` and turn a
+    /// working configuration into one the user believes is broken.
+    func testTheAddressHelpIsGuidanceRatherThanARule() {
+        let hint = GlomerisLlmAddressWording.pathHint.lowercased()
+
+        for absolute in ["must ", "required", "invalid", "not allowed"] {
+            XCTAssertFalse(
+                hint.contains(absolute),
+                "\"\(absolute)\" states a rule this app does not enforce and the "
+                    + "CLI does not hold: \(hint)")
+        }
+        XCTAssertTrue(
+            hint.contains("usually"),
+            "the usual case has to read as usual, not universal: \(hint)")
+    }
+
     // MARK: - LlmPayloadPreviewInterpretation
 
     func testThePayloadPreviewDecodesTheReport() throws {
