@@ -137,6 +137,9 @@ fn executable_fields(
     decision: &PolicyDecision,
     resolved_action: Option<&dyn Action>,
 ) -> (bool, Vec<OfferedAction>, Option<String>) {
+    // MUST stay ahead of the `action.plan` call below: `build_llm_plan_report`
+    // relies on a protected resource's action never being planned, so that no
+    // LLM response can cause one to be. See that function's docs.
     if decision.class == PolicyClass::Protected {
         let reason = decision
             .reasons

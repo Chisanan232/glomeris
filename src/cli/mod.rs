@@ -492,13 +492,19 @@ pub fn credential_flag_name(arg: &str) -> &str {
 /// also carries the same [`DetectCandidateReport`] projection `glomeris
 /// detect` prints, and building it calls [`resolve_action_for`] — a registry
 /// lookup — for protected resources too, exactly as `detect` already does
-/// for them. That lookup plans nothing, touches no filesystem, and its
-/// result is *discarded unused* for a protected decision:
-/// `executable_fields` tests `PolicyClass::Protected` first and returns
-/// `(false, [], Some("PROTECTED: …"))` whatever action was resolved. The
-/// property that matters — no action is ever planned or offered for a
-/// protected resource, however insistently a model asks — is unchanged, and
-/// is asserted directly in the golden test.
+/// for them. For a protected decision that lookup's result is *discarded
+/// unused*: `executable_fields` tests `PolicyClass::Protected` first and
+/// returns `(false, [], Some("PROTECTED: …"))` whatever action was resolved.
+///
+/// HORO-1358 gave `executable_fields` a reason to call [`Action::plan`] — it
+/// now refuses to report a candidate executable when the executor would
+/// refuse its plan on sight. That call sits *after* the `Protected` early
+/// return, so the narrowing above is unaffected: for a protected resource
+/// nothing is planned and no filesystem is touched, and the property that
+/// matters — no action is ever offered for a protected resource, however
+/// insistently a model asks — is unchanged and is asserted directly in the
+/// golden test. The "nothing is planned" half rests on that early return
+/// alone, not on a test: do not reorder those two checks.
 ///
 /// `impact` is the free-space context for the nested candidates' impact
 /// tiers; pass [`ImpactContext::default`] where it is genuinely unknown.
