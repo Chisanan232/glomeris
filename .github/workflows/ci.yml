@@ -172,6 +172,30 @@ jobs:
       - name: Check the committed app icon matches GlomerisMark's geometry
         run: bash scripts/check-app-icon-matches-geometry.sh
 
+  app-version-drift:
+    # HORO-1329: the app bundle reports its version from
+    # macos/GlomerisMenuBar/project.yml; the CLI it embeds reports the version
+    # in Cargo.toml. macos-app-release.yml puts both inside one .app, so they
+    # have to be the same number — and before this ticket they were not (0.1.0
+    # against 0.2.0), because nothing reads both files. cargo ignores
+    # project.yml and xcodebuild ignores Cargo.toml.
+    #
+    # ubuntu-latest, and no Xcode or XcodeGen: the guard compares committed
+    # text, including the MARKETING_VERSION in the .pbxproj that xcodebuild
+    # actually builds from, so it needs neither toolchain. That is deliberate —
+    # a version check that could only run on a pinned macOS runner would be the
+    # first thing to be skipped.
+    #
+    # A separate job from xcodeproj-drift, which it does not overlap: that one
+    # asks "is the project regenerated from the spec", this one asks "is the
+    # number in it right". A correctly regenerated project can still ship the
+    # wrong version, and a stale project can still have the right one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the app bundle version matches the crate version
+        run: bash scripts/check-app-version-matches-crate.sh
+
   no-policy-in-swift:
     # HORO-1068: mechanical guard — GlomerisMenuBar (the macOS thin client)
     # must never branch UI behavior on `policyLabel`/`policy_label`'s string
