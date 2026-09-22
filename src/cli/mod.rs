@@ -503,8 +503,11 @@ pub fn credential_flag_name(arg: &str) -> &str {
 /// nothing is planned and no filesystem is touched, and the property that
 /// matters — no action is ever offered for a protected resource, however
 /// insistently a model asks — is unchanged and is asserted directly in the
-/// golden test. The "nothing is planned" half rests on that early return
-/// alone, not on a test: do not reorder those two checks.
+/// golden test. A reorder would in fact be caught there too, since the
+/// golden fixture's action cannot plan for its path and the test asserts the
+/// refusal `starts_with("PROTECTED: ")` — but only incidentally, as a
+/// consequence of that one fixture. Keep the `Protected` check first on its
+/// own merits: it, not a test, is what guarantees nothing is planned.
 ///
 /// `impact` is the free-space context for the nested candidates' impact
 /// tiers; pass [`ImpactContext::default`] where it is genuinely unknown.
