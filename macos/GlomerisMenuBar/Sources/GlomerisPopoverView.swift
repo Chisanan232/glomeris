@@ -58,10 +58,11 @@
 //  So this shell owns the one level of navigation there is
 //  (`CandidateDetailNavigation`, defined in CandidateDetailView.swift),
 //  the two cards report a tapped resource id upward through
-//  `onOpenDetail`, and the detail replaces the scrolling body in place —
+//  `onOpenDetail`, and the detail opens over the scrolling body in place —
 //  same panel, same window, no presentation at all. The header and footer
 //  stay put, so the route out of the panel never disappears behind a
-//  drill-down.
+//  drill-down. `scrollingBody` explains why the overview it covers is
+//  hidden rather than removed.
 //
 //  This is also why the sections and the detail are threaded the same
 //  `client`/`projectRootsStore`: the detail is now a sibling of the cards
@@ -194,7 +195,7 @@ struct GlomerisPopoverView: View {
 
     // MARK: - Detail
 
-    /// One candidate, in place of the overview. `CandidateDetailView` brings
+    /// One candidate, over the hidden overview. `CandidateDetailView` brings
     /// its own inner `ScrollView`, so this is deliberately not wrapped in a
     /// second one — nested scroll views inside a 480pt panel are a worse
     /// reading experience than the sheet this replaced.
