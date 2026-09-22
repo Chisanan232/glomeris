@@ -82,6 +82,13 @@ could silently trigger a real, irreversible `brew cleanup -s`. Fixed:
 unconditionally, fail-closed, before ever spawning the tool. `dry_run`/
 `clean --dry-run` still render this action's plan; real execution stays
 permanently refused unless a scoped equivalent becomes available upstream.
+HORO-1358 carried that refusal upstream into reporting: `detect --json` and
+`explain --json` now report this candidate as `executable: false` with no
+offered action, because reporting puts the action's own plan to the same
+pre-mutation structural rule `execute()` applies. `clean --dry-run`, `free`,
+`autopilot` and `emergency` resolve actions independently and do not read
+`executable`, so they can still nominate `homebrew.cleanup.cache` — where it
+remains refused at execution.
 See `HORO-1005` for a related, non-blocking follow-up (`scoped_path` isn't
 yet structurally tied to what a `RunTool` step's `args` actually mutate —
 not currently exploitable, since this was the only unscoped action and it's
