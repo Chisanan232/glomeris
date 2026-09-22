@@ -348,12 +348,18 @@ pub struct DetectCandidateReport {
     pub impact_tier: &'static str,
     pub policy_label: &'static str,
     pub reasons: Vec<&'static str>,
-    /// `true` only when there's a real registered action for this
-    /// resource AND its policy class doesn't unconditionally forbid it
-    /// (i.e. not `PROTECTED`) — see [`executable_fields`]. HORO-1053.
+    /// `true` only when all four hold: a real registered action resolves
+    /// for this resource, its policy class doesn't unconditionally forbid
+    /// it (i.e. not `PROTECTED`), that action can actually *plan* for this
+    /// resource, and the resulting plan is not one
+    /// [`crate::executor::structural_refusal`] rejects on sight. See
+    /// [`executable_fields`]. HORO-1053, HORO-1358.
     pub executable: bool,
-    /// Empty for `PROTECTED` or when no action resolves; one entry
-    /// otherwise. HORO-1053.
+    /// One entry when `executable`, empty otherwise — the same four
+    /// conditions. Do NOT read this as "one entry unless PROTECTED or no
+    /// action resolves": an action can be registered, resolved and
+    /// `AUTO_SAFE` and still be offered nothing, which is exactly what
+    /// HORO-1358 fixed. HORO-1053, HORO-1358.
     pub offered_actions: Vec<OfferedAction>,
     /// Human-readable reason set exactly when `executable` is `false`.
     /// HORO-1053.
@@ -443,12 +449,18 @@ pub struct ExplainReport {
     /// to report at all (e.g. a `ResourceLocator::Tool` resource such as
     /// Docker's build cache, which has no dev/inode/mtime identity).
     pub fingerprint_token: Option<String>,
-    /// `true` only when there's a real registered action for this
-    /// resource AND its policy class doesn't unconditionally forbid it
-    /// (i.e. not `PROTECTED`) — see [`executable_fields`]. HORO-1053.
+    /// `true` only when all four hold: a real registered action resolves
+    /// for this resource, its policy class doesn't unconditionally forbid
+    /// it (i.e. not `PROTECTED`), that action can actually *plan* for this
+    /// resource, and the resulting plan is not one
+    /// [`crate::executor::structural_refusal`] rejects on sight. See
+    /// [`executable_fields`]. HORO-1053, HORO-1358.
     pub executable: bool,
-    /// Empty for `PROTECTED` or when no action resolves; one entry
-    /// otherwise. HORO-1053.
+    /// One entry when `executable`, empty otherwise — the same four
+    /// conditions. Do NOT read this as "one entry unless PROTECTED or no
+    /// action resolves": an action can be registered, resolved and
+    /// `AUTO_SAFE` and still be offered nothing, which is exactly what
+    /// HORO-1358 fixed. HORO-1053, HORO-1358.
     pub offered_actions: Vec<OfferedAction>,
     /// Human-readable reason set exactly when `executable` is `false`.
     /// HORO-1053.
