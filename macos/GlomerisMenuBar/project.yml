@@ -23,7 +23,19 @@ targets:
       path: Sources/Info.plist
       properties:
         LSUIElement: true
-        CFBundleShortVersionString: "0.1.0"
+        # HORO-1329: the version the user sees is a build setting reference,
+        # not a literal, so there is exactly one place to change it —
+        # MARKETING_VERSION below — and `xcodebuild MARKETING_VERSION=x.y.z`
+        # can override it at release time without editing a tracked file.
+        # Xcode's "Process Info.plist" step expands `$(...)` here; the
+        # neighbouring $(PRODUCT_BUNDLE_IDENTIFIER) and $(EXECUTABLE_NAME)
+        # have always relied on that.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        # Left a literal 1 on purpose. CFBundleVersion is the build number,
+        # not the release number: it is never shown to the user, and nothing
+        # in this repo produces a monotonic build counter to derive it from.
+        # Tying it to the crate version would make it non-monotonic across a
+        # version revert, which is the one thing macOS actually cares about.
         CFBundleVersion: "1"
         NSHumanReadableCopyright: "Copyright © Glomeris. All rights reserved."
         # HORO-1305. Both keys are declared rather than relying on the partial
@@ -38,6 +50,14 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBar
+        # HORO-1329. The single source of the app's user-visible version, kept
+        # equal to the `version` of the glomeris crate in Cargo.toml by
+        # scripts/check-app-version-matches-crate.sh. Before this ticket the
+        # plist carried a hardcoded 0.1.0 while the crate was at 0.2.0, so the
+        # bundle the release workflow uploads for tag vX would report a version
+        # unrelated to X — and the app embeds that CLI, so "which version am I
+        # running" had two different answers inside one .app.
+        MARKETING_VERSION: "0.2.0"
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: NO
         # HORO-1305. Sources/Assets.xcassets/AppIcon.appiconset is generated

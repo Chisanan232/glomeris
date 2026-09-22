@@ -99,6 +99,28 @@ jobs:
           chmod +x "$BIN_PATH"
           echo "bin_path=$BIN_PATH" >> "$GITHUB_ENV"
 
+      - name: Read the released CLI's own version
+        # HORO-1329: the number stamped into the bundle comes from the binary
+        # that is about to be embedded in it, not from the tag. The CLI inside
+        # the .app is the ground truth for "what version is this app", and
+        # deriving the stamp from anything else reintroduces the two-answers
+        # problem this ticket exists to fix — the bundle shipped 0.1.0 while
+        # the crate was at 0.2.0.
+        #
+        # The tag is still cross-checked, one step below, rather than trusted:
+        # if the downloaded asset and the tag disagree, that is a release-
+        # assembly bug and should stop the run, not be silently papered over.
+        run: |
+          set -euo pipefail
+          # `glomeris --version` prints "glomeris X.Y.Z".
+          CLI_VERSION="$("$bin_path" --version | awk 'NR==1 {print $2}')"
+          if [ -z "$CLI_VERSION" ]; then
+            echo "::error::could not read a version from '$bin_path --version'"
+            exit 1
+          fi
+          echo "cli_version=$CLI_VERSION" >> "$GITHUB_ENV"
+          echo "embedded CLI reports version $CLI_VERSION"
+
       - name: Build GlomerisMenuBar.app
         run: |
           set -euo pipefail
@@ -108,7 +130,8 @@ jobs:
             -configuration Release \
             build \
             CODE_SIGNING_ALLOWED=NO \
-            CONFIGURATION_BUILD_DIR="$PWD/build"
+            CONFIGURATION_BUILD_DIR="$PWD/build" \
+            MARKETING_VERSION="$cli_version"
 
       - name: Embed released binary into app bundle
         run: |
@@ -127,6 +150,47 @@ jobs:
           # Developer ID and notarization ticket and is deliberately out of
           # scope here; see HORO-1071.
           codesign --force --deep --sign - "$APP"
+
+      - name: Verify the bundle, the embedded CLI and the tag all agree
+        # HORO-1329. Three numbers that were previously unrelated:
+        #   * what the .app reports (Finder, About, CFBundleShortVersionString)
+        #   * what the CLI inside it reports
+        #   * the tag this asset is being attached to
+        # The stamp above makes the first two equal by construction, so this
+        # step's job is to prove the construction actually worked — Info.plist
+        # expansion is silent when it fails and would leave the literal
+        # "$(MARKETING_VERSION)", or an empty string, in a shipped bundle.
+        #
+        # A leading "v" is the only tag decoration stripped. release.yml's
+        # trigger allows other prefixes, so an unexpected tag shape fails here
+        # loudly rather than producing a bundle labelled with a number nobody
+        # can trace back to a release.
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          APP="build/GlomerisMenuBar.app"
+          BUNDLE_VERSION="$(
+            /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+              "$APP/Contents/Info.plist"
+          )"
+          EMBEDDED_VERSION="$("$APP/Contents/MacOS/glomeris" --version | awk 'NR==1 {print $2}')"
+          TAG_VERSION="${TAG#v}"
+
+          echo "bundle CFBundleShortVersionString: $BUNDLE_VERSION"
+          echo "embedded CLI --version:            $EMBEDDED_VERSION"
+          echo "release tag (leading v stripped):  $TAG_VERSION"
+
+          status=0
+          if [ "$BUNDLE_VERSION" != "$EMBEDDED_VERSION" ]; then
+            echo "::error::the app bundle reports $BUNDLE_VERSION but the CLI it embeds reports $EMBEDDED_VERSION"
+            status=1
+          fi
+          if [ "$EMBEDDED_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::the embedded CLI reports $EMBEDDED_VERSION but this asset is being attached to tag $TAG"
+            status=1
+          fi
+          exit "$status"
 
       - name: Zip app bundle
         run: |
