@@ -505,9 +505,10 @@ const HOST_ROOT_ENDPOINT_PATH: &str = "/chat/completions";
 /// ## Why this is a hint and not a refusal
 ///
 /// A path-less base URL is deliberately *accepted*: some OpenAI-compatible
-/// services really do serve completions at their root, and AC 6 forbids baking
-/// in any particular host or path shape. So this cannot claim the address is
-/// wrong — only that it is the likeliest explanation for a refusal, which is
+/// services really do serve completions at their root, and no particular host
+/// or path shape may be baked in here — the `/v1` below is what providers
+/// usually do, not a rule this code enforces. So this cannot claim the address
+/// is wrong — only that it is the likeliest explanation for a refusal, which is
 /// true precisely because the alternative (a provider that serves the root and
 /// refused for an unrelated reason) is rarer. Rejections at a configured API
 /// root get nothing: a 401 from `…/v1/chat/completions` is about the key, and
