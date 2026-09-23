@@ -88,6 +88,11 @@ targets:
       # card and the Clean button all read, asserted directly rather than
       # through whichever of the three views happens to render it.
       - path: Sources/CandidateActionability.swift
+      # HORO-1366: the Apply Plan preview/result vocabulary. Foundation-only
+      # and view-free, so its classification and its aggregate honesty are
+      # asserted against DTO fixtures directly rather than through the card
+      # that draws them.
+      - path: Sources/PlanApplication.swift
       - path: Sources/GlomerisDesignSystem.swift
       # HORO-1365: the scan and plan stores are exercised directly, so a
       # reset can be caught at the state boundary rather than only by a
