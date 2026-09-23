@@ -182,39 +182,50 @@ struct CandidateDetailViewModel: Equatable {
             + "This cannot be undone."
     }
 
-    /// Why the button is unavailable, or `nil` when it is not.
+    /// The CLI's reason for not acting on this resource, or `nil` when it
+    /// will. This is the permanent one of the button's two disabled causes:
+    /// a resource the CLI declines stays declined, and nothing the user does
+    /// in this sheet changes it.
+    var cleanRefusalTerm: GlomerisTerm? { actionability.term }
+
+    /// The transient cause: this sheet's own cleanup is running.
     ///
-    /// The two causes are genuinely different situations and this is the
-    /// method that keeps them apart. A resource the CLI will not act on stays
-    /// that way; a run already in flight clears in seconds. Before this
-    /// ticket both collapsed into one dimmed control with nothing to
-    /// distinguish them.
+    /// Deliberately NOT `GlomerisVocabulary.refusal("busy")`. That wording is
+    /// "Another run is in progress", and it is correct for what it describes —
+    /// `src/main.rs` emits `reason: "busy"` when a *different* invocation
+    /// already holds the executor lock. `isExecuting` is this view's own
+    /// `@State`, set by `performClean` two seconds earlier, and the run it
+    /// refers to is the one whose progress spinner renders directly below.
+    /// Telling a user that something else is blocking them, immediately above
+    /// their own progress indicator, is the same class of misreading this
+    /// ticket was filed to remove.
     ///
-    /// They cannot in fact co-occur — `performClean` needs an `actionId` to
-    /// start, and a non-executable resource has none, so `isExecuting` can
-    /// never be `true` while `isCleanEnabled` is `false` — but the refusal is
-    /// checked first regardless, because it is the permanent one and nothing
-    /// here should depend on that reasoning staying true.
-    func cleanUnavailableTerm(isExecuting: Bool) -> GlomerisTerm? {
-        if let refusalTerm = actionability.term {
-            return refusalTerm
-        }
-        // `busy` is a refusal reason the CLI emits in its own right, so the
-        // wording for "something else is running" already exists in
-        // GlomerisVocabulary and is not invented here.
-        return isExecuting ? GlomerisVocabulary.refusal("busy") : nil
-    }
+    /// Client state is worded where client state lives. This says nothing
+    /// about policy, so it borrows nothing from the CLI's refusal table.
+    static let cleanInFlightHint =
+        "Unavailable while this cleanup runs. It becomes available again when the run finishes."
 
     /// The Clean button's accessibility hint, and its tooltip — one string
     /// for both, so the spoken and the hovered explanation cannot drift.
+    ///
+    /// The two disabled causes are genuinely different situations and this is
+    /// the method that keeps them apart; before this ticket both collapsed
+    /// into one dimmed control with nothing to distinguish them. The refusal
+    /// is checked first because it is the permanent one. They cannot in fact
+    /// co-occur — `performClean` needs an `actionId` to start, and a
+    /// non-executable resource has none — but nothing here depends on that
+    /// reasoning staying true.
     ///
     /// When the button is unavailable the hint becomes the reason, because a
     /// hint describing a deletion that cannot happen is worse than no hint:
     /// the question a reader has at that moment is why, and this ticket was
     /// filed because nothing answered it.
     func cleanButtonHint(isExecuting: Bool) -> String {
-        if let unavailable = cleanUnavailableTerm(isExecuting: isExecuting) {
-            return "Unavailable. \(unavailable.title). \(unavailable.explanation)"
+        if let refusal = cleanRefusalTerm {
+            return "Unavailable. \(refusal.title). \(refusal.explanation)"
+        }
+        if isExecuting {
+            return Self.cleanInFlightHint
         }
         if requiresConfirmation {
             return "\(actionability.sentence) \(cleanActionDescription)"
@@ -356,8 +367,11 @@ struct CandidateDetailView: View {
                 .accessibilityHint(viewModel.cleanButtonHint(isExecuting: isExecuting))
                 .help(viewModel.cleanButtonHint(isExecuting: isExecuting))
 
-                if let unavailable = viewModel.cleanUnavailableTerm(isExecuting: isExecuting) {
-                    cleanUnavailableLine(unavailable)
+                // Only the refusal renders here. The in-flight case has the
+                // progress row immediately below, which says the same thing
+                // live and with detail this line could not carry.
+                if let refusal = viewModel.cleanRefusalTerm {
+                    cleanUnavailableLine(refusal)
                 }
 
                 if isExecuting {

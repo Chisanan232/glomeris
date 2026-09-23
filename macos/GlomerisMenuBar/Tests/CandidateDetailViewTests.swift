@@ -839,33 +839,61 @@ final class CandidateDetailViewTests: XCTestCase {
             )
         )
 
-        let refusedReason = refused.cleanUnavailableTerm(isExecuting: false)
-        let busyReason = executable.cleanUnavailableTerm(isExecuting: true)
+        let refusedHint = refused.cleanButtonHint(isExecuting: false)
+        let inFlightHint = executable.cleanButtonHint(isExecuting: true)
 
-        XCTAssertNotNil(refusedReason)
-        XCTAssertNotNil(busyReason)
-        XCTAssertNotEqual(refusedReason?.title, busyReason?.title)
-        XCTAssertNotEqual(refusedReason?.explanation, busyReason?.explanation)
-        XCTAssertNotEqual(
-            refused.cleanButtonHint(isExecuting: false),
-            executable.cleanButtonHint(isExecuting: true)
-        )
+        XCTAssertNotEqual(refusedHint, inFlightHint)
+        // Both have to say the control is unavailable, or the distinction
+        // would be between an explanation and silence rather than between two
+        // explanations.
+        XCTAssertTrue(refusedHint.contains("Unavailable"))
+        XCTAssertTrue(inFlightHint.contains("Unavailable"))
+        // And only the permanent one renders as a persistent line.
+        XCTAssertNotNil(refused.cleanRefusalTerm)
+        XCTAssertNil(executable.cleanRefusalTerm)
     }
 
-    /// The transient reason is the CLI's own `busy` refusal wording, not a
-    /// sentence written at this call site — the wording already existed in
-    /// GlomerisVocabulary and was simply being dropped here.
-    func testTheInFlightReasonIsTheCLIsBusyRefusalWording() {
+    /// The transient reason must NOT borrow `GlomerisVocabulary.refusal("busy")`.
+    ///
+    /// That wording is "Another run is in progress", which is right for what
+    /// it describes — `src/main.rs` emits `reason: "busy"` when a *different*
+    /// invocation holds the executor lock. `isExecuting` is this view's own
+    /// state, and the run it names is the one whose progress spinner renders
+    /// directly beneath the button. Announcing that something else is blocking
+    /// you, above your own progress indicator, is the same misreading this
+    /// ticket exists to remove.
+    func testTheInFlightReasonDoesNotClaimAnotherRunIsBlockingYou() {
         let viewModel = CandidateDetailViewModel(
             explainReport(
                 executable: true,
                 offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
             )
         )
-        XCTAssertEqual(
-            viewModel.cleanUnavailableTerm(isExecuting: true),
-            GlomerisVocabulary.refusal("busy")
+        let hint = viewModel.cleanButtonHint(isExecuting: true)
+
+        let busy = GlomerisVocabulary.refusal("busy")
+        XCTAssertFalse(hint.contains(busy.title))
+        XCTAssertFalse(hint.contains(busy.explanation))
+        XCTAssertFalse(hint.lowercased().contains("another"))
+        XCTAssertFalse(hint.lowercased().contains("the other"))
+        // It does say why the button is dimmed, and that the state passes.
+        XCTAssertEqual(hint, CandidateDetailViewModel.cleanInFlightHint)
+        XCTAssertTrue(hint.contains("Unavailable"))
+        XCTAssertTrue(hint.contains("this cleanup"))
+    }
+
+    /// The in-flight case is deliberately not given a persistent reason line:
+    /// the progress row directly below it already says a cleanup is running,
+    /// live and with the CLI's own step text, so a second static line would
+    /// duplicate it and spend viewport the evidence card needs.
+    func testTheInFlightCaseRendersNoReasonLineBecauseTheSpinnerSaysIt() {
+        let viewModel = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+            )
         )
+        XCTAssertNil(viewModel.cleanRefusalTerm)
     }
 
     /// An enabled, idle button has no unavailability reason to give, so
@@ -878,15 +906,19 @@ final class CandidateDetailViewTests: XCTestCase {
                 offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
             )
         )
-        XCTAssertNil(viewModel.cleanUnavailableTerm(isExecuting: false))
+        XCTAssertNil(viewModel.cleanRefusalTerm)
+        XCTAssertEqual(
+            viewModel.cleanButtonHint(isExecuting: false),
+            viewModel.cleanActionDescription
+        )
     }
 
     /// A refusal outranks the transient reason. They cannot co-occur today
     /// (`performClean` needs an `actionId`, and a refused resource has none),
     /// so this pins the resolution rather than discovering it: the permanent
-    /// reason is the useful one, and if the two ever did overlap, telling a
-    /// user to "try again once the other finishes" about a resource that will
-    /// never be cleanable would be actively misleading.
+    /// reason is the useful one, and if the two ever did overlap, saying the
+    /// button "becomes available again when the run finishes" about a resource
+    /// that will never be cleanable would be actively misleading.
     func testARefusalOutranksTheInFlightReason() {
         let viewModel = CandidateDetailViewModel(
             explainReport(
@@ -895,7 +927,10 @@ final class CandidateDetailViewTests: XCTestCase {
                 refusalReason: "no registered cleanup action for this resource kind"
             )
         )
-        XCTAssertEqual(viewModel.cleanUnavailableTerm(isExecuting: true)?.title, "Cannot be cleaned")
+        XCTAssertEqual(viewModel.cleanRefusalTerm?.title, "Cannot be cleaned")
+        let hint = viewModel.cleanButtonHint(isExecuting: true)
+        XCTAssertTrue(hint.contains("no registered cleanup action for this resource kind"))
+        XCTAssertNotEqual(hint, CandidateDetailViewModel.cleanInFlightHint)
     }
 
     /// The view has to actually attach the three modifiers, and attach the
@@ -912,11 +947,28 @@ final class CandidateDetailViewTests: XCTestCase {
     /// The reason must also be visible, not accessible-only: the ticket's
     /// premise is that a dimmed control communicates nothing, and that is as
     /// true for someone who can see it as for someone who cannot.
+    /// "Beneath the button" is the whole claim, so this compares positions
+    /// rather than merely checking that the call exists somewhere in the file.
+    /// An earlier version of this test asserted only presence and would have
+    /// passed with the line moved above the Button or buried in the evidence
+    /// card — either of which defeats the point of rendering it at all.
     func testTheUnavailableReasonIsRenderedVisiblyBeneathTheButton() throws {
         let source = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
-        XCTAssertTrue(source.contains("if let unavailable = viewModel.cleanUnavailableTerm(isExecuting: isExecuting)"))
-        XCTAssertTrue(source.contains("cleanUnavailableLine(unavailable)"))
         XCTAssertTrue(source.contains("private func cleanUnavailableLine(_ term: GlomerisTerm) -> some View"))
+
+        let cleanButton = try XCTUnwrap(source.range(of: #"Button("Clean")"#))
+        let enablement = try XCTUnwrap(source.range(of: ".disabled(isExecuting)"))
+        let reasonLine = try XCTUnwrap(source.range(of: "cleanUnavailableLine(refusal)"))
+        // `ProgressView()` rather than `if isExecuting {`, which also appears
+        // in `cleanButtonHint` above and would match there first.
+        let progressRow = try XCTUnwrap(source.range(of: "ProgressView()"))
+
+        XCTAssertLessThan(cleanButton.lowerBound, reasonLine.lowerBound, "the reason renders above the button")
+        XCTAssertLessThan(enablement.upperBound, reasonLine.lowerBound, "the reason renders inside the button chain")
+        XCTAssertLessThan(
+            reasonLine.upperBound, progressRow.lowerBound,
+            "the reason must sit between the button and the progress row, not after it"
+        )
     }
 
     /// None of the new wording may become a second opinion about whether the
