@@ -550,7 +550,7 @@ final class CandidatesSectionViewTests: XCTestCase {
                 policyLabel: "AUTO_SAFE",
                 executable: false,
                 refusalReason: "refusing to run brew: this step has no scoped_path, so its identity cannot be "
-                    + "revalidated before mutation - an unscoped mutating action is never executed "
+                    + "revalidated before mutation — an unscoped mutating action is never executed "
                     + "regardless of policy class"
             )
         )

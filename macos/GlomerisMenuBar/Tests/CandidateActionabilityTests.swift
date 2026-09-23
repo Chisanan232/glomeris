@@ -39,7 +39,7 @@ final class CandidateActionabilityTests: XCTestCase {
     /// HORO-1358 exposed, quoted from that ticket's comment on HORO-1323.
     private static let structuralRefusal =
         "refusing to run brew: this step has no scoped_path, so its identity cannot be "
-        + "revalidated before mutation - an unscoped mutating action is never executed "
+        + "revalidated before mutation — an unscoped mutating action is never executed "
         + "regardless of policy class"
 
     private func refused(_ reason: String) -> CandidateActionability {
