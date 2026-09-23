@@ -87,12 +87,17 @@ targets:
       - path: Sources/GlomerisDesignSystem.swift
       # HORO-1365: the scan and plan stores are exercised directly, so a
       # reset can be caught at the state boundary rather than only by a
-      # source grep over the views that draw them.
+      # source grep over the views that draw them. The cards below are also
+      # constructed against those stores and their fetch functions driven
+      # against a fixture binary, which is what makes "an explicit Refresh
+      # replaces the scan" a behavioural assertion rather than a grep.
+      #
+      # Sources/GlomerisPopoverView.swift is deliberately NOT here. It owns the
+      # stores, so a test constructing one would build a second pair unrelated
+      # to the ones under test — and open the real UserDefaults suite through
+      # its defaulted ProjectRootsStore to do it. What the shell has to be is a
+      # fact about its source text, and OverviewStateTests reads it as text.
       - path: Sources/OverviewState.swift
-      # HORO-1365: the shell too, so the popover can be CONSTRUCTED with the
-      # stores rather than only grepped. A defaulted store parameter sneaking
-      # back in is then a compile-time fact, not a source-text opinion.
-      - path: Sources/GlomerisPopoverView.swift
       - path: Sources/StatusHealthSectionView.swift
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateDetailView.swift
