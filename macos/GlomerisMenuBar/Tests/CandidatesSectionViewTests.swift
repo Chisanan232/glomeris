@@ -46,7 +46,10 @@ final class CandidatesSectionViewTests: XCTestCase {
     /// Refresh button's own action closure, not from `body`'s top level or
     /// any lifecycle hook.
     func testRunDetectIsOnlyInvokedFromTheRefreshButtonAction() throws {
-        let source = try Self.readSource("CandidatesSectionView.swift")
+        // Comment-stripped since HORO-1365: the function's doc comment now
+        // quotes this very call shape while explaining what its `@MainActor`
+        // annotation guarantees, and prose about a call site is not one.
+        let source = try Self.strippedOfComments(Self.readSource("CandidatesSectionView.swift"))
         // The Refresh button wraps the call in `Task { await runDetect() }`
         // inside its action closure; assert that exact call site exists,
         // and that it's the only call to runDetect() in the file.
@@ -96,7 +99,11 @@ final class CandidatesSectionViewTests: XCTestCase {
         struct ValueOutput: Decodable { let value: Int }
 
         let binaryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glomeris-client-fixture-helper")
+            // Versioned, so this really is the binary GlomerisClientTests
+            // builds. It used to be the unsuffixed name, which meant this test
+            // silently kept its own never-rebuilt copy — the exact staleness
+            // the revision suffix exists to prevent (HORO-1365).
+            .appendingPathComponent("glomeris-client-fixture-helper-v3")
         // Reuse the same compiled fixture GlomerisClientTests builds; if
         // this test runs before that one has compiled it, build it here.
         if !FileManager.default.isExecutableFile(atPath: binaryURL.path) {
@@ -322,16 +329,14 @@ final class CandidatesSectionViewTests: XCTestCase {
 
     /// The default state is Rust's order, so the list a user sees without
     /// touching anything is exactly what `detect` decided.
-    func testDefaultOrderIsTheCliRanking() throws {
-        let source = try Self.readSource("CandidatesSectionView.swift")
-        XCTAssertTrue(
-            source.contains("sortOrder: CandidateSortOrder = .recommended"),
-            "the list must open in the CLI's own order"
-        )
-        XCTAssertTrue(
-            source.contains("safetyFilter: CandidateSafetyFilter = .all"),
-            "nothing may be hidden until the user asks for it"
-        )
+    ///
+    /// HORO-1365 moved these two controls into `ScanState`, which upgraded this
+    /// from a source grep to a real assertion: the defaults are now read off a
+    /// freshly constructed store rather than matched as text in a declaration.
+    func testDefaultOrderIsTheCliRanking() {
+        let scan = ScanState()
+        XCTAssertEqual(scan.sortOrder, .recommended, "the list must open in the CLI's own order")
+        XCTAssertEqual(scan.safetyFilter, .all, "nothing may be hidden until the user asks for it")
     }
 
     /// Behavioural counterpart to the source checks above: `.recommended`
@@ -498,5 +503,22 @@ final class CandidatesSectionViewTests: XCTestCase {
             .deletingLastPathComponent() // GlomerisMenuBar
             .appendingPathComponent("Sources/\(fileName)")
         return try String(contentsOf: sourceURL, encoding: .utf8)
+    }
+
+    /// Strips whole-line `//` comments, matching
+    /// `CandidateDetailViewTests.strippedOfComments` — see that doc comment for
+    /// why a conservative line filter is preferred over a real comment parser.
+    ///
+    /// Added in HORO-1365 because it was needed: the view's doc comment now
+    /// quotes its own call site (`Task { await runDetect() }`) while explaining
+    /// what the `@MainActor` annotation does and does not guarantee, and
+    /// `testRunDetectIsOnlyInvokedFromTheRefreshButtonAction` counted that
+    /// sentence as a third call site. A guard that a truthful comment can break
+    /// pressures the next person to write a less truthful comment.
+    private static func strippedOfComments(_ source: String) -> String {
+        source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
     }
 }

@@ -10,10 +10,10 @@
 //  silently once already or that nothing else in the suite would catch:
 //  the width that made every row wrap, the unbounded height, the section
 //  order that is also the VoiceOver reading order, and the fact that the
-//  panel has a way out of itself at all. `GlomerisPopoverView` is not
-//  compiled into this target (it drives the real app's Settings scene and
-//  calls `NSApplication.terminate`), which is the other reason these read
-//  the file rather than the type.
+//  panel has a way out of itself at all. These read the file rather than the
+//  type because layout is what they are about; HORO-1365 did add the shell to
+//  this target, so it can now also be constructed — see
+//  `OverviewStateTests.buildOverview`.
 //
 //  HORO-1357 adds the presentation-shape invariants. The detail view was
 //  reached by `.sheet(item:)` from inside whichever card held the tapped
@@ -222,7 +222,7 @@ final class GlomerisPopoverViewTests: XCTestCase {
         )
         XCTAssertTrue(
             code.contains("opacity(navigation.isShowingDetail ? 0 : 1)"),
-            "the overview must stay in the hierarchy, or the candidates card loses its scan"
+            "the overview must stay in the hierarchy, or its scroll position resets"
         )
         XCTAssertTrue(
             code.contains("allowsHitTesting(!navigation.isShowingDetail)"),
@@ -232,6 +232,37 @@ final class GlomerisPopoverViewTests: XCTestCase {
             code.contains("accessibilityHidden(navigation.isShowingDetail)"),
             "a screen reader must not read out a list the user cannot see"
         )
+    }
+
+    /// HORO-1365: the shell hands the two stores down; it does not create
+    /// them, and it does not let a card default one into existence.
+    ///
+    /// This is the assertion that keeps the fix from being undone by a
+    /// convenience. `.opacity` above no longer protects the scan and the plan —
+    /// ownership does — so if this file ever starts constructing a `ScanState`,
+    /// every drill-down goes back to showing "No scan yet" no matter how the
+    /// overview is presented.
+    func testTheShellOwnsTheStoresAndHandsTheSameOnesDown() {
+        XCTAssertTrue(
+            code.contains("@StateObject private var scan = ScanState()"),
+            "the shell owns the scan: it is above the drill-down and below the scene"
+        )
+        XCTAssertTrue(
+            code.contains("@StateObject private var plan = PlanState()"),
+            "the shell owns the plan for the same reason"
+        )
+        XCTAssertTrue(code.contains("scan: scan,"), "the candidates card must get the real scan")
+        XCTAssertTrue(code.contains("plan: plan,"), "the AI Plan card must get the real plan")
+
+        // `@ObservedObject` here would be the bug back: an observed object is
+        // re-assigned from the init on every rebuild of this view, so a scan
+        // would last exactly as long as whoever constructed it kept it alive.
+        for forbidden in ["@ObservedObject", "scan: ScanState", "plan: PlanState"] {
+            XCTAssertFalse(
+                code.contains(forbidden),
+                "\(forbidden) would put the stores' lifetime back in a caller's hands"
+            )
+        }
     }
 
     /// A drill-down with no way out of it is the same dead end

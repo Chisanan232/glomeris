@@ -583,7 +583,11 @@ final class AiPlanSectionViewTests: XCTestCase {
         // `runLlmPlan()`, so ending the window at that definition reads the
         // whole body and nothing after it.
         let rest = source[afterSignature.upperBound...]
-        let end = rest.range(of: "private func runLlmPlan()")?.lowerBound ?? rest.endIndex
+        // Matched without an access modifier: HORO-1365 made `runLlmPlan`
+        // `internal` so the tests can drive it, and the `?? rest.endIndex`
+        // fallback below would have silently widened this window to the rest of
+        // the file rather than failing loudly.
+        let end = rest.range(of: "func runLlmPlan()")?.lowerBound ?? rest.endIndex
         let functionText = String(rest[..<end])
 
         XCTAssertFalse(

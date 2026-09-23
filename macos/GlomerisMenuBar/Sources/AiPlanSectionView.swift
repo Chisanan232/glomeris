@@ -363,18 +363,15 @@ struct AiPlanSectionView: View {
     /// would cache a credential for the lifetime of a view.
     private let settingsStore: GlomerisLlmSettingsStore
 
-    @State private var outcome: AiPlanOutcome?
-    @State private var lastPlannedAt: Date?
-    @State private var isPlanning = false
-    @State private var progressStatusText: String?
-    @State private var lastErrorMessage: String?
-
-    /// The running request, held only so Stop can cancel it. `GlomerisClient`
-    /// turns that cancellation into a `SIGTERM` for the child and a
-    /// `.cancelled` error, and `SectionFetchErrors.shortMessage` returns no
-    /// message for that case — a request the user stopped is not a failure to
-    /// report (HORO-1308).
-    @State private var planTask: Task<Void, Never>?
+    /// HORO-1365: the plan this card renders is NOT owned here. A plan the
+    /// user paid a provider for must outlive any drill-down into one of the
+    /// resources it mentions, and `@State` on this view could not promise
+    /// that — its lifetime is the view's place in the hierarchy, which the
+    /// panel's detail navigation decides. See `OverviewState.swift`.
+    ///
+    /// This card is still the only thing that writes it, and still only from
+    /// the Ask button below.
+    @ObservedObject private var plan: PlanState
 
     /// What a row tap does: report the suggested resource upward, so the
     /// popover shell shows the same detail view a candidates-list row leads
@@ -388,12 +385,17 @@ struct AiPlanSectionView: View {
     /// or resizes, is no longer any part of it.
     private let onOpenDetail: (String) -> Void
 
+    /// `plan` has deliberately NO default, for the reason given on
+    /// `CandidatesSectionView.init`: a defaulted `PlanState()` is a silent
+    /// route back to "No plan yet" over a plan that exists.
     init(
+        plan: PlanState,
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
         settingsStore: GlomerisLlmSettingsStore = GlomerisLlmSettingsStore(),
         onOpenDetail: @escaping (String) -> Void = { _ in }
     ) {
+        self.plan = plan
         self.client = client
         self.projectRootsStore = projectRootsStore
         self.settingsStore = settingsStore
@@ -405,7 +407,7 @@ struct AiPlanSectionView: View {
             controlRow
             provenanceNote
 
-            if isPlanning, let progressStatusText {
+            if plan.isPlanning, let progressStatusText = plan.progressStatusText {
                 Text(progressStatusText)
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
@@ -417,7 +419,7 @@ struct AiPlanSectionView: View {
             // candidates cards follow. A failed request leaves an earlier
             // plan visible, which is useful, but the freshness stamp above
             // still says when that plan was actually made.
-            if let lastErrorMessage {
+            if let lastErrorMessage = plan.lastErrorMessage {
                 GlomerisStateMessageView(message: .failure(lastErrorMessage))
             }
         }
@@ -427,14 +429,20 @@ struct AiPlanSectionView: View {
 
     private var controlRow: some View {
         HStack(spacing: GlomerisDesign.inlineSpacing) {
-            Button(isPlanning ? "Asking…" : "Ask AI for a plan") {
-                planTask = Task { await runLlmPlan() }
+            Button(plan.isPlanning ? "Asking…" : "Ask AI for a plan") {
+                // Set here as well as in `runLlmPlan`, for the reason given on
+                // the Refresh button — and with a worse consequence if the
+                // window is hit: a second tap would overwrite `planTask`,
+                // orphaning the first request where Stop can no longer reach it,
+                // and paying a provider twice for one question.
+                plan.isPlanning = true
+                plan.planTask = Task { await runLlmPlan() }
             }
-            .disabled(isPlanning)
+            .disabled(plan.isPlanning)
 
-            if isPlanning {
+            if plan.isPlanning {
                 Button("Stop") {
-                    planTask?.cancel()
+                    plan.planTask?.cancel()
                 }
             }
 
@@ -469,7 +477,7 @@ struct AiPlanSectionView: View {
     }
 
     private var lastPlannedText: String {
-        guard let lastPlannedAt else { return "not asked yet" }
+        guard let lastPlannedAt = plan.lastPlannedAt else { return "not asked yet" }
         let formatter = DateFormatter()
         formatter.dateStyle = .none
         formatter.timeStyle = .medium
@@ -480,7 +488,7 @@ struct AiPlanSectionView: View {
     /// "0 suggestions" next to a message that already says so in words is
     /// noise.
     private var countText: String? {
-        guard case .plan(let report) = outcome, !report.items.isEmpty else { return nil }
+        guard case .plan(let report) = plan.outcome, !report.items.isEmpty else { return nil }
         return report.items.count == 1 ? "1 suggestion" : "\(report.items.count) suggestions"
     }
 
@@ -493,7 +501,7 @@ struct AiPlanSectionView: View {
     /// the other.
     @ViewBuilder
     private var outcomeBody: some View {
-        if let message = AiPlanStateMessages.message(for: outcome, isPlanning: isPlanning) {
+        if let message = AiPlanStateMessages.message(for: plan.outcome, isPlanning: plan.isPlanning) {
             GlomerisStateMessageView(message: message)
         }
 
@@ -502,11 +510,11 @@ struct AiPlanSectionView: View {
         // words inside it, because `AiPlanStateMessages` is a pure token->copy
         // mapper and putting a button in it would give the message-building
         // layer the ability to act.
-        if outcome == .notConfigured {
+        if plan.outcome == .notConfigured {
             GlomerisSettingsButton(title: "Set up an AI provider…")
         }
 
-        if case .plan(let report) = outcome {
+        if case .plan(let report) = plan.outcome {
             if !report.items.isEmpty {
                 orderingNote
                 rows(report.items)
@@ -681,10 +689,24 @@ struct AiPlanSectionView: View {
     ///
     /// `runRaw` rather than `run` on purpose: exit 1 still carries a full
     /// report on stdout. See the file header and `AiPlanInterpretation`.
-    private func runLlmPlan() async {
-        isPlanning = true
-        progressStatusText = nil
-        lastErrorMessage = nil
+    ///
+    /// `@MainActor` for the same reason as `CandidatesSectionView.runDetect()`
+    /// — read that doc comment for what the annotation does and does not claim
+    /// — and with one extra beneficiary here: `plan.planTask` is a plain `var`
+    /// on a shared object, written from this function and from the Ask button
+    /// and read by Stop. With all three on the main actor there is no window in
+    /// which a finishing request nils the handle while Stop is reading it, which
+    /// would have cancelled nothing and left a child `glomeris llm-plan` running
+    /// and a provider request still billable.
+    ///
+    /// `internal` rather than `private` so the tests can drive it against a
+    /// pinned fixture binary. Its one production call site is still the Ask
+    /// button.
+    @MainActor
+    func runLlmPlan() async {
+        plan.isPlanning = true
+        plan.progressStatusText = nil
+        plan.lastErrorMessage = nil
 
         do {
             // `withEnvironment` is what makes the Settings window's provider
@@ -702,32 +724,32 @@ struct AiPlanSectionView: View {
                     progressType: ProgressEventDto.self,
                     onProgress: { event in
                         Task { @MainActor in
-                            progressStatusText = ProgressStatusText.text(for: event)
+                            plan.progressStatusText = ProgressStatusText.text(for: event)
                         }
                     }
                 )
-            outcome = AiPlanInterpretation.interpret(
+            plan.outcome = AiPlanInterpretation.interpret(
                 exitCode: raw.exitCode,
                 stdout: raw.stdout,
                 stderr: raw.stderr
             )
-            lastPlannedAt = Date()
+            plan.lastPlannedAt = Date()
         } catch {
             // `nil` for a cancellation, and a sentence for everything else.
             // A stopped request deliberately leaves `lastPlannedAt` alone, so
             // any plan still on screen keeps its real timestamp instead of
             // claiming to be current.
-            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "AI plan")
+            plan.lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "AI plan")
         }
 
-        isPlanning = false
-        progressStatusText = nil
-        planTask = nil
+        plan.isPlanning = false
+        plan.progressStatusText = nil
+        plan.planTask = nil
     }
 }
 
 #Preview {
-    AiPlanSectionView()
+    AiPlanSectionView(plan: PlanState())
         .padding(GlomerisDesign.outerPadding)
         .frame(width: GlomerisDesign.popoverWidth)
 }

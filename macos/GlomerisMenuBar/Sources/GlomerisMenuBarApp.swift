@@ -28,6 +28,25 @@ import SwiftUI
 
 @main
 struct GlomerisMenuBarApp: App {
+    /// HORO-1365 deliberately does NOT put the scan and the plan here.
+    ///
+    /// They belong above navigation, and `GlomerisPopoverView` is already above
+    /// navigation — it is the `MenuBarExtra` content root, and the drill-down it
+    /// owns happens strictly inside its own body. Hoisting them one level
+    /// further, to this scene, buys nothing and costs something real: an
+    /// `@StateObject` here makes every change to either store re-evaluate
+    /// `body`, and `body` *constructs* the `Settings` tabs below, whether or not
+    /// a Settings window is open. `AiProviderPreferencesView.init` reads the
+    /// keychain synchronously to seed its status, so a scene-level store turned
+    /// one scan — which publishes on every progress line — into a burst of
+    /// main-thread `SecItemCopyMatching` calls. On a bundle whose code identity
+    /// the keychain ACL does not recognise, each one can block behind a
+    /// `SecurityAgent` prompt, and while it is blocked this app has no menu-bar
+    /// item at all: no way in, and nothing on screen explaining why.
+    ///
+    /// Measured on a build that did hoist them here: the item vanished
+    /// mid-session on the first Refresh. That is a worse failure than the bug
+    /// being fixed, so the owner is the popover root. See OverviewState.swift.
     var body: some Scene {
         // HORO-1305: a custom template image rather than a `systemImage`
         // name. `Image(nsImage:)` is used instead of drawing the
