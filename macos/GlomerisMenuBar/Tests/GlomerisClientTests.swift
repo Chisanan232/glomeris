@@ -85,10 +85,11 @@ final class GlomerisClientTests: XCTestCase {
     /// `.c` source without bumping it would keep silently running the previous
     /// binary, and a fixture that lies about its own arguments is worse than
     /// one that fails to build. Bump it whenever the source changes
-    /// (`-v2`: `linger-ms`, HORO-1308).
+    /// (`-v2`: `linger-ms`, HORO-1308; `-v3`: the `GLOMERIS_FIXTURE_*`
+    /// environment override, HORO-1365).
     private static let fixtureURL: URL = {
         let binaryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glomeris-client-fixture-helper-v2")
+            .appendingPathComponent("glomeris-client-fixture-helper-v3")
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests
             .appendingPathComponent("Fixtures/glomeris_fixture_helper.c")

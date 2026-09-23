@@ -20,12 +20,28 @@
  * suite spawns exactly one fresh executable via `Process.executableURL`,
  * reused (never rewritten) across every fixture-based test — mirroring
  * how GlomerisClient spawns the real `glomeris` binary.
+ *
+ * HORO-1365 adds an environment override. The argv protocol above only works
+ * when the TEST chooses the arguments; driving a view's own fetch function
+ * (`runDetect`, `runLlmPlan`) means production code chooses them, so there is
+ * no way to hand this fixture a report that way. `GLOMERIS_FIXTURE_STDOUT`
+ * and `GLOMERIS_FIXTURE_EXIT` are read first when set, and reach the child
+ * through `GlomerisClient(executableURL:environment:)`. Both are ignored when
+ * unset, so every argv-driven test above is untouched.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 int main(int argc, char **argv) {
+    const char *env_stdout = getenv("GLOMERIS_FIXTURE_STDOUT");
+    const char *env_exit = getenv("GLOMERIS_FIXTURE_EXIT");
+    if (env_stdout != NULL) {
+        fputs(env_stdout, stdout);
+        fflush(stdout);
+        return env_exit != NULL ? atoi(env_exit) : 0;
+    }
+
     if (argc > 2) {
         fputs(argv[2], stdout);
     }
