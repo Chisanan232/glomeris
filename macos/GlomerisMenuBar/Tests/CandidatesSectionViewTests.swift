@@ -153,7 +153,10 @@ final class CandidatesSectionViewTests: XCTestCase {
         human: String? = "1.0 MB",
         policyLabel: String = "AUTO_SAFE",
         resourceId: String = "/tmp/example/target",
-        impactTier: String? = nil
+        impactTier: String? = nil,
+        executable: Bool = true,
+        offeredActions: [OfferedActionDto] = [],
+        refusalReason: String? = nil
     ) -> DetectCandidateReportDto {
         DetectCandidateReportDto(
             resourceId: resourceId,
@@ -164,9 +167,9 @@ final class CandidatesSectionViewTests: XCTestCase {
             impactTier: impactTier,
             policyLabel: policyLabel,
             reasons: ["regenerable by cargo build"],
-            executable: true,
-            offeredActions: [],
-            refusalReason: nil
+            executable: executable,
+            offeredActions: offeredActions,
+            refusalReason: refusalReason
         )
     }
 
@@ -493,6 +496,142 @@ final class CandidatesSectionViewTests: XCTestCase {
         // does not carry information nothing else carries.
         XCTAssertTrue(loud.accessibilityLabel.contains("1.0 MB"))
         XCTAssertTrue(quiet.accessibilityLabel.contains("1.0 MB"))
+    }
+
+    // MARK: - HORO-1323: telling non-deletable rows apart from the overview
+    //
+    // AC 1 of the ticket is that a user can identify which candidates cannot
+    // be cleaned without pressing Clean on each one. That makes this an
+    // overview-level property, not a detail-sheet one.
+
+    /// The badge is the visible half of AC 1.
+    func testNonExecutableRowCarriesAnActionabilityBadge() {
+        let row = CandidateRowViewModel(
+            candidate(
+                executable: false,
+                refusalReason: "no registered cleanup action for this resource kind"
+            )
+        )
+        XCTAssertEqual(row.actionabilityTerm?.title, "Cannot be cleaned")
+        XCTAssertEqual(row.actionabilityTerm?.tone, .guarded)
+    }
+
+    /// And it appears only where it says something. Following `impactTier`'s
+    /// precedent: a chip on every row is noise, and on a cleanable row the
+    /// safety badge already reads "Safe to reclaim" or "Asks first".
+    func testExecutableRowsCarryNoActionabilityBadge() {
+        XCTAssertNil(
+            CandidateRowViewModel(
+                candidate(
+                    executable: true,
+                    offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+                )
+            ).actionabilityTerm
+        )
+        XCTAssertNil(
+            CandidateRowViewModel(
+                candidate(
+                    policyLabel: "ASK",
+                    executable: true,
+                    offeredActions: [OfferedActionDto(actionId: "node.clean.node_modules", requiresConfirmation: true)]
+                )
+            ).actionabilityTerm
+        )
+    }
+
+    /// The case HORO-1358 made real, and the reason this is a separate axis
+    /// rather than a restatement of the safety badge: the Homebrew cache is
+    /// classified AUTO_SAFE and can still never be executed. A row that reads
+    /// only "Safe to reclaim" is, for that resource, actively misleading.
+    func testAnAutoSafeRowCanStillBeMarkedNonExecutable() {
+        let row = CandidateRowViewModel(
+            candidate(
+                kind: "homebrew_cache",
+                policyLabel: "AUTO_SAFE",
+                executable: false,
+                refusalReason: "refusing to run brew: this step has no scoped_path, so its identity cannot be "
+                    + "revalidated before mutation - an unscoped mutating action is never executed "
+                    + "regardless of policy class"
+            )
+        )
+        XCTAssertNotNil(row.actionabilityTerm)
+        XCTAssertNotEqual(
+            row.actionabilityTerm, row.safetyTerm,
+            "the two badges are different axes and must not collapse into one"
+        )
+        XCTAssertEqual(row.safetyTerm.token, "AUTO_SAFE")
+    }
+
+    /// The badge is not the only carrier: a PROTECTED row and a structurally
+    /// refused row share the badge title, so the reason has to come from the
+    /// CLI's own words.
+    func testRowExplanationIsTheCLIsOwnRefusalText() {
+        let refusal = "PROTECTED: protected_credential_material"
+        let row = CandidateRowViewModel(
+            candidate(policyLabel: "PROTECTED", executable: false, refusalReason: refusal)
+        )
+        XCTAssertEqual(row.actionabilityTerm?.explanation, refusal)
+    }
+
+    /// Unlike the chip, the spoken label carries the actionability state on
+    /// every row. A sighted user compares rows and reads absence as "this one
+    /// is fine"; a VoiceOver user hears one row at a time with nothing to
+    /// compare it against, so absence conveys nothing to them.
+    func testAccessibilityLabelAlwaysNamesTheActionabilityState() {
+        let refusal = "no registered cleanup action for this resource kind"
+        let refused = CandidateRowViewModel(candidate(executable: false, refusalReason: refusal))
+        let cleanable = CandidateRowViewModel(
+            candidate(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+            )
+        )
+        let asks = CandidateRowViewModel(
+            candidate(
+                policyLabel: "ASK",
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "node.clean.node_modules", requiresConfirmation: true)]
+            )
+        )
+
+        XCTAssertTrue(refused.accessibilityLabel.contains(refusal), refused.accessibilityLabel)
+        XCTAssertTrue(refused.accessibilityLabel.contains("Cleanup:"), refused.accessibilityLabel)
+        XCTAssertTrue(cleanable.accessibilityLabel.contains("Cleanup:"), cleanable.accessibilityLabel)
+        // Allowed, needs-confirmation and refused are three states the ticket
+        // says must not collapse — including for a listener.
+        XCTAssertNotEqual(cleanable.accessibilityLabel, asks.accessibilityLabel)
+        XCTAssertNotEqual(cleanable.accessibilityLabel, refused.accessibilityLabel)
+    }
+
+    /// The path stays last in the spoken label. It is the longest and least
+    /// scannable part, and the state has to arrive before a listener decides
+    /// whether to keep listening.
+    func testActionabilityIsSpokenBeforeThePath() throws {
+        let label = CandidateRowViewModel(
+            candidate(executable: false, refusalReason: "no registered cleanup action for this resource kind")
+        ).accessibilityLabel
+
+        let cleanup = try XCTUnwrap(label.range(of: "Cleanup:"), label)
+        let path = try XCTUnwrap(label.range(of: "Path:"), label)
+        XCTAssertTrue(cleanup.lowerBound < path.lowerBound, label)
+    }
+
+    /// The row renders the badge but must not gain an enablement decision from
+    /// it. This file's only `.disabled(...)` is the Refresh button's, on
+    /// `scan.isScanning`, and it stays the only one: nothing in the candidate
+    /// list gates on actionability, because the overview's job here is to say
+    /// what is true, and the one control that acts on it lives in the detail
+    /// sheet where `executable` is read directly.
+    func testTheRowBadgeAddsNoEnablementDecision() throws {
+        let source = Self.strippedOfComments(try Self.readSource("CandidatesSectionView.swift"))
+        XCTAssertTrue(source.contains("GlomerisBadgeView(term: actionabilityTerm)"))
+
+        let disabledModifiers = source.components(separatedBy: ".disabled(").dropFirst()
+        XCTAssertEqual(disabledModifiers.count, 1, "a new .disabled appeared in the candidate list")
+        XCTAssertTrue(disabledModifiers.first?.hasPrefix("scan.isScanning)") == true)
+
+        XCTAssertFalse(source.contains("actionability.sentence =="))
+        XCTAssertFalse(source.contains("actionabilityTerm =="))
     }
 
     // MARK: - Helpers
