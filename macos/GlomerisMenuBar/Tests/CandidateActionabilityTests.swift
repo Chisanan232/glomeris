@@ -235,10 +235,20 @@ final class CandidateActionabilityTests: XCTestCase {
         )
     }
 
-    /// `contains`, not `first`. Rust offers at most one action today so the
-    /// two agree, but if a second ever arrives, an action that asks first
-    /// must not be silently downgraded by the order of the array.
-    func testAnyOfferedActionRequiringConfirmationAsksFirst() {
+    /// `first`, not `contains` — the wording must describe the action that
+    /// will actually run.
+    ///
+    /// Only `offeredActions.first` can execute: `CandidateDetailViewModel`
+    /// takes `actionId` from it, gates the confirmation alert on its
+    /// `requiresConfirmation`, and passes its id to `execute`. So for a
+    /// hypothetical two-action resource where the first does not ask and the
+    /// second does, "asks first" would be a promise the button then breaks —
+    /// the overview would say the deletion needs confirming and pressing Clean
+    /// would delete immediately, unconfirmed. Not reachable from Rust today
+    /// (at most one action is offered); pinned because the failure direction
+    /// is a silently skipped consent step on the one control that deletes
+    /// files.
+    func testConfirmationDescribesTheActionThatWouldActuallyRun() {
         XCTAssertEqual(
             CandidateActionability(
                 executable: true,
@@ -248,8 +258,60 @@ final class CandidateActionabilityTests: XCTestCase {
                 ],
                 refusalReason: nil
             ),
+            .readyToClean
+        )
+        XCTAssertEqual(
+            CandidateActionability(
+                executable: true,
+                offeredActions: [
+                    OfferedActionDto(actionId: "a", requiresConfirmation: true),
+                    OfferedActionDto(actionId: "b", requiresConfirmation: false),
+                ],
+                refusalReason: nil
+            ),
             .asksFirstThenCleans
         )
+    }
+
+    /// The two initialisers must not disagree. The array form is what the
+    /// candidates list and the AI plan card use; the boolean form is what the
+    /// detail sheet uses, having already reduced the array itself. If those
+    /// reductions ever diverge, the overview and the button describe different
+    /// behaviour for the same resource — which is precisely the defect class
+    /// this ticket is about, reintroduced one layer down.
+    func testBothInitialisersAgreeOnTheSameOfferedActions() {
+        let shapes: [[OfferedActionDto]] = [
+            [],
+            [OfferedActionDto(actionId: "a", requiresConfirmation: false)],
+            [OfferedActionDto(actionId: "a", requiresConfirmation: true)],
+            [
+                OfferedActionDto(actionId: "a", requiresConfirmation: false),
+                OfferedActionDto(actionId: "b", requiresConfirmation: true),
+            ],
+            [
+                OfferedActionDto(actionId: "a", requiresConfirmation: true),
+                OfferedActionDto(actionId: "b", requiresConfirmation: false),
+            ],
+        ]
+
+        for actions in shapes {
+            // The reduction the detail sheet performs, spelled out here so the
+            // two are compared rather than assumed equal.
+            let asTheDetailSheetReducesIt = CandidateActionability(
+                executable: true,
+                requiresConfirmation: actions.first?.requiresConfirmation ?? false,
+                refusalReason: nil
+            )
+            let asTheOverviewReducesIt = CandidateActionability(
+                executable: true,
+                offeredActions: actions,
+                refusalReason: nil
+            )
+            XCTAssertEqual(
+                asTheOverviewReducesIt, asTheDetailSheetReducesIt,
+                "the overview and the Clean button disagree for \(actions.map(\.actionId))"
+            )
+        }
     }
 
     func testNoOfferedActionsWithExecutableTrueDoesNotAskFirst() {

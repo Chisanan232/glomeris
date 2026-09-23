@@ -112,14 +112,21 @@ enum CandidateActionability: Equatable {
     /// The array-taking form, for the two call sites that hold the DTO's
     /// `offered_actions` rather than an already-reduced boolean.
     ///
-    /// `contains` rather than `first?`: Rust offers at most one action today,
-    /// so the two agree, but "any offered action asks first" is the reading
-    /// that stays correct if that ever changes, and it is the one the AI plan
-    /// card already used.
+    /// `first?` rather than `contains`, and the distinction is a safety one.
+    /// Rust offers at most one action today so the two agree, but `first` is
+    /// the only element that can ever execute: `CandidateDetailViewModel`
+    /// takes its `actionId` from `offeredActions.first`, gates the
+    /// confirmation alert on `offeredActions.first?.requiresConfirmation`, and
+    /// passes that one action's id to `execute`. A reduction saying "any
+    /// offered action asks first" would, the moment Rust offered two, let the
+    /// overview promise a confirmation step that the button then skipped — the
+    /// user would be told their deletion needed confirming and would get an
+    /// immediate, unconfirmed deletion instead. Describing the action that
+    /// runs is the only reading that cannot produce that.
     init(executable: Bool, offeredActions: [OfferedActionDto], refusalReason: String?) {
         self.init(
             executable: executable,
-            requiresConfirmation: offeredActions.contains { $0.requiresConfirmation },
+            requiresConfirmation: offeredActions.first?.requiresConfirmation ?? false,
             refusalReason: refusalReason
         )
     }
