@@ -85,6 +85,10 @@ targets:
       - path: Sources/GlomerisDtos.swift
       - path: Sources/GlomerisVocabulary.swift
       - path: Sources/GlomerisDesignSystem.swift
+      # HORO-1365: the scan and plan stores are exercised directly, so a
+      # reset can be caught at the state boundary rather than only by a
+      # source grep over the views that draw them.
+      - path: Sources/OverviewState.swift
       - path: Sources/StatusHealthSectionView.swift
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateDetailView.swift
