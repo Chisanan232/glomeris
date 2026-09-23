@@ -539,6 +539,16 @@ final class CandidatesSectionViewTests: XCTestCase {
         )
     }
 
+    /// `executor::structural_refusal`'s own words, verbatim from
+    /// `src/executor/mod.rs`. One constant rather than a literal per test: this
+    /// string was transcribed with a hyphen where Rust has an em dash (U+2014),
+    /// and the correction had to be applied in three separate files. A fixture
+    /// that claims to be verbatim should exist once.
+    private static let structuralRefusal =
+        "refusing to run brew: this step has no scoped_path, so its identity cannot be "
+        + "revalidated before mutation — an unscoped mutating action is never executed "
+        + "regardless of policy class"
+
     /// The case HORO-1358 made real, and the reason this is a separate axis
     /// rather than a restatement of the safety badge: the Homebrew cache is
     /// classified AUTO_SAFE and can still never be executed. A row that reads
@@ -549,9 +559,7 @@ final class CandidatesSectionViewTests: XCTestCase {
                 kind: "homebrew_cache",
                 policyLabel: "AUTO_SAFE",
                 executable: false,
-                refusalReason: "refusing to run brew: this step has no scoped_path, so its identity cannot be "
-                    + "revalidated before mutation — an unscoped mutating action is never executed "
-                    + "regardless of policy class"
+                refusalReason: Self.structuralRefusal
             )
         )
         XCTAssertNotNil(row.actionabilityTerm)
@@ -614,6 +622,52 @@ final class CandidatesSectionViewTests: XCTestCase {
         let cleanup = try XCTUnwrap(label.range(of: "Cleanup:"), label)
         let path = try XCTUnwrap(label.range(of: "Path:"), label)
         XCTAssertTrue(cleanup.lowerBound < path.lowerBound, label)
+    }
+
+    /// Every clause in the label ends in a period so VoiceOver pauses between
+    /// them. The CLI's refusal strings carry no trailing period of their own,
+    /// so the refused cases are the ones that need supplying — otherwise the
+    /// reason runs straight into "Path:" as one breathless clause.
+    ///
+    /// Checks all five states, since only two of them come from the CLI and it
+    /// is the CLI's that lack the period.
+    func testEveryActionabilityClauseIsTerminatedBeforeThePath() throws {
+        let cases: [(String, DetectCandidateReportDto)] = [
+            ("refused, no action", candidate(
+                executable: false,
+                refusalReason: "no registered cleanup action for this resource kind"
+            )),
+            ("refused, structural", candidate(
+                executable: false,
+                refusalReason: Self.structuralRefusal
+            )),
+            ("refused, protected", candidate(
+                policyLabel: "PROTECTED",
+                executable: false,
+                refusalReason: "PROTECTED: protected_infra_state"
+            )),
+            ("refused, no reason given", candidate(executable: false, refusalReason: nil)),
+            ("ready", candidate(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "a", requiresConfirmation: false)]
+            )),
+            ("asks first", candidate(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "a", requiresConfirmation: true)]
+            )),
+        ]
+
+        for (name, dto) in cases {
+            let label = CandidateRowViewModel(dto).accessibilityLabel
+            let cleanup = try XCTUnwrap(label.range(of: "Cleanup:"), label)
+            let path = try XCTUnwrap(label.range(of: " Path:"), label)
+            let clause = String(label[cleanup.upperBound..<path.lowerBound])
+            XCTAssertTrue(
+                clause.hasSuffix("."),
+                "\(name): the actionability clause runs into the path — \(clause)"
+            )
+            XCTAssertFalse(clause.hasSuffix(".."), "\(name): doubled period — \(clause)")
+        }
     }
 
     /// The row renders the badge but must not gain an enablement decision from

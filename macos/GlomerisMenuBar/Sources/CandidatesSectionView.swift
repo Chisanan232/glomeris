@@ -188,7 +188,17 @@ struct CandidateRowViewModel: Equatable, Identifiable {
         if let impactTierTerm {
             label += " \(impactTierTerm.title)."
         }
-        label += " \(CandidateActionability.axis): \(actionability.sentence)"
+        // Terminated if it is not already. The refusal cases return the CLI's
+        // sentence, and the CLI's reason strings carry no trailing period, so
+        // without this the reason runs straight into "Path:" with no pause —
+        // the only unterminated clause in the label. Punctuation only: the
+        // reason's own words are untouched, which is the invariant that
+        // matters.
+        let sentence = actionability.sentence
+        label += " \(CandidateActionability.axis): \(sentence)"
+        if !sentence.hasSuffix(".") {
+            label += "."
+        }
         return label + " Path: \(id)."
     }
 
