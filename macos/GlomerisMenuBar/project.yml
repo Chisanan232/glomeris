@@ -84,6 +84,10 @@ targets:
       - path: Sources/ProjectRootsPreferencesView.swift
       - path: Sources/GlomerisDtos.swift
       - path: Sources/GlomerisVocabulary.swift
+      # HORO-1323: the actionability wording the candidates list, the AI plan
+      # card and the Clean button all read, asserted directly rather than
+      # through whichever of the three views happens to render it.
+      - path: Sources/CandidateActionability.swift
       - path: Sources/GlomerisDesignSystem.swift
       # HORO-1365: the scan and plan stores are exercised directly, so a
       # reset can be caught at the state boundary rather than only by a
