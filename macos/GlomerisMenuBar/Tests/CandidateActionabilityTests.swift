@@ -16,6 +16,7 @@
 //  pass-through, not a particular sentence.
 //
 
+import AppKit
 import XCTest
 
 final class CandidateActionabilityTests: XCTestCase {
@@ -323,6 +324,95 @@ final class CandidateActionabilityTests: XCTestCase {
             CandidateActionability(executable: true, offeredActions: [], refusalReason: nil),
             .readyToClean
         )
+    }
+
+    // MARK: - The badge term is held to the vocabulary's own rules
+
+    // This is the first `GlomerisTerm` built outside `GlomerisVocabulary`, so
+    // it is invisible to `GlomerisVocabularyTests`' sweeps — those enumerate
+    // `allAxes`, which is a list of vocabulary lookups. The sweeps exist
+    // because of failure modes that are silent (a mistyped SF Symbol renders
+    // as nothing at all; two axes sharing a name make a label ambiguous), so a
+    // term outside them is a term with no guard. The four tests below apply
+    // the same rules to this one.
+
+    private var badgeTerms: [GlomerisTerm] {
+        [
+            CandidateActionability.refused(reason: "PROTECTED: protected_infra_state"),
+            .refusedWithoutStatedReason,
+        ].compactMap(\.term)
+    }
+
+    /// A mistyped SF Symbol name is not a compile error — it renders as
+    /// nothing, and this badge is the one non-text marker distinguishing a
+    /// refused row on the overview, so it failing silently would take the
+    /// ticket's whole visual signal with it.
+    func testTheBadgeSymbolIsARealSFSymbol() throws {
+        XCTAssertFalse(badgeTerms.isEmpty)
+        for term in badgeTerms {
+            let name = try XCTUnwrap(term.symbolName, "a rendered badge needs a symbol")
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                "\(name) is not a real SF Symbol, so the badge would render as nothing at all"
+            )
+        }
+    }
+
+    /// `testEachAxisHasADistinctName` holds the vocabulary's thirteen axes to
+    /// this; a fourteenth axis introduced elsewhere has to meet it too, or two
+    /// clauses of the same accessibility label would carry the same prefix.
+    func testTheAxisNameCollidesWithNoVocabularyAxis() {
+        let vocabularyAxes = [
+            GlomerisVocabulary.pressureAxis,
+            GlomerisVocabulary.safetyAxis,
+            GlomerisVocabulary.completenessAxis,
+            GlomerisVocabulary.confidenceAxis,
+            GlomerisVocabulary.regenerabilityAxis,
+            GlomerisVocabulary.impactAxis,
+            GlomerisVocabulary.impactTierAxis,
+            GlomerisVocabulary.monitorAxis,
+            GlomerisVocabulary.outcomeAxis,
+            GlomerisVocabulary.refusalAxis,
+            GlomerisVocabulary.sourceAxis,
+            GlomerisVocabulary.kindAxis,
+            GlomerisVocabulary.reasonAxis,
+            GlomerisVocabulary.llmCheckAxis,
+        ]
+        XCTAssertFalse(
+            vocabularyAxes.contains(CandidateActionability.axis),
+            "\(CandidateActionability.axis) already names a vocabulary axis"
+        )
+    }
+
+    /// The badge shares a row with up to three others in a 340pt panel, so the
+    /// same chip-width rule the vocabulary axes are held to applies, and the
+    /// title must not leak the raw field it came from.
+    func testTheBadgeWordingIsChipSizedAndLeaksNoTags() {
+        for term in badgeTerms {
+            XCTAssertLessThanOrEqual(term.title.count, 34, "\(term.title) is too long for a chip")
+            XCTAssertFalse(term.explanation.isEmpty)
+            XCTAssertTrue(term.accessibilityLabel.contains(":"))
+            XCTAssertFalse(term.title.contains("_"), "the title leaks a raw tag")
+            XCTAssertFalse(term.title.lowercased().contains("executable"))
+        }
+    }
+
+    /// The symbol has to be distinguishable from the safety badge sitting
+    /// beside it, or the two axes differ by colour alone — which is exactly
+    /// what makes the AUTO_SAFE-but-refused Homebrew row unreadable in
+    /// greyscale.
+    func testTheBadgeSymbolDiffersFromEverySafetySymbol() throws {
+        let safetySymbols = Set(
+            ["AUTO_SAFE", "ASK", "PROTECTED", "UNKNOWN_INCOMPLETE"]
+                .compactMap { GlomerisVocabulary.safety($0).symbolName }
+        )
+        for term in badgeTerms {
+            let name = try XCTUnwrap(term.symbolName)
+            XCTAssertFalse(
+                safetySymbols.contains(name),
+                "\(name) is also a safety symbol, so the two badges differ by colour alone"
+            )
+        }
     }
 
     // MARK: - This type cannot gate anything
