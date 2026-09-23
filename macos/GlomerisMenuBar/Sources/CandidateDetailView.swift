@@ -143,6 +143,96 @@ struct CandidateDetailViewModel: Equatable {
     /// scan.
     var reasonTerms: [GlomerisTerm] { reasons.map(GlomerisVocabulary.reason) }
 
+    // MARK: - HORO-1323: what the Clean button says about itself
+    //
+    // Everything below is wording. None of it gates anything: the button's
+    // two `.disabled` modifiers still read `isCleanEnabled` and the view's
+    // `isExecuting` directly, and `CandidateActionability` deliberately
+    // exposes no boolean for one of them to reach for. See that file's
+    // header.
+    //
+    // These live on the view model rather than inside the view because the
+    // ticket's ACs are about the strings, and a string computed in a
+    // `@ViewBuilder` can only be checked by rendering SwiftUI or by grepping
+    // source. Here they are ordinary values a test can read.
+
+    /// What Glomeris will do about this resource, in words, from the
+    /// actionability fields alone.
+    var actionability: CandidateActionability {
+        CandidateActionability(
+            executable: isCleanEnabled,
+            requiresConfirmation: requiresConfirmation,
+            refusalReason: refusalReason
+        )
+    }
+
+    /// What the Clean button acts on, for `accessibilityValue`. The visible
+    /// label is the single word "Clean", which out of context names no
+    /// resource at all — this is the part that ties it to one.
+    var cleanTargetDescription: String {
+        "\(kindTerm.title), \(reclaimableText)"
+    }
+
+    /// What pressing it will do. Says "permanently" and "cannot be undone"
+    /// because irreversibility is the one property of this control a reader
+    /// cannot infer from anything else on the screen, and the reclaimable
+    /// amount because that is the scale of it.
+    var cleanActionDescription: String {
+        "Permanently deletes \(resourceId). Cleaning would free \(reclaimableText). "
+            + "This cannot be undone."
+    }
+
+    /// The CLI's reason for not acting on this resource, or `nil` when it
+    /// will. This is the permanent one of the button's two disabled causes:
+    /// a resource the CLI declines stays declined, and nothing the user does
+    /// in this sheet changes it.
+    var cleanRefusalTerm: GlomerisTerm? { actionability.term }
+
+    /// The transient cause: this sheet's own cleanup is running.
+    ///
+    /// Deliberately NOT `GlomerisVocabulary.refusal("busy")`. That wording is
+    /// "Another run is in progress", and it is correct for what it describes —
+    /// `src/main.rs` emits `reason: "busy"` when a *different* invocation
+    /// already holds the executor lock. `isExecuting` is this view's own
+    /// `@State`, set by `performClean` two seconds earlier, and the run it
+    /// refers to is the one whose progress spinner renders directly below.
+    /// Telling a user that something else is blocking them, immediately above
+    /// their own progress indicator, is the same class of misreading this
+    /// ticket was filed to remove.
+    ///
+    /// Client state is worded where client state lives. This says nothing
+    /// about policy, so it borrows nothing from the CLI's refusal table.
+    static let cleanInFlightHint =
+        "Unavailable while this cleanup runs. It becomes available again when the run finishes."
+
+    /// The Clean button's accessibility hint, and its tooltip — one string
+    /// for both, so the spoken and the hovered explanation cannot drift.
+    ///
+    /// The two disabled causes are genuinely different situations and this is
+    /// the method that keeps them apart; before this ticket both collapsed
+    /// into one dimmed control with nothing to distinguish them. The refusal
+    /// is checked first because it is the permanent one. They cannot in fact
+    /// co-occur — `performClean` needs an `actionId` to start, and a
+    /// non-executable resource has none — but nothing here depends on that
+    /// reasoning staying true.
+    ///
+    /// When the button is unavailable the hint becomes the reason, because a
+    /// hint describing a deletion that cannot happen is worse than no hint:
+    /// the question a reader has at that moment is why, and this ticket was
+    /// filed because nothing answered it.
+    func cleanButtonHint(isExecuting: Bool) -> String {
+        if let refusal = cleanRefusalTerm {
+            return "Unavailable. \(refusal.title). \(refusal.explanation)"
+        }
+        if isExecuting {
+            return Self.cleanInFlightHint
+        }
+        if requiresConfirmation {
+            return "\(actionability.sentence) \(cleanActionDescription)"
+        }
+        return cleanActionDescription
+    }
+
     init(_ report: ExplainReportDto) {
         isCleanEnabled = report.executable
         requiresConfirmation = report.offeredActions.first?.requiresConfirmation ?? false
@@ -267,6 +357,22 @@ struct CandidateDetailView: View {
                 }
                 .disabled(!viewModel.isCleanEnabled)
                 .disabled(isExecuting)
+                // HORO-1323. The two enablement modifiers above are unchanged
+                // field reads; these three are wording for what they did.
+                // `accessibilityHint` and `help` are handed the same string on
+                // purpose — both land in AXHelp, so two different strings
+                // would mean the spoken and hovered explanations depended on
+                // modifier order.
+                .accessibilityValue(viewModel.cleanTargetDescription)
+                .accessibilityHint(viewModel.cleanButtonHint(isExecuting: isExecuting))
+                .help(viewModel.cleanButtonHint(isExecuting: isExecuting))
+
+                // Only the refusal renders here. The in-flight case has the
+                // progress row immediately below, which says the same thing
+                // live and with detail this line could not carry.
+                if let refusal = viewModel.cleanRefusalTerm {
+                    cleanUnavailableLine(refusal)
+                }
 
                 if isExecuting {
                     HStack(spacing: GlomerisDesign.inlineSpacing) {
@@ -361,6 +467,48 @@ struct CandidateDetailView: View {
                 }
             }
         }
+    }
+
+    /// Why the Clean button is unavailable, shown immediately beneath it
+    /// (HORO-1323).
+    ///
+    /// Deliberately not accessible-only. A disabled control communicates
+    /// nothing on its own, which is this ticket's premise, and the fix has to
+    /// work for the reader who can see the dimmed button perfectly well and
+    /// still cannot tell why.
+    ///
+    /// For a refusal this repeats, word for word, the "Why not" row inside the
+    /// safety card above — and that repetition is the point rather than an
+    /// oversight. The card sits inside a bounded `ScrollView` and the button
+    /// sits below it, so the reason can easily be scrolled out of sight at the
+    /// exact moment it is needed. Repeating a refusal at the point of action
+    /// is the safe direction to err in; the alternative is a reader
+    /// concluding, as the founder pass did, that the product simply will not
+    /// do what they asked.
+    @ViewBuilder
+    private func cleanUnavailableLine(_ term: GlomerisTerm) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
+            if let symbolName = term.symbolName {
+                Image(systemName: symbolName)
+                    .imageScale(.small)
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(term.title)
+                    .font(GlomerisDesign.secondaryFont)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(term.explanation)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        // One element, so it is not read as a glyph followed by two unrelated
+        // fragments. The label is the badge's own, which leads with the axis.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(term.accessibilityLabel)
     }
 
     /// One policy reason: the plain sentence, with the raw code beneath it

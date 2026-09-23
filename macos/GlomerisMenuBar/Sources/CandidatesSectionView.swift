@@ -142,6 +142,21 @@ struct CandidateRowViewModel: Equatable, Identifiable {
     /// What Glomeris is allowed to do with it.
     let safetyTerm: GlomerisTerm
 
+    /// Whether Glomeris can actually act on it, and why not (HORO-1323).
+    ///
+    /// A separate axis from `safetyTerm`, not a restatement of it. Policy
+    /// permitting a resource and an action existing that could be carried out
+    /// are independent facts, and HORO-1358 made the gap between them real in
+    /// the product: the Homebrew cache is classified AUTO_SAFE and can never
+    /// be executed, because its step has no path to scope. Before this ticket
+    /// the overview showed only the first half of that, so the list said
+    /// "Safe to reclaim" about something the Clean button would refuse.
+    let actionability: CandidateActionability
+
+    /// The chip for it, present only on rows Glomeris will not act on — see
+    /// `CandidateActionability.term` for why the permitted cases carry none.
+    var actionabilityTerm: GlomerisTerm? { actionability.term }
+
     /// The impact term's wording on its own ("≥ 1.0 MB", "1.0 MB", "Size
     /// unknown"). Kept as a named property because the `≥`-for-a-partial-
     /// measurement convention is an AC of HORO-1063 and is asserted
@@ -157,11 +172,32 @@ struct CandidateRowViewModel: Equatable, Identifiable {
     /// "only the notable rows are called out" signal that sighted users get
     /// from the chip — rather than hearing an extra clause on every row, or
     /// nothing at all.
+    /// HORO-1323 adds the actionability sentence, and adds it for EVERY row
+    /// rather than only the refused ones — unlike the chip, which is silent
+    /// on the permitted cases. A sighted reader can tell a row with no
+    /// "Cannot be cleaned" chip from one that has it by looking at both; a
+    /// screen-reader user hears one row at a time and has nothing to compare
+    /// it against, so absence conveys nothing to them. Spelling it out is the
+    /// only way the two readings carry the same information.
+    ///
+    /// It goes after the badges and before the path, which is where the AI
+    /// plan card's row puts its verdict lines too.
     var accessibilityLabel: String {
         var label = "\(kindTerm.title). \(safetyTerm.axis): \(safetyTerm.title). "
             + "\(impactTerm.axis): \(impactTerm.title)."
         if let impactTierTerm {
             label += " \(impactTierTerm.title)."
+        }
+        // Terminated if it is not already. The refusal cases return the CLI's
+        // sentence, and the CLI's reason strings carry no trailing period, so
+        // without this the reason runs straight into "Path:" with no pause —
+        // the only unterminated clause in the label. Punctuation only: the
+        // reason's own words are untouched, which is the invariant that
+        // matters.
+        let sentence = actionability.sentence
+        label += " \(CandidateActionability.axis): \(sentence)"
+        if !sentence.hasSuffix(".") {
+            label += "."
         }
         return label + " Path: \(id)."
     }
@@ -175,6 +211,11 @@ struct CandidateRowViewModel: Equatable, Identifiable {
         )
         impactTierTerm = GlomerisVocabulary.impactTier(dto.impactTier)
         safetyTerm = GlomerisVocabulary.safety(dto.policyLabel)
+        actionability = CandidateActionability(
+            executable: dto.executable,
+            offeredActions: dto.offeredActions,
+            refusalReason: dto.refusalReason
+        )
     }
 }
 
@@ -589,6 +630,19 @@ struct CandidatesSectionView: View {
                         .imageScale(.small)
                         .foregroundStyle(.tertiary)
                         .accessibilityHidden(true)
+                }
+
+                // HORO-1323, and on its own line rather than beside the safety
+                // badge. In a 340pt panel a third chip on that line clips on a
+                // long safety title, and the thing it would clip is the safety
+                // verdict — the one item on the row that must never be lost.
+                // Costing a few points of height on the minority of rows that
+                // cannot be cleaned is the cheaper trade, and it also makes
+                // those rows visibly taller, which is itself part of what the
+                // founder pass asked for: a non-deletable item should look
+                // different before anyone presses anything.
+                if let actionabilityTerm = row.actionabilityTerm {
+                    GlomerisBadgeView(term: actionabilityTerm)
                 }
 
                 GlomerisPathText(path: row.id)

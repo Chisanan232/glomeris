@@ -11,6 +11,7 @@
 		0BE7EC01F051C82EA2A1F21E /* GlomerisExecutableLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */; };
 		16531098D8F4B46001EBF26D /* GlomerisVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D48A22858E94A17C0A670F4 /* GlomerisVocabulary.swift */; };
 		17F5854E45F07F642EDCBC75 /* MenuBarAppearance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 856468BC1E164E5D94FFBC9D /* MenuBarAppearance.swift */; };
+		1AFD92B6FDCC3D55D137614C /* CandidateActionability.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE2C8052F902D4945D73B022 /* CandidateActionability.swift */; };
 		24E8F3886E209400E58A9387 /* AiProviderPreferencesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */; };
 		2827AD2ABB4D9B3FF64489F2 /* GlomerisDesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0D343988045ECE0F0B72093 /* GlomerisDesignSystem.swift */; };
 		3165A2E5224163803248FF2D /* MenuBarAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */; };
@@ -46,9 +47,11 @@
 		AD262762180A887D1B0A3A98 /* GlomerisMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98E13E5FE5F4E90FE76683D /* GlomerisMark.swift */; };
 		AF71CB2F7EFCFF57F96E2F16 /* AiProviderPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */; };
 		B30687757F8D76B7C8516A4B /* StatusHealthSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 702FC176DA9694CDEA648E8A /* StatusHealthSectionView.swift */; };
+		B67B4B02F9A450278A3D05E3 /* CandidateActionability.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE2C8052F902D4945D73B022 /* CandidateActionability.swift */; };
 		BC822B8BD45C6AB26F4F7806 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		BE11AF504111C29A277E925E /* CandidatesSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */; };
 		C49D0E67DB2391025B3E7064 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
+		C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */; };
 		C79301D61905D743C5B5B52C /* GlomerisPopoverViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2538D1D665F56D4E896B4CE2 /* GlomerisPopoverViewTests.swift */; };
 		D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */; };
 		D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */; };
@@ -80,6 +83,7 @@
 		29CCC97F9DEA1F53F834AF90 /* GlomerisMenuBarApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisMenuBarApp.swift; sourceTree = "<group>"; };
 		369DFF13FAF9E42E7B08AF3F /* GlomerisDtos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisDtos.swift; sourceTree = "<group>"; };
 		36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiPlanSectionViewTests.swift; sourceTree = "<group>"; };
+		3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateActionabilityTests.swift; sourceTree = "<group>"; };
 		47250A5B4D152C9EE65C9F49 /* GlomerisClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisClientTests.swift; sourceTree = "<group>"; };
 		558C6D9B51E2DBA8DFBEA99D /* GlomerisLlmSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisLlmSettingsStore.swift; sourceTree = "<group>"; };
 		572A0F15A4840A54F5B9B4D8 /* HistoryAuditSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAuditSectionView.swift; sourceTree = "<group>"; };
@@ -101,6 +105,7 @@
 		AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateDetailViewTests.swift; sourceTree = "<group>"; };
 		B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutopilotPreferencesView.swift; sourceTree = "<group>"; };
 		B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsPreferencesView.swift; sourceTree = "<group>"; };
+		BE2C8052F902D4945D73B022 /* CandidateActionability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateActionability.swift; sourceTree = "<group>"; };
 		BECB6ADDEAAC408D1C8FBD6A /* GlomerisDesignSystemTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisDesignSystemTests.swift; sourceTree = "<group>"; };
 		C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarAppearanceTests.swift; sourceTree = "<group>"; };
 		C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiProviderPreferencesViewTests.swift; sourceTree = "<group>"; };
@@ -142,6 +147,7 @@
 				A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */,
 				D0EF776D63062A306819D429 /* Assets.xcassets */,
 				B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */,
+				BE2C8052F902D4945D73B022 /* CandidateActionability.swift */,
 				D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */,
 				99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */,
 				5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */,
@@ -171,6 +177,7 @@
 				36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */,
 				C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */,
 				9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */,
+				3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */,
 				AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */,
 				7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */,
 				8DD38E68A0373439B59F1F98 /* DtoGoldenFixturesTests.swift */,
@@ -290,6 +297,8 @@
 				24E8F3886E209400E58A9387 /* AiProviderPreferencesViewTests.swift in Sources */,
 				4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */,
 				F74F65D0FD1B4A09F0CD73ED /* AutopilotPreferencesView.swift in Sources */,
+				B67B4B02F9A450278A3D05E3 /* CandidateActionability.swift in Sources */,
+				C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */,
 				D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */,
 				3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */,
 				E67F00D16D2CAFE9E74443CB /* CandidatesSectionView.swift in Sources */,
@@ -332,6 +341,7 @@
 				7234B87DA614D063F3FB6063 /* AiPlanSectionView.swift in Sources */,
 				AF71CB2F7EFCFF57F96E2F16 /* AiProviderPreferencesView.swift in Sources */,
 				9105F63CB2E9FF2919AC35A0 /* AutopilotPreferencesView.swift in Sources */,
+				1AFD92B6FDCC3D55D137614C /* CandidateActionability.swift in Sources */,
 				86BD83AA3245ED6F3B7F381A /* CandidateDetailView.swift in Sources */,
 				F9DFFB9F1710A9D696739189 /* CandidatesSectionView.swift in Sources */,
 				79370CF11525490DD5B73CC3 /* CredentialStore.swift in Sources */,
