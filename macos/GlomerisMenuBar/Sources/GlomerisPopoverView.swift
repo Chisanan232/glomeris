@@ -83,13 +83,29 @@ struct GlomerisPopoverView: View {
     private let client: GlomerisClient
     private let projectRootsStore: ProjectRootsStore
 
+    /// HORO-1365: passed through to the two cards, and owned neither here nor
+    /// by them — `GlomerisMenuBarApp` holds both for the life of the process.
+    /// Everything in this file may be rebuilt freely without a completed scan
+    /// or a paid-for plan being at stake.
+    @ObservedObject private var scan: ScanState
+    @ObservedObject private var plan: PlanState
+
     /// The panel is one level deep: the overview, or one candidate's detail.
+    ///
+    /// This one IS `@State`, and correctly so: which candidate the user is
+    /// looking at right now is exactly the kind of thing that may reset, and
+    /// a panel that opens on the overview rather than on whatever was last
+    /// drilled into is the behaviour we want.
     @State private var navigation = CandidateDetailNavigation()
 
     init(
+        scan: ScanState,
+        plan: PlanState,
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore()
     ) {
+        self.scan = scan
+        self.plan = plan
         self.client = client
         self.projectRootsStore = projectRootsStore
     }
@@ -109,20 +125,27 @@ struct GlomerisPopoverView: View {
     /// overview is *hidden* there rather than removed.
     ///
     /// It was removed at first — `if detail else sections` — and that quietly
-    /// undid the fix it was part of. `CandidatesSectionView` keeps a completed
-    /// scan in its own `@State`, so taking it out of the hierarchy discards it:
-    /// drilling into a candidate and pressing back landed on "No scan yet", and
-    /// the user had to run the scan again to reach any other candidate. The
-    /// sheet this replaced did not have that problem, because a sheet leaves the
-    /// view it is presented over in place.
+    /// undid the fix it was part of: the cards kept their results in their own
+    /// `@State`, so taking them out of the hierarchy discarded them. Drilling
+    /// into a candidate and pressing back landed on "No scan yet", and the user
+    /// had to run the scan again to reach any other candidate.
     ///
-    /// So the detail is layered over the overview instead. `opacity` keeps the
-    /// overview alive and out of sight, `allowsHitTesting(false)` keeps its
-    /// scroll view from taking the wheel events meant for the detail, and
-    /// `accessibilityHidden` keeps a screen reader from reading a list the user
-    /// cannot see. The panel therefore stays as tall as the overview while a
-    /// detail is open, which is the cost of this, and a steady height is no
-    /// worse than one that jumps on every drill-down.
+    /// HORO-1365 moved those results out from under this decision entirely —
+    /// `scan` and `plan` now outlive anything this file does — so layering is
+    /// no longer what protects them, and a later change of shape here cannot
+    /// resurrect that bug. What layering still buys is the rest of the state a
+    /// mounted view carries and nobody hoists: scroll offset, the view-options
+    /// menu, the status and history cards' own fetches. Coming back to a list
+    /// scrolled to where you left it is the difference between navigation and
+    /// a reset, so the layering stays on those grounds.
+    ///
+    /// `opacity` keeps the overview alive and out of sight,
+    /// `allowsHitTesting(false)` keeps its scroll view from taking the wheel
+    /// events meant for the detail, and `accessibilityHidden` keeps a screen
+    /// reader from reading a list the user cannot see. The panel therefore
+    /// stays as tall as the overview while a detail is open, which is the cost
+    /// of this, and a steady height is no worse than one that jumps on every
+    /// drill-down.
     private var scrollingBody: some View {
         ZStack(alignment: .top) {
             sections
@@ -175,11 +198,13 @@ struct GlomerisPopoverView: View {
             VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
                 StatusHealthSectionView()
                 CandidatesSectionView(
+                    scan: scan,
                     client: client,
                     projectRootsStore: projectRootsStore,
                     onOpenDetail: { navigation.open($0) }
                 )
                 AiPlanSectionView(
+                    plan: plan,
                     client: client,
                     projectRootsStore: projectRootsStore,
                     onOpenDetail: { navigation.open($0) }
@@ -277,5 +302,5 @@ struct GlomerisPopoverView: View {
 }
 
 #Preview {
-    GlomerisPopoverView()
+    GlomerisPopoverView(scan: ScanState(), plan: PlanState())
 }

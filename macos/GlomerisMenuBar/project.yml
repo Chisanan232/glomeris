@@ -89,6 +89,10 @@ targets:
       # reset can be caught at the state boundary rather than only by a
       # source grep over the views that draw them.
       - path: Sources/OverviewState.swift
+      # HORO-1365: the shell too, so the popover can be CONSTRUCTED with the
+      # stores rather than only grepped. A defaulted store parameter sneaking
+      # back in is then a compile-time fact, not a source-text opinion.
+      - path: Sources/GlomerisPopoverView.swift
       - path: Sources/StatusHealthSectionView.swift
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateDetailView.swift

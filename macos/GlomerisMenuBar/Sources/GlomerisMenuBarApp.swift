@@ -28,6 +28,28 @@ import SwiftUI
 
 @main
 struct GlomerisMenuBarApp: App {
+    /// HORO-1365: a completed scan and a requested AI plan are owned here, at
+    /// the scene root, and handed down — not held as `@State` by the cards that
+    /// draw them.
+    ///
+    /// The founder report this fixes: refresh, ask for a plan, open one
+    /// suggested candidate, press back — and the scan and the plan were gone,
+    /// with the overview reading "No scan yet". The cause was ownership, not
+    /// rendering: `@State` lives and dies with a view's place in the hierarchy,
+    /// and the panel's drill-down is what decides that place. A result the user
+    /// waited for (and, for a plan, paid a provider for) must not be something
+    /// a navigation gesture can reach.
+    ///
+    /// `@StateObject` here is the whole point — created once, for the life of
+    /// the process, above every view that can be built, hidden, removed or
+    /// re-presented. Only the Refresh and Ask buttons write to them.
+    ///
+    /// This is presentation state, and it stays presentation state. These
+    /// objects hold what the CLI reported, verbatim; they classify nothing and
+    /// decide nothing, so the standing rule above is not bent by them.
+    @StateObject private var scan = ScanState()
+    @StateObject private var plan = PlanState()
+
     var body: some Scene {
         // HORO-1305: a custom template image rather than a `systemImage`
         // name. `Image(nsImage:)` is used instead of drawing the
@@ -35,7 +57,7 @@ struct GlomerisMenuBarApp: App {
         // needs an AppKit template image to be recoloured correctly for
         // light/dark menu bars, highlight state and tinted wallpapers.
         MenuBarExtra {
-            GlomerisPopoverView()
+            GlomerisPopoverView(scan: scan, plan: plan)
         } label: {
             Image(nsImage: MenuBarAppearance.menuBarImage())
                 .accessibilityLabel(MenuBarAppearance.title)

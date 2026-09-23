@@ -95,6 +95,15 @@
 //  "Path", which is an alphabetical index rather than a competing judgment
 //  about importance.
 //
+//  ---------------------------------------------------------------------
+//  HORO-1365: this card draws the scan, it does not own it
+//  ---------------------------------------------------------------------
+//  The candidate list, the scan timestamp and the two view controls live in
+//  `ScanState`, handed in and required. This view is still the only thing
+//  that writes them, and still only from the Refresh button — but its own
+//  mount/unmount no longer decides whether a completed scan survives.
+//  See `OverviewState.swift` for the defect that made this necessary.
+//
 //  A row can now carry a THIRD badge, but only sometimes: the
 //  `impact_tier` chip appears on `notable`/`large` candidates and on nothing
 //  else. A chip on every row is not emphasis, it is noise. The tier is
@@ -314,16 +323,12 @@ struct CandidatesSectionView: View {
     private let client: GlomerisClient
     private let projectRootsStore: ProjectRootsStore
 
-    @State private var candidates: [DetectCandidateReportDto] = []
-    @State private var lastScannedAt: Date?
-    @State private var isScanning = false
-    @State private var progressStatusText: String?
-    @State private var lastErrorMessage: String?
-    /// HORO-1307 view controls. Both default to "show me everything, in the
-    /// order Glomeris recommends", so the panel a user opens for the first
-    /// time is never silently filtered.
-    @State private var sortOrder: CandidateSortOrder = .recommended
-    @State private var safetyFilter: CandidateSafetyFilter = .all
+    /// HORO-1365: what the last scan found is NOT owned here. This card is
+    /// the only thing that writes it — from the Refresh button, below — but
+    /// it does not get to decide how long it lives. `@State` here would tie
+    /// the result to this view's position in the hierarchy, and the panel's
+    /// drill-down is what decides that; see `OverviewState.swift`.
+    @ObservedObject private var scan: ScanState
 
     /// HORO-1064/HORO-1357: what a row tap does — report the tapped
     /// resource upward, so the popover shell can show its detail view in
@@ -341,11 +346,18 @@ struct CandidatesSectionView: View {
     /// list, and nothing here decides what may run.
     private let onOpenDetail: (String) -> Void
 
+    /// `scan` has deliberately NO default. A defaulted `ScanState()` would let
+    /// any call site quietly construct a fresh, empty scan and render "No scan
+    /// yet" over a scan that had in fact completed — the HORO-1365 defect
+    /// again, arriving through a convenience rather than through a
+    /// re-presentation. Every real call site has to pass the one the app owns.
     init(
+        scan: ScanState,
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
         onOpenDetail: @escaping (String) -> Void = { _ in }
     ) {
+        self.scan = scan
         self.client = client
         self.projectRootsStore = projectRootsStore
         self.onOpenDetail = onOpenDetail
@@ -355,7 +367,7 @@ struct CandidatesSectionView: View {
         GlomerisCard(title: "Reclaimable space", trailing: countText) {
             controlRow
 
-            if isScanning, let progressStatusText {
+            if scan.isScanning, let progressStatusText = scan.progressStatusText {
                 Text(progressStatusText)
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
@@ -371,7 +383,7 @@ struct CandidatesSectionView: View {
             // follows. A scan that fails after an earlier one succeeded
             // leaves the previous list visible, which is useful, but showing
             // it as though it were current is the defect HORO-1297 fixed.
-            if let lastErrorMessage {
+            if let lastErrorMessage = scan.lastErrorMessage {
                 GlomerisStateMessageView(message: .failure(lastErrorMessage))
             }
         }
@@ -381,10 +393,10 @@ struct CandidatesSectionView: View {
 
     private var controlRow: some View {
         HStack(spacing: GlomerisDesign.inlineSpacing) {
-            Button(isScanning ? "Scanning…" : "Refresh") {
+            Button(scan.isScanning ? "Scanning…" : "Refresh") {
                 Task { await runDetect() }
             }
-            .disabled(isScanning)
+            .disabled(scan.isScanning)
 
             Text(lastScannedText)
                 .font(GlomerisDesign.captionFont)
@@ -408,19 +420,19 @@ struct CandidatesSectionView: View {
     /// nothing when it found plenty.
     private var viewOptionsMenu: some View {
         Menu {
-            Picker("Order", selection: $sortOrder) {
+            Picker("Order", selection: $scan.sortOrder) {
                 ForEach(CandidateSortOrder.allCases) { order in
                     Text(order.label).tag(order)
                 }
             }
-            Picker("Show", selection: $safetyFilter) {
+            Picker("Show", selection: $scan.safetyFilter) {
                 ForEach(CandidateSafetyFilter.allCases) { filter in
                     Text(filter.label).tag(filter)
                 }
             }
         } label: {
             Image(
-                systemName: safetyFilter == .all
+                systemName: scan.safetyFilter == .all
                     ? "line.3.horizontal.decrease.circle"
                     : "line.3.horizontal.decrease.circle.fill"
             )
@@ -428,15 +440,15 @@ struct CandidatesSectionView: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel(
-            safetyFilter == .all
-                ? "View options. Showing all candidates, \(sortOrder.label)."
-                : "View options. Filtered to \(safetyFilter.label), \(sortOrder.label)."
+            scan.safetyFilter == .all
+                ? "View options. Showing all candidates, \(scan.sortOrder.label)."
+                : "View options. Filtered to \(scan.safetyFilter.label), \(scan.sortOrder.label)."
         )
     }
 
     /// The candidates actually rendered, after the user's filter and order.
     private var visibleCandidates: [DetectCandidateReportDto] {
-        CandidateListShaping.shape(candidates, filter: safetyFilter, order: sortOrder)
+        CandidateListShaping.shape(scan.candidates, filter: scan.safetyFilter, order: scan.sortOrder)
     }
 
     /// Shown beside the card title. `nil` while there is nothing to count,
@@ -447,16 +459,16 @@ struct CandidatesSectionView: View {
     /// the visible count would misreport what the scan actually found, and
     /// showing only the total would contradict the list underneath it.
     private var countText: String? {
-        guard !candidates.isEmpty else { return nil }
+        guard !scan.candidates.isEmpty else { return nil }
         let visible = visibleCandidates.count
-        if visible == candidates.count {
+        if visible == scan.candidates.count {
             return visible == 1 ? "1 item" : "\(visible) items"
         }
-        return "\(visible) of \(candidates.count) items"
+        return "\(visible) of \(scan.candidates.count) items"
     }
 
     private var lastScannedText: String {
-        guard let lastScannedAt else { return "not scanned yet" }
+        guard let lastScannedAt = scan.lastScannedAt else { return "not scanned yet" }
         let formatter = DateFormatter()
         formatter.dateStyle = .none
         formatter.timeStyle = .medium
@@ -484,25 +496,25 @@ struct CandidatesSectionView: View {
         // Checked before the "no candidates at all" cases: a non-empty scan
         // whose rows are all filtered out is a different situation from an
         // empty scan, and must not borrow its wording.
-        if !candidates.isEmpty, visibleCandidates.isEmpty {
+        if !scan.candidates.isEmpty, visibleCandidates.isEmpty {
             return .filteredOut(
                 "No candidates match this filter",
-                detail: "Glomeris found \(candidates.count) "
-                    + "\(candidates.count == 1 ? "candidate" : "candidates"), "
-                    + "but none are \(safetyFilter.midSentenceDescription). "
+                detail: "Glomeris found \(scan.candidates.count) "
+                    + "\(scan.candidates.count == 1 ? "candidate" : "candidates"), "
+                    + "but none are \(scan.safetyFilter.midSentenceDescription). "
                     + "Change the filter in the view options to see them."
             )
         }
-        guard candidates.isEmpty else { return nil }
-        if isScanning {
+        guard scan.candidates.isEmpty else { return nil }
+        if scan.isScanning {
             return .loading("Scanning for reclaimable space…")
         }
-        if lastErrorMessage != nil {
+        if scan.lastErrorMessage != nil {
             // The failure message below is the whole story; an "all clear"
             // sitting next to it would contradict it.
             return nil
         }
-        if lastScannedAt == nil {
+        if scan.lastScannedAt == nil {
             return .notLookedYet(
                 "No scan yet",
                 detail: "Refresh to look for space you can reclaim."
@@ -585,9 +597,9 @@ struct CandidatesSectionView: View {
     /// button's action closure above, never from an appear-triggered task, a `Timer`,
     /// or any re-scan loop.
     private func runDetect() async {
-        isScanning = true
-        progressStatusText = nil
-        lastErrorMessage = nil
+        scan.isScanning = true
+        scan.progressStatusText = nil
+        scan.lastErrorMessage = nil
 
         do {
             let result = try await client.run(
@@ -596,23 +608,23 @@ struct CandidatesSectionView: View {
                 progressType: ProgressEventDto.self,
                 onProgress: { event in
                     Task { @MainActor in
-                        progressStatusText = ProgressStatusText.text(for: event)
+                        scan.progressStatusText = ProgressStatusText.text(for: event)
                     }
                 }
             )
-            candidates = result.output.candidates
-            lastScannedAt = Date()
+            scan.candidates = result.output.candidates
+            scan.lastScannedAt = Date()
         } catch {
-            lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")
+            scan.lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")
         }
 
-        isScanning = false
-        progressStatusText = nil
+        scan.isScanning = false
+        scan.progressStatusText = nil
     }
 }
 
 #Preview {
-    CandidatesSectionView()
+    CandidatesSectionView(scan: ScanState())
         .padding(GlomerisDesign.outerPadding)
         .frame(width: GlomerisDesign.popoverWidth)
 }
