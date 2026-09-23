@@ -684,8 +684,19 @@ final class CandidatesSectionViewTests: XCTestCase {
         XCTAssertEqual(disabledModifiers.count, 1, "a new .disabled appeared in the candidate list")
         XCTAssertTrue(disabledModifiers.first?.hasPrefix("scan.isScanning)") == true)
 
-        XCTAssertFalse(source.contains("actionability.sentence =="))
-        XCTAssertFalse(source.contains("actionabilityTerm =="))
+        // And the list never branches on the wording. The previous version of
+        // this checked for `actionability.sentence ==` and `actionabilityTerm ==`,
+        // spellings nobody would write; these are the ones that would actually
+        // appear if someone rebuilt a decision here.
+        for branch in [
+            "actionability ==", "actionabilityTerm ==", "switch row.actionability",
+            "switch actionability", ".readyToClean", ".asksFirstThenCleans", ".refused",
+        ] {
+            XCTAssertFalse(
+                source.contains(branch),
+                "\(branch): the candidate list is branching on actionability wording"
+            )
+        }
     }
 
     // MARK: - Helpers

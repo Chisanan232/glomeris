@@ -192,9 +192,9 @@ final class CandidateActionabilityTests: XCTestCase {
     /// asserted here too because this badge sits beside that one.
     func testRefusalBadgeIsGuardedAndNeverCritical() {
         let term = refused(Self.protectedRefusal).term
+        // One assertion, not three: the two `XCTAssertNotEqual`s that used to
+        // follow were implied by this equality and only inflated the count.
         XCTAssertEqual(term?.tone, .guarded)
-        XCTAssertNotEqual(term?.tone, .critical)
-        XCTAssertNotEqual(term?.tone, .warning)
     }
 
     /// Colour is never the sole carrier of state: the badge has a symbol and
@@ -446,9 +446,21 @@ final class CandidateActionabilityTests: XCTestCase {
         XCTAssertFalse(code.contains("\"PROTECTED"))
         XCTAssertFalse(code.contains("\"AUTO_SAFE"))
         XCTAssertFalse(code.contains("\"ASK"))
-        // The refusal text is never inspected, only carried.
-        XCTAssertFalse(code.contains("hasPrefix"))
-        XCTAssertFalse(code.contains("contains(\""))
+        // The refusal text is never inspected, only carried. Every way this
+        // file could look inside a string it was handed, not just the two an
+        // author would reach for first — the failure this guards against is
+        // reconstructing the PROTECTED-vs-structural distinction in Swift, and
+        // any one of these would do it.
+        for inspection in [
+            "hasPrefix", "hasSuffix", "contains(\"", "range(of:", "lowercased",
+            "uppercased", "split(separator", "components(separatedBy", "prefix(",
+            "suffix(", "firstIndex(of", "NSRegularExpression", "wholeMatch", "firstMatch",
+        ] {
+            XCTAssertFalse(
+                code.contains(inspection),
+                "\(inspection) inspects a string this file is only supposed to carry"
+            )
+        }
     }
 
     private static func readSource(_ fileName: String) -> String {
