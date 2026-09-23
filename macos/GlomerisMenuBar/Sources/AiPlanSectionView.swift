@@ -326,24 +326,42 @@ struct AiPlanRowViewModel: Equatable {
 
     /// Built from the gating fields alone. `skipReason` and `refusalReason`
     /// are passed through verbatim — this layer never rewords a refusal.
+    ///
+    /// HORO-1323 moved the four sentences out to `CandidateActionability`,
+    /// unchanged. They were written here, but the candidates list and the
+    /// Clean button needed the same wording, and three copies of "what
+    /// Glomeris will do about this resource" is three chances for them to
+    /// disagree about it. What stays here is the part that is genuinely this
+    /// card's own: a plan item can also carry a `skip_reason`, which is the
+    /// planner explaining why it rendered no action at all, and that is a
+    /// different statement from the candidate's refusal reason.
     private static func verdictLines(_ dto: LlmPlanItemReportDto) -> [String] {
         var lines: [String] = []
         if let skipReason = dto.skipReason {
             lines.append(skipReason)
         }
 
-        if dto.candidate.executable {
-            let needsConfirmation = dto.candidate.offeredActions.contains { $0.requiresConfirmation }
-            lines.append(
-                needsConfirmation
-                    ? "Glomeris will ask you to confirm this before anything runs."
-                    : "Glomeris is willing to run this. Open the row to review it and clean."
-            )
-        } else if let refusalReason = dto.candidate.refusalReason,
-                  !lines.contains(refusalReason) {
-            lines.append(refusalReason)
-        } else if lines.isEmpty {
-            lines.append("Glomeris has no action it is willing to run for this resource.")
+        let actionability = CandidateActionability(
+            executable: dto.candidate.executable,
+            offeredActions: dto.candidate.offeredActions,
+            refusalReason: dto.candidate.refusalReason
+        )
+
+        switch actionability {
+        case .refusedWithoutStatedReason:
+            // Behaviour preserved exactly: when the CLI gave no reason of its
+            // own but the planner did explain itself, the generic sentence
+            // adds nothing and is left off. Unreachable in practice — every
+            // branch of `executable_fields` returns a reason — but changing it
+            // silently while refactoring would be a behaviour change smuggled
+            // in as a tidy-up.
+            if lines.isEmpty {
+                lines.append(actionability.sentence)
+            }
+        case .readyToClean, .asksFirstThenCleans, .refused:
+            if !lines.contains(actionability.sentence) {
+                lines.append(actionability.sentence)
+            }
         }
 
         return lines
