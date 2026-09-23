@@ -242,22 +242,25 @@ final class GlomerisPopoverViewTests: XCTestCase {
     /// ownership does — so if this file ever starts constructing a `ScanState`,
     /// every drill-down goes back to showing "No scan yet" no matter how the
     /// overview is presented.
-    func testTheShellPassesTheStoresDownAndNeverCreatesThem() {
+    func testTheShellOwnsTheStoresAndHandsTheSameOnesDown() {
         XCTAssertTrue(
-            code.contains("@ObservedObject private var scan: ScanState"),
-            "the shell observes the scan; it must not own it"
+            code.contains("@StateObject private var scan = ScanState()"),
+            "the shell owns the scan: it is above the drill-down and below the scene"
         )
         XCTAssertTrue(
-            code.contains("@ObservedObject private var plan: PlanState"),
-            "the shell observes the plan; it must not own it"
+            code.contains("@StateObject private var plan = PlanState()"),
+            "the shell owns the plan for the same reason"
         )
         XCTAssertTrue(code.contains("scan: scan,"), "the candidates card must get the real scan")
         XCTAssertTrue(code.contains("plan: plan,"), "the AI Plan card must get the real plan")
 
-        for forbidden in ["@StateObject", "scan: ScanState = ", "plan: PlanState = "] {
+        // `@ObservedObject` here would be the bug back: an observed object is
+        // re-assigned from the init on every rebuild of this view, so a scan
+        // would last exactly as long as whoever constructed it kept it alive.
+        for forbidden in ["@ObservedObject", "scan: ScanState", "plan: PlanState"] {
             XCTAssertFalse(
                 code.contains(forbidden),
-                "\(forbidden) here would give the panel a private copy of the state"
+                "\(forbidden) would put the stores' lifetime back in a caller's hands"
             )
         }
     }

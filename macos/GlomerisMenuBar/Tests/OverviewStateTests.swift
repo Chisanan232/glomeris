@@ -182,17 +182,21 @@ final class OverviewStateTests: XCTestCase {
 
     // MARK: - Structure: why this cannot come back
 
-    /// The state is owned by the scene, above every view that can be built,
-    /// hidden, removed or re-presented.
-    func testTheScanAndThePlanAreOwnedByTheAppSceneAndNotByAnyView() throws {
-        let app = try readSource("GlomerisMenuBarApp.swift")
+    /// The state is owned by the popover root — above every drill-down, because
+    /// that root is also where `navigation` is declared.
+    func testTheScanAndThePlanAreOwnedByThePopoverRootAndNotByTheCards() throws {
+        let shell = try readSource("GlomerisPopoverView.swift")
         XCTAssertTrue(
-            app.contains("@StateObject private var scan = ScanState()"),
-            "the scan must be created once, by the scene"
+            shell.contains("@StateObject private var scan = ScanState()"),
+            "the scan must be created once, by the view above the drill-down"
         )
         XCTAssertTrue(
-            app.contains("@StateObject private var plan = PlanState()"),
-            "the plan must be created once, by the scene"
+            shell.contains("@StateObject private var plan = PlanState()"),
+            "the plan must be created once, by the view above the drill-down"
+        )
+        XCTAssertTrue(
+            shell.contains("@State private var navigation = CandidateDetailNavigation()"),
+            "ownership is only 'above navigation' while navigation is declared here"
         )
 
         // And the cards must not have taken ownership back.
@@ -231,6 +235,49 @@ final class OverviewStateTests: XCTestCase {
         XCTAssertFalse(
             aiPlan.contains("plan: PlanState = PlanState()"),
             "a defaulted store is a silent route back to an empty plan"
+        )
+    }
+
+    /// The state must NOT be hoisted onto the `App`, and this is not a style
+    /// preference — it was measured.
+    ///
+    /// An observable object on the scene makes every publish re-evaluate
+    /// `App.body`, and `App.body` constructs the `Settings` tabs eagerly,
+    /// whether or not a Settings window exists. `AiProviderPreferencesView.init`
+    /// seeds its status from `GlomerisLlmSettingsStore.status()`, which reads the
+    /// keychain synchronously. A Refresh publishes on every progress line, so the
+    /// scene-level version fired a burst of main-thread `SecItemCopyMatching`
+    /// calls per scan; on a bundle whose code identity the keychain ACL did not
+    /// recognise, one blocked behind a `SecurityAgent` prompt and the menu-bar
+    /// item vanished mid-scan — the app became unreachable, with nothing on
+    /// screen to explain it. Strictly worse than the bug being fixed.
+    ///
+    /// The two facts that make this a trap rather than a one-off are asserted
+    /// here, so whoever hoists the stores again has to read why not.
+    func testTheAppSceneHoldsNoObservableStateBecauseItsBodyBuildsTheSettingsTabs() throws {
+        let app = try strippedOfComments(readSource("GlomerisMenuBarApp.swift"))
+        XCTAssertFalse(
+            app.contains("@StateObject"),
+            "a scene-level store re-evaluates App.body, which reads the keychain"
+        )
+        XCTAssertFalse(app.contains("@State"), "same reason: any observable scene state does it")
+
+        // Fact one: the Settings tabs really are constructed by `App.body`.
+        XCTAssertTrue(
+            app.contains("AiProviderPreferencesView()"),
+            "if this pane moves, re-check whether the keychain read is still on this path"
+        )
+
+        // Fact two: constructing that pane really does read the keychain.
+        let pane = try strippedOfComments(readSource("AiProviderPreferencesView.swift"))
+        XCTAssertTrue(
+            pane.contains("_status = State(initialValue: store.status())"),
+            "the init-time read is the hazard; if it moves off init, this rule can relax"
+        )
+        let store = try strippedOfComments(readSource("GlomerisLlmSettingsStore.swift"))
+        XCTAssertTrue(
+            store.contains("stored: hasStoredApiKey"),
+            "status() must still be what reaches the keychain for this to be the trap"
         )
     }
 
@@ -298,10 +345,12 @@ final class OverviewStateTests: XCTestCase {
     /// which is what SwiftUI does on every body re-evaluation, and what a
     /// drill-down and a back press do to the overview.
     ///
-    /// The result is deliberately discarded: the assertion is always about the
-    /// stores afterwards, never about the views.
+    /// The shell is built with no arguments on purpose: it owns the stores, so
+    /// there is nothing to inject, and the cards are then built against the
+    /// stores under test directly. The result is deliberately discarded — the
+    /// assertion is always about the stores afterwards, never about the views.
     private func buildOverview(scan: ScanState, plan: PlanState) {
-        _ = GlomerisPopoverView(scan: scan, plan: plan)
+        _ = GlomerisPopoverView()
         _ = CandidatesSectionView(scan: scan)
         _ = AiPlanSectionView(plan: plan)
     }
