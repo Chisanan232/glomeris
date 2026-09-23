@@ -349,12 +349,19 @@ struct AiPlanRowViewModel: Equatable {
 
         switch actionability {
         case .refusedWithoutStatedReason:
-            // Behaviour preserved exactly: when the CLI gave no reason of its
-            // own but the planner did explain itself, the generic sentence
-            // adds nothing and is left off. Unreachable in practice — every
-            // branch of `executable_fields` returns a reason — but changing it
-            // silently while refactoring would be a behaviour change smuggled
-            // in as a tidy-up.
+            // Behaviour preserved on every input the CLI can produce: when the
+            // CLI gave no reason of its own but the planner did explain itself,
+            // the generic sentence adds nothing and is left off. Unreachable in
+            // practice — every branch of `executable_fields` returns a reason —
+            // but changing it silently while refactoring would be a behaviour
+            // change smuggled in as a tidy-up, so
+            // `testASkipReasonSuppressesTheGenericSentence` pins it.
+            //
+            // Two inputs Rust cannot emit do differ from the pre-HORO-1323
+            // code, both in the direction of saying less: a `skip_reason` byte
+            // -identical to one of the permitted sentences is no longer
+            // duplicated, and `refusal_reason: Some("")` no longer produces a
+            // blank verdict line.
             if lines.isEmpty {
                 lines.append(actionability.sentence)
             }
