@@ -103,6 +103,21 @@ final class AiPlanSectionViewTests: XCTestCase {
      "dropped_unknown_resource":0,"dropped_unknown_action":0,"provider_error":null}
     """
 
+    /// The same shape, but with the planner explaining itself. The distinction
+    /// between this and `silentlyRefusedPlanJSON` is one field, and it selects
+    /// the one branch of `verdictLines` that suppresses the generic sentence.
+    private static let plannerExplainedRefusalPlanJSON = """
+    {"items":[{"resource_id":"x:/tmp/x","policy_label":"UNKNOWN_INCOMPLETE",
+      "requested_action_id":null,"priority":null,"model_reason":null,"explain":null,
+      "skip_reason":"the model named an action that does not exist",
+      "candidate":{"resource_id":"x:/tmp/x","kind":"cargo_target_dir","reclaimable_bytes":null,
+        "reclaimable_human":null,"reclaimable_bytes_is_lower_bound":true,"impact_tier":null,
+        "policy_label":"UNKNOWN_INCOMPLETE","reasons":[],"executable":false,
+        "offered_actions":[],"refusal_reason":null},
+      "completeness":"failed","confidence":"low"}],
+     "dropped_unknown_resource":0,"dropped_unknown_action":0,"provider_error":null}
+    """
+
     // MARK: - A recommendation cannot enable anything
 
     /// The one that matters. The golden fixture's third item is a confident,
@@ -194,6 +209,30 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertEqual(
             row.machineVerdictLines,
             ["Glomeris has no action it is willing to run for this resource."]
+        )
+    }
+
+    /// The suppression rule, which had no test before: when the CLI reported no
+    /// refusal reason of its own but the planner DID explain itself, the
+    /// planner's sentence stands alone and the generic one is left off.
+    ///
+    /// Worth pinning precisely because the code path is unreachable from Rust
+    /// today. `verdictLines` guards it with an `if lines.isEmpty` whose comment
+    /// says removing it would be a behaviour change smuggled in as a tidy-up —
+    /// and until now, doing exactly that would have shipped green.
+    func testASkipReasonSuppressesTheGenericSentence() throws {
+        let report = try decodeReport(Self.plannerExplainedRefusalPlanJSON)
+        let row = AiPlanRowViewModel(report.items[0])
+
+        XCTAssertEqual(
+            row.machineVerdictLines,
+            ["the model named an action that does not exist"]
+        )
+        // Specifically: the planner's explanation is not followed by a vaguer
+        // restatement of the same fact.
+        XCTAssertFalse(
+            row.machineVerdictLines.contains("Glomeris has no action it is willing to run for this resource."),
+            "the generic sentence was appended after the planner already explained itself"
         )
     }
 
