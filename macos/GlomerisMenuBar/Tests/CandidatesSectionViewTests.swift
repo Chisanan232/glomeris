@@ -322,16 +322,14 @@ final class CandidatesSectionViewTests: XCTestCase {
 
     /// The default state is Rust's order, so the list a user sees without
     /// touching anything is exactly what `detect` decided.
-    func testDefaultOrderIsTheCliRanking() throws {
-        let source = try Self.readSource("CandidatesSectionView.swift")
-        XCTAssertTrue(
-            source.contains("sortOrder: CandidateSortOrder = .recommended"),
-            "the list must open in the CLI's own order"
-        )
-        XCTAssertTrue(
-            source.contains("safetyFilter: CandidateSafetyFilter = .all"),
-            "nothing may be hidden until the user asks for it"
-        )
+    ///
+    /// HORO-1365 moved these two controls into `ScanState`, which upgraded this
+    /// from a source grep to a real assertion: the defaults are now read off a
+    /// freshly constructed store rather than matched as text in a declaration.
+    func testDefaultOrderIsTheCliRanking() {
+        let scan = ScanState()
+        XCTAssertEqual(scan.sortOrder, .recommended, "the list must open in the CLI's own order")
+        XCTAssertEqual(scan.safetyFilter, .all, "nothing may be hidden until the user asks for it")
     }
 
     /// Behavioural counterpart to the source checks above: `.recommended`
