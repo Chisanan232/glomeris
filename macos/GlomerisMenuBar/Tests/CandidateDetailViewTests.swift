@@ -733,6 +733,207 @@ final class CandidateDetailViewTests: XCTestCase {
         XCTAssertNil(navigation.resourceId)
     }
 
+    // MARK: - HORO-1323: what the Clean button says about itself
+    //
+    // The ticket names three gaps, all on the one control in this app that
+    // deletes files: no hint that the action is permanent, no reason when it
+    // is disabled, and no value tying it to a resource. Asserted on the view
+    // model's strings rather than by rendering, which is why those strings
+    // live there — see the MARK in CandidateDetailView.swift.
+
+    /// Gap 1. "Clean" on its own conveys nothing about irreversibility.
+    func testCleanHintSaysTheDeletionIsPermanentAndNamesTheAmount() {
+        let report = explainReport(
+            executable: true,
+            offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+        )
+        let hint = CandidateDetailViewModel(report).cleanButtonHint(isExecuting: false)
+        XCTAssertTrue(hint.contains("Permanently deletes"), hint)
+        XCTAssertTrue(hint.contains("cannot be undone"), hint)
+        XCTAssertTrue(hint.contains("/tmp/example/target"), hint)
+        XCTAssertTrue(hint.contains("1.0 MB"), hint)
+    }
+
+    /// Gap 3. Out of context the label is an unqualified "Clean", so the
+    /// value has to name what is being cleaned.
+    func testCleanValueNamesTheResourceAndTheAmount() {
+        let report = explainReport(
+            executable: true,
+            offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+        )
+        let viewModel = CandidateDetailViewModel(report)
+        XCTAssertEqual(viewModel.cleanTargetDescription, "\(viewModel.kindTerm.title), 1.0 MB")
+        XCTAssertNotEqual(viewModel.cleanTargetDescription, "Clean")
+    }
+
+    /// An ASK resource is about to prompt, and the hint says so before the
+    /// prompt appears rather than after.
+    func testCleanHintMentionsConfirmationWhenTheActionAsksFirst() {
+        let report = explainReport(
+            executable: true,
+            policyLabel: "ASK",
+            offeredActions: [OfferedActionDto(actionId: "node.clean.node_modules", requiresConfirmation: true)]
+        )
+        let hint = CandidateDetailViewModel(report).cleanButtonHint(isExecuting: false)
+        XCTAssertTrue(hint.contains("confirm"), hint)
+        // Still says what it will eventually do — a confirmation prompt is
+        // not a substitute for stating the consequence.
+        XCTAssertTrue(hint.contains("cannot be undone"), hint)
+    }
+
+    /// Gap 2, and per the ticket the half that matters most: the announced
+    /// refusal for a PROTECTED resource must be the CLI's own text, not a
+    /// Swift-side reconstruction. The fixture's `policy_label` is deliberately
+    /// the misleading "AUTO_SAFE" — anything reading the label to decide what
+    /// to announce would get this wrong in the most dangerous direction.
+    func testDisabledCleanAnnouncesTheCLIsOwnRefusalText() {
+        let refusal = "PROTECTED: protected_credential_material"
+        let report = explainReport(
+            executable: false,
+            policyLabel: "AUTO_SAFE",
+            offeredActions: [],
+            refusalReason: refusal
+        )
+        let viewModel = CandidateDetailViewModel(report)
+        let hint = viewModel.cleanButtonHint(isExecuting: false)
+        XCTAssertTrue(hint.contains(refusal), hint)
+        XCTAssertTrue(hint.hasPrefix("Unavailable."), hint)
+        // And it does NOT promise a deletion that cannot happen.
+        XCTAssertFalse(hint.contains("Permanently deletes"), hint)
+    }
+
+    /// The structural refusal HORO-1358 exposed, which reaches the UI for an
+    /// AUTO_SAFE resource. Same assertion, different Rust wording, because the
+    /// point is pass-through rather than one sentence.
+    func testDisabledCleanAnnouncesAStructuralRefusalVerbatim() {
+        let refusal = "refusing to run brew: this step has no scoped_path, so its identity cannot be "
+            + "revalidated before mutation - an unscoped mutating action is never executed "
+            + "regardless of policy class"
+        let report = explainReport(
+            executable: false,
+            policyLabel: "AUTO_SAFE",
+            offeredActions: [],
+            refusalReason: refusal
+        )
+        XCTAssertTrue(
+            CandidateDetailViewModel(report).cleanButtonHint(isExecuting: false).contains(refusal)
+        )
+    }
+
+    /// The two stacked `.disabled` conditions are different situations — one
+    /// is a property of the resource, the other clears in seconds — and this
+    /// is the assertion that they no longer collapse into one silent dimmed
+    /// control.
+    func testTheTwoDisabledReasonsReadDifferently() {
+        let refused = CandidateDetailViewModel(
+            explainReport(
+                executable: false,
+                offeredActions: [],
+                refusalReason: "no registered cleanup action for this resource kind"
+            )
+        )
+        let executable = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+            )
+        )
+
+        let refusedReason = refused.cleanUnavailableTerm(isExecuting: false)
+        let busyReason = executable.cleanUnavailableTerm(isExecuting: true)
+
+        XCTAssertNotNil(refusedReason)
+        XCTAssertNotNil(busyReason)
+        XCTAssertNotEqual(refusedReason?.title, busyReason?.title)
+        XCTAssertNotEqual(refusedReason?.explanation, busyReason?.explanation)
+        XCTAssertNotEqual(
+            refused.cleanButtonHint(isExecuting: false),
+            executable.cleanButtonHint(isExecuting: true)
+        )
+    }
+
+    /// The transient reason is the CLI's own `busy` refusal wording, not a
+    /// sentence written at this call site — the wording already existed in
+    /// GlomerisVocabulary and was simply being dropped here.
+    func testTheInFlightReasonIsTheCLIsBusyRefusalWording() {
+        let viewModel = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+            )
+        )
+        XCTAssertEqual(
+            viewModel.cleanUnavailableTerm(isExecuting: true),
+            GlomerisVocabulary.refusal("busy")
+        )
+    }
+
+    /// An enabled, idle button has no unavailability reason to give, so
+    /// nothing extra is rendered beneath it and the hint stays the
+    /// description of the action.
+    func testAnAvailableCleanButtonHasNoUnavailableReason() {
+        let viewModel = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false)]
+            )
+        )
+        XCTAssertNil(viewModel.cleanUnavailableTerm(isExecuting: false))
+    }
+
+    /// A refusal outranks the transient reason. They cannot co-occur today
+    /// (`performClean` needs an `actionId`, and a refused resource has none),
+    /// so this pins the resolution rather than discovering it: the permanent
+    /// reason is the useful one, and if the two ever did overlap, telling a
+    /// user to "try again once the other finishes" about a resource that will
+    /// never be cleanable would be actively misleading.
+    func testARefusalOutranksTheInFlightReason() {
+        let viewModel = CandidateDetailViewModel(
+            explainReport(
+                executable: false,
+                offeredActions: [],
+                refusalReason: "no registered cleanup action for this resource kind"
+            )
+        )
+        XCTAssertEqual(viewModel.cleanUnavailableTerm(isExecuting: true)?.title, "Cannot be cleaned")
+    }
+
+    /// The view has to actually attach the three modifiers, and attach the
+    /// SAME hint string to both `accessibilityHint` and `help` — they both
+    /// land in AXHelp, so two different strings would make the spoken and
+    /// hovered explanations depend on modifier order.
+    func testCleanButtonAttachesTheHintValueAndTooltip() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        XCTAssertTrue(source.contains(".accessibilityValue(viewModel.cleanTargetDescription)"))
+        XCTAssertTrue(source.contains(".accessibilityHint(viewModel.cleanButtonHint(isExecuting: isExecuting))"))
+        XCTAssertTrue(source.contains(".help(viewModel.cleanButtonHint(isExecuting: isExecuting))"))
+    }
+
+    /// The reason must also be visible, not accessible-only: the ticket's
+    /// premise is that a dimmed control communicates nothing, and that is as
+    /// true for someone who can see it as for someone who cannot.
+    func testTheUnavailableReasonIsRenderedVisiblyBeneathTheButton() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        XCTAssertTrue(source.contains("if let unavailable = viewModel.cleanUnavailableTerm(isExecuting: isExecuting)"))
+        XCTAssertTrue(source.contains("cleanUnavailableLine(unavailable)"))
+        XCTAssertTrue(source.contains("private func cleanUnavailableLine(_ term: GlomerisTerm) -> some View"))
+    }
+
+    /// None of the new wording may become a second opinion about whether the
+    /// action is allowed. The enablement assertions above already pin the two
+    /// `.disabled` reads; this pins the other direction — no `.disabled` in
+    /// this file reads the actionability wording.
+    func testEnablementNeverReadsTheActionabilityWording() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidateDetailView.swift"))
+        XCTAssertFalse(source.contains(".disabled(viewModel.actionability"))
+        XCTAssertFalse(source.contains(".disabled(actionability"))
+        let disabledModifiers = source.components(separatedBy: ".disabled(").count - 1
+        XCTAssertEqual(
+            disabledModifiers, 2,
+            "expected exactly the two known .disabled conditions — !isCleanEnabled and isExecuting"
+        )
+    }
+
     // MARK: - Helpers
 
     private static func readSource(_ fileName: String) throws -> String {
