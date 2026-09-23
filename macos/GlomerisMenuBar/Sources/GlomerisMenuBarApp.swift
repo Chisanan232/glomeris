@@ -28,28 +28,25 @@ import SwiftUI
 
 @main
 struct GlomerisMenuBarApp: App {
-    /// HORO-1365: a completed scan and a requested AI plan are owned here, at
-    /// the scene root, and handed down — not held as `@State` by the cards that
-    /// draw them.
+    /// HORO-1365 deliberately does NOT put the scan and the plan here.
     ///
-    /// The founder report this fixes: refresh, ask for a plan, open one
-    /// suggested candidate, press back — and the scan and the plan were gone,
-    /// with the overview reading "No scan yet". The cause was ownership, not
-    /// rendering: `@State` lives and dies with a view's place in the hierarchy,
-    /// and the panel's drill-down is what decides that place. A result the user
-    /// waited for (and, for a plan, paid a provider for) must not be something
-    /// a navigation gesture can reach.
+    /// They belong above navigation, and `GlomerisPopoverView` is already above
+    /// navigation — it is the `MenuBarExtra` content root, and the drill-down it
+    /// owns happens strictly inside its own body. Hoisting them one level
+    /// further, to this scene, buys nothing and costs something real: an
+    /// `@StateObject` here makes every change to either store re-evaluate
+    /// `body`, and `body` *constructs* the `Settings` tabs below, whether or not
+    /// a Settings window is open. `AiProviderPreferencesView.init` reads the
+    /// keychain synchronously to seed its status, so a scene-level store turned
+    /// one scan — which publishes on every progress line — into a burst of
+    /// main-thread `SecItemCopyMatching` calls. On a bundle whose code identity
+    /// the keychain ACL does not recognise, each one can block behind a
+    /// `SecurityAgent` prompt, and while it is blocked this app has no menu-bar
+    /// item at all: no way in, and nothing on screen explaining why.
     ///
-    /// `@StateObject` here is the whole point — created once, for the life of
-    /// the process, above every view that can be built, hidden, removed or
-    /// re-presented. Only the Refresh and Ask buttons write to them.
-    ///
-    /// This is presentation state, and it stays presentation state. These
-    /// objects hold what the CLI reported, verbatim; they classify nothing and
-    /// decide nothing, so the standing rule above is not bent by them.
-    @StateObject private var scan = ScanState()
-    @StateObject private var plan = PlanState()
-
+    /// Measured on a build that did hoist them here: the item vanished
+    /// mid-session on the first Refresh. That is a worse failure than the bug
+    /// being fixed, so the owner is the popover root. See OverviewState.swift.
     var body: some Scene {
         // HORO-1305: a custom template image rather than a `systemImage`
         // name. `Image(nsImage:)` is used instead of drawing the
@@ -57,7 +54,7 @@ struct GlomerisMenuBarApp: App {
         // needs an AppKit template image to be recoloured correctly for
         // light/dark menu bars, highlight state and tinted wallpapers.
         MenuBarExtra {
-            GlomerisPopoverView(scan: scan, plan: plan)
+            GlomerisPopoverView()
         } label: {
             Image(nsImage: MenuBarAppearance.menuBarImage())
                 .accessibilityLabel(MenuBarAppearance.title)

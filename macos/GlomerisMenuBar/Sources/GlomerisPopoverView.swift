@@ -83,12 +83,26 @@ struct GlomerisPopoverView: View {
     private let client: GlomerisClient
     private let projectRootsStore: ProjectRootsStore
 
-    /// HORO-1365: passed through to the two cards, and owned neither here nor
-    /// by them — `GlomerisMenuBarApp` holds both for the life of the process.
-    /// Everything in this file may be rebuilt freely without a completed scan
-    /// or a paid-for plan being at stake.
-    @ObservedObject private var scan: ScanState
-    @ObservedObject private var plan: PlanState
+    /// HORO-1365: the completed scan and the requested AI plan are owned here,
+    /// and handed down to the cards that draw them.
+    ///
+    /// Here, specifically, because this view is the one place that is both above
+    /// every drill-down and below the scene. Above: `navigation` is declared in
+    /// this file and read only in this file's body, so no route into a detail
+    /// and no route back out of one can reach these objects — a `@StateObject`
+    /// is created once per view identity, and re-evaluating a body does not
+    /// re-create it. Below: putting them on the `App` would make every progress
+    /// line of a scan re-evaluate `App.body`, which constructs the Settings tabs
+    /// and with them a synchronous keychain read (see GlomerisMenuBarApp.swift).
+    ///
+    /// Only the Refresh and Ask buttons write to either one. Nothing observes a
+    /// timer, an appearance or a preference change to clear them.
+    ///
+    /// This is presentation state, and it stays presentation state. Both objects
+    /// hold what the CLI reported, verbatim; they classify nothing and decide
+    /// nothing, so the standing project rule is not bent by them.
+    @StateObject private var scan = ScanState()
+    @StateObject private var plan = PlanState()
 
     /// The panel is one level deep: the overview, or one candidate's detail.
     ///
@@ -99,13 +113,9 @@ struct GlomerisPopoverView: View {
     @State private var navigation = CandidateDetailNavigation()
 
     init(
-        scan: ScanState,
-        plan: PlanState,
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore()
     ) {
-        self.scan = scan
-        self.plan = plan
         self.client = client
         self.projectRootsStore = projectRootsStore
     }
@@ -131,11 +141,12 @@ struct GlomerisPopoverView: View {
     /// had to run the scan again to reach any other candidate.
     ///
     /// HORO-1365 moved those results out from under this decision entirely —
-    /// `scan` and `plan` now outlive anything this file does — so layering is
-    /// no longer what protects them, and a later change of shape here cannot
-    /// resurrect that bug. What layering still buys is the rest of the state a
-    /// mounted view carries and nobody hoists: scroll offset, the view-options
-    /// menu, the status and history cards' own fetches. Coming back to a list
+    /// `scan` and `plan` are owned by this view, not by the cards, so nothing
+    /// this property does can reach them — and a later change of shape here
+    /// cannot resurrect that bug. What layering still buys is the rest of the
+    /// state a mounted view carries and nobody hoists: scroll offset, the
+    /// view-options menu, the status and history cards' own fetches. Coming
+    /// back to a list
     /// scrolled to where you left it is the difference between navigation and
     /// a reset, so the layering stays on those grounds.
     ///
@@ -302,5 +313,5 @@ struct GlomerisPopoverView: View {
 }
 
 #Preview {
-    GlomerisPopoverView(scan: ScanState(), plan: PlanState())
+    GlomerisPopoverView()
 }

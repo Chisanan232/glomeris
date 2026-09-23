@@ -3,7 +3,8 @@
 //  GlomerisMenuBar
 //
 //  HORO-1365: what a scan found and what a provider suggested are owned
-//  here — above the view tree — instead of inside the cards that draw them.
+//  above every drill-down — by `GlomerisPopoverView` — instead of inside the
+//  cards that draw them.
 //
 //  ---------------------------------------------------------------------
 //  The defect this exists to make structurally impossible
@@ -26,11 +27,24 @@
 //  `NavigationStack`, a conditional branch) silently reintroduces the same
 //  data loss, which is precisely how it survived being fixed once already.
 //
-//  So the lifetime is moved off the view tree entirely. These objects are
-//  created once by `GlomerisMenuBarApp` and handed down, and navigating in
-//  or out of a detail cannot reach them. Hiding the overview, removing it,
-//  re-presenting it or rebuilding the whole popover all leave a completed
-//  scan and a completed plan exactly where they were.
+//  So the lifetime is moved above the drill-down. These objects are created
+//  once by `GlomerisPopoverView` — the `MenuBarExtra` content root, which
+//  also declares the `navigation` the detail turns on — and handed down.
+//  Hiding the overview, removing it, re-presenting it or rebuilding the
+//  whole body all leave a completed scan and a completed plan exactly where
+//  they were, because re-evaluating a body does not re-create a
+//  `@StateObject`.
+//
+//  Not one level higher, on the `App`. That was tried, and it is worse: an
+//  observable object on the scene makes every publish re-evaluate
+//  `App.body`, which constructs the Settings tabs whether or not a Settings
+//  window exists — and `AiProviderPreferencesView.init` seeds its status
+//  with a synchronous keychain read. A single Refresh publishes on every
+//  progress line, so the scene-level version turned one scan into a burst of
+//  main-thread `SecItemCopyMatching` calls; on a bundle whose code identity
+//  the keychain ACL does not recognise, one of them blocked behind a
+//  `SecurityAgent` prompt and the app's menu-bar item disappeared mid-scan.
+//  The popover root is above everything this ticket is about and below that.
 //
 //  ---------------------------------------------------------------------
 //  What may replace a result, and what may not
