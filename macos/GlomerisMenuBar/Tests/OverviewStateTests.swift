@@ -134,50 +134,158 @@ final class OverviewStateTests: XCTestCase {
     }
 
     // MARK: - AC6/AC7: the user can still replace either result
+    //
+    // These drive the real `runDetect()` / `runLlmPlan()` against a pinned
+    // fixture binary, rather than performing the production assignments in the
+    // test body and asserting they happened. That distinction matters: an
+    // earlier version of these tests did the latter, and would have passed
+    // against a `runDetect` that cleared the candidate list on failure.
 
-    /// The fix must not have made the state immovable — an explicit Refresh
-    /// replaces a scan outright rather than merging into it.
-    func testAnExplicitRefreshReplacesTheScanRatherThanAddingToIt() {
+    /// AC6. The fix must not have made the state immovable — an explicit
+    /// Refresh replaces a scan outright rather than merging into it.
+    @MainActor
+    func testAnExplicitRefreshReplacesTheScanRatherThanAddingToIt() async throws {
         let scan = ScanState()
         scan.candidates = [candidate(resourceId: "/tmp/old/target")]
         scan.lastScannedAt = Date(timeIntervalSince1970: 1_700_000_000)
 
-        // What `runDetect()` does on success, in the same order.
-        scan.candidates = [candidate(resourceId: "/tmp/new/node_modules")]
-        let rescannedAt = Date(timeIntervalSince1970: 1_700_009_999)
-        scan.lastScannedAt = rescannedAt
+        let card = CandidatesSectionView(
+            scan: scan,
+            client: try Self.fixtureClient(stdout: Self.detectReportJSON(resourceId: "/tmp/new/node_modules"))
+        )
+        await card.runDetect()
 
-        XCTAssertEqual(scan.candidates.map(\.resourceId), ["/tmp/new/node_modules"])
-        XCTAssertEqual(scan.lastScannedAt, rescannedAt)
+        XCTAssertEqual(
+            scan.candidates.map(\.resourceId), ["/tmp/new/node_modules"],
+            "a successful detect must replace the list, not append to it"
+        )
+        XCTAssertNotEqual(
+            scan.lastScannedAt, Date(timeIntervalSince1970: 1_700_000_000),
+            "the scan timestamp must move with the scan"
+        )
+        XCTAssertNil(scan.lastErrorMessage)
+        XCTAssertFalse(scan.isScanning, "the flag must be cleared however the fetch ends")
+        XCTAssertNil(scan.progressStatusText, "a finished scan shows no progress line")
     }
 
-    /// The same for an explicit Ask.
-    func testAnExplicitAskReplacesThePlanRatherThanAddingToIt() {
+    /// A failed Refresh is additive: it reports the failure and leaves the
+    /// earlier scan usable. Anything else is the founder's symptom arriving by
+    /// a second route — an empty overview the user did not ask for.
+    ///
+    /// The fixture exits non-zero here, which is a real `GlomerisClient` error
+    /// rather than a decode failure, so the `catch` branch is the one under test.
+    @MainActor
+    func testAFailedRefreshLeavesTheEarlierScanInPlace() async throws {
+        let scan = ScanState()
+        let earlier = [candidate(resourceId: "/tmp/a/node_modules")]
+        scan.candidates = earlier
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        scan.lastScannedAt = scannedAt
+
+        let card = CandidatesSectionView(
+            scan: scan,
+            client: try Self.fixtureClient(stdout: "not json at all", exitCode: 3)
+        )
+        await card.runDetect()
+
+        XCTAssertEqual(scan.candidates, earlier, "a failure must not empty the overview")
+        XCTAssertEqual(scan.lastScannedAt, scannedAt, "a failure must not restamp the scan")
+        XCTAssertNotNil(scan.lastErrorMessage, "and it must say so")
+        XCTAssertFalse(scan.isScanning)
+    }
+
+    /// AC7, the same shape for an explicit Ask. `llm-plan` is read with
+    /// `runRaw`, so the fixture's stdout is interpreted by
+    /// `AiPlanInterpretation` exactly as the real CLI's would be.
+    @MainActor
+    func testAnExplicitAskReplacesThePlanRatherThanAddingToIt() async throws {
         let plan = PlanState()
         plan.outcome = .plan(planReport(resourceIds: ["/tmp/old/target"]))
+        plan.lastPlannedAt = Date(timeIntervalSince1970: 1_700_000_000)
 
-        plan.outcome = .plan(planReport(resourceIds: ["/tmp/new/node_modules"]))
-        let askedAt = Date(timeIntervalSince1970: 1_700_009_999)
-        plan.lastPlannedAt = askedAt
+        // Not handed to the client: `runLlmPlan` calls
+        // `withEnvironment(settingsStore.childEnvironment())`, which REPLACES
+        // the child environment wholesale, so anything pinned on the client
+        // would be discarded. `childEnvironment()` is built on top of this
+        // process's environment, which is therefore where the fixture's
+        // instructions have to go.
+        Self.setFixtureEnvironment(stdout: Self.planReportJSON(resourceId: "/tmp/new/node_modules"))
+        defer { Self.clearFixtureEnvironment() }
 
-        XCTAssertEqual(planItems(plan.outcome).map(\.resourceId), ["/tmp/new/node_modules"])
-        XCTAssertEqual(plan.lastPlannedAt, askedAt)
+        let card = AiPlanSectionView(
+            plan: plan,
+            client: GlomerisClient(executableURL: try Self.fixtureBinary()),
+            settingsStore: Self.settingsStoreThatTouchesNoKeychain()
+        )
+        await card.runLlmPlan()
+
+        XCTAssertEqual(
+            planItems(plan.outcome).map(\.resourceId), ["/tmp/new/node_modules"],
+            "a successful ask must replace the plan"
+        )
+        XCTAssertNotEqual(plan.lastPlannedAt, Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertFalse(plan.isPlanning)
+        XCTAssertNil(plan.planTask, "the handle must be released so Stop cannot cancel a finished run")
     }
 
     /// A failed Ask is additive — it must not take an earlier usable plan with
-    /// it, which is the rule the card's own error rendering already follows.
-    func testAFailedAskLeavesTheEarlierPlanInPlace() {
+    /// it. This is the one the user pays for twice if it is wrong: the plan is
+    /// gone and the only way back is another billable request.
+    @MainActor
+    func testAFailedAskLeavesTheEarlierPlanInPlace() async throws {
         let plan = PlanState()
         let earlier = planReport(resourceIds: ["/tmp/a/node_modules"])
         plan.outcome = .plan(earlier)
-        plan.lastPlannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let plannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        plan.lastPlannedAt = plannedAt
 
-        // What `runLlmPlan()` does in its `catch`: set the message, touch
-        // neither the outcome nor the stamp.
-        plan.lastErrorMessage = "could not reach the provider"
+        let card = AiPlanSectionView(
+            plan: plan,
+            // A pinned path that does not exist: the spawn itself fails, which
+            // is the "could not reach the provider" class of failure.
+            client: GlomerisClient(executableURL: URL(fileURLWithPath: "/no/such/glomeris-binary")),
+            settingsStore: Self.settingsStoreThatTouchesNoKeychain()
+        )
+        await card.runLlmPlan()
 
-        XCTAssertEqual(plan.outcome, .plan(earlier))
-        XCTAssertEqual(plan.lastPlannedAt, Date(timeIntervalSince1970: 1_700_000_000))
+        XCTAssertEqual(plan.outcome, .plan(earlier), "a failed ask must not discard a paid-for plan")
+        XCTAssertEqual(plan.lastPlannedAt, plannedAt, "nor claim the old plan is current")
+        XCTAssertNotNil(plan.lastErrorMessage)
+        XCTAssertFalse(plan.isPlanning)
+    }
+
+    /// Both fetches must stay `@MainActor`: every assignment they make is to a
+    /// `@Published` property of an object a live view observes, so an off-main
+    /// write would publish a SwiftUI-observed change from a background thread.
+    ///
+    /// Asserted as a source fact, which is an uncomfortable shape for a test and
+    /// is chosen deliberately. The behavioural version — subscribe to
+    /// `objectWillChange`, drive the fetch, count publishes seen off the main
+    /// thread — was written first and then discarded, because it was measured to
+    /// pass with the annotation removed: in Swift 5 language mode an unstructured
+    /// `Task {}` inherits its creating context and a `nonisolated async` callee
+    /// stays on it, so there is no off-main write to observe on this target
+    /// today. A guard that cannot fail is not a guard. Under Swift 6 semantics
+    /// the callee would resume on the cooperative pool, and this assertion is
+    /// what stops the annotation being deleted as decoration before then.
+    func testBothFetchesStayOnTheMainActor() throws {
+        for (file, function) in [
+            ("CandidatesSectionView.swift", "func runDetect() async"),
+            ("AiPlanSectionView.swift", "func runLlmPlan() async"),
+        ] {
+            let source = try strippedOfComments(readSource(file))
+            guard let declaration = source.range(of: function) else {
+                return XCTFail("\(file) no longer declares \(function)")
+            }
+            // The annotation must be the token immediately before it, so an
+            // `@MainActor` somewhere else in the file cannot satisfy this.
+            let preceding = source[source.startIndex..<declaration.lowerBound]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertTrue(
+                preceding.hasSuffix("@MainActor"),
+                "\(function) publishes to a store a live view observes and must be main-actor"
+            )
+        }
     }
 
     // MARK: - Structure: why this cannot come back
@@ -185,7 +293,7 @@ final class OverviewStateTests: XCTestCase {
     /// The state is owned by the popover root — above every drill-down, because
     /// that root is also where `navigation` is declared.
     func testTheScanAndThePlanAreOwnedByThePopoverRootAndNotByTheCards() throws {
-        let shell = try readSource("GlomerisPopoverView.swift")
+        let shell = try strippedOfComments(readSource("GlomerisPopoverView.swift"))
         XCTAssertTrue(
             shell.contains("@StateObject private var scan = ScanState()"),
             "the scan must be created once, by the view above the drill-down"
@@ -201,7 +309,7 @@ final class OverviewStateTests: XCTestCase {
 
         // And the cards must not have taken ownership back.
         for file in ["CandidatesSectionView.swift", "AiPlanSectionView.swift"] {
-            let source = try readSource(file)
+            let source = try strippedOfComments(readSource(file))
             XCTAssertFalse(
                 source.contains("@State private var candidates"),
                 "\(file) must not own the scan result"
@@ -223,14 +331,14 @@ final class OverviewStateTests: XCTestCase {
     /// in fact completed — the same user-visible defect, arriving through an
     /// init rather than through a re-presentation.
     func testNeitherCardCanBeGivenAThrowawayStoreByOmission() throws {
-        let candidates = try readSource("CandidatesSectionView.swift")
+        let candidates = try strippedOfComments(readSource("CandidatesSectionView.swift"))
         XCTAssertTrue(candidates.contains("scan: ScanState,"), "scan must be a required parameter")
         XCTAssertFalse(
             candidates.contains("scan: ScanState = ScanState()"),
             "a defaulted store is a silent route back to an empty overview"
         )
 
-        let aiPlan = try readSource("AiPlanSectionView.swift")
+        let aiPlan = try strippedOfComments(readSource("AiPlanSectionView.swift"))
         XCTAssertTrue(aiPlan.contains("plan: PlanState,"), "plan must be a required parameter")
         XCTAssertFalse(
             aiPlan.contains("plan: PlanState = PlanState()"),
@@ -252,8 +360,13 @@ final class OverviewStateTests: XCTestCase {
     /// item vanished mid-scan — the app became unreachable, with nothing on
     /// screen to explain it. Strictly worse than the bug being fixed.
     ///
-    /// The two facts that make this a trap rather than a one-off are asserted
-    /// here, so whoever hoists the stores again has to read why not.
+    /// The synchronous keychain read at the far end of that chain is a defect in
+    /// its own right and is filed as HORO-1368 — this test deliberately does NOT
+    /// assert on `AiProviderPreferencesView`'s or `GlomerisLlmSettingsStore`'s
+    /// internals to prove the chain exists. Pinning another file's private
+    /// implementation from here would mean HORO-1368's fix has to come back and
+    /// edit a test about scene state, and a guard that fires on the repair is
+    /// worse than no guard.
     func testTheAppSceneHoldsNoObservableStateBecauseItsBodyBuildsTheSettingsTabs() throws {
         let app = try strippedOfComments(readSource("GlomerisMenuBarApp.swift"))
         XCTAssertFalse(
@@ -262,22 +375,21 @@ final class OverviewStateTests: XCTestCase {
         )
         XCTAssertFalse(app.contains("@State"), "same reason: any observable scene state does it")
 
-        // Fact one: the Settings tabs really are constructed by `App.body`.
+        // The one fact this file can honestly own: the Settings tabs really are
+        // constructed by `App.body`, so a scene-level publish reaches them.
         XCTAssertTrue(
             app.contains("AiProviderPreferencesView()"),
             "if this pane moves, re-check whether the keychain read is still on this path"
         )
 
-        // Fact two: constructing that pane really does read the keychain.
-        let pane = try strippedOfComments(readSource("AiProviderPreferencesView.swift"))
-        XCTAssertTrue(
-            pane.contains("_status = State(initialValue: store.status())"),
-            "the init-time read is the hazard; if it moves off init, this rule can relax"
-        )
-        let store = try strippedOfComments(readSource("GlomerisLlmSettingsStore.swift"))
-        XCTAssertTrue(
-            store.contains("stored: hasStoredApiKey"),
-            "status() must still be what reaches the keychain for this to be the trap"
+        // And the popover must not be given an identity the scene can change.
+        // `.id()` on the content view is the one modifier that would let a
+        // scene-level re-evaluation discard the popover root's `@StateObject`s
+        // — the exact ownership this fix depends on — without any of the
+        // clearing patterns the other guards look for.
+        XCTAssertFalse(
+            app.contains(".id("),
+            "an identity on the popover would let the scene throw the stores away"
         )
     }
 
@@ -310,13 +422,29 @@ final class OverviewStateTests: XCTestCase {
         )
         XCTAssertFalse(source.contains("UserDefaults"), "these stores are not persistence")
 
-        for file in ["CandidatesSectionView.swift", "AiPlanSectionView.swift"] {
-            let card = try readSource(file)
-            XCTAssertFalse(
-                card.contains(".onChange("),
-                "\(file) must have no state-clearing trigger outside its own button"
-            )
-            XCTAssertFalse(card.contains(".onReceive("), "\(file) must not react to a publisher")
+        // The shell is in this list too, and it is the important one: it is what
+        // owns the stores now, so a trigger there could clear a completed scan
+        // for the whole app rather than for one card. Leaving it out was how the
+        // first version of this guard managed to cover only the views that
+        // cannot do the damage.
+        for file in [
+            "GlomerisPopoverView.swift",
+            "CandidatesSectionView.swift",
+            "AiPlanSectionView.swift",
+        ] {
+            let source = try strippedOfComments(readSource(file))
+            // Each of these is a route to "something other than a button
+            // decided the state should change". `.onAppear` is the one worth
+            // spelling out: it is how a view-lifecycle event — which a
+            // drill-down and a back press both produce — would get to write the
+            // stores again, which is this ticket's defect with a different
+            // trigger.
+            for trigger in [".onChange(", ".onReceive(", ".onAppear", ".onDisappear", "Timer", "NotificationCenter"] {
+                XCTAssertFalse(
+                    source.contains(trigger),
+                    "\(file) contains \(trigger): the state must change only from an explicit button"
+                )
+            }
         }
     }
 
@@ -345,14 +473,153 @@ final class OverviewStateTests: XCTestCase {
     /// which is what SwiftUI does on every body re-evaluation, and what a
     /// drill-down and a back press do to the overview.
     ///
-    /// The shell is built with no arguments on purpose: it owns the stores, so
-    /// there is nothing to inject, and the cards are then built against the
-    /// stores under test directly. The result is deliberately discarded — the
-    /// assertion is always about the stores afterwards, never about the views.
+    /// Only the two cards, not the shell: the shell is what owns the stores, so
+    /// constructing one here would build a second pair of stores unrelated to
+    /// the ones under test — and, through its defaulted `ProjectRootsStore`,
+    /// open the real `UserDefaults` suite to do it. The result is deliberately
+    /// discarded; the assertion is always about the stores afterwards.
     private func buildOverview(scan: ScanState, plan: PlanState) {
-        _ = GlomerisPopoverView()
         _ = CandidatesSectionView(scan: scan)
         _ = AiPlanSectionView(plan: plan)
+    }
+
+    // MARK: - The fixture binary
+    //
+    // The same compiled Mach-O helper `GlomerisClientTests` builds, under the
+    // same revision-suffixed name on purpose: an unsuffixed or differently-named
+    // copy would be built once by whichever suite ran first and then never
+    // rebuilt when the `.c` changed, which is precisely the staleness the suffix
+    // exists to prevent.
+    //
+    // It is handed its script through `GLOMERIS_FIXTURE_STDOUT` /
+    // `GLOMERIS_FIXTURE_EXIT` rather than through argv, because here the
+    // arguments are chosen by the production code under test (`runDetect` builds
+    // `["detect", "--json", "--progress-json"] + roots`), not by the test.
+
+    private static let fixtureStdoutVariable = "GLOMERIS_FIXTURE_STDOUT"
+    private static let fixtureExitVariable = "GLOMERIS_FIXTURE_EXIT"
+
+    private static func fixtureBinary() throws -> URL {
+        let binaryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glomeris-client-fixture-helper-v3")
+        guard !FileManager.default.isExecutableFile(atPath: binaryURL.path) else { return binaryURL }
+
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // Tests
+            .appendingPathComponent("Fixtures/glomeris_fixture_helper.c")
+        let clang = Process()
+        clang.executableURL = URL(fileURLWithPath: "/usr/bin/clang")
+        clang.arguments = ["-O0", "-o", binaryURL.path, sourceURL.path]
+        try clang.run()
+        clang.waitUntilExit()
+        return binaryURL
+    }
+
+    /// A client pinned to the fixture, with the fixture's script in the
+    /// client's own environment. Good for `runDetect`, which spawns with
+    /// whatever environment its client carries.
+    private static func fixtureClient(stdout: String, exitCode: Int32 = 0) throws -> GlomerisClient {
+        GlomerisClient(
+            executableURL: try fixtureBinary(),
+            // A complete environment, as `GlomerisClient` requires — and a
+            // deliberately tiny one. The fixture is spawned by absolute path
+            // and reads nothing else, so there is nothing here to inherit.
+            environment: [
+                fixtureStdoutVariable: stdout,
+                fixtureExitVariable: String(exitCode),
+            ]
+        )
+    }
+
+    /// For `runLlmPlan` only, which replaces the child environment wholesale
+    /// from `GlomerisLlmSettingsStore.childEnvironment()` — so the script has to
+    /// be in this process's environment for `childEnvironment()` to carry it
+    /// through. Always paired with `clearFixtureEnvironment()` in a `defer`.
+    private static func setFixtureEnvironment(stdout: String, exitCode: Int32 = 0) {
+        setenv(fixtureStdoutVariable, stdout, 1)
+        setenv(fixtureExitVariable, String(exitCode), 1)
+    }
+
+    private static func clearFixtureEnvironment() {
+        unsetenv(fixtureStdoutVariable)
+        unsetenv(fixtureExitVariable)
+    }
+
+    /// A settings store that reads no keychain and writes no shared defaults.
+    ///
+    /// Both halves matter. `childEnvironment()` reads the API key from the
+    /// credential store at spawn time, and an `InMemoryCredentialStore` keeps
+    /// that off the real keychain — no `SecItemCopyMatching`, so no
+    /// authorisation prompt can appear in the middle of a test run. The
+    /// throwaway suite keeps the endpoint and model out of the app's own
+    /// `UserDefaults`, which on this machine belongs to a running app.
+    private static func settingsStoreThatTouchesNoKeychain() -> GlomerisLlmSettingsStore {
+        GlomerisLlmSettingsStore(
+            defaults: UserDefaults(suiteName: "dev.glomeris.GlomerisMenuBarTests.HORO-1365"),
+            credentials: InMemoryCredentialStore()
+        )
+    }
+
+    // MARK: - Fixture payloads
+    //
+    // Hand-written rather than built by encoding the DTOs: these have to be
+    // what the CLI's `Serialize` output looks like on the wire, and a round trip
+    // through the app's own `Decodable` mirrors would prove only that the
+    // mirrors agree with themselves. The key spelling is snake_case for the same
+    // reason (`GlomerisDtos.swift`'s `CodingKeys`).
+
+    private static func candidateJSON(
+        resourceId: String,
+        policyLabel: String = "AUTO_SAFE",
+        executable: Bool = true
+    ) -> String {
+        """
+        {
+          "resource_id": "\(resourceId)",
+          "kind": "node_modules",
+          "reclaimable_bytes": 1048576,
+          "reclaimable_human": "1.0 MB",
+          "reclaimable_bytes_is_lower_bound": false,
+          "impact_tier": "normal",
+          "policy_label": "\(policyLabel)",
+          "reasons": ["regenerable"],
+          "executable": \(executable),
+          "offered_actions": [
+            {"action_id": "node.clean.node_modules", "requires_confirmation": false}
+          ],
+          "refusal_reason": null
+        }
+        """
+    }
+
+    private static func detectReportJSON(resourceId: String) -> String {
+        """
+        {"candidates": [\(candidateJSON(resourceId: resourceId))]}
+        """
+    }
+
+    private static func planReportJSON(resourceId: String) -> String {
+        """
+        {
+          "items": [
+            {
+              "resource_id": "\(resourceId)",
+              "policy_label": "AUTO_SAFE",
+              "requested_action_id": "node.clean.node_modules",
+              "priority": 1,
+              "model_reason": "regenerable dependencies",
+              "explain": null,
+              "skip_reason": null,
+              "candidate": \(candidateJSON(resourceId: resourceId)),
+              "completeness": "complete",
+              "confidence": "high"
+            }
+          ],
+          "dropped_unknown_resource": 0,
+          "dropped_unknown_action": 0,
+          "provider_error": null
+        }
+        """
     }
 
     private func candidate(
