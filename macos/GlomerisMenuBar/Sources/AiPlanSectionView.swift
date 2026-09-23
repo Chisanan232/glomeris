@@ -430,6 +430,12 @@ struct AiPlanSectionView: View {
     private var controlRow: some View {
         HStack(spacing: GlomerisDesign.inlineSpacing) {
             Button(plan.isPlanning ? "Asking…" : "Ask AI for a plan") {
+                // Set here as well as in `runLlmPlan`, for the reason given on
+                // the Refresh button — and with a worse consequence if the
+                // window is hit: a second tap would overwrite `planTask`,
+                // orphaning the first request where Stop can no longer reach it,
+                // and paying a provider twice for one question.
+                plan.isPlanning = true
                 plan.planTask = Task { await runLlmPlan() }
             }
             .disabled(plan.isPlanning)
@@ -683,7 +689,21 @@ struct AiPlanSectionView: View {
     ///
     /// `runRaw` rather than `run` on purpose: exit 1 still carries a full
     /// report on stdout. See the file header and `AiPlanInterpretation`.
-    private func runLlmPlan() async {
+    ///
+    /// `@MainActor` for the same reason as `CandidatesSectionView.runDetect()`
+    /// — read that doc comment for what the annotation does and does not claim
+    /// — and with one extra beneficiary here: `plan.planTask` is a plain `var`
+    /// on a shared object, written from this function and from the Ask button
+    /// and read by Stop. With all three on the main actor there is no window in
+    /// which a finishing request nils the handle while Stop is reading it, which
+    /// would have cancelled nothing and left a child `glomeris llm-plan` running
+    /// and a provider request still billable.
+    ///
+    /// `internal` rather than `private` so the tests can drive it against a
+    /// pinned fixture binary. Its one production call site is still the Ask
+    /// button.
+    @MainActor
+    func runLlmPlan() async {
         plan.isPlanning = true
         plan.progressStatusText = nil
         plan.lastErrorMessage = nil

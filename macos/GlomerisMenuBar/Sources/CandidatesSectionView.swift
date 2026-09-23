@@ -394,6 +394,15 @@ struct CandidatesSectionView: View {
     private var controlRow: some View {
         HStack(spacing: GlomerisDesign.inlineSpacing) {
             Button(scan.isScanning ? "Scanning…" : "Refresh") {
+                // Set here as well as in `runDetect`, so `.disabled` below has
+                // something to act on before the scan begins: a `Task` body does
+                // not start until this action returns, so between the tap and
+                // the flag landing the button is still live. The window is one
+                // main-actor turn wide and a second mouse click inside it is
+                // unlikely rather than impossible — but the state is shared now,
+                // and two concurrent scans writing one `ScanState` is not a
+                // race worth leaving open for the sake of one line.
+                scan.isScanning = true
                 Task { await runDetect() }
             }
             .disabled(scan.isScanning)
@@ -596,7 +605,33 @@ struct CandidatesSectionView: View {
     /// with `--progress-json`, always in direct response to the Refresh
     /// button's action closure above, never from an appear-triggered task, a `Timer`,
     /// or any re-scan loop.
-    private func runDetect() async {
+    ///
+    /// `@MainActor` for the reason `StatusHealthSectionView.refresh()` gives at
+    /// length, and since HORO-1365 for a second one: every assignment below is
+    /// to a `@Published` property of a `ScanState` that a live view is
+    /// subscribed to, so each one sends `objectWillChange`, and publishing that
+    /// from a background thread is unsupported.
+    ///
+    /// Stated precisely, because it is easy to overclaim: this is a guarantee,
+    /// not a repair. Measured on this target — Swift 5 language mode, no strict
+    /// concurrency — removing the annotation and driving the production shape
+    /// (`Task { await runDetect() }` created from a main-actor button action)
+    /// still landed every write on the main thread, because an unstructured
+    /// `Task {}` inherits the context it was created in and a `nonisolated
+    /// async` callee here does not hop off it. Under Swift 6 semantics it would,
+    /// and the writes would then publish from the cooperative pool with nothing
+    /// in the source to notice. The annotation makes the property a compile-time
+    /// fact instead of a consequence of the language mode.
+    ///
+    /// The isolation costs no concurrency: the time here is spent suspended on
+    /// subprocess I/O, and `GlomerisClient` already reads the pipes off the main
+    /// thread.
+    ///
+    /// `internal` rather than `private` so the tests can drive it against a
+    /// pinned fixture binary and assert on the store afterwards. Its one
+    /// production call site is still the Refresh button.
+    @MainActor
+    func runDetect() async {
         scan.isScanning = true
         scan.progressStatusText = nil
         scan.lastErrorMessage = nil
