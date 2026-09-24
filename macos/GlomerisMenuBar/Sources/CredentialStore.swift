@@ -102,9 +102,19 @@ protocol CredentialStore: Sendable {
 /// surfaced, because a status code cannot help a user and a message built
 /// around the item risks carrying it.
 struct KeychainCredentialStore: CredentialStore {
-    /// Matches the UserDefaults suite name and the bundle identifier, so all
-    /// of this app's stored state is findable under one name.
-    static let service = "dev.glomeris.GlomerisMenuBar"
+    /// The running bundle's identifier, which is also the domain
+    /// `UserDefaults.standard` writes to, so all of this app's stored state is
+    /// findable under one name — and under a *different* one in a build with a
+    /// different identifier.
+    ///
+    /// HORO-1456: this was the literal `dev.glomeris.GlomerisMenuBar`. Equal to
+    /// the release identifier, so no shipped build changes behaviour here and
+    /// no stored key needs migrating; the difference is that a diagnostic or
+    /// beta build now gets its own keychain items instead of the user's, with
+    /// no source file to remember to patch. See `BundleIdentity` for what this
+    /// resolves to in a test process, where it is deliberately neither the
+    /// release identifier nor a crash.
+    static let service = BundleIdentity.current
 
     private let service: String
 
