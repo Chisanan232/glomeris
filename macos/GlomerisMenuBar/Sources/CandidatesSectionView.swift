@@ -182,24 +182,24 @@ struct CandidateRowViewModel: Equatable, Identifiable {
     ///
     /// It goes after the badges and before the path, which is where the AI
     /// plan card's row puts its verdict lines too.
+    ///
+    /// HORO-1451 moved the termination rule this row invented into
+    /// `SpokenLabel`, unchanged in effect: every clause still ends in exactly
+    /// one sentence mark and the CLI's reason is still passed through
+    /// verbatim. It was the only one of five spoken labels in this app getting
+    /// that right, which is precisely why it should not have been living here.
+    /// The one behavioural difference is that a clause already ending in "!" or
+    /// "?", or in a quotation mark after a period, no longer gets a second
+    /// full stop.
     var accessibilityLabel: String {
-        var label = "\(kindTerm.title). \(safetyTerm.axis): \(safetyTerm.title). "
-            + "\(impactTerm.axis): \(impactTerm.title)."
-        if let impactTierTerm {
-            label += " \(impactTierTerm.title)."
-        }
-        // Terminated if it is not already. The refusal cases return the CLI's
-        // sentence, and the CLI's reason strings carry no trailing period, so
-        // without this the reason runs straight into "Path:" with no pause —
-        // the only unterminated clause in the label. Punctuation only: the
-        // reason's own words are untouched, which is the invariant that
-        // matters.
-        let sentence = actionability.sentence
-        label += " \(CandidateActionability.axis): \(sentence)"
-        if !sentence.hasSuffix(".") {
-            label += "."
-        }
-        return label + " Path: \(id)."
+        SpokenLabel.compose([
+            kindTerm.title,
+            SpokenLabel.clause(safetyTerm.axis, safetyTerm.title),
+            SpokenLabel.clause(impactTerm.axis, impactTerm.title),
+            impactTierTerm?.title,
+            SpokenLabel.clause(CandidateActionability.axis, actionability.sentence),
+            "Path: \(id)",
+        ])
     }
 
     init(_ dto: DetectCandidateReportDto) {

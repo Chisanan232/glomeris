@@ -283,6 +283,70 @@ final class HistoryAuditSectionViewTests: XCTestCase {
         XCTAssertTrue(label.contains(GlomerisVocabulary.sourceAxis), label)
     }
 
+    // MARK: - HORO-1451: the joins, not the parts
+
+    /// The whole label, so the clause boundaries are pinned rather than assumed.
+    /// `timeText` is a formatted date and is therefore read from the row rather
+    /// than written out — everything after it is this label's own doing.
+    ///
+    /// This row's own bug was small and in the opposite direction from the AI
+    /// plan card's: it appended "." to `abort_reason` unconditionally, so a
+    /// reason Rust had already terminated was spoken with two.
+    func testTheWholeAuditLabelIsSpokenAsSentences() {
+        let row = ActionHistoryRowViewModel(abortedDto())
+
+        XCTAssertEqual(
+            row.accessibilityLabel,
+            "\(row.timeText). docker.clean.build_cache. Outcome: Stopped safely. "
+                + "ResourceIdentityChanged. Triggered by: Automatic recovery. "
+                + "Safety: Asks first. Path: docker_build_cache:docker."
+        )
+    }
+
+    /// An `abort_reason` that is a sentence rather than a discriminant. Rust's
+    /// abort reasons are free text and some of them end in a period, which the
+    /// old unconditional append turned into "…nothing was modified.. Triggered
+    /// by: …".
+    func testAnAbortReasonThatAlreadyEndsInAPeriodIsNotGivenASecond() {
+        let dto = ActionHistoryEventReportDto(
+            timestamp: 1_700_000_600,
+            actionId: "docker.clean.build_cache",
+            resourceId: "docker_build_cache:docker",
+            policyLabel: "ASK",
+            outcome: "aborted_by_revalidation",
+            abortReason: "The resource changed after the plan was made. Nothing was modified.",
+            actualReclaimedBytes: nil,
+            actualReclaimedHuman: nil,
+            source: "free"
+        )
+        let row = ActionHistoryRowViewModel(dto)
+
+        XCTAssertEqual(
+            row.accessibilityLabel,
+            "\(row.timeText). docker.clean.build_cache. Outcome: Stopped safely. "
+                + "The resource changed after the plan was made. Nothing was modified. "
+                + "Triggered by: Automatic recovery. Safety: Asks first. "
+                + "Path: docker_build_cache:docker."
+        )
+        XCTAssertFalse(row.accessibilityLabel.contains(".."), row.accessibilityLabel)
+    }
+
+    /// The optional clauses on this row are `reclaimedText` and `detailText`,
+    /// and a successful record has one of each state: a reclaimed figure and no
+    /// abort reason. A dropped clause must leave no doubled space and no
+    /// stranded period behind it.
+    func testASucceededRecordDropsItsAbsentClausesCleanly() {
+        let row = ActionHistoryRowViewModel(autoSafeSucceededDto())
+
+        XCTAssertEqual(
+            row.accessibilityLabel,
+            "\(row.timeText). cargo.clean.target_dir. Outcome: Cleaned. reclaimed 2.0 GB. "
+                + "Triggered by: You. Safety: Safe to reclaim. "
+                + "Path: cargo_target_dir:/Users/dev/proj/target."
+        )
+        XCTAssertFalse(row.accessibilityLabel.contains("  "), row.accessibilityLabel)
+    }
+
     // MARK: - One error per list
 
     /// Both lists are fetched concurrently and each used to write the same

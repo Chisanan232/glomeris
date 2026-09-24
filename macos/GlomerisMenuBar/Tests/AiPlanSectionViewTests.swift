@@ -329,6 +329,167 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertTrue(label.contains("Path: cargo_target_dir:/Users/dev/proj/target."))
     }
 
+    // MARK: - HORO-1451: the joins, not the parts
+    //
+    // Every assertion above this section is a `contains`, which is precisely
+    // how the defect survived: each clause was present, and the string that
+    // joined them was heard as one unpunctuated run. The tests below assert the
+    // whole label by equality, so where one clause ends and the next begins is
+    // pinned rather than assumed.
+    //
+    // The expected strings are written out here by hand rather than assembled
+    // from the row's own terms. A test that rebuilt the label the way the
+    // implementation does would agree with any implementation, including the
+    // broken one.
+
+    /// The reported row. The fixture's PROTECTED suggestion is the one shape
+    /// that carries BOTH refusal clauses — the planner's "no action was
+    /// rendered" and the candidate's policy reason — plus a model quotation and
+    /// a path, and Rust terminates none of the three.
+    ///
+    /// Before this ticket this read "…High confidence. PROTECTED — no cleanup
+    /// action is ever rendered for this resource PROTECTED:
+    /// protected_credential_material The model's reason, which is advice and not
+    /// a verdict: looks like a stale build directory Path: …" — three
+    /// unterminated joins, and a listener with no way to tell where the refusal
+    /// stopped and the model's opinion started.
+    func testTheRefusedSuggestionsWholeLabelIsSpokenAsSentences() throws {
+        let row = AiPlanRowViewModel(try goldenPlan().items[2])
+
+        XCTAssertEqual(
+            row.accessibilityLabel,
+            "Rust build output. Safety: Protected. Storage impact: 1.0 KB. "
+                + "Evidence: Fully measured. Confidence: High confidence. "
+                + "Cleanup: PROTECTED \u{2014} no cleanup action is ever rendered for this "
+                + "resource. PROTECTED: protected_credential_material. "
+                + "The model's reason, which is advice and not a verdict: "
+                + "looks like a stale build directory. "
+                + "Path: cargo_target_dir:/Users/dev/.ssh/id_ed25519."
+        )
+    }
+
+    /// One refusal clause rather than two, and no model reason at all — the
+    /// planner explained itself and the candidate gave no reason of its own.
+    /// The clause count changes; the punctuation does not.
+    func testASingleRefusalClauseIsAlsoTerminated() throws {
+        let row = AiPlanRowViewModel(
+            try decodeReport(Self.plannerExplainedRefusalPlanJSON).items[0]
+        )
+
+        XCTAssertEqual(
+            row.accessibilityLabel,
+            "Rust build output. Safety: Not enough evidence. Storage impact: Size unknown. "
+                + "Evidence: Measurement failed. Confidence: Low confidence. "
+                + "Cleanup: the model named an action that does not exist. Path: x:/tmp/x."
+        )
+    }
+
+    /// Absent optional clauses. This row has no impact tier and no model
+    /// reason, so two of the eight clauses are missing — and a dropped clause
+    /// must leave no trace, neither a doubled space nor a stranded period.
+    func testAnAskSuggestionWithNoOptionalClausesLeavesNoResidue() throws {
+        let label = AiPlanRowViewModel(try goldenPlan().items[1]).accessibilityLabel
+
+        XCTAssertEqual(
+            label,
+            "node_modules. Safety: Asks first. Storage impact: 512.0 MB. "
+                + "Evidence: Partly measured. Confidence: Medium confidence. "
+                + "Cleanup: Glomeris will ask you to confirm this before anything runs. "
+                + "Path: node_modules:/Users/dev/proj/node_modules."
+        )
+        XCTAssertFalse(label.contains("  "), label)
+    }
+
+    /// The other half of the same defect. This row's cleanup sentence and model
+    /// reason both already end in a period — `ApplyPlanView` joined with ". "
+    /// and produced "…review it and clean.. " from exactly this shape — and the
+    /// permitted sentence also has an interior full stop, which a rule that
+    /// counted marks rather than looking at the end would trip over.
+    func testAPermittedSuggestionGainsNoSecondFullStop() throws {
+        let label = AiPlanRowViewModel(try goldenPlan().items[0]).accessibilityLabel
+
+        XCTAssertEqual(
+            label,
+            "Rust build output. Safety: Safe to reclaim. Storage impact: 2.0 GB. "
+                + "Worth a look. Evidence: Fully measured. Confidence: High confidence. "
+                + "Cleanup: Glomeris is willing to run this. Open the row to review it and "
+                + "clean. The model's reason, which is advice and not a verdict: "
+                + "Largest build output and nothing is using it. "
+                + "Path: cargo_target_dir:/Users/dev/proj/target."
+        )
+        XCTAssertFalse(label.contains(".."), label)
+    }
+
+    /// A long refusal and a quoted model sentence, together. Both are the cases
+    /// where a composer is most tempted to intervene: the refusal is 300-odd
+    /// characters of the planner's own words, and the quotation's last character
+    /// is a quote mark sitting behind the period that really does end it.
+    func testALongRefusalAndAQuotedModelReasonAreBothSpokenWhole() throws {
+        let refusal = "cargo.clean.target_dir cannot be planned for this resource: "
+            + "the manifest at /Users/dev/proj/Cargo.toml names a workspace member that is "
+            + "missing, so the planner cannot establish which target directory this resource "
+            + "corresponds to and has nothing it could delete"
+        let modelReason = "The directory \u{201C}looks stale to me.\u{201D}"
+        let json = """
+        {"items":[{"resource_id":"cargo_target_dir:/Users/dev/proj/target",
+          "policy_label":"AUTO_SAFE","requested_action_id":null,"priority":1,
+          "model_reason":"\(modelReason)","explain":null,"skip_reason":null,
+          "candidate":{"resource_id":"cargo_target_dir:/Users/dev/proj/target",
+            "kind":"cargo_target_dir","reclaimable_bytes":1024,"reclaimable_human":"1.0 KB",
+            "reclaimable_bytes_is_lower_bound":false,"impact_tier":null,
+            "policy_label":"AUTO_SAFE","reasons":[],"executable":false,
+            "offered_actions":[],"refusal_reason":"\(refusal)"},
+          "completeness":"complete","confidence":"high"}],
+         "dropped_unknown_resource":0,"dropped_unknown_action":0,"provider_error":null}
+        """
+        let label = AiPlanRowViewModel(try decodeReport(json).items[0]).accessibilityLabel
+
+        // Neither shortened nor reflowed: the refusal appears whole, once.
+        XCTAssertTrue(label.contains("Cleanup: \(refusal)."), label)
+        // The quotation keeps the mark it already had and gains no second one.
+        XCTAssertTrue(label.contains("and not a verdict: \(modelReason) Path:"), label)
+        XCTAssertFalse(label.contains(".."), label)
+        XCTAssertFalse(label.contains("\u{201D}."), label)
+    }
+
+    /// One resource, two lists, one description of it. The candidates list and
+    /// the AI plan card build their own labels from the same
+    /// `DetectCandidateReportDto`, and before HORO-1451 only the candidates list
+    /// terminated its cleanup clause — so the same refusal was spoken two
+    /// different ways depending on which list the user was in.
+    ///
+    /// Asserted on a plan item with no `skip_reason`, because that is the shape
+    /// where the two rows genuinely have the same thing to say. When the planner
+    /// does add a statement of its own, the plan row says more by design.
+    func testTheSameRefusalIsSpokenIdenticallyInBothLists() throws {
+        let refusal = "no registered cleanup action for this resource kind"
+        let json = """
+        {"items":[{"resource_id":"docker_images:docker","policy_label":"ASK",
+          "requested_action_id":null,"priority":1,"model_reason":null,"explain":null,
+          "skip_reason":null,
+          "candidate":{"resource_id":"docker_images:docker","kind":"docker_images",
+            "reclaimable_bytes":1024,"reclaimable_human":"1.0 KB",
+            "reclaimable_bytes_is_lower_bound":false,"impact_tier":null,"policy_label":"ASK",
+            "reasons":[],"executable":false,"offered_actions":[],
+            "refusal_reason":"\(refusal)"},
+          "completeness":"complete","confidence":"high"}],
+         "dropped_unknown_resource":0,"dropped_unknown_action":0,"provider_error":null}
+        """
+        let item = try decodeReport(json).items[0]
+
+        let planLabel = AiPlanRowViewModel(item).accessibilityLabel
+        let candidateLabel = CandidateRowViewModel(item.candidate).accessibilityLabel
+
+        let clause = "\(CandidateActionability.axis): \(refusal)."
+        XCTAssertTrue(planLabel.contains(clause), planLabel)
+        XCTAssertTrue(candidateLabel.contains(clause), candidateLabel)
+
+        // And the same clause reaches "Path:" the same way in both, which is the
+        // join the defect broke.
+        XCTAssertTrue(planLabel.contains("\(clause) Path:"), planLabel)
+        XCTAssertTrue(candidateLabel.contains("\(clause) Path:"), candidateLabel)
+    }
+
     // MARK: - The exit-code contract
 
     func testExitZeroWithAReportIsAPlan() throws {

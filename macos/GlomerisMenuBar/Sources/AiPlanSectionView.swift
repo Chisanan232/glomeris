@@ -284,28 +284,56 @@ struct AiPlanRowViewModel: Equatable {
     /// least afford to be summarised.
     let machineVerdictLines: [String]
 
-    /// One sentence for VoiceOver, because the row is a single button.
+    /// What VoiceOver reads, because the row is a single button.
     ///
     /// Ordered deliberately: what it is, what Glomeris will permit, how much
     /// is at stake, how well it is known, and only THEN what the model said,
     /// explicitly attributed. A screen-reader user hears the machine's
     /// verdict before the model's opinion, which is the same priority a
     /// sighted user gets from the badges sitting above the quotation.
+    ///
+    /// # HORO-1451
+    ///
+    /// This used to append each clause with a bare space, so a refused
+    /// suggestion — the one row that can least afford to be summarised — was
+    /// heard as an unpunctuated run: the skip reason, the reason code, the
+    /// model's sentence and the path all ran into one another, because every
+    /// one of those four is a fragment Rust does not terminate. On screen they
+    /// are separate `Text` views and layout supplies the boundary, which is why
+    /// nothing but the live accessibility tree showed it.
+    ///
+    /// Two changes, both matching what `CandidateRowViewModel` has done since
+    /// HORO-1323 so that one resource does not describe itself two ways in two
+    /// lists. `SpokenLabel` terminates each clause exactly once, and the
+    /// verdict carries the cleanup axis so a listener knows which question the
+    /// refusal is answering. The refusal text itself is untouched.
+    ///
+    /// The axis names the verdict once rather than once per line. There can be
+    /// two lines — the planner's "no action was rendered at all" and the
+    /// candidate's "here is the policy reason" — and they are two statements on
+    /// the same axis, so "Cleanup: A. B." is what they are. Repeating the
+    /// prefix would claim they were about different things.
     var accessibilityLabel: String {
-        var label = "\(kindTerm.title). \(safetyTerm.axis): \(safetyTerm.title). "
-            + "\(impactTerm.axis): \(impactTerm.title)."
-        if let impactTierTerm {
-            label += " \(impactTierTerm.title)."
-        }
-        label += " \(completenessTerm.axis): \(completenessTerm.title). "
-            + "\(confidenceTerm.axis): \(confidenceTerm.title)."
-        for line in machineVerdictLines {
-            label += " \(line)"
+        var clauses: [String?] = [
+            kindTerm.title,
+            SpokenLabel.clause(safetyTerm.axis, safetyTerm.title),
+            SpokenLabel.clause(impactTerm.axis, impactTerm.title),
+            impactTierTerm?.title,
+            SpokenLabel.clause(completenessTerm.axis, completenessTerm.title),
+            SpokenLabel.clause(confidenceTerm.axis, confidenceTerm.title),
+        ]
+        for (index, line) in machineVerdictLines.enumerated() {
+            clauses.append(index == 0 ? SpokenLabel.clause(CandidateActionability.axis, line) : line)
         }
         if let modelReason {
-            label += " The model's reason, which is advice and not a verdict: \(modelReason)"
+            // Attribution and quotation are ONE clause on purpose. Split into
+            // two they would be two sentences, and a listener arriving at the
+            // second one late would hear the model's opinion in the same
+            // grammatical position as Glomeris's verdicts above it.
+            clauses.append("The model's reason, which is advice and not a verdict: \(modelReason)")
         }
-        return label + " Path: \(resourceId)."
+        clauses.append("Path: \(resourceId)")
+        return SpokenLabel.compose(clauses)
     }
 
     init(_ dto: LlmPlanItemReportDto) {

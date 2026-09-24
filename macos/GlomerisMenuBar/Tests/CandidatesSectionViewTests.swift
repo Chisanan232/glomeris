@@ -670,6 +670,57 @@ final class CandidatesSectionViewTests: XCTestCase {
         }
     }
 
+    /// HORO-1451. The two tests above check the cleanup clause's ending; this
+    /// one checks the whole label, because this row's termination rule moved out
+    /// to `SpokenLabel` and "the clause still ends in a period" would also hold
+    /// of a composer that had quietly changed something else — a dropped axis, a
+    /// doubled space where the impact tier used to be, a reordered clause.
+    ///
+    /// Written out by hand rather than assembled from `row`'s own terms: a test
+    /// that rebuilt the label the way the implementation does would agree with
+    /// any implementation.
+    func testTheWholeRowLabelIsSpokenAsSentences() {
+        let refused = CandidateRowViewModel(
+            candidate(
+                kind: "node_modules",
+                human: "310 MB",
+                policyLabel: "PROTECTED",
+                resourceId: "/Users/dev/proj/node_modules",
+                impactTier: "large",
+                executable: false,
+                refusalReason: "PROTECTED: protected_user_documents"
+            )
+        )
+        XCTAssertEqual(
+            refused.accessibilityLabel,
+            "node_modules. Safety: Protected. Storage impact: 310 MB. Biggest wins. "
+                + "Cleanup: PROTECTED: protected_user_documents. "
+                + "Path: /Users/dev/proj/node_modules."
+        )
+
+        // The same row without the optional tier, and with a cleanup sentence
+        // that already ends in a period — the two ways the label can change
+        // shape, neither of which may alter its punctuation.
+        let cleanable = CandidateRowViewModel(
+            candidate(
+                kind: "cargo_target_dir",
+                human: "2.0 GB",
+                resourceId: "/Users/dev/proj/target",
+                executable: true,
+                offeredActions: [
+                    OfferedActionDto(actionId: "cargo.clean.target_dir", requiresConfirmation: false),
+                ]
+            )
+        )
+        XCTAssertEqual(
+            cleanable.accessibilityLabel,
+            "Rust build output. Safety: Safe to reclaim. Storage impact: 2.0 GB. "
+                + "Cleanup: Glomeris is willing to run this. Open the row to review it and clean. "
+                + "Path: /Users/dev/proj/target."
+        )
+        XCTAssertFalse(cleanable.accessibilityLabel.contains(".."), cleanable.accessibilityLabel)
+    }
+
     /// The row renders the badge but must not gain an enablement decision from
     /// it. This file's only `.disabled(...)` is the Refresh button's, on
     /// `scan.isScanning`, and it stays the only one: nothing in the candidate

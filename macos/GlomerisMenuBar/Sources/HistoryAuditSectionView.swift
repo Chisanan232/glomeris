@@ -149,21 +149,21 @@ struct ActionHistoryRowViewModel: Equatable, Identifiable {
     /// Why it stopped, verbatim from `abort_reason`.
     let detailText: String?
 
+    /// HORO-1451. `detailText` is `abort_reason` verbatim and this appended a
+    /// period to it unconditionally, so a reason Rust had already terminated
+    /// was read with two. The clauses are otherwise exactly the ones this row
+    /// always spoke, in the same order.
     var accessibilityLabel: String {
-        var parts = [
-            "\(timeText). \(actionId).",
-            "\(outcomeTerm.axis): \(outcomeTerm.title).",
-        ]
-        if let reclaimedText {
-            parts.append("\(reclaimedText).")
-        }
-        if let detailText {
-            parts.append("\(detailText).")
-        }
-        parts.append("\(sourceTerm.axis): \(sourceTerm.title).")
-        parts.append("\(safetyTerm.axis): \(safetyTerm.title).")
-        parts.append("Path: \(resourceId).")
-        return parts.joined(separator: " ")
+        SpokenLabel.compose([
+            timeText,
+            actionId,
+            SpokenLabel.clause(outcomeTerm.axis, outcomeTerm.title),
+            reclaimedText,
+            detailText,
+            SpokenLabel.clause(sourceTerm.axis, sourceTerm.title),
+            SpokenLabel.clause(safetyTerm.axis, safetyTerm.title),
+            "Path: \(resourceId)",
+        ])
     }
 
     init(_ dto: ActionHistoryEventReportDto) {

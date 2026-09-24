@@ -824,6 +824,113 @@ final class ApplyPlanViewTests: XCTestCase {
         XCTAssertTrue(spoken.contains("/Users/x/proj/target"), spoken)
     }
 
+    // MARK: - HORO-1451: the joins, not the parts
+    //
+    // Both labels above are `contains` checks, and both of this surface's spoken
+    // labels were wrong in opposite directions while passing them. The step
+    // label joined with ". " over clauses that already ended in one; the result
+    // label interpolated Rust's outcome sentence with a bare space. The tests
+    // below assert the assembled string, with the expected text written out by
+    // hand rather than rebuilt from the same terms the implementation reads.
+
+    /// A step whose cleanup clause is a permitted sentence. This is the shape
+    /// that produced "…review it and clean.. Path: …" — the app's own sentence
+    /// ends in a period, the old `". "` join added a second one, and the result
+    /// was a stutter on the surface that asks the user for permission to delete
+    /// things.
+    func testAPermittedStepsLabelGainsNoSecondFullStop() throws {
+        let runnable = PlanApplicationStep(explain: try JSONDecoder().decode(
+            ExplainReportDto.self,
+            from: Data(Self.explainJson(kind: "cargo_target_dir").utf8)
+        ))
+
+        XCTAssertEqual(
+            ApplyPlanView.stepAccessibilityLabel(runnable, group: "Will run"),
+            "Will run: Rust build output. Storage impact: 8.0 MB. Safety: Safe to reclaim. "
+                + "Evidence shows a tool can recreate this and nothing is using it, so Glomeris "
+                + "can reclaim it without asking. "
+                + "Cleanup: Glomeris is willing to run this. Open the row to review it and clean. "
+                + "Path: /Users/x/proj/target."
+        )
+    }
+
+    /// And a step whose cleanup clause is the CLI's refusal, which carries no
+    /// mark of its own — the same clause, the opposite correction.
+    func testARefusedStepsRefusalIsTerminatedBeforeThePath() throws {
+        let refused = PlanApplicationStep(explain: try JSONDecoder().decode(
+            ExplainReportDto.self,
+            from: Data(Self.explainJson(
+                resourceId: "/Users/x/.aws/credentials",
+                kind: "cargo_target_dir",
+                policyLabel: "PROTECTED",
+                executable: false,
+                refusalReason: Self.protectedRefusal
+            ).utf8)
+        ))
+
+        let spoken = ApplyPlanView.stepAccessibilityLabel(refused, group: "Will be skipped")
+        XCTAssertEqual(
+            spoken,
+            "Will be skipped: Rust build output. Storage impact: 8.0 MB. Safety: Protected. "
+                + "Evidence says this is not recreatable or is in use. Glomeris refuses to clean "
+                + "it, and you cannot override that here. "
+                + "Cleanup: PROTECTED: protected_credential_material. "
+                + "Path: /Users/x/.aws/credentials."
+        )
+        XCTAssertFalse(spoken.contains(".."), spoken)
+    }
+
+    /// The result rows. `status.message` is Rust's own text for every outcome
+    /// except `cleaned`, so the four unsuccessful cases each ran straight into
+    /// "Path:" — on the one surface whose job is to report what was just done to
+    /// the user's disk, where "did this actually run" is the whole question.
+    func testEveryOutcomeIsTerminatedBeforeThePath() {
+        let cases: [(String, PlanApplicationItemStatus, String)] = [
+            (
+                "cleaned",
+                .cleaned(reclaimedBytes: 8_388_608, human: "8.0 MB"),
+                "Cleaned \u{2014} reclaimed 8.0 MB."
+            ),
+            (
+                "refused",
+                .refused(reason: "protected", message: Self.protectedRefusal),
+                "PROTECTED: protected_credential_material."
+            ),
+            (
+                "aborted",
+                .abortedByRevalidation(message: "the resource changed between the preview and now"),
+                "the resource changed between the preview and now."
+            ),
+            (
+                "failed",
+                .failed(message: "cargo clean exited with status 101"),
+                "cargo clean exited with status 101."
+            ),
+            (
+                "not attempted",
+                .notAttempted(reason: "an earlier item stopped the batch"),
+                "an earlier item stopped the batch."
+            ),
+        ]
+
+        for (name, status, expectedOutcomeClause) in cases {
+            let spoken = ApplyPlanView.resultAccessibilityLabel(
+                PlanApplicationItemResult(
+                    resourceId: "/Users/x/proj/target",
+                    kind: "cargo_target_dir",
+                    status: status
+                )
+            )
+            XCTAssertEqual(
+                spoken,
+                "Rust build output. Outcome: \(expectedOutcomeClause) "
+                    + "Path: /Users/x/proj/target.",
+                "\(name): the outcome and the path are not separate sentences"
+            )
+            XCTAssertFalse(spoken.contains(".."), "\(name): doubled mark — \(spoken)")
+        }
+    }
+
     // MARK: - Structural guards
     //
     // Facts about which code exists. See the file header for why these are
