@@ -188,9 +188,13 @@ only work for someone who had launched the app *from* a configured shell.
 
 | Field | Stored in |
 |---|---|
-| Endpoint (API root) | `UserDefaults`, suite `dev.glomeris.GlomerisMenuBar` |
+| Endpoint (API root) | `UserDefaults.standard` — for a bundled app, the preference domain named by its bundle identifier |
 | Model | the same |
-| API key | the **login keychain**, account `llmApiKey` |
+| API key | the **login keychain**, account `llmApiKey`, service = the app's bundle identifier |
+
+Both namespaces are derived from the running bundle rather than written out as
+literals (HORO-1456), so a beta, renamed or diagnostic build gets its own stored
+settings and its own keychain items instead of the released app's.
 
 ### The precedence rule
 
