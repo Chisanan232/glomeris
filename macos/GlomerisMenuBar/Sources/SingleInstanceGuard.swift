@@ -170,9 +170,20 @@ enum SingleInstanceGuard {
     /// Reads the current instance list, applies the rule, asks the superseded
     /// instances to quit, and returns whether this process should carry on.
     ///
-    /// Call before any scene is constructed: a process that is going to yield
-    /// must never create a status item, or the duplicate icon appears anyway for
-    /// as long as it takes to decide.
+    /// Call from `App.init`, before any scene is constructed: a process that is
+    /// going to yield must never create a status item, or the duplicate icon
+    /// appears anyway for as long as it takes to decide.
+    ///
+    /// `App.init` and not an `NSApplicationDelegate` hook, which is the more
+    /// obvious-looking place and is measurably too late. SwiftUI evaluates the
+    /// `App`'s `body` and instantiates the entire scene graph inside `App.main()`,
+    /// *before* `NSApplication.finishLaunching` delivers
+    /// `applicationWillFinishLaunching`. Measured on a build wired that way: a
+    /// second instance sampled 40s after launch was still inside `body`, with its
+    /// delegate not yet constructed and both processes running. Anything that
+    /// blocks during scene construction — on this project, the synchronous keychain
+    /// read that seeds the AI Provider tab — postpones the hook indefinitely, and a
+    /// duplicate that yields "eventually" is a duplicate icon in the meantime.
     ///
     /// - Parameter gracePeriod: how long to wait for a superseded instance to act
     ///   on the quit request before escalating. The escalation is scoped to

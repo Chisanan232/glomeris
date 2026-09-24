@@ -31,18 +31,32 @@ struct GlomerisMenuBarApp: App {
     /// HORO-1453: one menu-bar item per logged-in user, decided before any scene
     /// exists.
     ///
-    /// This has to happen here rather than in `body` or in an `onAppear`, because
-    /// by the time a scene is constructed the status item is already on its way to
-    /// the menu bar — and a duplicate icon that appears and then disappears is
-    /// still a duplicate icon the founder can see. `init` runs before `body` is
-    /// ever asked for, so a process that is going to yield never draws anything.
+    /// `init` is the only place this can go, and the alternatives were both
+    /// measured rather than reasoned about:
+    ///
+    ///   * `body`, or a view's `onAppear`, is too late — by then the status item
+    ///     is already on its way to the menu bar, and a duplicate icon that
+    ///     appears and then disappears is still a duplicate icon.
+    ///   * An `NSApplicationDelegate` hook is later still, which is not obvious:
+    ///     SwiftUI evaluates this `body` and instantiates the whole scene graph
+    ///     *inside* `App.main()`, before `NSApplication.finishLaunching` delivers
+    ///     any delegate callback. A sampled stack of a second instance built that
+    ///     way was sitting in `body` → `Settings` → `TabView` with the delegate
+    ///     not yet constructed, so it had not had the chance to yield and the
+    ///     duplicate process stayed. Worse, anything that blocks during scene
+    ///     construction — see the note on `Settings` below — means the hook is
+    ///     never reached at all.
+    ///
+    /// `init` runs before `body` is ever asked for, so a process that is going to
+    /// yield never draws anything and never depends on the scene graph getting as
+    /// far as launching.
     ///
     /// `exit(0)` rather than a graceful shutdown for the same reason: there is
     /// nothing to tear down yet. No window, no status item, no store, no child
     /// process — `GlomerisPopoverView` owns all of that and has not been built.
     ///
-    /// See SingleInstanceGuard.swift for what was measured and why the rule is
-    /// "the launch wins".
+    /// See SingleInstanceGuard.swift for what was measured about the launch routes
+    /// and for why the rule is "the launch wins".
     init() {
         if !SingleInstanceGuard.enforce() {
             exit(0)
