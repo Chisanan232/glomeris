@@ -490,6 +490,15 @@ struct AiPlanSectionView: View {
     /// two short lines because a paragraph here would be scrolled past, and
     /// the second line is the one a first-time user needs — that pressing the
     /// button is what sends anything anywhere.
+    ///
+    /// HORO-1367 shortened the second line from three sentences to one. Every
+    /// fact it carried is still here — that asking sends a summary, that it
+    /// goes to the user's own provider, that it may cost money, and that
+    /// Settings can show the payload without sending it — because each one is
+    /// a thing the user would be wronged by not knowing. What went was the
+    /// wording around them: at the old width this line wrapped to three lines
+    /// of tertiary caption directly above the button it describes, which is
+    /// the shape a reader skips.
     private var provenanceNote: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("The model recommends. Glomeris decides what may run.")
@@ -497,9 +506,8 @@ struct AiPlanSectionView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(
-                "Asking sends a summary of what Glomeris found to your configured provider, "
-                    + "which may cost money. Settings shows exactly what would be sent, without "
-                    + "sending it."
+                "Asking sends a summary of what Glomeris found to your provider "
+                    + "and may cost money. Settings previews it without sending."
             )
             .font(GlomerisDesign.captionFont)
             .foregroundStyle(.tertiary)
@@ -580,7 +588,10 @@ struct AiPlanSectionView: View {
     /// — numbering the rows — would state the opposite of the truth in the
     /// app's own typography for machine judgments. See file header.
     private var orderingNote: some View {
-        Text("In the order the model suggested. Glomeris's own ranking is the list above.")
+        // HORO-1367: "The model's order" says what "In the order the model
+        // suggested" said, in a third of the words. The second clause is the
+        // load-bearing half and is untouched.
+        Text("The model's order. Glomeris's own ranking is the list above.")
             .font(GlomerisDesign.captionFont)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)
