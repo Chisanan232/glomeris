@@ -517,6 +517,172 @@ final class ApplyPlanViewTests: XCTestCase {
         }
     }
 
+    // MARK: - What the batch actually asks the CLI for
+    //
+    // Everything above drives the real binary and then reads the state the
+    // surface ended in — which is the right way round for an outcome, and blind
+    // to the request. The fixture answers before it looks at `argv`, so a batch
+    // that sent the wrong arguments would still get the stdout the test supplied
+    // and still land in the phase the test expects.
+    //
+    // That blindness matters for one argument in particular. `--confirm-ask` is
+    // the whole of AC5 at the wire: drop it and
+    // `testAConfirmableStepIsOnlyRunAfterTheUserOptsIn` passes unchanged, while
+    // an opted-in batch asks Rust to clean an ASK resource with no consent
+    // recorded. (Rust refuses — `ask_no_consent`, exit 3, verified against the
+    // release binary — so the product would not delete anything it should not.
+    // But the app would be attempting it, and the refusal would arrive as a
+    // per-item failure the user cannot act on.) The mirror case matters as much:
+    // an AUTO_SAFE step must NOT carry a consent flag, or the batch would be
+    // claiming consent nobody gave.
+    //
+    // So these tests read `GLOMERIS_FIXTURE_ARGV_LOG` and assert the argument
+    // arrays themselves. They are the only tests in this suite that can fail on
+    // a request rather than on a response.
+
+    /// An AUTO_SAFE step: the `execute` the single-item Clean would make, and
+    /// neither consent flag.
+    @MainActor
+    func testAnAutoSafeStepIsExecutedWithNoConsentFlags() async throws {
+        let plan = PlanState()
+        let logPath = argvLogPath()
+        let preview = PlanApplicationPreview(steps: [step(resourceId: "/Users/x/proj/target")])
+        let view = try makeView(
+            plan: plan, items: [], stdout: Self.executeJson(), argvLogPath: logPath
+        )
+
+        await view.applyPlan(preview)
+
+        let invocations = try recordedInvocations(at: logPath)
+        XCTAssertEqual(invocations.count, 1, "one authorised step, one child")
+        let argv = invocations[0]
+        XCTAssertEqual(argv.first, "execute")
+        XCTAssertTrue(argv.contains("--action-id"))
+        XCTAssertEqual(argv.value(after: "--action-id"), "cargo.clean.target_dir")
+        XCTAssertEqual(argv.value(after: "--resource-id"), "/Users/x/proj/target")
+        XCTAssertTrue(argv.contains("--json"))
+        XCTAssertTrue(argv.contains("--progress-json"))
+        XCTAssertFalse(
+            argv.contains("--confirm-ask"),
+            "an AUTO_SAFE step must not claim a confirmation nobody gave: \(argv)"
+        )
+        XCTAssertFalse(
+            argv.contains("--observed-fingerprint"),
+            "the token is only sent with the consent it pairs with: \(argv)"
+        )
+    }
+
+    /// AC5 at the wire. An opted-in ASK step carries `--confirm-ask` AND
+    /// `--observed-fingerprint` with the token from its own `explain` report —
+    /// `execute` requires the pair, and either one alone is a usage error
+    /// (exit 2, no JSON body, verified against the release binary).
+    @MainActor
+    func testAnOptedInConfirmableStepSendsConsentAndTheTokenTogether() async throws {
+        let plan = PlanState()
+        plan.applyIncludesConfirmable = true
+        let logPath = argvLogPath()
+        let preview = PlanApplicationPreview(steps: [
+            step(resourceId: "/Users/x/Library/Caches/pip", requiresConfirmation: true),
+        ])
+        let view = try makeView(
+            plan: plan, items: [], stdout: Self.executeJson(), argvLogPath: logPath
+        )
+
+        await view.applyPlan(preview)
+
+        let invocations = try recordedInvocations(at: logPath)
+        XCTAssertEqual(invocations.count, 1)
+        let argv = invocations[0]
+        XCTAssertTrue(argv.contains("--confirm-ask"), "AC5 at the wire: \(argv)")
+        XCTAssertEqual(
+            argv.value(after: "--observed-fingerprint"), "opaque-token",
+            "the token is the one `explain` reported for this resource: \(argv)"
+        )
+    }
+
+    /// The step that asks first and the step that does not, in one batch: the
+    /// consent flag goes to exactly one of them. A batch-wide flag would pass
+    /// both single-step tests above and fail this one.
+    @MainActor
+    func testConsentIsSentPerStepAndNotForTheWholeBatch() async throws {
+        let plan = PlanState()
+        plan.applyIncludesConfirmable = true
+        let logPath = argvLogPath()
+        let preview = PlanApplicationPreview(steps: [
+            step(resourceId: "/Users/x/Library/Caches/pip", requiresConfirmation: true),
+            step(resourceId: "/Users/x/proj/target"),
+        ])
+        let view = try makeView(
+            plan: plan, items: [], stdout: Self.executeJson(), argvLogPath: logPath
+        )
+
+        await view.applyPlan(preview)
+
+        let invocations = try recordedInvocations(at: logPath)
+        XCTAssertEqual(invocations.count, 2, "two authorised steps, two children, in plan order")
+        XCTAssertEqual(invocations[0].value(after: "--resource-id"), "/Users/x/Library/Caches/pip")
+        XCTAssertTrue(invocations[0].contains("--confirm-ask"))
+        XCTAssertEqual(invocations[1].value(after: "--resource-id"), "/Users/x/proj/target")
+        XCTAssertFalse(
+            invocations[1].contains("--confirm-ask"),
+            "the AUTO_SAFE step must not inherit the ASK step's consent: \(invocations[1])"
+        )
+    }
+
+    /// A refused step is not executed with a made-up action id, and not executed
+    /// at all: no child process is spawned for it. The absence of a log file is
+    /// the assertion — nothing ran, so nothing wrote one.
+    @MainActor
+    func testARefusedStepSpawnsNoChildAtAll() async throws {
+        let plan = PlanState()
+        plan.applyPhase = .reviewing(PlanApplicationPreview(steps: []))
+        let logPath = argvLogPath()
+        let preview = PlanApplicationPreview(steps: [
+            step(resourceId: "/Users/x/.aws/credentials",
+                 executable: false,
+                 refusalReason: Self.protectedRefusal),
+        ])
+        let view = try makeView(
+            plan: plan, items: [], stdout: Self.executeJson(), argvLogPath: logPath
+        )
+
+        await view.applyPlan(preview)
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: logPath),
+            "a PROTECTED resource must not reach a child process"
+        )
+    }
+
+    /// The configured project roots reach both calls. They scope what Glomeris
+    /// will look at, so a batch that dropped them would be re-checking and
+    /// mutating against a different resource set than the plan was made from.
+    @MainActor
+    func testProjectRootsAreForwardedToBothTheReCheckAndTheExecution() async throws {
+        let sweepLog = argvLogPath()
+        let sweepPlan = PlanState()
+        let sweep = try makeView(
+            plan: sweepPlan, items: [planItem()], stdout: Self.explainJson(),
+            argvLogPath: sweepLog, projectRoots: ["/Users/x/proj"]
+        )
+        await sweep.preparePreview()
+        let explainArgv = try recordedInvocations(at: sweepLog)
+        XCTAssertEqual(explainArgv.count, 1)
+        XCTAssertEqual(explainArgv[0].first, "explain")
+        XCTAssertEqual(explainArgv[0].value(after: "--project-root"), "/Users/x/proj")
+
+        let executeLog = argvLogPath()
+        let executePlan = PlanState()
+        let execute = try makeView(
+            plan: executePlan, items: [], stdout: Self.executeJson(),
+            argvLogPath: executeLog, projectRoots: ["/Users/x/proj"]
+        )
+        await execute.applyPlan(PlanApplicationPreview(steps: [step(resourceId: "/Users/x/proj/target")]))
+        let executeArgv = try recordedInvocations(at: executeLog)
+        XCTAssertEqual(executeArgv.count, 1)
+        XCTAssertEqual(executeArgv[0].value(after: "--project-root"), "/Users/x/proj")
+    }
+
     // MARK: - Wording
 
     func testTheSummaryNamesWhatWillRunAndWhatWillNot() {
@@ -837,3 +1003,15 @@ final class ApplyPlanViewTests: XCTestCase {
     }
 }
 
+private extension Array where Element == String {
+    /// The argument immediately after `flag`, or `nil` when the flag is absent
+    /// or is the last element.
+    ///
+    /// Positional rather than a `--flag=value` split, because
+    /// `buildExecuteArguments` emits separate elements and `clap` is being asked
+    /// for exactly that shape.
+    func value(after flag: String) -> String? {
+        guard let index = firstIndex(of: flag), index + 1 < count else { return nil }
+        return self[index + 1]
+    }
+}
