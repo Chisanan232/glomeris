@@ -167,11 +167,22 @@ enum GlomerisDesign {
     ///
     /// Responsive bounds rather than one fixed size, because the constraint
     /// is the display and not the design: 430…640pt is comfortable on any
-    /// current laptop, and on something shorter the panel has to give the
-    /// height back rather than run off the bottom of the screen. Pure and
-    /// total — every input, including a zero or negative height from a
-    /// display that has not been configured yet, yields a usable range with
-    /// `min <= max`.
+    /// current laptop, and on something shorter the panel gives the height
+    /// back rather than running off the bottom of the screen.
+    ///
+    /// It gives the height back down to `floorBodyHeight` and no further, so
+    /// below roughly 380pt of usable height — `floorBodyHeight` plus
+    /// `panelChromeAllowance` — the range stops shrinking and the reservation
+    /// this function makes no longer fits the display it was handed. That is
+    /// deliberate, on the grounds in `floorBodyHeight`: a panel thinner than
+    /// that is not a reading surface, and no display a Mac can drive is
+    /// anywhere near it. It is stated here because it is the one input range
+    /// where the "give the height back" promise above stops holding, and a
+    /// guard that reads as unconditional invites being trusted as one.
+    ///
+    /// Pure and total — every input, including a zero or negative height from
+    /// a display that has not been configured yet, yields a usable range with
+    /// `min <= max` and both ends positive.
     static func bodyHeightLimits(visibleScreenHeight: CGFloat) -> (min: CGFloat, max: CGFloat) {
         let available = visibleScreenHeight - panelChromeAllowance
         // `floorBodyHeight` wins over a tiny or nonsensical `available`, so
