@@ -621,7 +621,10 @@ final class PlanApplicationTests: XCTestCase {
         ])
         XCTAssertEqual(outcome.reclaimedBytes, 3072)
         XCTAssertFalse(outcome.reclaimedIsIncomplete)
-        XCTAssertEqual(outcome.reclaimedText, "3072 bytes")
+        // HORO-1452: was "3072 bytes". The sum is rendered by the same
+        // convention as the per-item strings it was summed from, so a reader
+        // can check the arithmetic — 1.0 KB + 2.0 KB = 3.0 KB.
+        XCTAssertEqual(outcome.reclaimedText, "3.0 KB")
     }
 
     /// One cleaned row quotes Rust's rendering rather than re-rendering its
@@ -639,7 +642,9 @@ final class PlanApplicationTests: XCTestCase {
             .cleaned(reclaimedBytes: nil, human: "unknown"),
         ])
         XCTAssertTrue(outcome.reclaimedIsIncomplete)
-        XCTAssertEqual(outcome.reclaimedText, "at least 1024 bytes")
+        // HORO-1452: was "at least 1024 bytes". The floor wording is unchanged;
+        // only the figure inside it is now rendered like every other figure.
+        XCTAssertEqual(outcome.reclaimedText, "at least 1.0 KB")
     }
 
     func testNoMeasuredSizeAtAllReportsNoTotalRatherThanZero() {
@@ -1061,13 +1066,20 @@ final class PlanApplicationTests: XCTestCase {
         )
     }
 
-    /// A sum is raw bytes on purpose — scaling it here would put a 1000-based
-    /// number beside Rust's 1024-based ones and read as though space had gone
-    /// missing. Documented on `reclaimedText`, asserted here.
-    func testASummedEstimateIsRawBytesRatherThanALocallyScaledFigure() {
+    /// HORO-1452, the finding itself: this used to be "12582912 bytes", sitting
+    /// between a list of humanised per-item sizes above it and a humanised
+    /// result line after the run.
+    ///
+    /// A sum is not something any CLI invocation produces — a batch is N
+    /// single-item `execute` calls — so it has to be rendered here. What HORO-1312
+    /// objected to was a *disagreeing* rendering, and `GlomerisByteFormat` is a
+    /// port of Rust's rule under a fixture both languages assert against. So the
+    /// sum is now rendered, by the producer's convention, and 4.0 MB + 8.0 MB
+    /// reads as the 12.0 MB it is.
+    func testASummedEstimateIsRenderedByTheSharedConvention() {
         XCTAssertEqual(
             mixedPreview().reclaimableEstimateText(includingConfirmable: true),
-            "12582912 bytes"
+            "12.0 MB"
         )
     }
 
@@ -1090,7 +1102,7 @@ final class PlanApplicationTests: XCTestCase {
         ])
         XCTAssertEqual(
             preview.reclaimableEstimateText(includingConfirmable: false),
-            "at least 2048 bytes"
+            "at least 2.0 KB"
         )
     }
 
@@ -1106,6 +1118,235 @@ final class PlanApplicationTests: XCTestCase {
             )),
         ])
         XCTAssertNil(preview.reclaimableEstimateText(includingConfirmable: false))
+    }
+
+    // MARK: - HORO-1452: every aggregate figure, at every magnitude
+    //
+    // The defect was narrow in appearance and wide in reach: the humanised
+    // formatter was reached only when exactly one attempted step had a rendered
+    // string of its own, so both Apply Plan aggregates — the estimate before the
+    // run and the reclaimed total after it — printed a raw integer in every
+    // other case. These cover the matrix rather than the one reproduction.
+
+    /// A preview of AUTO_SAFE, runnable steps with the given sizes. `nil` is a
+    /// step whose size was never measured.
+    private func estimatePreview(_ sizes: [UInt64?]) -> PlanApplicationPreview {
+        PlanApplicationPreview(steps: sizes.enumerated().map { index, bytes in
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/proj\(index)/target",
+                reclaimableBytes: bytes,
+                reclaimableHuman: bytes.map { GlomerisByteFormat.human($0) },
+                fingerprintToken: "token-\(index)",
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            ))
+        })
+    }
+
+    func testTheEstimateIsHumanisedAtEveryMagnitude() {
+        // One item: Rust's own string for that item, quoted.
+        XCTAssertEqual(
+            estimatePreview([5_242_880]).reclaimableEstimateText(includingConfirmable: false),
+            "5.0 MB"
+        )
+
+        // Multiple items, one per unit — the case that used to print raw.
+        let cases: [(sizes: [UInt64?], expected: String)] = [
+            ([0, 0], "0 B"),
+            ([300, 212], "512 B"),
+            ([1_024, 2_048], "3.0 KB"),
+            ([1_048_576, 3_145_728], "4.0 MB"),
+            ([1_073_741_824, 1_073_741_824], "2.0 GB"),
+            ([549_755_813_888, 549_755_813_888], "1.0 TB"),
+        ]
+        for (sizes, expected) in cases {
+            XCTAssertEqual(
+                estimatePreview(sizes).reclaimableEstimateText(includingConfirmable: false),
+                expected,
+                "for \(sizes.count) steps summing to \(expected)"
+            )
+        }
+    }
+
+    func testTheReclaimedTotalIsHumanisedAtEveryMagnitude() {
+        func cleaned(_ sizes: [UInt64]) -> PlanApplicationResult {
+            result(sizes.map { .cleaned(reclaimedBytes: $0, human: GlomerisByteFormat.human($0)) })
+        }
+
+        // A single cleaned item still quotes Rust's string; the rest are sums.
+        XCTAssertEqual(cleaned([5_242_880]).reclaimedText, "5.0 MB")
+        XCTAssertEqual(cleaned([0, 0]).reclaimedText, "0 B")
+        XCTAssertEqual(cleaned([300, 212]).reclaimedText, "512 B")
+        XCTAssertEqual(cleaned([1_024, 2_048]).reclaimedText, "3.0 KB")
+        XCTAssertEqual(cleaned([1_048_576, 3_145_728]).reclaimedText, "4.0 MB")
+        XCTAssertEqual(cleaned([1_073_741_824, 1_073_741_824]).reclaimedText, "2.0 GB")
+        XCTAssertEqual(cleaned([549_755_813_888, 549_755_813_888]).reclaimedText, "1.0 TB")
+    }
+
+    /// A total a reader can check against the rows above it. This is the whole
+    /// point of one convention rather than two: the per-item figures the panel
+    /// shows and the aggregate it shows are the same function of the same bytes,
+    /// so 1.0 MB and 3.0 MB visibly make 4.0 MB.
+    func testTheTotalIsTheSameFunctionOfTheSameBytesAsThePerItemFigures() {
+        let sizes: [UInt64] = [1_048_576, 3_145_728]
+        let preview = estimatePreview(sizes.map { Optional($0) })
+
+        let perItem = preview.steps.compactMap(\.reclaimableHuman)
+        XCTAssertEqual(perItem, ["1.0 MB", "3.0 MB"])
+
+        let sum = sizes.reduce(UInt64(0), +)
+        XCTAssertEqual(preview.reclaimableEstimate(includingConfirmable: false).bytes, sum)
+        XCTAssertEqual(
+            preview.reclaimableEstimateText(includingConfirmable: false),
+            GlomerisByteFormat.human(sum)
+        )
+        XCTAssertEqual(preview.reclaimableEstimateText(includingConfirmable: false), "4.0 MB")
+
+        // And the result line after the run agrees with the estimate before it,
+        // for the same bytes — previously "4.0 MB" then "4194304 bytes".
+        let outcome = result(sizes.map { .cleaned(reclaimedBytes: $0, human: GlomerisByteFormat.human($0)) })
+        XCTAssertEqual(outcome.reclaimedText, preview.reclaimableEstimateText(includingConfirmable: false))
+    }
+
+    /// The mixed plan, which is the shape a real batch has: an ASK item excluded
+    /// by default and included on request, a PROTECTED item, a structurally
+    /// refused item and a stale one. Both wordings stay humanised across the
+    /// whole matrix, and including the ASK item moves the figure by exactly that
+    /// item's size.
+    func testMixedExecutedSkippedAndAskItemsAllRenderHumanised() {
+        let preview = mixedPreview()
+
+        // ASK excluded by default: the one AUTO_SAFE runnable step.
+        XCTAssertEqual(preview.reclaimableEstimateText(includingConfirmable: false), "8.0 MB")
+        // ASK included: 8.0 MB + the ASK item's 4.0 MB. Nothing else joins —
+        // PROTECTED, structurally refused and stale contribute nothing.
+        XCTAssertEqual(preview.reclaimableEstimateText(includingConfirmable: true), "12.0 MB")
+        XCTAssertEqual(
+            preview.reclaimableEstimate(includingConfirmable: true).bytes,
+            8_388_608 + 4_194_304
+        )
+
+        // The result over that same mix: one cleaned, one ASK item never
+        // attempted, one refused, one failed.
+        let outcome = result([
+            .cleaned(reclaimedBytes: 8_388_608, human: "8.0 MB"),
+            .notAttempted(reason: "not included in this run"),
+            .refused(reason: "protected", message: Self.protectedRefusal),
+            .failed(message: "Execution failed: permission denied"),
+        ])
+        XCTAssertEqual(outcome.reclaimedText, "8.0 MB")
+        XCTAssertFalse(outcome.isCompleteSuccess)
+
+        // Two cleaned out of the mix: a sum, and still humanised.
+        let both = result([
+            .cleaned(reclaimedBytes: 8_388_608, human: "8.0 MB"),
+            .cleaned(reclaimedBytes: 4_194_304, human: "4.0 MB"),
+            .notAttempted(reason: "not included in this run"),
+        ])
+        XCTAssertEqual(both.reclaimedText, "12.0 MB")
+    }
+
+    /// Both aggregates keep their floor wording when a contributing size was
+    /// never measured — the fix changed the figure, not the honesty.
+    func testTheFloorWordingSurvivesHumanisation() {
+        XCTAssertEqual(
+            estimatePreview([2_097_152, nil]).reclaimableEstimateText(includingConfirmable: false),
+            "at least 2.0 MB"
+        )
+        XCTAssertEqual(
+            result([
+                .cleaned(reclaimedBytes: 2_097_152, human: "2.0 MB"),
+                .cleaned(reclaimedBytes: nil, human: "unknown"),
+            ]).reclaimedText,
+            "at least 2.0 MB"
+        )
+    }
+
+    /// Anti-vacuity. Both aggregates are one call to `humanByteCount` now, so
+    /// there is no branch left that can interpolate a count into a sentence. A
+    /// reintroduced one would be invisible to the assertions above if it sat on
+    /// a path they do not reach, so the two functions are read as source too.
+    func testNeitherAggregateInterpolatesARawCountAnyMore() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent() // Tests
+                .appendingPathComponent("../Sources/PlanApplication.swift"),
+            encoding: .utf8
+        )
+        let code = source
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("///") }
+            .joined(separator: "\n")
+
+        XCTAssertFalse(
+            code.contains("bytes) bytes"),
+            "HORO-1452: a raw byte count is being interpolated into a sentence again"
+        )
+        XCTAssertFalse(
+            code.contains("total) bytes"),
+            "HORO-1452: the reclaimed total is raw again"
+        )
+        XCTAssertFalse(
+            code.contains("ByteCountFormatter"),
+            "HORO-1312: a 1000-based formatter would disagree with the CLI's own figures"
+        )
+        // And the control: the file really does route every figure through the
+        // one formatter, so the absences above are not absences of the whole
+        // feature. Three sites — the per-step estimate, the batch estimate and
+        // the batch reclaimed total.
+        XCTAssertEqual(
+            code.components(separatedBy: "humanByteCount(").count - 1,
+            3,
+            "expected exactly three rendered figures, all via humanByteCount"
+        )
+    }
+
+    /// The third site, and the smallest of the three: a step with a measured
+    /// count and no CLI string for it used to disclaim a size it had, while the
+    /// total underneath counted those bytes. The two now agree.
+    func testAStepWithBytesButNoCliStringStillShowsASize() {
+        let preview = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/proj/target",
+                reclaimableBytes: 3_145_728,
+                reclaimableHuman: nil,
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+        ])
+        XCTAssertEqual(preview.steps.first?.reclaimableText, "3.0 MB")
+        XCTAssertEqual(preview.reclaimableEstimateText(includingConfirmable: false), "3.0 MB")
+
+        // Nothing measured and nothing rendered is still a disclaimer, not a
+        // zero: "size unknown" is the only honest answer there.
+        let unmeasured = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/proj/target",
+                reclaimableBytes: nil,
+                reclaimableHuman: nil,
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+        ])
+        XCTAssertEqual(unmeasured.steps.first?.reclaimableText, "size unknown")
+
+        // And the lower-bound wording survives on that path too.
+        let floor = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/proj/target",
+                reclaimableBytes: 3_145_728,
+                reclaimableHuman: nil,
+                reclaimableBytesIsLowerBound: true,
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+        ])
+        XCTAssertEqual(floor.steps.first?.reclaimableText, "at least 3.0 MB")
     }
 
     // MARK: - Fixtures for the entry-point gate
