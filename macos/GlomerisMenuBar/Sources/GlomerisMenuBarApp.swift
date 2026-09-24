@@ -28,6 +28,27 @@ import SwiftUI
 
 @main
 struct GlomerisMenuBarApp: App {
+    /// HORO-1453: one menu-bar item per logged-in user, decided before any scene
+    /// exists.
+    ///
+    /// This has to happen here rather than in `body` or in an `onAppear`, because
+    /// by the time a scene is constructed the status item is already on its way to
+    /// the menu bar — and a duplicate icon that appears and then disappears is
+    /// still a duplicate icon the founder can see. `init` runs before `body` is
+    /// ever asked for, so a process that is going to yield never draws anything.
+    ///
+    /// `exit(0)` rather than a graceful shutdown for the same reason: there is
+    /// nothing to tear down yet. No window, no status item, no store, no child
+    /// process — `GlomerisPopoverView` owns all of that and has not been built.
+    ///
+    /// See SingleInstanceGuard.swift for what was measured and why the rule is
+    /// "the launch wins".
+    init() {
+        if !SingleInstanceGuard.enforce() {
+            exit(0)
+        }
+    }
+
     /// HORO-1365 deliberately does NOT put the scan and the plan here.
     ///
     /// They belong above navigation, and `GlomerisPopoverView` is already above
