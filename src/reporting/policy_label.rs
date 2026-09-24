@@ -167,4 +167,58 @@ mod tests {
         let d = decision(PolicyClass::AutoSafe, vec![]);
         assert_eq!(label_for(&d).to_string(), "AUTO_SAFE");
     }
+
+    /// HORO-1468. `NOT_POLICY_GOVERNED` exists for the audit trail of an
+    /// action policy never classified, so the thing that would make it
+    /// dangerous is it ever appearing as the projection of a real decision:
+    /// a reader — or `autopilot::gate::admit` — would then be told policy
+    /// did not judge a resource that it did judge.
+    ///
+    /// Driven over every class crossed with every reason singly and all
+    /// reasons at once, from `ReasonCode::ALL`, so a new reason code is
+    /// covered without editing this test. Sampling a few shapes would pass
+    /// just as well today and stop covering the enum the moment it grew.
+    #[test]
+    fn label_for_never_returns_not_policy_governed() {
+        let classes = [
+            PolicyClass::AutoSafe,
+            PolicyClass::Ask,
+            PolicyClass::Protected,
+        ];
+        let mut reason_sets: Vec<Vec<ReasonCode>> =
+            ReasonCode::ALL.iter().map(|r| vec![*r]).collect();
+        reason_sets.push(ReasonCode::ALL.to_vec());
+        reason_sets.push(Vec::new());
+
+        for class in classes {
+            for reasons in &reason_sets {
+                let d = decision(class, reasons.clone());
+                assert_ne!(
+                    label_for(&d),
+                    PolicyLabel::NotPolicyGoverned,
+                    "class {class:?} with reasons {reasons:?} projected to a label \
+                     that means policy never ran"
+                );
+            }
+        }
+    }
+
+    /// The token is what lands in `AuditRecord::policy_label` and what the
+    /// macOS app switches on, so it has to be distinct from all four real
+    /// labels rather than merely non-empty.
+    #[test]
+    fn not_policy_governed_has_its_own_token() {
+        assert_eq!(
+            PolicyLabel::NotPolicyGoverned.as_str(),
+            "NOT_POLICY_GOVERNED"
+        );
+        for other in [
+            PolicyLabel::AutoSafe,
+            PolicyLabel::Ask,
+            PolicyLabel::Protected,
+            PolicyLabel::UnknownIncomplete,
+        ] {
+            assert_ne!(other.as_str(), PolicyLabel::NotPolicyGoverned.as_str());
+        }
+    }
 }
