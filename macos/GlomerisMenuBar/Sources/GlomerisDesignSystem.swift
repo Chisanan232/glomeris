@@ -42,11 +42,32 @@ import SwiftUI
 /// Spacing, type and metric tokens. Named by role rather than by value so
 /// a change of mind about the type scale is one edit here.
 enum GlomerisDesign {
-    /// The popover is a reading column, not a window. 340pt fits a full
+    /// The popover is a reading column, not a window. 340pt fit a full
     /// "Safe to reclaim" badge plus a size next to it on one line, which
     /// the previous 260pt did not — it wrapped almost every status line
     /// and the wrapping was what made the panel hard to scan.
-    static let popoverWidth: CGFloat = 340
+    ///
+    /// HORO-1367 widens it to 420pt. 340pt was chosen against the surface
+    /// as it stood at HORO-1306: one badge and one size. The MVP 2.0 rows
+    /// now carry a resource name, a safety badge, a size badge and an
+    /// evidence badge, the AI Plan rows add a model rationale, and Apply
+    /// Plan's preview adds a disposition prefix to each line — so the line
+    /// that 340pt was sized for is no longer the longest line in the panel,
+    /// and the wrapping HORO-1306 removed had come back somewhere else.
+    ///
+    /// Measured, same content at both widths (accessibility frames, so these
+    /// are rendered line boxes and not an estimate): the AI Plan provenance
+    /// note went from 291x39pt to 361x26pt — three wrapped lines to two; the
+    /// "nothing has been sent anywhere" line and the ordering note each went
+    /// from two lines to one; and an AI Plan row carrying a model rationale
+    /// went from 127pt to 114pt, which is one wrapped line of the model's
+    /// own sentence per row.
+    ///
+    /// 420pt is still a column and not a window: it is a third of the
+    /// narrowest display this app is expected to run on (1280pt), so the
+    /// panel cannot crowd the menu-bar item it hangs from, and it leaves
+    /// `bodyHeightLimits` to do the vertical half of the job.
+    static let popoverWidth: CGFloat = 420
 
     /// Gap between cards. Larger than any spacing *inside* a card, so the
     /// grouping is legible without needing a divider between every pair.
