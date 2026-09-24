@@ -458,13 +458,66 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     /// and "why is it using the wrong key" are the same question, and a screen
     /// that words an inherited value the same as a configured one cannot answer
     /// either.
+    /// Driven off `allCases` rather than a hand-written list, so adding a source
+    /// without wording it fails here instead of rendering as whatever the
+    /// `switch` happens to fall through to.
     func testEachSettingSourceReadsDifferently() {
-        let sources: [GlomerisLlmSettingSource] = [.settings, .environment, .absent]
-        let titles = sources.map(GlomerisLlmSettingSourceWording.title)
-        let symbols = sources.map(GlomerisLlmSettingSourceWording.symbolName)
+        let sources = GlomerisLlmSettingSource.allCases
+        let titles = sources.map { GlomerisLlmSettingSourceWording.title($0) }
+        let symbols = sources.map { GlomerisLlmSettingSourceWording.symbolName($0) }
 
         XCTAssertEqual(Set(titles).count, sources.count, "shared wording: \(titles)")
         XCTAssertEqual(Set(symbols).count, sources.count, "shared symbol: \(symbols)")
+    }
+
+    /// HORO-1368. "Not looked at yet" is not a fourth configuration, and it must
+    /// not read as one — a row saying "Not set" about a key that is about to
+    /// resolve as set is a false statement the user may act on by pasting a key
+    /// they already have stored.
+    func testTheUnresolvedKeyIsWordedAsAnActivityRatherThanAsAState() {
+        let pending = GlomerisLlmSettingSourceWording.title(nil)
+
+        XCTAssertEqual(pending, GlomerisLlmSettingSourceWording.pendingTitle)
+        for source in GlomerisLlmSettingSource.allCases {
+            XCTAssertNotEqual(
+                pending, GlomerisLlmSettingSourceWording.title(source),
+                "'still looking' must not be worded as \(source)")
+            XCTAssertNotEqual(
+                GlomerisLlmSettingSourceWording.symbolName(nil),
+                GlomerisLlmSettingSourceWording.symbolName(source))
+        }
+        XCTAssertFalse(
+            pending.lowercased().contains("not set"),
+            "an unresolved key must not claim there is no key: \(pending)")
+    }
+
+    /// AC 6. The condition that used to take the whole menu-bar item with it now
+    /// has to be a sentence the user can act on. Three things have to be in it,
+    /// because leaving any one out sends the user somewhere useless: that macOS
+    /// refused, that replacing the build is why, and that saving again fixes it.
+    func testAnUnreadableKeyIsExplainedWithSomethingTheUserCanDo() {
+        let explanation = GlomerisLlmSettingSourceWording.unreadableExplanation.lowercased()
+
+        XCTAssertTrue(explanation.contains("keychain"), "name where the refusal came from")
+        XCTAssertTrue(
+            explanation.contains("build"),
+            "the cause is a changed code identity; without it the user blames the key")
+        XCTAssertTrue(
+            explanation.contains("again"),
+            "the remedy is re-saving the same key: \(explanation)")
+
+        // And it must not be worded as the key being wrong. It is not — the
+        // stored key may be perfectly valid and simply unreachable.
+        for misattribution in ["invalid key", "wrong key", "incorrect"] {
+            XCTAssertFalse(
+                explanation.contains(misattribution),
+                "\"\(misattribution)\" blames the credential for a keychain refusal")
+        }
+
+        XCTAssertNotEqual(
+            GlomerisLlmSettingSourceWording.title(.unreadable),
+            GlomerisLlmSettingSourceWording.title(.absent),
+            "stored-but-unreachable and never-stored need different remedies")
     }
 
     func testTheEnvironmentSourceNamesWhereTheValueCameFrom() {
@@ -479,8 +532,11 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     /// compile error, it renders as nothing, and "Key: Not set" with no icon
     /// beside it reads as a layout glitch rather than as a state.
     func testEverySourceSymbolResolvesToARealSFSymbol() {
-        for source in [GlomerisLlmSettingSource.settings, .environment, .absent] {
-            let name = GlomerisLlmSettingSourceWording.symbolName(source)
+        let names = GlomerisLlmSettingSource.allCases.map {
+            GlomerisLlmSettingSourceWording.symbolName($0)
+        } + [GlomerisLlmSettingSourceWording.symbolName(nil)]
+
+        for name in names {
             XCTAssertNotNil(
                 NSImage(systemSymbolName: name, accessibilityDescription: nil),
                 "\(name) is not an SF Symbol")
@@ -594,15 +650,56 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     /// a timer, never as a retry. Asserted structurally because "it does not
     /// happen by itself" is not something a unit test can observe the absence
     /// of by running.
+    ///
+    /// HORO-1368 introduced one automatic trigger — the `.task` that resolves
+    /// the key's availability — so this can no longer be "nothing runs by
+    /// itself". It is narrowed instead of dropped: exactly one `.task`, calling
+    /// exactly one function, and that function is checked below to run no
+    /// command. Deleting this guard would have been the easy way to green, and
+    /// it is the guard that stops an "auto-test on open" from being added.
     func testNeitherCommandCanRunWithoutTheUserPressingSomething() throws {
         let code = try Self.readCode()
 
-        for trigger in [".onAppear", ".task {", ".task(", "Timer", "DispatchQueue.main.asyncAfter",
+        for trigger in [".onAppear", ".task(", "Timer", "DispatchQueue.main.asyncAfter",
                         ".refreshable", ".onReceive"] {
             XCTAssertFalse(
                 code.contains(trigger),
                 "\(trigger) would make a paid request happen on its own")
         }
+
+        XCTAssertEqual(
+            code.components(separatedBy: ".task {").count - 1, 1,
+            "exactly one thing on this screen may happen without a press")
+        XCTAssertTrue(
+            code.contains(".task { await loadCredentialStatus() }"),
+            "and it must be that one, whole — a `.task` doing anything else here is "
+                + "a command one edit away from running on open")
+    }
+
+    /// The other half: the one automatic trigger cannot spend anything. It reads
+    /// the keychain and assigns to `status`; it does not touch `client`, does not
+    /// name a command, and does not reach the credential *value*.
+    func testTheOneAutomaticTaskRunsNoCommandAndSpendsNothing() throws {
+        let code = try Self.readCode()
+        let body = try XCTUnwrap(
+            code.range(of: "private func loadCredentialStatus() async {")
+                .flatMap { start in
+                    code[start.upperBound...].range(of: "\n    }").map {
+                        String(code[start.upperBound..<$0.lowerBound])
+                    }
+                },
+            "loadCredentialStatus no longer exists; update this test")
+
+        for forbidden in ["client", "runRaw", "AiProviderCommands", "withEnvironment",
+                          "childEnvironment", "secret(forKey"] {
+            XCTAssertFalse(
+                body.contains(forbidden),
+                "\(forbidden) in the automatic task would make opening this screen do "
+                    + "something the user did not ask for")
+        }
+        XCTAssertTrue(
+            body.contains("await store.resolvedStatus()"),
+            "the availability query, off the main thread, and nothing else")
     }
 
     /// The preview runs on the plain client, and there must be exactly one
@@ -656,7 +753,7 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     func testTheTypedKeyIsClearedEvenWhenTheWriteFails() throws {
         let code = try Self.readCode()
         let saveBody = try XCTUnwrap(
-            code.range(of: "private func saveKey() {")
+            code.range(of: "private func saveKey() async {")
                 .flatMap { start in
                     code[start.upperBound...].range(of: "\n    }").map {
                         String(code[start.upperBound..<$0.lowerBound])
@@ -691,10 +788,71 @@ final class AiProviderPreferencesViewTests: XCTestCase {
         let code = try Self.readCode()
 
         XCTAssertTrue(code.contains("Button(\"Remove key\", role: .destructive)"))
+        // Driven by the already-resolved status rather than by asking the store
+        // again (HORO-1368 AC 4): this is inside `body`, so `store.hasStoredApiKey`
+        // here would be a keychain query per re-evaluation of the view.
         XCTAssertTrue(
-            code.contains("if store.hasStoredApiKey"),
-            "offered exactly when there is something to remove")
-        XCTAssertTrue(code.contains("store.deleteApiKey()"))
+            code.contains("if status.apiKey == .settings"),
+            "offered exactly when there is something of ours to remove")
+        XCTAssertFalse(
+            code.contains("store.hasStoredApiKey"),
+            "a keychain question asked from inside body is the HORO-1368 defect")
+        XCTAssertTrue(code.contains("await store.resolvedDeleteApiKey()"))
+    }
+
+    /// HORO-1368 AC 1 and AC 3, as a structural claim over this file: the
+    /// keychain is reachable from here only through the store's `resolved*`
+    /// members, every one of which hops off the main thread. The synchronous
+    /// spellings still exist on the store — `GlomerisLlmSettingsStoreTests` uses
+    /// them, and they are what the resolved ones call — so "this screen does not
+    /// use them" has to be asserted rather than made impossible.
+    ///
+    /// Complementary to the behavioural proof in
+    /// `GlomerisLlmSettingsStoreTests.testResolvedReadsHappenOffTheMainThread`:
+    /// that one shows the hop really happens, this one shows this screen takes it.
+    func testEveryKeychainTouchOnThisScreenGoesThroughTheOffThreadRoute() throws {
+        let code = try Self.readCode()
+
+        for synchronous in ["store.status(", "store.childEnvironment(", "store.setApiKey(",
+                            "store.deleteApiKey(", "store.apiKeyAvailability"] {
+            XCTAssertFalse(
+                code.contains(synchronous),
+                "\(synchronous) reaches the keychain on whichever thread calls it, and on "
+                    + "this screen that is the main one")
+        }
+
+        // The one synchronous store call that is allowed, because it reads
+        // UserDefaults and never the keychain — it is what lets `init` seed
+        // without I/O (AC 2).
+        XCTAssertTrue(code.contains("store.statusWithoutApiKey()"))
+        for resolved in ["await store.resolvedStatus()", "await store.resolvedChildEnvironment()",
+                         "await store.resolvedSetApiKey(", "await store.resolvedDeleteApiKey()"] {
+            XCTAssertTrue(code.contains(resolved), "\(resolved) is gone; update this test")
+        }
+    }
+
+    /// AC 2's structural half. `init` runs while `App.body` is being evaluated,
+    /// before any scene exists, so anything it does happens on the main thread
+    /// whether or not a Settings window is ever opened.
+    func testTheViewSeedsItselfWithoutTouchingTheKeychain() throws {
+        let code = try Self.readCode()
+        let initBody = try XCTUnwrap(
+            code.range(of: "projectRootsStore: ProjectRootsStore = ProjectRootsStore()\n    ) {")
+                .flatMap { start in
+                    code[start.upperBound...].range(of: "\n    }").map {
+                        String(code[start.upperBound..<$0.lowerBound])
+                    }
+                },
+            "the initialiser signature changed; update this test")
+
+        XCTAssertTrue(
+            initBody.contains("_status = State(initialValue: store.statusWithoutApiKey())"),
+            "init must seed from UserDefaults only")
+        for forbidden in ["resolved", "status()", "hasStoredApiKey", "availability", "Task {"] {
+            XCTAssertFalse(
+                initBody.contains(forbidden),
+                "\(forbidden) in init would put a keychain query back on the launch path")
+        }
     }
 
     /// The connection test costs money, so the button must say what it does
@@ -749,6 +907,85 @@ final class AiProviderPreferencesViewTests: XCTestCase {
         }
         XCTAssertTrue(source.contains(".accessibilityElement(children: .combine)"))
         XCTAssertTrue(source.contains(".accessibilityElement(children: .contain)"))
+    }
+
+    // MARK: - Nothing on the launch path reads the keychain (HORO-1368 AC 4)
+
+    /// The behavioural half of AC 4, and the one that actually reproduces the
+    /// defect's mechanism.
+    ///
+    /// `App.body` constructs this view whether or not a Settings window is open
+    /// — `OverviewStateTests.testTheAppSceneHoldsNoObservableStateBecauseItsBodyBuildsTheSettingsTabs`
+    /// asserts that path exists — so `init` and every re-evaluation of `body`
+    /// happen on the main thread during launch and on every scene update. Before
+    /// this ticket that chain ended in a synchronous `SecItemCopyMatching`, which
+    /// on a build the keychain item's ACL does not admit blocks behind a
+    /// `SecurityAgent` prompt until somebody answers it; AppKit then removes the
+    /// status item, and there is no other way into the app.
+    ///
+    /// Asserted by counting touches rather than by reading the source, because
+    /// the touch can be reintroduced from anywhere this view reaches.
+    @MainActor
+    func testNeitherConstructingNorEvaluatingTheScreenTouchesTheKeychain() {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": "sk-test-only"])
+        let view = Self.makeView(credentials: credentials)
+
+        XCTAssertEqual(
+            credentials.touches, [],
+            "init reached the keychain: \(credentials.touches)")
+
+        // Materialising the body is what `App.body` does to build the Settings
+        // tabs. It must be free of keychain work too — the pre-fix version asked
+        // the store `hasStoredApiKey` from inside `body`, so every re-evaluation
+        // was another query.
+        _ = view.body
+
+        XCTAssertEqual(
+            credentials.touches, [],
+            "evaluating body reached the keychain: \(credentials.touches)")
+    }
+
+    /// And the screen still works: the availability query does happen, once the
+    /// view is on screen and off the main thread. Without this, the test above
+    /// would pass just as well against a screen that never resolved the key at
+    /// all and permanently displayed "Checking your keychain…".
+    @MainActor
+    func testTheScreenDoesResolveTheKeyOnceItIsOnScreen() async {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": "sk-test-only"])
+        let store = Self.makeStore(credentials: credentials)
+
+        // What `.task { await loadCredentialStatus() }` does. The `.task` itself
+        // needs a rendered view to fire, which a unit test has no way to produce
+        // — `testNeitherCommandCanRunWithoutTheUserPressingSomething` pins that
+        // the modifier is attached and calls exactly this.
+        let status = await store.resolvedStatus(environment: [:])
+
+        XCTAssertEqual(status.apiKey, .settings)
+        XCTAssertEqual(credentials.operations, [.availability])
+        XCTAssertFalse(
+            credentials.touches.allSatisfy(\.wasOnMainThread),
+            "the resolution must not run where the defect was")
+    }
+
+    private static func makeStore(credentials: RecordingCredentialStore)
+        -> GlomerisLlmSettingsStore {
+        GlomerisLlmSettingsStore(
+            defaults: UserDefaults(
+                suiteName: "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)")!,
+            credentials: credentials
+        )
+    }
+
+    /// Built with throwaway `UserDefaults` suites so nothing here reads or writes
+    /// the running app's own preferences.
+    private static func makeView(credentials: RecordingCredentialStore)
+        -> AiProviderPreferencesView {
+        AiProviderPreferencesView(
+            store: makeStore(credentials: credentials),
+            projectRootsStore: ProjectRootsStore(
+                defaults: UserDefaults(
+                    suiteName: "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)")!)
+        )
     }
 
     /// Both text fields write straight through to the store, so the field and

@@ -792,8 +792,15 @@ struct AiPlanSectionView: View {
             // did nothing here. `childEnvironment` is a COMPLETE environment,
             // not an overlay — `Process.environment` replaces wholesale, and
             // dropping PATH would break executable resolution.
+            //
+            // HORO-1368: `resolvedChildEnvironment`, which performs the
+            // keychain read off the main thread. `runLlmPlan` is `@MainActor`,
+            // so the synchronous version ran the read on the main thread — and
+            // on a build whose code identity the stored item's ACL does not
+            // admit, that read waits on a `SecurityAgent` prompt, during which
+            // the app has no menu-bar item at all.
             let raw = try await client
-                .withEnvironment(settingsStore.childEnvironment())
+                .withEnvironment(await settingsStore.resolvedChildEnvironment())
                 .runRaw(
                     ["llm-plan", "--json", "--progress-json"]
                         + projectRootsStore.commandLineArguments,
