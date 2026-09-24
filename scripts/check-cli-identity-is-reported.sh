@@ -77,7 +77,6 @@ without_comments() {
 }
 
 identity_body="$(without_comments "$IDENTITY_FILE")"
-status_body="$(without_comments "$STATUS_VIEW")"
 workflow_body="$(without_comments "$RELEASE_WORKFLOW")"
 
 # ---------------------------------------------------------------------------
@@ -151,12 +150,16 @@ fi
 # `fingerprintText` existed, so deleting every call to it from the card still
 # passed. A helper nothing calls renders nothing — that mutation reproduced the
 # exact regression this check exists to catch, and the check did not bite.
+# Comment lines are dropped from the extracted body for the same reason they are
+# dropped from the other files: this card explains at length what it renders and
+# why, and a checked call spelled out in a comment would satisfy the searches
+# below while the card rendered nothing.
 cli_card="$(
   /usr/bin/awk '
     /private var cliCard: some View/ { inside = 1 }
     inside { print }
     inside && /^    }$/ { exit }
-  ' "${REPO_ROOT}/${STATUS_VIEW}"
+  ' "${REPO_ROOT}/${STATUS_VIEW}" | grep -vE '^[[:space:]]*(//|\*|/\*)' || true
 )"
 
 if [[ -z "$cli_card" ]]; then
