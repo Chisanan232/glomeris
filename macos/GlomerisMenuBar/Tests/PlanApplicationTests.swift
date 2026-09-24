@@ -677,4 +677,351 @@ final class PlanApplicationTests: XCTestCase {
         XCTAssertEqual(steps[1].actionability, .asksFirstThenCleans)
         XCTAssertEqual(steps[4].actionability, .readyToClean)
     }
+
+    // MARK: - AC1: whether an entry point is offered at all
+
+    /// The gate is read from the suggestion set's own actionability, before any
+    /// re-check has happened, so the button can appear at the same moment the
+    /// rows do. It is deliberately optimistic in one direction only: a plan may
+    /// offer the entry point and then preview as entirely unrunnable once
+    /// `explain` has been re-run, and that is the honest outcome — the review
+    /// step is where the user learns it, and `hasAnythingToApply` is what gates
+    /// the destructive control.
+    func testEntryPointIsOfferedWhenAnySuggestionLooksActionable() {
+        XCTAssertTrue(PlanApplicationPreview.snapshotSuggestsAnApplicableItem([
+            planItem(resourceId: "/Users/x/.aws/credentials", policyLabel: "PROTECTED",
+                     executable: false, refusalReason: Self.protectedRefusal),
+            planItem(resourceId: "/Users/x/proj/target", policyLabel: "AUTO_SAFE",
+                     executable: true, requiresConfirmation: false),
+        ]))
+    }
+
+    /// AC7, at the entry point. A plan of refusals must not present a
+    /// destructive-sounding action at all — not a disabled one, since a dimmed
+    /// Apply still asserts that applying this plan is a thing that could happen.
+    func testEntryPointIsNotOfferedForAPlanOfRefusalsOnly() {
+        XCTAssertFalse(PlanApplicationPreview.snapshotSuggestsAnApplicableItem([
+            planItem(resourceId: "/Users/x/.aws/credentials", policyLabel: "PROTECTED",
+                     executable: false, refusalReason: Self.protectedRefusal),
+            planItem(resourceId: "/opt/homebrew/var/cache", policyLabel: "AUTO_SAFE",
+                     executable: false, refusalReason: Self.structuralRefusal),
+            // No stated reason at all: still not something to offer an Apply for.
+            planItem(resourceId: "/Users/x/other", policyLabel: "AUTO_SAFE",
+                     executable: false, refusalReason: nil),
+        ]))
+    }
+
+    func testEntryPointIsNotOfferedForAnEmptyPlan() {
+        XCTAssertFalse(PlanApplicationPreview.snapshotSuggestsAnApplicableItem([]))
+    }
+
+    /// An ASK-only plan is applicable — the user can opt in — so the entry
+    /// point appears. The same property `testPlanOfOnlyConfirmableItemsCanStillBeApplied`
+    /// asserts one step further down.
+    func testEntryPointIsOfferedForAConfirmableOnlySuggestion() {
+        XCTAssertTrue(PlanApplicationPreview.snapshotSuggestsAnApplicableItem([
+            planItem(resourceId: "/Users/x/Library/Caches/pip", policyLabel: "ASK",
+                     executable: true, requiresConfirmation: true),
+        ]))
+    }
+
+    /// AC3 at the gate as well as in the preview: an AUTO_SAFE label on a
+    /// resource Rust will not execute does not make the plan applicable.
+    func testAnAutoSafeLabelOnANonExecutableSuggestionDoesNotOfferTheEntryPoint() {
+        XCTAssertFalse(PlanApplicationPreview.snapshotSuggestsAnApplicableItem([
+            planItem(resourceId: "/opt/homebrew/var/cache", policyLabel: "AUTO_SAFE",
+                     executable: false, refusalReason: Self.structuralRefusal),
+        ]))
+    }
+
+    // MARK: - Positions, not resource ids
+
+    /// A provider may name the same resource twice. `attemptedIndices` answers
+    /// in positions so a duplicated id cannot collapse two outcomes into one or
+    /// attribute the first item's result to the second.
+    func testDuplicatedResourceIdsRemainTwoSeparateSteps() {
+        let duplicated = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/proj/target",
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/proj/target",
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+        ])
+        XCTAssertEqual(duplicated.attemptedIndices(includingConfirmable: false), [0, 1])
+
+        // The first cleaned, the second found nothing left to clean. Both
+        // outcomes survive, attached to the right position.
+        let result = PlanApplicationResult.assemble(
+            preview: duplicated,
+            includingConfirmable: false,
+            statusesByStepIndex: [
+                0: .cleaned(reclaimedBytes: 1_048_576, human: "1.0 MB"),
+                1: .failed(message: "the directory no longer exists"),
+            ],
+            stoppedEarlyReason: nil
+        )
+        XCTAssertEqual(result.items.count, 2)
+        XCTAssertTrue(result.items[0].status.didClean)
+        XCTAssertFalse(result.items[1].status.didClean)
+        XCTAssertFalse(result.isCompleteSuccess)
+    }
+
+    func testAttemptedIndicesArePositionsInTheModelsOrder() {
+        let preview = mixedPreview()
+        // Position 4 only: the runnable AUTO_SAFE item the model ranked last.
+        XCTAssertEqual(preview.attemptedIndices(includingConfirmable: false), [4])
+        // Opting in adds position 1 — and in plan order, not appended.
+        XCTAssertEqual(preview.attemptedIndices(includingConfirmable: true), [1, 4])
+    }
+
+    // MARK: - AC8: the result accounts for every previewed step
+
+    /// The heart of AC8's "it never reports the whole plan successful when one
+    /// or more items were refused". The result is assembled over every step in
+    /// the preview, not over the attempted subset, so a batch that cleaned its
+    /// one runnable item out of five still says so as one of five.
+    func testAssembleReportsEverySkippedStepAlongsideTheExecutedOne() {
+        let preview = mixedPreview()
+        let result = PlanApplicationResult.assemble(
+            preview: preview,
+            includingConfirmable: false,
+            statusesByStepIndex: [4: .cleaned(reclaimedBytes: 8_388_608, human: "8.0 MB")],
+            stoppedEarlyReason: nil
+        )
+
+        XCTAssertEqual(result.items.count, 5)
+        XCTAssertEqual(result.cleanedCount, 1)
+        XCTAssertEqual(result.notCleanedCount, 4)
+        XCTAssertFalse(result.isCompleteSuccess)
+        XCTAssertEqual(result.headline, "Cleaned 1 of 5 items — 4 did not run.")
+
+        // Order is the preview's order, which is the model's order.
+        XCTAssertEqual(result.items.map(\.resourceId), preview.steps.map(\.resourceId))
+    }
+
+    /// AC6 in the result as well as in the preview: each skipped row carries
+    /// the CLI's own sentence, so PROTECTED, a structural refusal and a stale
+    /// resource remain three different explanations after the run rather than
+    /// one shared "skipped".
+    func testEverySkippedStepKeepsItsOwnReasonInTheResult() {
+        let result = PlanApplicationResult.assemble(
+            preview: mixedPreview(),
+            includingConfirmable: false,
+            statusesByStepIndex: [4: .cleaned(reclaimedBytes: 8_388_608, human: "8.0 MB")],
+            stoppedEarlyReason: nil
+        )
+        XCTAssertEqual(result.items[0].status, .notAttempted(reason: Self.protectedRefusal))
+        XCTAssertEqual(result.items[2].status, .notAttempted(reason: Self.structuralRefusal))
+        XCTAssertEqual(
+            result.items[3].status,
+            .notAttempted(reason: "explain: no such resource is currently detected")
+        )
+
+        let messages = Set([0, 2, 3].map { result.items[$0].status.message })
+        XCTAssertEqual(messages.count, 3, "three distinct causes must read as three distinct rows")
+    }
+
+    /// AC5's consequence. An ASK item the user did not opt in to is not
+    /// "refused" and not "failed" — it is unapplied because they did not
+    /// authorise it, and the row says which.
+    func testAConfirmableStepTheUserDidNotIncludeSaysWhyItWasNotApplied() {
+        let result = PlanApplicationResult.assemble(
+            preview: mixedPreview(),
+            includingConfirmable: false,
+            statusesByStepIndex: [4: .cleaned(reclaimedBytes: 8_388_608, human: "8.0 MB")],
+            stoppedEarlyReason: nil
+        )
+        XCTAssertEqual(
+            result.items[1].status,
+            .notAttempted(
+                reason: "Not applied — you did not include the items that ask for confirmation."
+            )
+        )
+        // And it does not read as a refusal by Glomeris, which would be a lie
+        // about who declined.
+        XCTAssertFalse(result.items[1].status.message.contains("PROTECTED"))
+    }
+
+    /// An item that was in the batch and never reached says that, rather than
+    /// borrowing the reason of the item that stopped the batch.
+    func testAnItemTheBatchNeverReachedIsDistinguishedFromARefusal() {
+        let preview = mixedPreview()
+        let result = PlanApplicationResult.assemble(
+            preview: preview,
+            includingConfirmable: true,
+            // Position 1 refused with `busy`; position 4 was authorised and
+            // never reached.
+            statusesByStepIndex: [
+                1: .refused(reason: "busy", message: "another Glomeris invocation is running"),
+            ],
+            stoppedEarlyReason: "another Glomeris invocation is running"
+        )
+        XCTAssertEqual(
+            result.items[4].status,
+            .notAttempted(reason: "Not attempted — the batch stopped before reaching this item.")
+        )
+        XCTAssertFalse(result.isCompleteSuccess)
+        XCTAssertEqual(result.stoppedEarlyReason, "another Glomeris invocation is running")
+        // The refusal's own words are still on its own row, not moved onto the
+        // row that never ran.
+        XCTAssertTrue(result.items[1].status.message.contains("another Glomeris invocation"))
+    }
+
+    /// An all-skipped plan, applied anyway (nothing to attempt): no row claims
+    /// success and the aggregate does not either.
+    func testAssemblingWithNoStatusesAtAllClaimsNothing() {
+        let result = PlanApplicationResult.assemble(
+            preview: mixedPreview(),
+            includingConfirmable: false,
+            statusesByStepIndex: [:],
+            stoppedEarlyReason: nil
+        )
+        XCTAssertEqual(result.cleanedCount, 0)
+        XCTAssertFalse(result.isCompleteSuccess)
+        XCTAssertNil(result.reclaimedBytes)
+        XCTAssertEqual(result.headline, "Nothing was cleaned — 5 items did not run.")
+    }
+
+    /// The one case that is a complete success: every previewed step ran and
+    /// cleaned. `includingConfirmable` is true here because otherwise the ASK
+    /// step would be unapplied and the batch — correctly — would not be complete.
+    func testAPlanWhereEveryStepCleanedIsACompleteSuccess() {
+        let preview = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/a", fingerprintToken: "a", executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/b", fingerprintToken: "b", executable: true,
+                offeredActions: [OfferedActionDto(actionId: "pip.purge.cache",
+                                                  requiresConfirmation: true)]
+            )),
+        ])
+        let result = PlanApplicationResult.assemble(
+            preview: preview,
+            includingConfirmable: true,
+            statusesByStepIndex: [
+                0: .cleaned(reclaimedBytes: 1_000, human: "1.0 KB"),
+                1: .cleaned(reclaimedBytes: 2_000, human: "2.0 KB"),
+            ],
+            stoppedEarlyReason: nil
+        )
+        XCTAssertTrue(result.isCompleteSuccess)
+        XCTAssertEqual(result.cleanedCount, 2)
+        XCTAssertEqual(result.reclaimedBytes, 3_000)
+        XCTAssertFalse(result.reclaimedIsIncomplete)
+    }
+
+    // MARK: - Rendering the pre-run estimate
+    //
+    // What the estimate counts is asserted above; these cover only how the
+    // preview words it.
+
+    /// A single step quotes Rust's own rendering rather than re-formatting it,
+    /// so the preview's figure matches the one the detail view shows for the
+    /// same resource.
+    func testASingleStepEstimateQuotesTheCliRendering() {
+        XCTAssertEqual(
+            mixedPreview().reclaimableEstimateText(includingConfirmable: false),
+            "8.0 MB"
+        )
+    }
+
+    /// A sum is raw bytes on purpose — scaling it here would put a 1000-based
+    /// number beside Rust's 1024-based ones and read as though space had gone
+    /// missing. Documented on `reclaimedText`, asserted here.
+    func testASummedEstimateIsRawBytesRatherThanALocallyScaledFigure() {
+        XCTAssertEqual(
+            mixedPreview().reclaimableEstimateText(includingConfirmable: true),
+            "12582912 bytes"
+        )
+    }
+
+    /// A total assembled over an unmeasured step is worded as a floor, so the
+    /// preview never states a figure it cannot stand behind.
+    func testASummedEstimateOverAnUnmeasuredStepIsWordedAsAFloor() {
+        let preview = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/a", reclaimableBytes: 2_048, reclaimableHuman: "2.0 KB",
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/b", reclaimableBytes: nil, reclaimableHuman: nil,
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+        ])
+        XCTAssertEqual(
+            preview.reclaimableEstimateText(includingConfirmable: false),
+            "at least 2048 bytes"
+        )
+    }
+
+    /// No attempted step reported a size: the preview says nothing about space
+    /// rather than showing a confident zero.
+    func testNoMeasuredStepMeansNoEstimateSentenceAtAll() {
+        let preview = PlanApplicationPreview(steps: [
+            PlanApplicationStep(explain: explainReport(
+                resourceId: "/Users/x/a", reclaimableBytes: nil, reclaimableHuman: nil,
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            )),
+        ])
+        XCTAssertNil(preview.reclaimableEstimateText(includingConfirmable: false))
+    }
+
+    // MARK: - Fixtures for the entry-point gate
+
+    /// A plan item as `llm-plan --json` reports one. Only the candidate's
+    /// actionability triple matters to `snapshotSuggestsAnApplicableItem`; the
+    /// rest is filled in so the DTO is a real one rather than a stub of the
+    /// shape the gate happens to read.
+    private func planItem(
+        resourceId: String,
+        policyLabel: String,
+        executable: Bool,
+        requiresConfirmation: Bool = false,
+        refusalReason: String? = nil
+    ) -> LlmPlanItemReportDto {
+        let offeredActions = executable
+            ? [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                requiresConfirmation: requiresConfirmation)]
+            : []
+        return LlmPlanItemReportDto(
+            resourceId: resourceId,
+            policyLabel: policyLabel,
+            requestedActionId: offeredActions.first?.actionId,
+            priority: 1,
+            modelReason: "the model's own words, which decide nothing here",
+            explain: nil,
+            skipReason: nil,
+            candidate: DetectCandidateReportDto(
+                resourceId: resourceId,
+                kind: "cargo_target",
+                reclaimableBytes: 1_048_576,
+                reclaimableHuman: "1.0 MB",
+                reclaimableBytesIsLowerBound: false,
+                impactTier: nil,
+                policyLabel: policyLabel,
+                reasons: ["regenerable by cargo build"],
+                executable: executable,
+                offeredActions: offeredActions,
+                refusalReason: refusalReason
+            ),
+            completeness: "complete",
+            confidence: "high"
+        )
+    }
 }
