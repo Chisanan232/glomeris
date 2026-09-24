@@ -124,7 +124,13 @@ enum PlanApplicationDisposition: Equatable {
 /// also means the preview and the deletion read the same field from the same
 /// source, one after the other, which is what makes AC4's "same execution
 /// invariants as single-item Clean" true rather than asserted.
-struct PlanApplicationStep: Equatable, Identifiable {
+/// Deliberately not `Identifiable`, and neither is `PlanApplicationItemResult`.
+/// A provider may name the same resource twice — `AiPlanSectionView.rows`
+/// already keys its `ForEach` by position for exactly that reason, and
+/// `resourceId` as an identity would make a duplicated suggestion misrender in
+/// the preview and the result too. Position is the honest identity here, since
+/// the order is the plan's.
+struct PlanApplicationStep: Equatable {
     let resourceId: String
     let kind: String
     let policyLabel: String
@@ -144,8 +150,6 @@ struct PlanApplicationStep: Equatable, Identifiable {
     /// preview can show the same sentence the row and the detail show.
     let actionability: CandidateActionability
     let disposition: PlanApplicationDisposition
-
-    var id: String { resourceId }
 
     var kindTerm: GlomerisTerm { GlomerisVocabulary.kind(kind) }
     var safetyTerm: GlomerisTerm { GlomerisVocabulary.safety(policyLabel) }
@@ -252,20 +256,60 @@ struct PlanApplicationPreview: Equatable {
         steps.contains { $0.disposition.isRunnable }
     }
 
-    /// The steps that will actually be attempted, given the user's decision
-    /// about items that ask first.
+    /// Whether the plan as it stands is worth offering a batch over at all —
+    /// read from the snapshot `llm-plan` embedded in each item, before any
+    /// `explain` has been re-run.
+    ///
+    /// This decides whether an *entry point* appears, and nothing else. It is
+    /// explicitly not an authorisation and cannot be one: pressing that entry
+    /// point runs the `explain` sweep, and the fresh reports are what every
+    /// disposition is built from. A snapshot that has since gone stale
+    /// therefore costs at most an offer to review a plan whose preview then
+    /// says nothing in it can be applied — which is honest, and is the state
+    /// `hasAnythingToApply` gates the destructive action on.
+    ///
+    /// Switched over rather than asked for a boolean, because
+    /// `CandidateActionability` deliberately exposes none: a boolean there
+    /// would be the obvious thing for a `.disabled(...)` to read, and then the
+    /// enablement of a deleting control would depend on a display type. See
+    /// that file's header.
+    static func snapshotSuggestsAnApplicableItem(_ items: [LlmPlanItemReportDto]) -> Bool {
+        items.contains { item in
+            switch CandidateActionability(
+                executable: item.candidate.executable,
+                offeredActions: item.candidate.offeredActions,
+                refusalReason: item.candidate.refusalReason
+            ) {
+            case .readyToClean, .asksFirstThenCleans: return true
+            case .refused, .refusedWithoutStatedReason: return false
+            }
+        }
+    }
+
+    /// The positions of the steps that will actually be attempted, given the
+    /// user's decision about items that ask first.
     ///
     /// When the opt-in is off, an ASK step is *skipped*, never run
     /// unconfirmed — the default is off, so the quietest possible misreading
     /// of this control leaves the more conservative batch.
-    func stepsToAttempt(includingConfirmable: Bool) -> [PlanApplicationStep] {
-        steps.filter { step in
-            switch step.disposition {
+    ///
+    /// Positions rather than steps, because the runner has to record each
+    /// attempt's outcome against the step it belongs to and a duplicated
+    /// resource id cannot do that. `stepsToAttempt` is the same answer in the
+    /// shape the preview's summary wants, derived from this one so there is a
+    /// single definition of what gets attempted.
+    func attemptedIndices(includingConfirmable: Bool) -> [Int] {
+        steps.indices.filter { index in
+            switch steps[index].disposition {
             case .willRun: return true
             case .willRunAfterConfirming: return includingConfirmable
             case .skippedRefused, .skippedStale: return false
             }
         }
+    }
+
+    func stepsToAttempt(includingConfirmable: Bool) -> [PlanApplicationStep] {
+        attemptedIndices(includingConfirmable: includingConfirmable).map { steps[$0] }
     }
 
     /// The measured-evidence total for what will be attempted, or `nil` when
@@ -291,6 +335,24 @@ struct PlanApplicationPreview: Equatable {
             }
         }
         return measured ? (total, lowerBound) : (nil, lowerBound)
+    }
+
+    /// The estimate as one phrase, or `nil` when no attempted step reported a
+    /// size — in which case the preview says nothing about space rather than
+    /// showing a confident zero.
+    ///
+    /// Same convention as `PlanApplicationResult.reclaimedText`, for the same
+    /// reason: one step quotes Rust's own rendering, and a sum is raw bytes
+    /// because re-scaling it here would put a 1000-based number beside Rust's
+    /// 1024-based ones.
+    func reclaimableEstimateText(includingConfirmable: Bool) -> String? {
+        let attempted = stepsToAttempt(includingConfirmable: includingConfirmable)
+        let estimate = reclaimableEstimate(includingConfirmable: includingConfirmable)
+        guard let bytes = estimate.bytes else { return nil }
+        if attempted.count == 1, let only = attempted.first?.reclaimableHuman, !only.isEmpty {
+            return estimate.isLowerBound ? "at least \(only)" : only
+        }
+        return estimate.isLowerBound ? "at least \(bytes) bytes" : "\(bytes) bytes"
     }
 }
 
@@ -384,12 +446,11 @@ enum PlanApplicationItemStatus: Equatable {
 }
 
 /// One row of the result: which resource, and what happened to it.
-struct PlanApplicationItemResult: Equatable, Identifiable {
+struct PlanApplicationItemResult: Equatable {
     let resourceId: String
     let kind: String
     let status: PlanApplicationItemStatus
 
-    var id: String { resourceId }
     var kindTerm: GlomerisTerm { GlomerisVocabulary.kind(kind) }
 }
 
@@ -495,5 +556,75 @@ struct PlanApplicationResult: Equatable {
         if cleanedCount == 1, let only = renderedByRust.first { return only }
         guard let total = reclaimedBytes else { return nil }
         return reclaimedIsIncomplete ? "at least \(total) bytes" : "\(total) bytes"
+    }
+
+    /// Builds the result from the preview it was applied from, so the account
+    /// covers every item of the plan rather than only the ones that were tried.
+    ///
+    /// # Why skipped items are in the result
+    ///
+    /// A batch of five suggestions in which one cleaned and four were refused
+    /// is not a one-item success with four items that were never mentioned
+    /// again. AC8 says a plan is never reported successful when one or more
+    /// items were refused, and the refused ones are precisely these — so every
+    /// step appears, in the plan's order, each with either what its `execute`
+    /// returned or the reason it was not attempted. That also means
+    /// `isCompleteSuccess` is reachable only by a plan whose every item
+    /// cleaned, which is the intended reading.
+    ///
+    /// # Why this is pure
+    ///
+    /// This mapping is the honesty of the whole feature, and it is the part a
+    /// runner would be tempted to shortcut ("only report what I tried"). It
+    /// takes the statuses it is given and decides nothing about them; the only
+    /// judgment is which sentence a *not attempted* item gets, and there are
+    /// three, each corresponding to a distinct thing that happened.
+    ///
+    /// `statusesByStepIndex` is keyed by position in `preview.steps`, not by
+    /// resource id, because a provider may name the same resource twice.
+    static func assemble(
+        preview: PlanApplicationPreview,
+        includingConfirmable: Bool,
+        statusesByStepIndex: [Int: PlanApplicationItemStatus],
+        stoppedEarlyReason: String?
+    ) -> PlanApplicationResult {
+        let attemptable = Set(preview.attemptedIndices(includingConfirmable: includingConfirmable))
+        let items = preview.steps.enumerated().map { index, step -> PlanApplicationItemResult in
+            let status = statusesByStepIndex[index]
+                ?? .notAttempted(reason: notAttemptedReason(
+                    step: step,
+                    wasAttemptable: attemptable.contains(index),
+                    batchStopped: stoppedEarlyReason != nil
+                ))
+            return PlanApplicationItemResult(
+                resourceId: step.resourceId,
+                kind: step.kind,
+                status: status
+            )
+        }
+        return PlanApplicationResult(items: items, stoppedEarlyReason: stoppedEarlyReason)
+    }
+
+    /// The three reasons an item of the plan was not attempted, in the order
+    /// they take precedence.
+    private static func notAttemptedReason(
+        step: PlanApplicationStep,
+        wasAttemptable: Bool,
+        batchStopped: Bool
+    ) -> String {
+        // Glomeris would not run it. The CLI's own sentence, unchanged — the
+        // only thing that distinguishes PROTECTED from a missing action from a
+        // structural refusal from a stale resource.
+        if let skipReason = step.disposition.skipReason { return skipReason }
+        // It asks first, and the user did not include those.
+        if !wasAttemptable {
+            return "Not applied — you did not include the items that ask for confirmation."
+        }
+        // It was in the batch and the batch ended before reaching it.
+        if batchStopped { return "Not attempted — the batch stopped before reaching this item." }
+        // Attemptable, nothing stopped the batch, and yet no status was
+        // recorded. Nothing produces this today; saying so plainly is better
+        // than a sentence that implies a cause we do not have.
+        return "Not attempted, and Glomeris cannot say why."
     }
 }
