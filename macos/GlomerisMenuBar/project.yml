@@ -112,6 +112,12 @@ targets:
       - path: Sources/CandidateDetailView.swift
       - path: Sources/HistoryAuditSectionView.swift
       - path: Sources/AiPlanSectionView.swift
+      # HORO-1366: the batch itself — the only place in the target that turns a
+      # provider's suggestion set into `execute` invocations. Here so its two
+      # call sites can be driven against a fixture binary, and so the guards
+      # that keep `execute` out of a cancellable task are assertions about a
+      # compiled type rather than only about source text.
+      - path: Sources/ApplyPlanView.swift
       - path: Sources/CredentialStore.swift
       - path: Sources/GlomerisLlmSettingsStore.swift
       - path: Sources/AiProviderPreferencesView.swift
