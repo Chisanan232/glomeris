@@ -9,6 +9,10 @@
 //! Ask-because-of-observed-risk judgment. This module does not change,
 //! and is never consulted by, [`crate::policy::classify`] itself — it is
 //! a read-only projection for report text.
+//!
+//! [`PolicyLabel::NotPolicyGoverned`] (HORO-1468) is the one label that is
+//! not a projection of any [`crate::policy::PolicyDecision`] at all — see
+//! its own doc comment.
 
 use crate::policy::{PolicyClass, PolicyDecision, ReasonCode};
 
@@ -20,6 +24,27 @@ pub enum PolicyLabel {
     Ask,
     Protected,
     UnknownIncomplete,
+    /// Not a judgment about a developer resource: the audit trail's label
+    /// for an action on the tool's OWN disposable state, which
+    /// [`crate::policy::classify`] never sees (HORO-1468).
+    ///
+    /// Exactly one action needs it today — `glomeris emergency`'s step 1,
+    /// which deletes the pressure-history file this tool wrote itself. That
+    /// deletion is deliberately not policy-governed (see
+    /// `crate::emergency::free_self_owned_disposable_state`), and before
+    /// HORO-1468 it was also not audited, so the one action in the product
+    /// that runs with no policy gate at all left no trace in
+    /// `actions.jsonl`. Auditing it required a label, and every other value
+    /// in this enum would have been a false claim that policy ran and
+    /// cleared it.
+    ///
+    /// [`label_for`] can never return this — it projects a decision, and
+    /// every decision has a class. `label_for_never_returns_not_policy_
+    /// governed` below asserts that over every class/reason shape rather
+    /// than leaving it to the doc comment. It follows that any match on
+    /// this variant in an authorization path is unreachable today and must
+    /// fail closed regardless; `crate::autopilot::gate::admit` does.
+    NotPolicyGoverned,
 }
 
 impl PolicyLabel {
@@ -29,6 +54,7 @@ impl PolicyLabel {
             PolicyLabel::Ask => "ASK",
             PolicyLabel::Protected => "PROTECTED",
             PolicyLabel::UnknownIncomplete => "UNKNOWN_INCOMPLETE",
+            PolicyLabel::NotPolicyGoverned => "NOT_POLICY_GOVERNED",
         }
     }
 }
