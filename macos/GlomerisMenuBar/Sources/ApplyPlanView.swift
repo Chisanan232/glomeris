@@ -143,7 +143,13 @@ struct ApplyPlanView: View {
                 "Re-checks every suggestion against Glomeris and shows what would run. "
                     + "Nothing is deleted until you confirm."
             )
-            Text("Re-checks every suggestion first. Nothing runs until you confirm.")
+            // HORO-1367: the re-check promise was stated twice on the first
+            // layer — once here and once in the button's accessibility hint
+            // just above. The hint keeps the full sentence, because a
+            // VoiceOver user gets no second glance at the caption; the
+            // visible line keeps only the half that is a safety promise, and
+            // "Apply plan…" already promises the intermediate step.
+            Text("Nothing runs until you confirm.")
                 .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
