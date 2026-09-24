@@ -503,6 +503,170 @@ mod select_candidate_tests {
 
         assert!(selected.is_none());
     }
+
+    /// A real, minimal cargo project under the OS temp dir, so
+    /// `cargo.clean.target_dir` can genuinely plan for it — its planner stats
+    /// `Cargo.toml` and refuses without one. Returns the target dir.
+    ///
+    /// The other tests in this module use non-existent paths deliberately,
+    /// since policy classification does not need the resource to exist. The
+    /// two HORO-1359 tests below do need it, because they are about whether
+    /// an action can be *planned*.
+    fn cargo_project_fixture(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "glomeris-h1359-select-{tag}-{}-{:?}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("clock before epoch")
+                .as_nanos()
+        ));
+        let target = root.join("target");
+        std::fs::create_dir_all(&target).expect("create target dir");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.0.0\"\n",
+        )
+        .expect("write Cargo.toml");
+        target
+    }
+
+    /// HORO-1359: the loop must not pick a candidate whose action execution
+    /// refuses on sight — and must fall through to the next-largest one in
+    /// the *same* call.
+    ///
+    /// The Homebrew cache is deliberately the larger of the two, which is
+    /// also the realistic case: it is often the biggest single thing on a
+    /// developer's disk, so the old ordering picked it first, `execute`
+    /// refused it, and one of `config.max_iterations` was spent. Asserting
+    /// that the cargo target dir comes back — rather than merely that the
+    /// cache does not — is what pins the filter to selection rather than to
+    /// the caller, where each refused candidate would still cost an
+    /// iteration.
+    #[test]
+    fn a_candidate_whose_action_cannot_run_is_skipped_for_the_next_largest() {
+        let target = cargo_project_fixture("skip-for-next");
+        let brew_cache = std::env::temp_dir().join("glomeris-h1359-nonexistent-brew-cache");
+        let registry = ActionRegistry::builtin();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let big_but_refused = evidence(
+            &brew_cache.to_string_lossy(),
+            ResourceKind::HomebrewCache,
+            10_000,
+        );
+        let small_but_runnable =
+            evidence(&target.to_string_lossy(), ResourceKind::CargoTargetDir, 100);
+
+        // Fixture validity: the refusal asserted below must come from the
+        // action being unrunnable, not from the policy class or from a
+        // missing registry entry.
+        let brew_action = registry
+            .get("homebrew.cleanup.cache")
+            .expect("registered built-in");
+        assert!(
+            crate::actionability::plan_refusal(brew_action, &big_but_refused).is_some(),
+            "fixture invalid: this action must be statically refused"
+        );
+
+        let (selected, ask_skipped) = select_candidate(
+            vec![
+                (big_but_refused, ActionId("homebrew.cleanup.cache")),
+                (small_but_runnable, ActionId("cargo.clean.target_dir")),
+            ],
+            &registry,
+            &PolicyConfig::default(),
+            &CleanCollector,
+            now,
+            &HashSet::new(),
+            false,
+        );
+
+        // Positive control and headline assertion in one: the runnable
+        // candidate is still selected, so this cannot pass by selecting
+        // nothing — and it is selected despite being 100× smaller.
+        let selected = selected.expect("the runnable candidate must still be selected");
+        assert_eq!(selected.decision.class, PolicyClass::AutoSafe);
+        assert_eq!(selected.action_id, ActionId("cargo.clean.target_dir"));
+        assert_eq!(
+            selected.size, 100,
+            "the larger candidate is the refused one; picking it is the defect"
+        );
+        assert_eq!(
+            ask_skipped, 0,
+            "a statically-refused candidate is not an Ask skip: that count means consent, \
+             and conflating the two would misreport why the loop stopped"
+        );
+
+        std::fs::remove_dir_all(target.parent().expect("fixture has a parent")).ok();
+    }
+
+    /// The degenerate case: when the only candidate is one whose action
+    /// cannot run, nothing is selected — and it is not counted as an `Ask`
+    /// skip, so `free`'s own stop reason stays truthful.
+    #[test]
+    fn a_sole_candidate_whose_action_cannot_run_selects_nothing() {
+        let brew_cache = std::env::temp_dir().join("glomeris-h1359-nonexistent-brew-cache-only");
+        let ev = evidence(
+            &brew_cache.to_string_lossy(),
+            ResourceKind::HomebrewCache,
+            10_000,
+        );
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let (selected, ask_skipped) = select_candidate(
+            vec![(ev, ActionId("homebrew.cleanup.cache"))],
+            &ActionRegistry::builtin(),
+            &PolicyConfig::default(),
+            &CleanCollector,
+            now,
+            &HashSet::new(),
+            true,
+        );
+
+        assert!(selected.is_none());
+        assert_eq!(ask_skipped, 0);
+    }
+
+    /// An action id absent from the registry is deliberately NOT treated as
+    /// a refusal. Every other test in this module passes
+    /// `ActionId("test.action")`, so this pins the behaviour they all rely
+    /// on rather than leaving it as an accident of the filter's shape.
+    ///
+    /// The reasoning: `candidates_with_actions` resolved the id from this
+    /// same registry, so it cannot be missing in production; step 8 in the
+    /// caller already reports that case; and `execute` refuses an unknown
+    /// action independently, so nothing unsafe follows either way. Answering
+    /// it here would mean this filter deciding something that is not its
+    /// question.
+    #[test]
+    fn an_unregistered_action_id_is_not_treated_as_a_refusal() {
+        let ev = evidence(
+            "/tmp/unregistered/target",
+            ResourceKind::CargoTargetDir,
+            100,
+        );
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        assert!(
+            ActionRegistry::builtin().get("test.action").is_none(),
+            "fixture invalid: this id must be absent from the registry"
+        );
+
+        let (selected, _) = select_candidate(
+            vec![(ev, ActionId("test.action"))],
+            &ActionRegistry::builtin(),
+            &PolicyConfig::default(),
+            &CleanCollector,
+            now,
+            &HashSet::new(),
+            false,
+        );
+
+        assert!(
+            selected.is_some(),
+            "an unresolvable action id must reach the caller, which reports it"
+        );
+    }
 }
 
 /// Builds an [`AuditRecord`] (HORO-1057, `source: "free"`) from a real
