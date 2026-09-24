@@ -314,50 +314,93 @@ final class SingleInstanceGuardTests: XCTestCase {
 
     // MARK: - Where the rule is applied
 
-    /// The rule is worthless if it runs after the status item exists: the
-    /// duplicate icon appears and then vanishes, which is still a duplicate icon.
-    /// Asserted on the source text because the scene body cannot be evaluated in a
-    /// unit test — and because the mistake this catches is a refactor that moves
-    /// the call into `body` or an `onAppear`.
-    func testTheGuardRunsBeforeAnySceneIsConstructed() throws {
-        let source = try Self.readSource("GlomerisMenuBarApp.swift")
-        let code = source
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-            .joined(separator: "\n")
+    /// The rule has exactly one place it can run, and both ways of getting it
+    /// wrong were reached in practice while fixing this ticket.
+    ///
+    /// Too late in the obvious way: `body`, or a view's `onAppear`. By then the
+    /// status item is already on its way to the menu bar, so the duplicate icon
+    /// appears and then vanishes, which is still a duplicate icon.
+    ///
+    /// Too late in the non-obvious way: an `NSApplicationDelegate` hook. SwiftUI
+    /// instantiates the whole scene graph inside `App.main()`, before
+    /// `NSApplication.finishLaunching` delivers a single delegate callback —
+    /// measured on a build wired to `applicationWillFinishLaunching`, where a
+    /// second instance sampled long after launch was still inside `body` with its
+    /// delegate not yet constructed, and both processes were running. The live
+    /// lifecycle check failed on exactly that.
+    ///
+    /// Asserted on the source text because neither the scene body nor an
+    /// application launch can be exercised from a unit test, and what has to hold
+    /// is a fact about where the call is written.
+    func testTheGuardRunsFromTheAppInitialiserAndNowhereElse() throws {
+        let entryPoint = Self.stripComments(try Self.readSource("GlomerisMenuBarApp.swift"))
 
-        let initIndex = try XCTUnwrap(code.range(of: "init()"), "the entry point has no init")
-        let bodyIndex = try XCTUnwrap(code.range(of: "var body: some Scene"))
-        let enforceIndex = try XCTUnwrap(
-            code.range(of: "SingleInstanceGuard.enforce()"),
-            "the app no longer enforces the single-instance rule at all"
-        )
+        // The initialiser: everything between the start of the App struct and the
+        // scene body it must run before.
+        let structStart = try XCTUnwrap(entryPoint.range(of: "struct GlomerisMenuBarApp: App {"))
+        let bodyStart = try XCTUnwrap(entryPoint.range(of: "var body: some Scene"))
+        let beforeBody = entryPoint[structStart.upperBound..<bodyStart.lowerBound]
 
         XCTAssertTrue(
-            initIndex.lowerBound < enforceIndex.lowerBound,
-            "enforce() must be called from init()"
+            beforeBody.contains("init() {"),
+            "the app needs an initialiser to decide in, before any scene exists"
         )
         XCTAssertTrue(
-            enforceIndex.upperBound < bodyIndex.lowerBound,
-            "enforce() must run before the scene body, or a second icon is drawn before it is removed"
+            beforeBody.contains("SingleInstanceGuard.enforce()"),
+            "the initialiser must be what enforces the rule"
         )
-        XCTAssertTrue(code.contains("exit(0)"), "a yielding process has to actually exit")
+        XCTAssertTrue(
+            beforeBody.contains("exit(0)"),
+            "a yielding process has to actually exit, before it draws anything"
+        )
+
+        // Not from a delegate callback: that arrives after the scene graph is
+        // built, and after anything blocking in it.
+        XCTAssertFalse(
+            entryPoint.contains("NSApplicationDelegateAdaptor"),
+            "an application-delegate hook runs after the scene graph is "
+                + "instantiated, which is too late to prevent a second status item"
+        )
+
+        // And not from the scene body, whichever file it moves to.
+        let sceneBody = entryPoint[bodyStart.lowerBound...]
+        XCTAssertFalse(
+            sceneBody.contains("SingleInstanceGuard"),
+            "the scene body must not enforce the rule — the status item is already "
+                + "on its way by then"
+        )
+        for file in ["GlomerisMenuBarApp.swift", "GlomerisPopoverView.swift"] {
+            let text = Self.stripComments(try Self.readSource(file))
+            XCTAssertFalse(
+                text.contains("onAppear") && text.contains("SingleInstanceGuard"),
+                "\(file) must not enforce the rule from a view's lifecycle"
+            )
+        }
     }
 
     /// One `MenuBarExtra`, so one process is one icon. This is the fact that made
     /// the live accessibility-tree count meaningful, and a second scene here would
     /// silently invalidate every count in this ticket's evidence.
     func testTheAppDeclaresExactlyOneMenuBarExtra() throws {
-        let source = try Self.readSource("GlomerisMenuBarApp.swift")
-        let code = source
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-            .joined(separator: "\n")
+        let code = Self.stripComments(try Self.readSource("GlomerisMenuBarApp.swift"))
 
-        XCTAssertEqual(code.components(separatedBy: "MenuBarExtra").count - 1, 1)
+        XCTAssertEqual(
+            code.components(separatedBy: "MenuBarExtra").count - 1, 1,
+            "one MenuBarExtra: one process is one icon, which is what makes the live "
+                + "accessibility-tree count mean anything"
+        )
     }
 
     // MARK: - Helpers
+
+    /// Comments are stripped so a placement assertion cannot be satisfied — or
+    /// broken — by prose. Both files here document the calls they make.
+    private static func stripComments(_ source: String) -> String {
+        source
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+    }
 
     private static func readSource(_ fileName: String) throws -> String {
         let sourceURL = URL(fileURLWithPath: #filePath)
