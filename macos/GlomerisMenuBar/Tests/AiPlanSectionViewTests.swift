@@ -692,9 +692,13 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertTrue(source.contains("your provider"), "whose provider receives it")
         XCTAssertTrue(source.contains("may cost money"), "that asking can be billed")
         XCTAssertTrue(
-            source.contains("Settings previews it without sending"),
-            "the privacy preview must be discoverable from here, and it must be clear that "
-                + "previewing does not itself send"
+            source.contains("Settings shows exactly what would be sent"),
+            "the preview claim must stay the exact one: \"previews it\" is true of a summary or "
+                + "a sample, and what Settings displays is the payload itself"
+        )
+        XCTAssertTrue(
+            source.contains("without sending it"),
+            "and it must be clear that previewing does not itself send"
         )
         // HORO-1309 moved the preview into the GUI. Until then this card told
         // the user to run `glomeris llm-plan --print-payload` in a terminal —
