@@ -814,6 +814,45 @@ mod tests {
         );
     }
 
+    /// Pins the *wiring*, not the mechanism: `atomic_write`'s own tests
+    /// prove a writer never truncates a file it did not create, and this
+    /// proves the plist is written through that writer. A future edit that
+    /// reintroduces a local temp-file-plus-rename here — the obvious thing
+    /// to reach for, and what this module did before HORO-1464 — clobbers
+    /// the squatter and fails.
+    ///
+    /// Deterministic: the pre-placed file sits at the exact name the old
+    /// code derived from the target, so nothing here depends on timing.
+    /// A concurrent writer's in-flight scratch file is the same situation.
+    #[test]
+    fn writing_the_plist_cannot_disturb_a_file_at_the_old_predictable_temp_name() {
+        const SQUATTER: &str = "another process's in-flight plist write";
+        let dir = unique_temp_dir("old-temp-name-untouched");
+        std::fs::create_dir_all(&dir).unwrap();
+        let plist_path = dir.join(format!("{LABEL}.plist"));
+        let log_dir = dir.join("logs");
+        let old_temp_name = plist_path.with_extension("plist.tmp");
+        std::fs::write(&old_temp_name, SQUATTER).unwrap();
+
+        write_plist(&plist_path, Path::new("/bin/echo"), 60, &log_dir).unwrap();
+
+        assert!(
+            std::fs::read_to_string(&plist_path)
+                .unwrap()
+                .contains(LABEL),
+            "the plist must still be written correctly"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&old_temp_name).unwrap(),
+            SQUATTER,
+            "the write must not have used — and so must not have truncated — \
+             the temp name it derived from the target before HORO-1464"
+        );
+        assert_eq!(temp_paths_beside(&plist_path), Vec::<PathBuf>::new());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn uninstall_backs_up_before_removing() {
         let dir = unique_temp_dir("uninstall-backup");
