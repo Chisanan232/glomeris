@@ -82,6 +82,29 @@ final class GlomerisPopoverViewTests: XCTestCase {
         )
     }
 
+    /// The range has to bound both things that occupy the body, which means it
+    /// belongs on the `ZStack` and not on the overview inside it.
+    ///
+    /// The detail branch is the taller of the two — it stacks a back bar, a
+    /// header, the Clean button, a refusal line and an outcome message around
+    /// its own inner scroll region — so bounding only the overview leaves the
+    /// one surface that can outgrow the display unbounded. Its own
+    /// `.frame(maxHeight:)` is not a substitute: a lone ceiling on a
+    /// `ScrollView` is the exact shape this ticket found to state no height
+    /// preference at all.
+    func testTheHeightRangeBoundsTheDetailBranchAndNotOnlyTheOverview() throws {
+        let body = try Self.propertyBody(named: "scrollingBody", in: code)
+        XCTAssertTrue(body.contains("ZStack"), "the two surfaces are layered, so this is the ZStack")
+        XCTAssertTrue(
+            body.contains("detail(resourceId)"),
+            "sanity: the window must be the property that hosts the detail branch"
+        )
+        XCTAssertTrue(
+            body.contains("minHeight: Self.bodyHeightLimits.min"),
+            "the range must be applied where both branches are bounded by it"
+        )
+    }
+
     /// The bound has to come from the display, not from inside the panel.
     /// A `GeometryReader` here could only report the space the panel had
     /// already been given, which is the number this ticket is trying to
@@ -328,6 +351,28 @@ final class GlomerisPopoverViewTests: XCTestCase {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
+    }
+
+    /// The text of one computed property, from its signature to the start of
+    /// the next declaration at the same indentation.
+    ///
+    /// Needed because *where* a modifier is applied is the invariant, and a
+    /// whole-file `contains` cannot see that: the height range read identically
+    /// when it was on the overview inside the `ZStack`, where it bounded only
+    /// one of the two surfaces. Throws rather than falling back to the rest of
+    /// the file, so a renamed property fails loudly instead of widening the
+    /// window until the assertion passes.
+    private static func propertyBody(named name: String, in source: String) throws -> String {
+        let signature = try XCTUnwrap(
+            source.range(of: "private var \(name): some View {"),
+            "no `private var \(name): some View` — renamed, or no longer a computed property"
+        )
+        let rest = source[signature.upperBound...]
+        let end = try XCTUnwrap(
+            rest.range(of: "\n    }\n"),
+            "could not find the end of \(name)"
+        )
+        return String(rest[..<end.upperBound])
     }
 
     private static func readSource(_ fileName: String) throws -> String {
