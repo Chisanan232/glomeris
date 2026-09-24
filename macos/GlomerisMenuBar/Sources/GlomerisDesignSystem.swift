@@ -93,10 +93,87 @@ enum GlomerisDesign {
     /// instead of starting at a different x for every row.
     static let detailLabelWidth: CGFloat = 132
 
-    /// The maximum height the scrolling body may take before it scrolls.
-    /// A menu-bar popover that grows past this stops being glanceable and
-    /// starts covering the screen it is reporting on.
-    static let maxBodyHeight: CGFloat = 520
+    /// The ceiling on the scrolling body's height — the point past which a
+    /// menu-bar popover stops being glanceable and starts covering the
+    /// screen it is reporting on.
+    ///
+    /// HORO-1367 raises it from 520pt. Note what this token does and does
+    /// not do: on every display the app is expected to run on, the height
+    /// the panel actually opens at is `minBodyHeight`, not this — measured
+    /// after the change, a body offered 430…640pt opened at exactly 430pt
+    /// with 1342pt of content inside it. This is the guard rail for the case
+    /// where something else drives the body taller, not the working number.
+    /// `minBodyHeight` explains why it was never the working number.
+    static let maxBodyHeight: CGFloat = 640
+
+    /// The height the scrolling body opens at when there is room for it.
+    ///
+    /// # Why a floor is needed at all, when there is already a ceiling
+    ///
+    /// `maxBodyHeight` alone never bound anything. A `ScrollView` accepts
+    /// any height it is offered, so it reports no height preference of its
+    /// own, and `MenuBarExtra(.window)` — given a body with no preference —
+    /// sizes its panel from its own default rather than from the ceiling.
+    /// Measured on the build that shipped to the founder DogFood: a body
+    /// holding some 1300pt of content settled at a 289pt viewport, in a
+    /// 340x360pt panel, while this ceiling stood at 520pt and the display
+    /// had 1079pt of usable height. The panel was not being clamped by a
+    /// deliberate limit; it was landing on a number nobody chose, and the
+    /// founder's report of a cramped surface is that number.
+    ///
+    /// A floor states the preference the `ScrollView` will not state, and
+    /// the panel adopts it. Measured after: 420x501pt panel, 430pt body —
+    /// exactly this token, so the mechanism is confirmed and not assumed.
+    ///
+    /// # Why a floor is safe now, and was not before
+    ///
+    /// HORO-1306's note argued that "a popover showing one healthy status
+    /// card should be the size of one healthy status card", which a floor
+    /// would break. That case no longer exists: the body always carries
+    /// four cards — status, candidates, AI Plan and history — and the
+    /// shortest of those four states is already taller than this. Measured
+    /// on a freshly launched app with nothing scanned, nothing asked and one
+    /// history row, the content was 1342pt against this 430pt floor. A floor
+    /// cannot open this panel onto blank space, so the argument that blocked
+    /// it has expired rather than been overruled.
+    static let minBodyHeight: CGFloat = 430
+
+    /// The shortest body worth opening on a display too small for
+    /// `minBodyHeight`. Below this the panel is not a reading surface and
+    /// internal scrolling is doing all the work anyway.
+    static let floorBodyHeight: CGFloat = 240
+
+    /// Vertical space the panel spends on everything that is not the
+    /// scrolling body: the header, the footer, and the two dividers between
+    /// them.
+    ///
+    /// Measured at 71pt — panel 501pt, body 430pt, and the same 71pt
+    /// difference before the change at 360 and 289. Reserved at roughly
+    /// double that on purpose, because the two failure modes are not
+    /// symmetric: over-reserving costs body height only on a display too
+    /// short for the full ceiling (under 780pt of usable height, which no
+    /// Mac ships with), while under-reserving puts the footer — and with it
+    /// Settings and Quit — off the bottom of the screen.
+    static let panelChromeAllowance: CGFloat = 140
+
+    /// The height range to offer the scrolling body on a display whose
+    /// usable height is `visibleScreenHeight`.
+    ///
+    /// Responsive bounds rather than one fixed size, because the constraint
+    /// is the display and not the design: 430…640pt is comfortable on any
+    /// current laptop, and on something shorter the panel has to give the
+    /// height back rather than run off the bottom of the screen. Pure and
+    /// total — every input, including a zero or negative height from a
+    /// display that has not been configured yet, yields a usable range with
+    /// `min <= max`.
+    static func bodyHeightLimits(visibleScreenHeight: CGFloat) -> (min: CGFloat, max: CGFloat) {
+        let available = visibleScreenHeight - panelChromeAllowance
+        // `floorBodyHeight` wins over a tiny or nonsensical `available`, so
+        // the range can never invert and the panel can never be offered a
+        // negative height.
+        let ceiling = Swift.max(Swift.min(maxBodyHeight, available), floorBodyHeight)
+        return (min: Swift.min(minBodyHeight, ceiling), max: ceiling)
+    }
 
     // MARK: Type scale
     //
