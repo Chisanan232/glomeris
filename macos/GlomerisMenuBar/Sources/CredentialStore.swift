@@ -186,10 +186,32 @@ struct KeychainCredentialStore: CredentialStore {
     func insertAttributes(forKey key: String, data: Data) -> [String: Any] {
         var insert = baseQuery(forKey: key)
         insert[kSecValueData as String] = data
-        // Available whenever the user has unlocked the Mac, and never synced
-        // to iCloud or included in a backup: a BYOK key is local to the
-        // machine the CLI runs on, so ThisDeviceOnly is both the tighter and
-        // the more accurate choice.
+        // HORO-1455 AC 1. This is a *file* keychain item — the login keychain —
+        // and `kSecAttrAccessible` is honoured by the data-protection keychain,
+        // not by a file keychain. Reaching the data-protection keychain needs an
+        // entitlement this app does not have: measured, an unsigned build passing
+        // `kSecUseDataProtectionKeychain` gets errSecMissingEntitlement (-34018).
+        // So the attribute is stored and inert.
+        //
+        // It is set anyway, because it is the correct value to already be
+        // carrying if Glomeris becomes a signed, entitled app, and because
+        // removing it would read as a decision to allow syncing. But the comment
+        // that used to be here claimed the protection it describes was in force,
+        // and two thirds of that claim were false. What actually holds today:
+        //
+        //   * Encrypted at rest while the login keychain is locked. True, and it
+        //     is the login keychain's doing, not this attribute's.
+        //   * Not synced to iCloud. True, but because a file keychain is not
+        //     syncable at all — `kSecAttrSynchronizable` is a data-protection
+        //     attribute too.
+        //   * Not included in a backup. FALSE. ~/Library/Keychains is an
+        //     ordinary directory, so any file-level backup of the home directory
+        //     contains the item. It is still encrypted there, and useless
+        //     without the keychain password.
+        //
+        // Whether to move to the data-protection keychain and pay its costs is a
+        // founder call recorded on HORO-1455, not something to decide in a
+        // comment. See book/src/byok.md, which now says the same thing to a user.
         insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         return insert
     }
