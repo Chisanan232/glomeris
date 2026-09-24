@@ -480,6 +480,89 @@ final class AutopilotPreferencesTests: XCTestCase {
         XCTAssertTrue(note.contains("900"))
     }
 
+    // MARK: - Spoken labels
+
+    /// HORO-1470. The status card shows its title and its detail as two
+    /// `Text` views, so the only thing separating them for a listener is
+    /// punctuation. Pinned as "the title ends in a sentence mark and the
+    /// detail follows it", not as a whole-string literal: the wording of both
+    /// halves is `AutopilotStatusViewModel.make`'s business and re-wording it
+    /// must not have to come through here.
+    func testTheStatusCardIsSpokenAsSentencesAndNotAsAComma() throws {
+        for report in [try revokedReport(), try enabledReport()] {
+            let status = AutopilotStatusViewModel.make(report)
+            let spoken = status.accessibilityLabel
+
+            XCTAssertEqual(
+                spoken, "\(status.title). \(status.detail)",
+                "the card's two Text views must be joined by a sentence boundary"
+            )
+            XCTAssertFalse(
+                spoken.contains("\(status.title), "),
+                "\(spoken) splices the title onto the detail with a comma"
+            )
+        }
+    }
+
+    /// The fourteen rows behind the "things you cannot answer in advance"
+    /// disclosure, same shape and same defect as the status card.
+    ///
+    /// Driven from the fixture's own reason list rather than from a chosen
+    /// example, so a reason added to the CLI is covered here the moment the
+    /// fixture is regenerated.
+    func testEveryNeverPreauthorizableRowIsSpokenAsSentences() throws {
+        let reasons = try enabledReport().neverPreauthorizableReasons
+        XCTAssertEqual(
+            reasons.count, 14,
+            "the disclosure's own label counts these; a change belongs in both places"
+        )
+
+        for reason in reasons {
+            let term = GlomerisVocabulary.reason(reason)
+            let spoken = AutopilotTermLabel.spoken(term)
+
+            XCTAssertEqual(spoken, "\(term.title). \(term.explanation)", "reason \(reason)")
+            // The axis prefix is deliberately absent: these rows render the
+            // title as prose, not as a chip, so nothing on screen says it.
+            XCTAssertFalse(spoken.hasPrefix("\(term.axis):"), "reason \(reason)")
+        }
+    }
+
+    /// Anti-vacuity for both assertions above.
+    ///
+    /// The two tests would pass against a composer that did nothing at all if
+    /// every `title` happened to end in a period already — none do, but that
+    /// is a property of today's wording rather than of the code under test.
+    /// This reproduces SwiftUI's `children: .combine` join on the same inputs
+    /// and requires the assertion to reject it, so a regression to the
+    /// pre-fix behaviour cannot pass.
+    func testTheComposerIsWhatMakesTheDifferenceNotTheWording() throws {
+        let status = AutopilotStatusViewModel.make(try revokedReport())
+
+        // What SwiftUI produced before this fix, and what the live
+        // accessibility tree read out: HORO-1470's reported string.
+        let combined = "\(status.title), \(status.detail)"
+        XCTAssertEqual(combined, "Autopilot is off, No run can delete anything. Glomeris still "
+            + "detects and explains; it just will not act without being asked each time.")
+        XCTAssertNotEqual(
+            status.accessibilityLabel, combined,
+            "the fix must not reproduce SwiftUI's comma join"
+        )
+
+        // And the titles really do lack punctuation of their own, so the
+        // period in the composed label is something `SpokenLabel` added
+        // rather than something the wording supplied.
+        XCTAssertFalse(status.title.hasSuffix("."))
+        for reason in try enabledReport().neverPreauthorizableReasons {
+            let term = GlomerisVocabulary.reason(reason)
+            XCTAssertFalse(term.title.hasSuffix("."), "reason \(reason)")
+            XCTAssertNotEqual(
+                AutopilotTermLabel.spoken(term), "\(term.title), \(term.explanation)",
+                "reason \(reason)"
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     private func value(of flag: String, in arguments: [String]) -> String? {
