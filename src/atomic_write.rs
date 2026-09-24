@@ -162,3 +162,338 @@ pub fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+/// Every temp path this module could have created beside `target` that is
+/// still on disk. Empty is the only acceptable result once a write has
+/// returned, success or failure.
+///
+/// Exists so tests can assert "no residue" against the *naming scheme*
+/// rather than against one hardcoded name. The assertions this replaces
+/// each named a single fixed path (`x.plist.tmp`, `x.json.tmp`,
+/// `x.conf.tmp`); a name this module no longer produces is a path that can
+/// never exist, so those assertions would have passed without testing
+/// anything.
+///
+/// Test-only: a residue scan is not something production code should ever
+/// need, and shipping it as public API would invite a caller to treat
+/// leftover temp files as a normal state to clean up rather than as a bug.
+#[cfg(test)]
+pub(crate) fn temp_paths_beside(target: &Path) -> Vec<PathBuf> {
+    let Some(file_name) = target.file_name().and_then(|n| n.to_str()) else {
+        return Vec::new();
+    };
+    let Some(parent) = target.parent() else {
+        return Vec::new();
+    };
+    let prefix = format!("{file_name}{TEMP_INFIX}");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(&prefix))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directory of this test's own. Every test here predicts exact temp
+    /// file names, which is only sound because no other test writes into
+    /// the same directory.
+    fn unique_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-atomic-write-test-{tag}-{}-{}",
+            std::process::id(),
+            NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("test dir");
+        dir
+    }
+
+    /// Hands out 0, 1, 2, ... regardless of what the rest of the process is
+    /// doing, so a test can name the files this write is about to try.
+    fn counting_from(start: u64) -> impl FnMut() -> u64 {
+        let mut next = start;
+        move || {
+            let current = next;
+            next += 1;
+            current
+        }
+    }
+
+    #[test]
+    fn a_temp_name_is_the_target_name_plus_this_process_and_a_sequence() {
+        let candidate = temp_candidate(Path::new("/a/b/heartbeat.json"), 7).expect("named");
+
+        assert_eq!(
+            candidate,
+            Path::new(&format!("/a/b/heartbeat.json.tmp.{}.7", std::process::id())),
+            "the temp name must stay derived from the whole target file name: \
+             a reader who finds one in a directory listing has to be able to \
+             tell which file it belongs to"
+        );
+    }
+
+    #[test]
+    fn a_backup_and_its_plist_do_not_share_a_temp_name() {
+        // The shape that made `with_extension` the wrong tool: it replaces
+        // the last extension, so `.bak`'s temp name was spelled in terms of
+        // the plist's, and reasoning about whether they collided took a
+        // second look at `file_stem`. These are both concrete targets in
+        // `launchd::install_impl`, written one after the other.
+        let plist = temp_candidate(Path::new("/a/x.plist"), 0).expect("named");
+        let backup = temp_candidate(Path::new("/a/x.plist.bak"), 1).expect("named");
+
+        assert_ne!(plist, backup);
+        assert!(backup.to_string_lossy().contains("x.plist.bak.tmp."));
+    }
+
+    #[test]
+    fn every_call_gets_a_temp_name_no_other_call_is_using() {
+        let dir = unique_test_dir("distinct-names");
+        let target = dir.join("shared.conf");
+
+        let (_first_file, first) = create_exclusive_temp(&target).expect("first temp");
+        let (_second_file, second) = create_exclusive_temp(&target).expect("second temp");
+
+        assert_ne!(
+            first, second,
+            "two writers of one target must not name the same scratch file — \
+             sharing it is the whole defect (HORO-1464)"
+        );
+        assert!(first.exists() && second.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_already_sitting_at_a_candidate_name_is_skipped_not_truncated() {
+        let dir = unique_test_dir("never-truncate");
+        let target = dir.join("envelope.conf");
+        const SQUATTER: &str = "another writer's in-flight content";
+
+        // Occupy the first four names this write will try. Standing in for
+        // residue from a dead process that had this pid, and for the
+        // in-flight temp file of a concurrent writer if the naming scheme
+        // ever stopped separating them.
+        let occupied: Vec<PathBuf> = (0..4)
+            .map(|sequence| {
+                let path = temp_candidate(&target, sequence).expect("named");
+                fs::write(&path, format!("{SQUATTER} {sequence}")).expect("occupy");
+                path
+            })
+            .collect();
+
+        let (_file, chosen) =
+            create_exclusive_temp_from(&target, counting_from(0)).expect("a free name exists");
+
+        assert_eq!(
+            chosen,
+            temp_candidate(&target, 4).expect("named"),
+            "the write must step past every occupied name to the first free one"
+        );
+        for (sequence, path) in occupied.iter().enumerate() {
+            assert_eq!(
+                fs::read_to_string(path).expect("still readable"),
+                format!("{SQUATTER} {sequence}"),
+                "an occupied candidate must be left byte-identical: opening it \
+                 with truncation is how one writer destroys another's scratch file"
+            );
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exhausting_every_candidate_name_errors_rather_than_reusing_one() {
+        let dir = unique_test_dir("exhausted");
+        let target = dir.join("heartbeat.json");
+        for sequence in 0..MAX_TEMP_NAME_ATTEMPTS {
+            let path = temp_candidate(&target, sequence).expect("named");
+            fs::write(&path, "occupied").expect("occupy");
+        }
+
+        let error = create_exclusive_temp_from(&target, counting_from(0))
+            .expect_err("no candidate name is free");
+
+        assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+        assert!(
+            error.to_string().contains("already taken"),
+            "the error must say what it ran out of, not just fail: {error}"
+        );
+        for sequence in 0..MAX_TEMP_NAME_ATTEMPTS {
+            let path = temp_candidate(&target, sequence).expect("named");
+            assert_eq!(fs::read_to_string(&path).expect("readable"), "occupied");
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_successful_write_replaces_the_target_and_leaves_no_residue() {
+        let dir = unique_test_dir("success");
+        let target = dir.join("heartbeat.json");
+        fs::write(&target, "stale").expect("seed");
+
+        write_atomically(&target, b"fresh").expect("write");
+
+        assert_eq!(fs::read_to_string(&target).expect("readable"), "fresh");
+        assert_eq!(
+            temp_paths_beside(&target),
+            Vec::<PathBuf>::new(),
+            "a successful write must not leave scratch files behind"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_write_that_cannot_be_renamed_leaves_neither_the_target_nor_residue() {
+        // A target that is a directory: the temp file is created and
+        // written, then `fs::rename` refuses to replace a directory with a
+        // file. That exercises the cleanup path *after* a temp file exists,
+        // which a failure before creation never reaches.
+        let dir = unique_test_dir("rename-fails");
+        let target = dir.join("in-the-way");
+        fs::create_dir(&target).expect("occupy the target path with a directory");
+
+        let error = write_atomically(&target, b"content").expect_err("rename must fail");
+
+        assert!(
+            target.is_dir(),
+            "the failed write must not have replaced it"
+        );
+        assert_eq!(
+            temp_paths_beside(&target),
+            Vec::<PathBuf>::new(),
+            "a failed write must clean up its own scratch file: {error}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_with_no_file_name_is_refused_rather_than_guessed_at() {
+        let error = write_atomically(Path::new("/"), b"content").expect_err("not a file");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("no final path component"));
+    }
+
+    #[test]
+    fn the_residue_scan_finds_a_temp_file_the_producer_really_created() {
+        // Anti-vacuity for `temp_paths_beside` itself. Every "no residue"
+        // assertion in this crate now goes through it, so a scan that
+        // matches nothing would turn all of them into decoration — which is
+        // exactly what the fixed-name assertions it replaced became.
+        let dir = unique_test_dir("scan-finds-it");
+        let target = dir.join("envelope.conf");
+
+        let (_file, created) = create_exclusive_temp(&target).expect("temp");
+
+        assert_eq!(
+            temp_paths_beside(&target),
+            vec![created.clone()],
+            "the scan must recognise the producer's own output"
+        );
+
+        // And it must not claim a sibling that merely lives next door.
+        fs::write(dir.join("envelope.conf.bak"), "not a temp file").expect("seed");
+        fs::write(dir.join("unrelated.conf.tmp.1.1"), "another file's").expect("seed");
+        assert_eq!(temp_paths_beside(&target), vec![created]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_never_publish_a_mixture_of_their_content() {
+        // The defect, reproduced as the property it violates. Eight threads
+        // write deliberately different-length content to one target while a
+        // ninth reads it. Every read, and the final state, must be exactly
+        // one writer's content: a mixed temp file renamed into place shows
+        // up as a value that is in neither set.
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        const WRITERS: usize = 8;
+        const WRITES_EACH: usize = 60;
+
+        let dir = unique_test_dir("no-mixture");
+        let target = dir.join("envelope.conf");
+
+        // Distinct lengths as well as distinct bytes: equal-length content
+        // can interleave into something that still looks well-formed, and
+        // this test would then pass over a real tear.
+        let contents: Vec<String> = (0..WRITERS)
+            .map(|i| format!("writer-{i}-{}", "x".repeat(1 + i * 997)))
+            .collect();
+        write_atomically(&target, contents[0].as_bytes()).expect("seed");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let target = target.clone();
+            let contents = contents.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let mut reads = 0usize;
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(seen) = fs::read_to_string(&target) {
+                        assert!(
+                            contents.contains(&seen),
+                            "a reader saw content belonging to no single writer \
+                             ({} bytes) — that is a torn publish",
+                            seen.len()
+                        );
+                        reads += 1;
+                    }
+                }
+                reads
+            })
+        };
+
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let target = target.clone();
+                let content = contents[i].clone();
+                std::thread::spawn(move || {
+                    for _ in 0..WRITES_EACH {
+                        write_atomically(&target, content.as_bytes()).expect("write");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer thread");
+        }
+        stop.store(true, Ordering::Relaxed);
+        let reads = reader.join().expect("reader thread");
+
+        let final_contents = fs::read_to_string(&target).expect("readable");
+        assert!(
+            contents.contains(&final_contents),
+            "the published file must be exactly one writer's content"
+        );
+        assert_eq!(
+            temp_paths_beside(&target),
+            Vec::<PathBuf>::new(),
+            "{} concurrent writes must leave no scratch files behind",
+            WRITERS * WRITES_EACH
+        );
+        eprintln!(
+            "atomic_write concurrency: {} writes across {WRITERS} threads, {reads} reads, \
+             0 torn",
+            WRITERS * WRITES_EACH
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
