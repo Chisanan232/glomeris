@@ -63,6 +63,29 @@ final class GlomerisDesignSystemTests: XCTestCase {
         )
     }
 
+    /// The other end of the same argument, and the one HORO-1367 left
+    /// unguarded when it widened the panel: a menu-bar popover is a column
+    /// hanging off a menu-bar item, and a wide enough one stops reading as
+    /// that and starts crowding the item it belongs to.
+    ///
+    /// Expressed against the narrowest display the app is expected to run on
+    /// rather than as a bare number, because that is the reasoning the width
+    /// was actually chosen by — `popoverWidth`'s own note claims the panel is
+    /// a third of a 1280pt display, and nothing else in the suite would notice
+    /// if a later widening made that false.
+    func testThePopoverStaysAColumnAndNotAWindow() {
+        let narrowestSupportedDisplayWidth: CGFloat = 1280
+        XCTAssertLessThanOrEqual(
+            GlomerisDesign.popoverWidth * 3,
+            narrowestSupportedDisplayWidth,
+            """
+            \(GlomerisDesign.popoverWidth)pt is more than a third of a \
+            \(narrowestSupportedDisplayWidth)pt display — wide enough to crowd the menu-bar \
+            item it hangs from
+            """
+        )
+    }
+
     /// A menu-bar popover that can grow without limit stops being a glance
     /// and starts covering the screen whose disk it is reporting on.
     func testBodyHeightIsBounded() {
@@ -72,6 +95,158 @@ final class GlomerisDesignSystemTests: XCTestCase {
             800,
             "a popover this tall covers the screen it is reporting on"
         )
+    }
+
+    /// HORO-1367. A ceiling alone never bound the panel — a `ScrollView`
+    /// accepts any height it is offered, so it states no preference of its
+    /// own and `MenuBarExtra(.window)` fell back to its own default. The
+    /// floor is what states the preference, so it has to be a real floor:
+    /// below the ceiling (or the range inverts) and tall enough to be worth
+    /// opening at.
+    func testTheOpeningHeightIsAFloorBelowTheCeiling() {
+        XCTAssertLessThan(
+            GlomerisDesign.minBodyHeight,
+            GlomerisDesign.maxBodyHeight,
+            "the floor is at or above the ceiling, so the range is not a range"
+        )
+        XCTAssertGreaterThan(
+            GlomerisDesign.minBodyHeight,
+            GlomerisDesign.floorBodyHeight,
+            "the comfortable opening height is no better than the small-display fallback"
+        )
+        XCTAssertGreaterThan(
+            GlomerisDesign.minBodyHeight,
+            300,
+            "a floor this low does not open onto more than one card, which is the point of having one"
+        )
+    }
+
+    /// The comfortable range is what the panel opens at on the displays this
+    /// app actually runs on. Asserted against real usable heights rather than
+    /// pixels on screen, so this stays true regardless of how SwiftUI lays
+    /// the panel out.
+    ///
+    /// The heights are `visibleFrame` heights — menu bar and Dock already
+    /// deducted — for a 13" MacBook Air (1470x956 scaled, ~918 usable), a
+    /// 16" MacBook Pro (~1079 usable) and a 27" external display (~1379).
+    func testEveryLaptopSizedDisplayGetsTheFullComfortableRange() {
+        for usableHeight in [918.0, 1079.0, 1379.0] as [CGFloat] {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+            XCTAssertEqual(
+                limits.max,
+                GlomerisDesign.maxBodyHeight,
+                "a \(usableHeight)pt display has room for the full ceiling but was given \(limits.max)pt"
+            )
+            XCTAssertEqual(
+                limits.min,
+                GlomerisDesign.minBodyHeight,
+                "a \(usableHeight)pt display was not offered the comfortable opening height"
+            )
+        }
+    }
+
+    /// AC6: a display too short for the comfortable range must get the height
+    /// back, not have the panel run off the bottom of the screen. The panel
+    /// still has to fit *with* its own header and footer, which is what the
+    /// chrome allowance is for.
+    ///
+    /// Swept across the whole band where the panel is between the two
+    /// regimes, rather than tested at one height. At any single height in
+    /// this band `max` happens to equal `height - panelChromeAllowance`
+    /// exactly, so a lone chrome-fit assertion there is an identity and
+    /// discriminates nothing; the same assertion across the band does
+    /// discriminate, because raising the floor or dropping the allowance term
+    /// breaks it at the bottom of the band while leaving the top intact.
+    func testEveryShortDisplayGetsAShorterPanelRatherThanOneOffTheScreen() {
+        let crossover = GlomerisDesign.floorBodyHeight + GlomerisDesign.panelChromeAllowance
+        let fullRange = GlomerisDesign.maxBodyHeight + GlomerisDesign.panelChromeAllowance
+
+        for usableHeight in stride(from: crossover, through: fullRange, by: 20) {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+
+            XCTAssertLessThanOrEqual(
+                limits.max + GlomerisDesign.panelChromeAllowance,
+                usableHeight,
+                "body + chrome is \(limits.max + GlomerisDesign.panelChromeAllowance)pt on a "
+                    + "\(usableHeight)pt display — the footer would be off-screen"
+            )
+            XCTAssertLessThanOrEqual(limits.min, limits.max, "the range inverted at \(usableHeight)pt")
+        }
+
+        // And the ceiling really does come down, rather than the band being
+        // vacuously satisfied by a range that never moves.
+        XCTAssertLessThan(
+            GlomerisDesign.bodyHeightLimits(visibleScreenHeight: 600).max,
+            GlomerisDesign.maxBodyHeight,
+            "the ceiling did not come down on a display too short for it"
+        )
+    }
+
+    /// The one input range where the "gives the height back" promise stops
+    /// holding, pinned so it stays a documented exception rather than
+    /// becoming a surprise.
+    ///
+    /// Below `floorBodyHeight + panelChromeAllowance` the floor wins and the
+    /// panel asks for more than the display has. That is deliberate — a body
+    /// thinner than the floor is not a reading surface — and no display a Mac
+    /// can drive comes close. What this asserts is that the crossover is
+    /// exactly where the design system says it is, so the claim and the
+    /// arithmetic cannot drift apart.
+    func testTheHeightGivenBackStopsAtTheFloorAndNoLower() {
+        let crossover = GlomerisDesign.floorBodyHeight + GlomerisDesign.panelChromeAllowance
+
+        for usableHeight in [-1000.0, 0.0, 100.0, crossover - 1] as [CGFloat] {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+            XCTAssertEqual(
+                limits.max,
+                GlomerisDesign.floorBodyHeight,
+                "below the crossover the body must sit on the floor, not below it"
+            )
+            XCTAssertEqual(limits.min, limits.max, "at the floor there is no range left to offer")
+        }
+
+        XCTAssertGreaterThan(
+            GlomerisDesign.bodyHeightLimits(visibleScreenHeight: crossover).max,
+            GlomerisDesign.floorBodyHeight - 1,
+            "at the crossover the body should be exactly the floor and not less"
+        )
+        XCTAssertLessThan(
+            crossover,
+            500,
+            "the exception must stay confined to displays no Mac can drive — \(crossover)pt is "
+                + "getting close to a real one"
+        )
+    }
+
+    /// Total, not just correct on the inputs that were thought of. A display
+    /// that has not been configured yet reports a zero height, and
+    /// `NSScreen.main` can be nil — both arrive here as 0 or less, and a
+    /// negative or inverted range is a layout constraint SwiftUI will trap
+    /// on.
+    func testNoDisplayHeightCanProduceAnUnusableRange() {
+        for usableHeight in [-1000.0, -1.0, 0.0, 1.0, 100.0, 139.0, 140.0, 141.0, 5000.0] as [CGFloat] {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+            XCTAssertGreaterThan(
+                limits.min,
+                0,
+                "a \(usableHeight)pt display produced a non-positive minimum height"
+            )
+            XCTAssertLessThanOrEqual(
+                limits.min,
+                limits.max,
+                "a \(usableHeight)pt display inverted the range: \(limits)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                limits.max,
+                GlomerisDesign.floorBodyHeight,
+                "a \(usableHeight)pt display shrank the body below the point of opening it"
+            )
+            XCTAssertLessThanOrEqual(
+                limits.max,
+                GlomerisDesign.maxBodyHeight,
+                "a \(usableHeight)pt display was offered more than the ceiling"
+            )
+        }
     }
 
     // MARK: - Tone

@@ -143,6 +143,17 @@ struct ApplyPlanView: View {
                 "Re-checks every suggestion against Glomeris and shows what would run. "
                     + "Nothing is deleted until you confirm."
             )
+            // HORO-1367 shortened this line and then put it back. The claim
+            // it dropped — that every suggestion is re-checked before
+            // anything is shown — is the evidence-first promise of the whole
+            // surface, and it survived only in the accessibility hint above,
+            // which is not read aloud when hints are off and is never shown
+            // to a sighted user at all. That is a safety fact hidden to save
+            // space, which this ticket is not allowed to do.
+            //
+            // It costs nothing to keep: at the widened `popoverWidth` this
+            // sentence sets on one line, which is the whole of the wrapping
+            // this ticket wanted gone from here.
             Text("Re-checks every suggestion first. Nothing runs until you confirm.")
                 .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.secondary)

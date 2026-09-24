@@ -196,11 +196,10 @@ what:
   verdict: …"*.
 
 The rows appear in the order the provider returned them, and the card says so
-(*"In the order the model suggested. Glomeris's own ranking is the list
-above."*). No rank number is drawn on a row, and the model's own `priority`
-field is carried in `--json` but never shown: the list position already makes
-that claim once, and two competing numberings would read as though one of them
-were authoritative. Nothing in the app re-sorts the list either — Glomeris's
+(*"The model's order. Glomeris's own ranking is the list above."*). No rank
+number is drawn on a row, and the model's own `priority` field is carried in
+`--json` but never shown: the list position already makes that claim once, and
+two competing numberings would read as though one of them were authoritative. Nothing in the app re-sorts the list either — Glomeris's
 ranking is the Reclaimable space card, which is why the AI Plan card sits
 below it.
 

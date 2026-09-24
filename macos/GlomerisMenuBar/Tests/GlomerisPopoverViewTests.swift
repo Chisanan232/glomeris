@@ -61,11 +61,86 @@ final class GlomerisPopoverViewTests: XCTestCase {
     /// A menu-bar popover that grows with its content ends up covering the
     /// screen whose disk it is reporting on — and the history card alone can
     /// hold twenty rows.
-    func testTheBodyScrollsWithinABoundedHeight() {
+    ///
+    /// HORO-1367 changed what this asserts, because the old shape did not
+    /// work: a lone `maxHeight` bounded nothing. A `ScrollView` accepts any
+    /// height it is offered, so it reported no preference, and
+    /// `MenuBarExtra(.window)` sized the panel from its own default — a
+    /// measured 289pt viewport while the ceiling stood at 520. So the body
+    /// now takes a *range*, and both ends of it have to be there: the floor
+    /// is what the panel actually adopts, the ceiling is what keeps it off
+    /// the screen it is reporting on.
+    func testTheBodyScrollsWithinABoundedHeightRange() {
         XCTAssertTrue(code.contains("ScrollView"))
         XCTAssertTrue(
-            code.contains("maxHeight: GlomerisDesign.maxBodyHeight"),
-            "the scrolling body must be bounded, and bounded by maxHeight so a short popover stays short"
+            code.contains("minHeight: Self.bodyHeightLimits.min"),
+            "without a floor the ScrollView states no height preference and the panel picks its own"
+        )
+        XCTAssertTrue(
+            code.contains("maxHeight: Self.bodyHeightLimits.max"),
+            "the scrolling body must still be capped, or it covers the screen it is reporting on"
+        )
+    }
+
+    /// The range has to bound both things that occupy the body, which means it
+    /// belongs on the `ZStack` and not on the overview inside it.
+    ///
+    /// The detail branch is the taller of the two — it stacks a back bar, a
+    /// header, the Clean button, a refusal line and an outcome message around
+    /// its own inner scroll region — so bounding only the overview leaves the
+    /// one surface that can outgrow the display unbounded. Its own
+    /// `.frame(maxHeight:)` is not a substitute: a lone ceiling on a
+    /// `ScrollView` is the exact shape this ticket found to state no height
+    /// preference at all.
+    func testTheHeightRangeBoundsTheDetailBranchAndNotOnlyTheOverview() throws {
+        let body = try Self.propertyBody(named: "scrollingBody", in: code)
+        XCTAssertTrue(body.contains("ZStack"), "the two surfaces are layered, so this is the ZStack")
+        XCTAssertTrue(
+            body.contains("detail(resourceId)"),
+            "sanity: the window must be the property that hosts the detail branch"
+        )
+        XCTAssertTrue(
+            body.contains("minHeight: Self.bodyHeightLimits.min"),
+            "the range must be applied where both branches are bounded by it"
+        )
+    }
+
+    /// The bound has to come from the display, not from inside the panel.
+    /// A `GeometryReader` here could only report the space the panel had
+    /// already been given, which is the number this ticket is trying to
+    /// change — so reading it would make the limit circular.
+    func testTheHeightBoundIsTakenFromTheDisplayAndNotFromInsideThePanel() {
+        XCTAssertTrue(
+            code.contains("NSScreen"),
+            "the panel's height limit must be bounded by the display it opens on"
+        )
+        XCTAssertTrue(
+            code.contains("GlomerisDesign.bodyHeightLimits(visibleScreenHeight:"),
+            "the shell must ask the design system for the range rather than computing its own"
+        )
+        XCTAssertTrue(
+            code.contains("visibleFrame"),
+            "frame rather than visibleFrame would include the menu bar and Dock, so the panel "
+                + "would ask for height that is not there"
+        )
+        XCTAssertFalse(
+            code.contains("GeometryReader"),
+            "a geometry proxy inside the panel can only report the size the panel already has"
+        )
+        // `NSScreen.main` is the screen with the *focused* window, and this
+        // panel is non-activating — it never becomes key, so `main` reports
+        // whichever display the user was in before they clicked the menu bar.
+        // Guessing too generously asks for height the panel's own display does
+        // not have, which is how the footer gets clipped; the shortest display
+        // attached has no such direction to fail in.
+        XCTAssertFalse(
+            code.contains("NSScreen.main"),
+            "a non-activating panel never owns the focused screen, so NSScreen.main can name a "
+                + "taller display than the one the panel opened on"
+        )
+        XCTAssertTrue(
+            code.contains(".min()"),
+            "the bound must come from the shortest display attached, not from one of them"
         )
     }
 
@@ -291,6 +366,28 @@ final class GlomerisPopoverViewTests: XCTestCase {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
+    }
+
+    /// The text of one computed property, from its signature to the start of
+    /// the next declaration at the same indentation.
+    ///
+    /// Needed because *where* a modifier is applied is the invariant, and a
+    /// whole-file `contains` cannot see that: the height range read identically
+    /// when it was on the overview inside the `ZStack`, where it bounded only
+    /// one of the two surfaces. Throws rather than falling back to the rest of
+    /// the file, so a renamed property fails loudly instead of widening the
+    /// window until the assertion passes.
+    private static func propertyBody(named name: String, in source: String) throws -> String {
+        let signature = try XCTUnwrap(
+            source.range(of: "private var \(name): some View {"),
+            "no `private var \(name): some View` — renamed, or no longer a computed property"
+        )
+        let rest = source[signature.upperBound...]
+        let end = try XCTUnwrap(
+            rest.range(of: "\n    }\n"),
+            "could not find the end of \(name)"
+        )
+        return String(rest[..<end.upperBound])
     }
 
     private static func readSource(_ fileName: String) throws -> String {

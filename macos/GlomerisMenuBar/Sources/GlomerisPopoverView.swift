@@ -167,6 +167,25 @@ struct GlomerisPopoverView: View {
                 detail(resourceId)
             }
         }
+        // HORO-1367: a range, not a ceiling. `maxHeight` alone stated no
+        // preference a `ScrollView` would pass on, so the panel sized itself
+        // from `MenuBarExtra`'s own default and opened far shorter than the
+        // ceiling allowed — see `GlomerisDesign.minBodyHeight`. The floor is
+        // the preference; the ceiling still keeps the panel off the screen it
+        // is reporting on.
+        //
+        // On the ZStack and not on `sections`, which is where it went first.
+        // Both branches occupy this space, and the detail is the taller one:
+        // it stacks a back bar, a header, the Clean button, a refusal line and
+        // an outcome message around its own inner scroll region. Bounding only
+        // the overview would leave the one surface that can actually outgrow
+        // the display unbounded, and the detail's inner
+        // `.frame(maxHeight: maxBodyHeight)` is not that bound — it is the
+        // shape this ticket's own diagnosis says states no preference at all.
+        .frame(
+            minHeight: Self.bodyHeightLimits.min,
+            maxHeight: Self.bodyHeightLimits.max
+        )
     }
 
     // MARK: - Header
@@ -224,9 +243,33 @@ struct GlomerisPopoverView: View {
             }
             .padding(GlomerisDesign.outerPadding)
         }
-        // `maxHeight`, not `height`: a popover showing one healthy status
-        // card should be the size of one healthy status card.
-        .frame(maxHeight: GlomerisDesign.maxBodyHeight)
+    }
+
+    /// The height range to offer the body, bounded by the display.
+    ///
+    /// Read from `NSScreen` rather than a `GeometryReader`, because the
+    /// question is how much room the *panel* may take on the display, and a
+    /// geometry proxy inside the panel can only report the space the panel
+    /// has already been given.
+    ///
+    /// The shortest display attached, not `NSScreen.main`. `main` is the screen
+    /// with the focused window, and this panel is non-activating — it never
+    /// becomes key, so `main` reports whatever the user was in before they
+    /// clicked the menu bar. That guess has a safe direction and an unsafe one:
+    /// too *little* height costs nothing, because the body scrolls internally
+    /// and no state becomes unreachable, while too much asks for height the
+    /// display the panel actually opened on does not have, and puts the footer
+    /// — Settings and Quit — off the bottom of the screen. Taking the minimum
+    /// removes the unsafe direction outright. It is also free in practice:
+    /// every display that ships on or alongside a Mac clears the height at
+    /// which the comfortable range is capped anyway, so a second monitor only
+    /// changes this number if it is genuinely small, which is the case where
+    /// being conservative is right.
+    private static var bodyHeightLimits: (min: CGFloat, max: CGFloat) {
+        let visibleHeight = NSScreen.screens
+            .map(\.visibleFrame.height)
+            .min() ?? 0
+        return GlomerisDesign.bodyHeightLimits(visibleScreenHeight: visibleHeight)
     }
 
     // MARK: - Detail

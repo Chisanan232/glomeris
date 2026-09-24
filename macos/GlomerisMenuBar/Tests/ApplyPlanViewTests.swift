@@ -924,6 +924,45 @@ final class ApplyPlanViewTests: XCTestCase {
         XCTAssertFalse(source.contains("NSAlert"))
     }
 
+    /// HORO-1367 cut the visible caption under "Apply plan…" to one sentence
+    /// and then put the other one back, because what it had dropped survived
+    /// only in the button's accessibility hint — and a hint is not read aloud
+    /// when hints are switched off, and is never shown to a sighted user at
+    /// all. Both facts therefore have to be *visible*: that every suggestion
+    /// is re-checked before anything is shown, which is the evidence-first
+    /// promise of the surface, and that nothing runs without consent.
+    ///
+    /// Asserted on the whole `Text(…)` literal rather than on the two
+    /// sentences separately, because a substring search cannot tell visible
+    /// copy from an accessibility string: with two loose `contains` checks
+    /// this test would pass just as happily if the caption and the hint were
+    /// swapped, which is the arrangement it exists to rule out.
+    func testTheApplyEntryPointStatesBothPromisesOnScreenAndInFullToVoiceOver() throws {
+        let source = try strippedSource()
+
+        XCTAssertTrue(
+            source.contains(
+                "Text(\"Re-checks every suggestion first. Nothing runs until you confirm.\")"
+            ),
+            "both the re-check promise and the consent promise must be on screen, in a Text and "
+                + "not only in an accessibility hint"
+        )
+        XCTAssertTrue(
+            source.contains("Re-checks every suggestion against Glomeris"),
+            "the hint carries the fuller sentence, since a VoiceOver user gets no second glance"
+        )
+        XCTAssertTrue(
+            source.contains("Nothing is deleted until you confirm."),
+            "the hint must carry the consent promise in full"
+        )
+        // The ellipsis is what tells a sighted user there is a step in
+        // between, independently of the caption saying so.
+        XCTAssertTrue(
+            source.contains("Button(\"Apply plan…\")"),
+            "the ellipsis promises the review step"
+        )
+    }
+
     // MARK: - Reading this file's own source
 
     private func strippedSource() throws -> String {

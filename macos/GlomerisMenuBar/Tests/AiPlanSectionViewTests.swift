@@ -75,6 +75,27 @@ final class AiPlanSectionViewTests: XCTestCase {
             .joined(separator: "\n")
     }
 
+    /// `readCode()` with adjacent string literals joined, so a phrase that the
+    /// line-length limit split across a `+` can still be found whole.
+    ///
+    /// Added in HORO-1367 after this exact false failure: shortening the
+    /// provenance note moved the wrap point, `"may cost money"` became
+    /// `"…and may " + "cost money…"`, and the assertion that the card still
+    /// discloses the cost failed on copy that discloses it perfectly well. A
+    /// guard that reports a missing disclosure because of where a line broke
+    /// is a guard that will eventually be silenced rather than believed.
+    ///
+    /// The pattern requires a closing quote, then only whitespace, a `+`, more
+    /// whitespace, and an opening quote — so it joins concatenated literals
+    /// and cannot reach across an argument list, where a comma intervenes.
+    private static func readJoinedCopy() throws -> String {
+        try readCode().replacingOccurrences(
+            of: "\"\\s*\\+\\s*\"",
+            with: "",
+            options: .regularExpression
+        )
+    }
+
     /// An empty plan with no provider error — the "your provider had nothing
     /// to say" shape, which the golden fixture cannot also be.
     private static let emptyPlanJSON = """
@@ -584,6 +605,22 @@ final class AiPlanSectionViewTests: XCTestCase {
         )
     }
 
+    /// The rows are in the model's order, and the note says so. The second
+    /// half is the load-bearing one: it is what stops the card reading as
+    /// Glomeris's own verdict, and it is the reason HORO-1308 placed this
+    /// card *below* the candidates list rather than above it.
+    ///
+    /// Pinned because HORO-1367 shortened this line for density, and the
+    /// half that would be tempting to drop next is the longer one.
+    func testTheOrderingNoteStillSaysWhoseOrderItIsAndWhereGlomerisOwnRankingIs() throws {
+        let code = try Self.readCode()
+        XCTAssertTrue(code.contains("The model's order"), "the rows' order must be attributed")
+        XCTAssertTrue(
+            code.contains("Glomeris's own ranking is the list above"),
+            "without this the card reads as Glomeris's verdict rather than a second opinion"
+        )
+    }
+
     /// `priority` is a second, independently-wrong-able copy of the claim the
     /// list order already makes. It stays on the DTO for `--json` consumers
     /// and off the screen.
@@ -638,13 +675,30 @@ final class AiPlanSectionViewTests: XCTestCase {
 
     /// The standing rule of the product, on screen before anything is asked
     /// for — and the fact that asking is what sends data anywhere.
+    ///
+    /// HORO-1367 shortened this note, and that is exactly the kind of edit
+    /// that quietly drops a disclosure — so each of the four facts is
+    /// asserted separately rather than as one sentence. Shorter wording is
+    /// allowed to break this test; losing a fact is not.
+    ///
+    /// Run against `readJoinedCopy()`, not `readSource()`, for two reasons:
+    /// the note's own doc comment lists the four facts it is keeping, so raw
+    /// text would satisfy every assertion here from the rationale alone; and
+    /// a fact that happens to straddle a line wrap is still disclosed.
     func testTheCardStatesWhoDecidesAndWhatAskingCosts() throws {
-        let source = try Self.readSource()
+        let source = try Self.readJoinedCopy()
         XCTAssertTrue(source.contains("The model recommends. Glomeris decides what may run."))
-        XCTAssertTrue(source.contains("may cost money"))
+        XCTAssertTrue(source.contains("sends a summary"), "that asking transmits anything at all")
+        XCTAssertTrue(source.contains("your provider"), "whose provider receives it")
+        XCTAssertTrue(source.contains("may cost money"), "that asking can be billed")
         XCTAssertTrue(
             source.contains("Settings shows exactly what would be sent"),
-            "the privacy preview must be discoverable from here"
+            "the preview claim must stay the exact one: \"previews it\" is true of a summary or "
+                + "a sample, and what Settings displays is the payload itself"
+        )
+        XCTAssertTrue(
+            source.contains("without sending it"),
+            "and it must be clear that previewing does not itself send"
         )
         // HORO-1309 moved the preview into the GUI. Until then this card told
         // the user to run `glomeris llm-plan --print-payload` in a terminal —
