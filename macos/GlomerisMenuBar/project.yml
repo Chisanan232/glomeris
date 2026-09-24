@@ -74,6 +74,13 @@ targets:
       - path: Tests
         excludes:
           - "Fixtures/**"
+      # HORO-1456: the single source of the running bundle's identifier. In
+      # here because the keychain service and both preference stores derive
+      # their names from it, so it has to compile into the test target for
+      # those files to; and so that BundleIdentity.identity(declaredBy:) can
+      # be driven over both its branches, the fallback one included, which no
+      # process the app is normally run as takes.
+      - path: Sources/BundleIdentity.swift
       - path: Sources/GlomerisClient.swift
       - path: Sources/GlomerisExecutableLocator.swift
       - path: Sources/MenuBarAppearance.swift

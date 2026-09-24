@@ -118,7 +118,6 @@ struct GlomerisLlmSettingsStatus: Equatable {
 /// its own. The unchecked part is that one documented guarantee and nothing
 /// else.
 struct GlomerisLlmSettingsStore: @unchecked Sendable {
-    private static let suiteName = "dev.glomeris.GlomerisMenuBar"
     private static let endpointKey = "llmBaseUrl"
     private static let modelKey = "llmModel"
 
@@ -133,8 +132,19 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     private let defaults: UserDefaults
     private let credentials: CredentialStore
 
+    /// `UserDefaults.standard` is the default rather than a named suite: for a
+    /// bundled app it *is* the domain named by its bundle identifier, so the
+    /// endpoint and model are namespaced under the running bundle by
+    /// construction, and a build with a different identifier reads its own
+    /// settings rather than the release app's.
+    ///
+    /// HORO-1456: this was `UserDefaults(suiteName:) ?? .standard` against the
+    /// literal `dev.glomeris.GlomerisMenuBar`. Foundation returns `nil` from
+    /// that initialiser when handed the calling process's own bundle
+    /// identifier, so in the app the fallback was always the branch taken —
+    /// the storage is unchanged, and nothing needs migrating.
     init(defaults: UserDefaults? = nil, credentials: CredentialStore? = nil) {
-        self.defaults = defaults ?? UserDefaults(suiteName: Self.suiteName) ?? .standard
+        self.defaults = defaults ?? .standard
         self.credentials = credentials ?? KeychainCredentialStore()
     }
 
@@ -344,8 +354,15 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// then stops depending on a caller remembering to `await` from somewhere
     /// nonisolated. `MainActor.run` here — the one-line change that reintroduces
     /// the bug — is what the off-thread tests actually catch.
+    ///
+    /// The label is derived rather than written out (HORO-1456). A queue label
+    /// is diagnostic only — it namespaces nothing and no state is filed under
+    /// it — but it was the last place in `Sources/` spelling the release bundle
+    /// identifier out, and leaving it would have meant the guard script that
+    /// keeps that literal from coming back needed an exemption list. An
+    /// exemption list is where the next literal hides.
     private static let keychainQueue = DispatchQueue(
-        label: "dev.glomeris.GlomerisMenuBar.keychain",
+        label: "\(BundleIdentity.current).keychain",
         qos: .userInitiated
     )
 

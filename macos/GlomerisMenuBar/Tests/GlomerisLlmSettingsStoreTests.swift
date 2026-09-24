@@ -33,7 +33,9 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     private static let key = "sk-test-only-never-a-real-credential"
 
     /// A fresh, uniquely-named suite per test, so no test sees another's
-    /// state and none touches the real `dev.glomeris.GlomerisMenuBar` suite.
+    /// state and none touches the domain the app itself writes to —
+    /// `UserDefaults.standard`, which for a bundled app is the domain named
+    /// by its bundle identifier (HORO-1456).
     private func makeDefaults() -> (UserDefaults, String) {
         let suiteName = "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
