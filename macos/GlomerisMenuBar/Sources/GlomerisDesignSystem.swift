@@ -154,6 +154,12 @@ enum GlomerisDesign {
     /// short for the full ceiling (under 780pt of usable height, which no
     /// Mac ships with), while under-reserving puts the footer — and with it
     /// Settings and Quit — off the bottom of the screen.
+    ///
+    /// The doubling is also what covers Dynamic Type. The header and footer
+    /// are set in semantic fonts, so the chrome this models grows with the
+    /// system text size while this number does not; 71pt measured at the
+    /// default size has room to roughly double before the reservation is
+    /// wrong in the direction that clips the footer.
     static let panelChromeAllowance: CGFloat = 140
 
     /// The height range to offer the scrolling body on a display whose
