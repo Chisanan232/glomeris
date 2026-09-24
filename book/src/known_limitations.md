@@ -85,10 +85,16 @@ permanently refused unless a scoped equivalent becomes available upstream.
 HORO-1358 carried that refusal upstream into reporting: `detect --json` and
 `explain --json` now report this candidate as `executable: false` with no
 offered action, because reporting puts the action's own plan to the same
-pre-mutation structural rule `execute()` applies. `clean --dry-run`, `free`,
-`autopilot` and `emergency` resolve actions independently and do not read
-`executable`, so they can still nominate `homebrew.cleanup.cache` — where it
-remains refused at execution.
+pre-mutation structural rule `execute()` applies. HORO-1360 moved that rule
+into one shared predicate (`actionability`) and pointed two more surfaces at
+it: the BYOK LLM prompt no longer names `homebrew.cleanup.cache` among a
+resource's offered action ids, and `autopilot` reports such a candidate as
+*ineligible* without spending one of its bounded attempts, rather than
+charging an attempt and reporting an execution failure that was certain in
+advance. `clean --dry-run`, `free` and `emergency` still resolve actions
+independently and do not read the predicate, so they can still nominate
+`homebrew.cleanup.cache` — where it remains refused at execution. That
+remainder is `HORO-1359`.
 See `HORO-1005` for a related, non-blocking follow-up (`scoped_path` isn't
 yet structurally tied to what a `RunTool` step's `args` actually mutate —
 not currently exploitable, since this was the only unscoped action and it's
