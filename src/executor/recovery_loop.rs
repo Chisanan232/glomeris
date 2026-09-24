@@ -251,8 +251,25 @@ fn refresh_evidence(
 /// set, picks the largest `Ask` candidate instead. Returns the number of
 /// `Ask` candidates seen but not eligible for auto-approval, for the
 /// caller's `actions_declined_or_skipped` bookkeeping.
+///
+/// # Why the actionability filter is here rather than at step 8
+///
+/// A candidate whose action execution would refuse on sight is dropped
+/// during selection (HORO-1359), which means the loop picks the
+/// next-largest candidate *in the same iteration*. Filtering it later, in
+/// the caller just before `execute`, would have been a smaller diff and
+/// wrong: the caller can only `continue`, so each guaranteed-to-fail
+/// candidate would spend one of `config.max_iterations`. Burning iteration
+/// budget on a step that could never have worked is the specific harm in a
+/// low-disk recovery, which is the situation this loop exists for.
+///
+/// The `Protected` arm still returns before anything is planned. That
+/// ordering is why the filter reads the policy-free
+/// [`crate::actionability::plan_refusal`] rather than `static_refusal`: the
+/// `match` below is the Protected gate, and it is already there.
 fn select_candidate(
     candidates: Vec<(Evidence, ActionId)>,
+    registry: &ActionRegistry,
     policy_cfg: &PolicyConfig,
     collector: &dyn EvidenceCollector,
     now: SystemTime,
@@ -270,18 +287,34 @@ fn select_candidate(
         let decision = classify(&refreshed, policy_cfg, now);
         let size = candidate_size(&refreshed);
         match decision.class {
-            PolicyClass::AutoSafe => auto_safe.push(ScoredCandidate {
-                evidence: refreshed,
-                action_id,
-                decision,
-                size,
-            }),
-            PolicyClass::Ask => ask.push(ScoredCandidate {
-                evidence: refreshed,
-                action_id,
-                decision,
-                size,
-            }),
+            PolicyClass::AutoSafe | PolicyClass::Ask => {
+                // Past the Protected gate, so planning is permitted here
+                // and only here.
+                //
+                // A missing action id is deliberately NOT treated as a
+                // refusal: `candidates_with_actions` resolved it from this
+                // same registry, so it cannot be missing in production, and
+                // step 8 in the caller already reports the case. Answering
+                // it here would mean this filter deciding something that is
+                // not its question. Nothing unsafe follows either way —
+                // `execute` refuses an unknown action independently.
+                if let Some(action) = registry.get(action_id.0) {
+                    if crate::actionability::plan_refusal(action, &refreshed).is_some() {
+                        continue;
+                    }
+                }
+                let scored = ScoredCandidate {
+                    evidence: refreshed,
+                    action_id,
+                    decision,
+                    size,
+                };
+                if scored.decision.class == PolicyClass::AutoSafe {
+                    auto_safe.push(scored);
+                } else {
+                    ask.push(scored);
+                }
+            }
             PolicyClass::Protected => {}
         }
     }
@@ -377,6 +410,7 @@ mod select_candidate_tests {
                 (small, ActionId("test.action")),
                 (big, ActionId("test.action")),
             ],
+            &ActionRegistry::builtin(),
             &PolicyConfig::default(),
             &CleanCollector,
             now,
@@ -400,6 +434,7 @@ mod select_candidate_tests {
 
         let (selected, _) = select_candidate(
             vec![(only, ActionId("test.action"))],
+            &ActionRegistry::builtin(),
             &PolicyConfig::default(),
             &CleanCollector,
             now,
@@ -417,6 +452,7 @@ mod select_candidate_tests {
 
         let (selected, ask_skipped) = select_candidate(
             vec![(ev, ActionId("test.action"))],
+            &ActionRegistry::builtin(),
             &PolicyConfig::default(),
             &ToolLiveCollector,
             now,
@@ -435,6 +471,7 @@ mod select_candidate_tests {
 
         let (selected, ask_skipped) = select_candidate(
             vec![(ev, ActionId("test.action"))],
+            &ActionRegistry::builtin(),
             &PolicyConfig::default(),
             &ToolLiveCollector,
             now,
@@ -456,6 +493,7 @@ mod select_candidate_tests {
 
         let (selected, _) = select_candidate(
             vec![(ev, ActionId("test.action"))],
+            &ActionRegistry::builtin(),
             &PolicyConfig::default(),
             &CleanCollector,
             now,
@@ -642,6 +680,7 @@ pub fn run(
         let now = wall_clock.now();
         let (selected, ask_skipped) = select_candidate(
             candidates,
+            action_registry,
             policy_cfg,
             collector,
             now,
