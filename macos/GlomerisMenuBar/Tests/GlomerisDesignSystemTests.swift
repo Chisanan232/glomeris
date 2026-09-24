@@ -74,6 +74,109 @@ final class GlomerisDesignSystemTests: XCTestCase {
         )
     }
 
+    /// HORO-1367. A ceiling alone never bound the panel — a `ScrollView`
+    /// accepts any height it is offered, so it states no preference of its
+    /// own and `MenuBarExtra(.window)` fell back to its own default. The
+    /// floor is what states the preference, so it has to be a real floor:
+    /// below the ceiling (or the range inverts) and tall enough to be worth
+    /// opening at.
+    func testTheOpeningHeightIsAFloorBelowTheCeiling() {
+        XCTAssertLessThan(
+            GlomerisDesign.minBodyHeight,
+            GlomerisDesign.maxBodyHeight,
+            "the floor is at or above the ceiling, so the range is not a range"
+        )
+        XCTAssertGreaterThan(
+            GlomerisDesign.minBodyHeight,
+            GlomerisDesign.floorBodyHeight,
+            "the comfortable opening height is no better than the small-display fallback"
+        )
+        XCTAssertGreaterThan(
+            GlomerisDesign.minBodyHeight,
+            300,
+            "a floor this low does not open onto more than one card, which is the point of having one"
+        )
+    }
+
+    /// The comfortable range is what the panel opens at on the displays this
+    /// app actually runs on. Asserted against real usable heights rather than
+    /// pixels on screen, so this stays true regardless of how SwiftUI lays
+    /// the panel out.
+    ///
+    /// The heights are `visibleFrame` heights — menu bar and Dock already
+    /// deducted — for a 13" MacBook Air (1470x956 scaled, ~918 usable), a
+    /// 16" MacBook Pro (~1079 usable) and a 27" external display (~1379).
+    func testEveryLaptopSizedDisplayGetsTheFullComfortableRange() {
+        for usableHeight in [918.0, 1079.0, 1379.0] as [CGFloat] {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+            XCTAssertEqual(
+                limits.max,
+                GlomerisDesign.maxBodyHeight,
+                "a \(usableHeight)pt display has room for the full ceiling but was given \(limits.max)pt"
+            )
+            XCTAssertEqual(
+                limits.min,
+                GlomerisDesign.minBodyHeight,
+                "a \(usableHeight)pt display was not offered the comfortable opening height"
+            )
+        }
+    }
+
+    /// AC6: a display too short for the comfortable range must get the height
+    /// back, not have the panel run off the bottom of the screen. The panel
+    /// still has to fit *with* its own header and footer, which is what the
+    /// chrome allowance is for.
+    func testAShortDisplayGetsAShorterPanelRatherThanOneOffTheScreen() {
+        // Shorter than any Mac ships with, deliberately: the guard has to
+        // hold for a display nobody anticipated, not just for a small one.
+        let usableHeight: CGFloat = 600
+        let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+
+        XCTAssertLessThan(
+            limits.max,
+            GlomerisDesign.maxBodyHeight,
+            "the ceiling did not come down on a display too short for it"
+        )
+        XCTAssertLessThanOrEqual(
+            limits.max + GlomerisDesign.panelChromeAllowance,
+            usableHeight,
+            "body + chrome is \(limits.max + GlomerisDesign.panelChromeAllowance)pt on a "
+                + "\(usableHeight)pt display — the footer would be off-screen"
+        )
+        XCTAssertLessThanOrEqual(limits.min, limits.max, "the range inverted")
+    }
+
+    /// Total, not just correct on the inputs that were thought of. A display
+    /// that has not been configured yet reports a zero height, and
+    /// `NSScreen.main` can be nil — both arrive here as 0 or less, and a
+    /// negative or inverted range is a layout constraint SwiftUI will trap
+    /// on.
+    func testNoDisplayHeightCanProduceAnUnusableRange() {
+        for usableHeight in [-1000.0, -1.0, 0.0, 1.0, 100.0, 139.0, 140.0, 141.0, 5000.0] as [CGFloat] {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+            XCTAssertGreaterThan(
+                limits.min,
+                0,
+                "a \(usableHeight)pt display produced a non-positive minimum height"
+            )
+            XCTAssertLessThanOrEqual(
+                limits.min,
+                limits.max,
+                "a \(usableHeight)pt display inverted the range: \(limits)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                limits.max,
+                GlomerisDesign.floorBodyHeight,
+                "a \(usableHeight)pt display shrank the body below the point of opening it"
+            )
+            XCTAssertLessThanOrEqual(
+                limits.max,
+                GlomerisDesign.maxBodyHeight,
+                "a \(usableHeight)pt display was offered more than the ceiling"
+            )
+        }
+    }
+
     // MARK: - Tone
 
     /// Two tones that paint identically are one tone, and the second one is
