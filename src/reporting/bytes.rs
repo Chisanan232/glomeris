@@ -70,4 +70,47 @@ mod tests {
         // 1024*1024 - 1 bytes: still under the MB boundary, so KB.
         assert_eq!(human_bytes(1024 * 1024 - 1), "1024.0 KB");
     }
+
+    /// HORO-1452. This function is no longer the only implementation of the
+    /// convention: the macOS app has to render two figures no CLI invocation
+    /// ever produces — the Apply Plan batch estimate and the batch reclaimed
+    /// total, both sums over N single-item `execute` calls with no batch report
+    /// to carry a rendered string — so `GlomerisByteFormat.human` ports the
+    /// same rule.
+    ///
+    /// The fixture is the contract between them. This test makes it Rust's
+    /// output by definition; the Swift suite asserts the same file. Neither
+    /// side can drift without a failure, and changing the convention on purpose
+    /// means editing the fixture and then following in both languages.
+    #[test]
+    fn golden_fixture_pins_the_shared_convention() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/human_bytes_golden.tsv"
+        );
+        let text = std::fs::read_to_string(path).expect("golden fixture must be readable");
+
+        let mut checked = 0usize;
+        for line in text.lines() {
+            let line = line.trim_end();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (bytes, expected) = line
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("fixture line is not <bytes>\\t<rendered>: {line}"));
+            let bytes: u64 = bytes
+                .parse()
+                .unwrap_or_else(|e| panic!("fixture byte count {bytes} does not parse: {e}"));
+            assert_eq!(human_bytes(bytes), expected, "for {bytes} bytes");
+            checked += 1;
+        }
+
+        // A fixture that failed to parse, or that someone emptied, would
+        // otherwise pass this test by asserting nothing at all.
+        assert!(
+            checked >= 16,
+            "expected the fixture to still cover at least 16 values, checked {checked}"
+        );
+    }
 }
