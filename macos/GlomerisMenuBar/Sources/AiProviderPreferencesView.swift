@@ -36,14 +36,20 @@
 //
 //  The key is bound to a `SecureField` and is cleared from memory the moment
 //  it is saved. There is no "show key" affordance and no way to read a stored
-//  key back for display: `GlomerisLlmSettingsStore` exposes
-//  `hasStoredApiKey`, a `Bool`, and nothing else (AC 5).
+//  key back for display: `GlomerisLlmSettingsStore` will say whether a key is
+//  there and where it came from, and has no getter for the value at all (AC 5).
+//
+//  Since HORO-1368 this screen does not even ask whether a key exists on the
+//  main thread. Every keychain touch goes through the store's `resolved*`
+//  members, which hop to a background queue — a keychain operation can wait on
+//  a person, and a main thread waiting on a person loses the menu-bar item.
 //
 //  ---------------------------------------------------------------------
 //  Nothing here contacts a provider except the Test button
 //  ---------------------------------------------------------------------
 //  Two commands are run from this screen, both only from a button's action
-//  closure — no `.onAppear`, no `.task`, no `Timer`, no retry:
+//  closure — no `.onAppear`, no `Timer`, no retry, and the one `.task` on the
+//  body runs no command at all (it asks the keychain whether a key exists):
 //
 //    * `llm-check --json` — the connection test. This DOES make one bounded
 //      request, which is the entire point of pressing it, and the button says
@@ -332,21 +338,46 @@ enum AiProviderCommands {
 /// no Rust producer to diff it against and nothing for the
 /// `vocabulary-covers-cli-tokens` job to check.
 enum GlomerisLlmSettingSourceWording {
-    static func title(_ source: GlomerisLlmSettingSource) -> String {
+    /// What a row says while the answer is still being fetched (HORO-1368).
+    /// `nil` is not a fourth kind of configuration — it is this screen not
+    /// knowing yet — so it is worded as an activity rather than as a state.
+    static let pendingTitle = "Checking your keychain…"
+    static let pendingSymbolName = "ellipsis.circle"
+
+    static func title(_ source: GlomerisLlmSettingSource?) -> String {
+        guard let source else { return pendingTitle }
         switch source {
         case .settings: return "Set here"
         case .environment: return "From the environment this app was launched with"
         case .absent: return "Not set"
+        case .unreadable: return "Stored here, but this app could not read it"
         }
     }
 
-    static func symbolName(_ source: GlomerisLlmSettingSource) -> String {
+    static func symbolName(_ source: GlomerisLlmSettingSource?) -> String {
+        guard let source else { return pendingSymbolName }
         switch source {
         case .settings: return "pencil"
         case .environment: return "terminal"
         case .absent: return "circle.dashed"
+        case .unreadable: return "exclamationmark.triangle"
         }
     }
+
+    /// The sentence shown when the key is stored but unreachable (AC 6).
+    ///
+    /// Names the cause it is nearly always going to be, because the alternative
+    /// is a user pasting a key that is already correct: a keychain item admits
+    /// the *code identity* that created it, and replacing the app changes that
+    /// identity. Saving again re-stores the key under the identity now running.
+    ///
+    /// Deliberately not phrased as an error in the key. Before HORO-1368 this
+    /// condition had no wording at all, because it took the menu-bar item with
+    /// it and there was nothing on screen to word.
+    static let unreadableExplanation =
+        "macOS did not let this app read the key from your keychain, so Glomeris cannot use "
+        + "it. This usually means the app was replaced by a different build after the key was "
+        + "saved. Paste the key again to store it for this build."
 }
 
 // MARK: - Addressing the provider
@@ -393,7 +424,7 @@ enum GlomerisLlmAddressWording {
 enum GlomerisLlmKeyRemovalWording {
     static func message(
         removed: Bool,
-        remainingSource: GlomerisLlmSettingSource
+        remainingSource: GlomerisLlmSettingSource?
     ) -> GlomerisStateMessage {
         guard removed else {
             return .failure("macOS refused to remove the key from the keychain.")
@@ -449,8 +480,16 @@ struct AiProviderPreferencesView: View {
     /// `GlomerisLlmSettingsStore` has no getter for one.
     @State private var apiKey: String = ""
 
+    /// Seeded without touching the keychain, so `status.apiKey` starts `nil`
+    /// and is filled in by `loadCredentialStatus()` (HORO-1368 AC 2 and AC 4).
     @State private var status: GlomerisLlmSettingsStatus
+
     @State private var keyActionMessage: GlomerisStateMessage?
+    /// Save and Remove both write to the keychain, which can block behind an
+    /// authorisation prompt, so both are asynchronous and both are disabled
+    /// while one is in flight — two overlapping writes to one item is not a
+    /// state this screen should be able to produce.
+    @State private var isWritingKey = false
 
     @State private var isTesting = false
     @State private var checkOutcome: LlmCheckOutcome?
@@ -472,7 +511,15 @@ struct AiProviderPreferencesView: View {
         self.projectRootsStore = projectRootsStore
         _endpointText = State(initialValue: store.endpoint ?? "")
         _modelText = State(initialValue: store.model ?? "")
-        _status = State(initialValue: store.status())
+        // HORO-1368: `statusWithoutApiKey`, not `status`. `App.body` constructs
+        // this view whether or not a Settings window is open, and every
+        // re-evaluation of it ran the old `status()` — a synchronous
+        // `SecItemCopyMatching` on the main thread, which on a build the
+        // keychain item's ACL does not admit blocks behind a `SecurityAgent`
+        // prompt. A blocked main thread cannot service the status item, so
+        // AppKit removed it: the app vanished from the menu bar with no way
+        // back in and nothing on screen explaining why.
+        _status = State(initialValue: store.statusWithoutApiKey())
     }
 
     var body: some View {
@@ -486,6 +533,20 @@ struct AiProviderPreferencesView: View {
             .padding(GlomerisDesign.outerPadding)
         }
         .frame(width: 460, height: 560)
+        // The keychain read this view needs, off the main thread and after the
+        // scene exists. It runs no command and spends nothing — see
+        // `loadCredentialStatus()`.
+        .task { await loadCredentialStatus() }
+    }
+
+    /// Fills in `status.apiKey`, which `init` deliberately left unknown.
+    ///
+    /// The only work here is one availability query against the keychain, on a
+    /// background queue. It does not read the key, does not spawn `glomeris`,
+    /// and cannot cost the user anything — the two commands on this screen are
+    /// reachable only from their buttons.
+    private func loadCredentialStatus() async {
+        status = await store.resolvedStatus()
     }
 
     // MARK: Provider
@@ -555,7 +616,7 @@ struct AiProviderPreferencesView: View {
             set: { newValue in
                 endpointText = newValue
                 store.endpoint = newValue
-                status = store.status()
+                refreshEditableSources()
             }
         )
     }
@@ -566,12 +627,25 @@ struct AiProviderPreferencesView: View {
             set: { newValue in
                 modelText = newValue
                 store.model = newValue
-                status = store.status()
+                refreshEditableSources()
             }
         )
     }
 
-    private func sourceRow(label: String, source: GlomerisLlmSettingSource) -> some View {
+    /// Re-resolves the two fields a keystroke can change, and leaves the key's
+    /// state as it was.
+    ///
+    /// Typing an endpoint cannot alter where the key came from, so re-reading
+    /// the keychain for every character would be a keychain round trip — and,
+    /// on a build whose code identity the item does not admit, a chance of a
+    /// blocking prompt — per keystroke.
+    private func refreshEditableSources() {
+        var fresh = store.statusWithoutApiKey()
+        fresh.apiKey = status.apiKey
+        status = fresh
+    }
+
+    private func sourceRow(label: String, source: GlomerisLlmSettingSource?) -> some View {
         HStack(spacing: 3) {
             Image(systemName: GlomerisLlmSettingSourceWording.symbolName(source))
                 .imageScale(.small)
@@ -599,25 +673,44 @@ struct AiProviderPreferencesView: View {
                 SecureField("Paste your key", text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityLabel("API key")
-                    .onSubmit { saveKey() }
+                    .onSubmit { Task { await saveKey() } }
                 Button("Save") {
-                    saveKey()
+                    Task { await saveKey() }
                 }
-                .disabled(apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    isWritingKey
+                        || apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
             HStack(spacing: GlomerisDesign.inlineSpacing) {
                 sourceRow(label: "Key", source: status.apiKey)
                 Spacer(minLength: 0)
-                if store.hasStoredApiKey {
+                if status.apiKey == .settings {
                     // AC 8. Explicit, always visible once a key exists, and
                     // labelled with what it does rather than with "Clear" —
                     // revoking a credential should be the easiest thing on
                     // this screen to find and the hardest to do by accident.
+                    //
+                    // Driven by the resolved status rather than by asking the
+                    // store again, because being in `body` that question would
+                    // be a keychain read per re-evaluation (HORO-1368 AC 4).
                     Button("Remove key", role: .destructive) {
-                        removeKey()
+                        Task { await removeKey() }
                     }
+                    .disabled(isWritingKey)
                 }
+            }
+
+            // AC 6. The condition that used to take the whole app with it, said
+            // out loud instead. Only when nothing was inherited to fall back
+            // on — with a usable GLOMERIS_LLM_API_KEY in the environment the
+            // status row already reads `From the environment` and there is
+            // nothing for the user to do.
+            if status.apiKey == .unreadable {
+                Text(GlomerisLlmSettingSourceWording.unreadableExplanation)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let keyActionMessage {
@@ -626,31 +719,44 @@ struct AiProviderPreferencesView: View {
         }
     }
 
-    private func saveKey() {
+    /// Stores the typed key, off the main thread.
+    ///
+    /// The write is the blocking half: `SecItemUpdate` on an existing item
+    /// replaces its data, which the item's ACL guards exactly as a read does, so
+    /// saving over a key stored by an earlier build can raise the same
+    /// `SecurityAgent` prompt (HORO-1368 AC 1).
+    private func saveKey() async {
         let typed = apiKey
         guard !typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-
-        let saved = store.setApiKey(typed)
-        // Cleared whatever happened: leaving it in a `@State` after a failed
-        // write keeps a secret in memory for as long as the window is open,
-        // and the user can paste again.
+        // Cleared before the write, not after it: an `await` in between is a
+        // point at which the window can close or the view can be re-created,
+        // and a secret must not be the thing left behind in `@State` if it is.
         apiKey = ""
-        status = store.status()
+        isWritingKey = true
+        keyActionMessage = .loading("Saving to your keychain…")
+
+        let saved = await store.resolvedSetApiKey(typed)
+        status = await store.resolvedStatus()
         keyActionMessage =
             saved
             ? .success("Key saved to your keychain.")
             : .failure(
                 "macOS refused to store the key in the keychain. Nothing was saved, and "
                     + "nothing was written anywhere else.")
+        isWritingKey = false
     }
 
-    private func removeKey() {
-        let removed = store.deleteApiKey()
-        status = store.status()
+    private func removeKey() async {
+        isWritingKey = true
+        keyActionMessage = .loading("Removing it from your keychain…")
+
+        let removed = await store.resolvedDeleteApiKey()
+        status = await store.resolvedStatus()
         keyActionMessage = GlomerisLlmKeyRemovalWording.message(
             removed: removed,
             remainingSource: status.apiKey
         )
+        isWritingKey = false
     }
 
     // MARK: Connection test
@@ -680,7 +786,14 @@ struct AiProviderPreferencesView: View {
                 Spacer(minLength: 0)
             }
 
-            if !status.isComplete {
+            // Two different reasons the button is off, said apart. "All three
+            // are needed" while the key is still being looked up would be a
+            // claim about a configuration this screen has not read yet.
+            if status.apiKey == nil {
+                Text(GlomerisLlmSettingSourceWording.pendingTitle)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.tertiary)
+            } else if !status.isComplete {
                 Text(
                     "All three of the address, the model and the key are needed. A test without "
                         + "them would fail here without ever reaching your provider."
@@ -771,8 +884,13 @@ struct AiProviderPreferencesView: View {
             // `progressType` is named only to satisfy generic inference —
             // neither of this screen's commands is given `--progress-json`, so
             // no progress event is ever emitted to decode.
+            // `resolvedChildEnvironment` and not `childEnvironment`: this is the
+            // one call on this screen that reads the key *value*, which is the
+            // read an item's ACL can put an authorisation prompt in front of.
+            // On the main thread that prompt took the menu-bar item with it
+            // (HORO-1368 AC 3).
             let raw = try await client
-                .withEnvironment(store.childEnvironment())
+                .withEnvironment(await store.resolvedChildEnvironment())
                 .runRaw(
                     AiProviderCommands.connectionTest,
                     progressType: ProgressEventDto.self
