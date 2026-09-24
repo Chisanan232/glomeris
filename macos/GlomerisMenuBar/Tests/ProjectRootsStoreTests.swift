@@ -14,8 +14,9 @@ import XCTest
 
 final class ProjectRootsStoreTests: XCTestCase {
     /// A fresh, uniquely-named `UserDefaults` suite per test, so tests
-    /// never see each other's persisted state and never touch the real
-    /// `dev.glomeris.GlomerisMenuBar` suite used by the app.
+    /// never see each other's persisted state and never touch the domain
+    /// the app itself writes to — `UserDefaults.standard`, which for a
+    /// bundled app is the domain named by its bundle identifier (HORO-1456).
     private func makeDefaults() -> UserDefaults {
         let suiteName = "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

@@ -23,21 +23,30 @@ import Foundation
 /// formats them as repeated `--project-root <path>` arguments for
 /// `GlomerisClient.run(_:)`.
 ///
-/// Backed by a dedicated `UserDefaults(suiteName:)` instance rather than
-/// `.standard` so this app's preference state is namespaced under its own
-/// bundle identifier and doesn't collide with anything else reading
-/// `.standard` in the same process. Every read goes straight to
-/// `UserDefaults` — there is no in-memory cache — so an add/remove takes
-/// effect on the very next read, in this process or a fresh one, with no
-/// stale-list bug across app restarts.
+/// Backed by `UserDefaults.standard`, which for a bundled app *is* the
+/// domain named by its bundle identifier — so this app's preference state is
+/// namespaced under its own identifier by construction, and a build with a
+/// different identifier gets a different domain without anything here saying
+/// so. Every read goes straight to `UserDefaults` — there is no in-memory
+/// cache — so an add/remove takes effect on the very next read, in this
+/// process or a fresh one, with no stale-list bug across app restarts.
+///
+/// HORO-1456: this used to read `UserDefaults(suiteName:) ?? .standard`
+/// against the literal `dev.glomeris.GlomerisMenuBar`, and the comment above
+/// claimed the suite was what namespaced it. It was not. Foundation returns
+/// `nil` from `UserDefaults(suiteName:)` when handed the calling process's own
+/// bundle identifier — logging "using your own bundle identifier as an
+/// NSUserDefaults suite name does not make sense and will not work" — so in
+/// the app the `?? .standard` fallback was always the operative branch. The
+/// storage is unchanged; what changed is that the code now says which domain
+/// it uses instead of arriving there through a failed initialiser.
 struct ProjectRootsStore {
-    private static let suiteName = "dev.glomeris.GlomerisMenuBar"
     private static let defaultsKey = "projectRoots"
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults? = nil) {
-        self.defaults = defaults ?? UserDefaults(suiteName: Self.suiteName) ?? .standard
+        self.defaults = defaults ?? .standard
     }
 
     /// The currently configured project-root paths, in the order they
