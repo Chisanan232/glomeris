@@ -648,6 +648,34 @@ final class PlanApplicationTests: XCTestCase {
         XCTAssertNil(outcome.reclaimedText)
     }
 
+    /// The commonest successful batch there is, and it used to read "Reclaimed
+    /// unknown."
+    ///
+    /// `executor::execute_plan` measures `actual_reclaimed_bytes` only for a
+    /// plan made entirely of `DeletePath` steps; a `RunTool` step makes it
+    /// `Unavailable`. `cargo.clean.target_dir` is a `RunTool`, so the release
+    /// binary returns `"actual_reclaimed_bytes": null` on every successful cargo
+    /// cleanup, and `humanByteCount` renders that as the literal `"unknown"`.
+    /// One such row must therefore say nothing about space, exactly as two
+    /// already did.
+    func testASingleCleanedRowWithNoMeasuredSizeSaysNothingAboutSpace() {
+        let outcome = result([.cleaned(reclaimedBytes: nil, human: "unknown")])
+        XCTAssertEqual(outcome.cleanedCount, 1)
+        XCTAssertEqual(outcome.headline, "Cleaned 1 item.")
+        XCTAssertNil(
+            outcome.reclaimedText,
+            "a row whose size was never measured must not be reported as 'unknown' reclaimed"
+        )
+    }
+
+    /// The counterpart: a single row that *did* measure still quotes Rust's own
+    /// rendering rather than the raw count, so the fix above did not silence the
+    /// case it was never about.
+    func testASingleCleanedRowWithAMeasuredSizeStillQuotesRustsOwnString() {
+        let outcome = result([.cleaned(reclaimedBytes: 2_621_478, human: "2.5 MB")])
+        XCTAssertEqual(outcome.reclaimedText, "2.5 MB")
+    }
+
     // MARK: - Steps and results carry no policy judgment of their own
 
     /// Both types render their policy label and kind through
