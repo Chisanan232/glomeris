@@ -97,8 +97,15 @@ for required in "$WORKFLOW_DIR" "$VERSION_FILE"; do
 done
 
 # `<key>=<value>` lines only; everything else in the pin file is prose.
+#
+# `|| true` is load-bearing under `set -euo pipefail`. Without it, a missing key
+# makes grep exit 1, pipefail carries that out of the command substitution, and
+# `set -e` kills the script at the assignment below — before the loop that is
+# supposed to report the missing key. Measured, by deleting the pin line: exit
+# status 1 with a zero-byte log, which in CI is a red job with no reason given
+# and the `FAIL: no '<key>=' line` message never printed.
 pinned() {
-  grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2
+  grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true
 }
 
 actionlint_version="$(pinned actionlint_version)"
