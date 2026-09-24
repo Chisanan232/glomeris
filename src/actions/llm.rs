@@ -1196,6 +1196,51 @@ mod tests {
         );
     }
 
+    /// HORO-1360 AC5: the named case. A Homebrew cache is the resource the
+    /// old prompt view got wrong every single time, not just when the disk
+    /// happened to be in an awkward state — `brew cleanup -s` takes no path
+    /// to scope, so `structural_refusal` rejects its step unconditionally.
+    #[test]
+    fn a_homebrew_cache_contributes_no_action_id_to_the_prompt() {
+        let actions = ActionRegistry::builtin();
+        let brew = evidence_for(ResourceKind::HomebrewCache, "/opt/homebrew/cache");
+        let brew_view = LlmResourceView::from_evidence(&brew, &decision_for(&brew), &actions, 0);
+
+        assert!(
+            brew_view.offered_action_ids.is_empty(),
+            "a homebrew cache has no runnable action, so the model must not be \
+             asked to rank one; got {:?}",
+            brew_view.offered_action_ids
+        );
+
+        // Positive control, in this same test so the two cannot drift apart.
+        //
+        // Two things are being controlled for, because the emptiness above
+        // has two boring explanations. First, the registry does know an
+        // action for `HomebrewCache` — so the filter is what emptied the
+        // list, not an unpopulated registry. Second, `from_evidence` does
+        // still name actions when one is genuinely runnable — so the filter
+        // is not simply refusing everything.
+        assert_eq!(
+            actions.ids_for_kind(ResourceKind::HomebrewCache),
+            vec!["homebrew.cleanup.cache"],
+            "control invalid: the registry no longer lists an action for this kind, \
+             so the assertion above would pass for the wrong reason"
+        );
+
+        let target_dir = temp_cargo_project("llm-view-control");
+        let cargo = evidence_for(
+            ResourceKind::CargoTargetDir,
+            target_dir.to_str().expect("utf-8 temp path"),
+        );
+        let cargo_view = LlmResourceView::from_evidence(&cargo, &decision_for(&cargo), &actions, 1);
+        assert_eq!(
+            cargo_view.offered_action_ids,
+            vec!["cargo.clean.target_dir"],
+            "control invalid: nothing is being offered at all"
+        );
+    }
+
     #[test]
     fn from_evidence_handles_missing_last_modified() {
         let mut ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
