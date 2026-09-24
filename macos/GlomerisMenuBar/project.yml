@@ -93,6 +93,10 @@ targets:
       # asserted against DTO fixtures directly rather than through the card
       # that draws them.
       - path: Sources/PlanApplication.swift
+      # HORO-1452: the port of Rust's `human_bytes`. Compiled into the test
+      # target so the golden fixture can be asserted against the real function
+      # rather than against a copy of it in the test file.
+      - path: Sources/GlomerisByteFormat.swift
       - path: Sources/GlomerisDesignSystem.swift
       # HORO-1365: the scan and plan stores are exercised directly, so a
       # reset can be caught at the state boundary rather than only by a
