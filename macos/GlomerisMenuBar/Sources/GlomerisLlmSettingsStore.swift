@@ -118,7 +118,6 @@ struct GlomerisLlmSettingsStatus: Equatable {
 /// its own. The unchecked part is that one documented guarantee and nothing
 /// else.
 struct GlomerisLlmSettingsStore: @unchecked Sendable {
-    private static let suiteName = "dev.glomeris.GlomerisMenuBar"
     private static let endpointKey = "llmBaseUrl"
     private static let modelKey = "llmModel"
 
@@ -133,8 +132,19 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     private let defaults: UserDefaults
     private let credentials: CredentialStore
 
+    /// `UserDefaults.standard` is the default rather than a named suite: for a
+    /// bundled app it *is* the domain named by its bundle identifier, so the
+    /// endpoint and model are namespaced under the running bundle by
+    /// construction, and a build with a different identifier reads its own
+    /// settings rather than the release app's.
+    ///
+    /// HORO-1456: this was `UserDefaults(suiteName:) ?? .standard` against the
+    /// literal `dev.glomeris.GlomerisMenuBar`. Foundation returns `nil` from
+    /// that initialiser when handed the calling process's own bundle
+    /// identifier, so in the app the fallback was always the branch taken —
+    /// the storage is unchanged, and nothing needs migrating.
     init(defaults: UserDefaults? = nil, credentials: CredentialStore? = nil) {
-        self.defaults = defaults ?? UserDefaults(suiteName: Self.suiteName) ?? .standard
+        self.defaults = defaults ?? .standard
         self.credentials = credentials ?? KeychainCredentialStore()
     }
 
