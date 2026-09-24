@@ -533,6 +533,14 @@ struct ApplyPlanView: View {
     /// result is assembled from whatever the loop recorded, so a batch that
     /// stops still reports per item.
     ///
+    /// Sequential *within* one run, which is only the whole story while there is
+    /// one run: the loop has no cancellable handle by design, so nothing can
+    /// stop a batch and a second one entered while the first awaits a child
+    /// would put two `execute` processes in flight. `beginApplyingBatch()` is
+    /// the compare-and-set that refuses that, and it is a latch on `PlanState`
+    /// rather than a look at `applyPhase` because clearing the phase is
+    /// something the UI does routinely.
+    ///
     /// `internal` so the tests can drive it; its one production call site is
     /// the Apply button's detached `Task {}`.
     @MainActor
@@ -540,6 +548,8 @@ struct ApplyPlanView: View {
         let includingConfirmable = plan.applyIncludesConfirmable
         let indices = preview.attemptedIndices(includingConfirmable: includingConfirmable)
         guard !indices.isEmpty else { return }
+        guard plan.beginApplyingBatch() else { return }
+        defer { plan.endApplyingBatch() }
 
         plan.applyErrorMessage = nil
         plan.applyCompletedItems = []
@@ -607,7 +617,16 @@ struct ApplyPlanView: View {
                 arguments,
                 progressType: ProgressEventDto.self,
                 onProgress: { event in
+                    // Each event gets its own unstructured task, so these are
+                    // unordered with respect to each other and to the loop. The
+                    // phase check is what keeps that contained: without it a
+                    // late write can land after the batch ended and put a
+                    // deletion line — "Deleting …" — into `preparingBody`,
+                    // which renders the same field for a read-only re-check.
+                    // Within a run the worst case is an out-of-date line, which
+                    // a progress indicator is allowed to be.
                     Task { @MainActor in
+                        guard case .applying = plan.applyPhase else { return }
                         plan.applyProgressText = ProgressStatusText.text(for: event)
                     }
                 }

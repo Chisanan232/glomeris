@@ -187,6 +187,37 @@ final class PlanState: ObservableObject {
     /// button action and keeps nothing; the cancel the ticket asks for happens
     /// in `.reviewing`, before anything has run.
 
+    /// `true` from the moment the `execute` loop starts until it ends.
+    ///
+    /// This is a fact about a running child process, not display state, which
+    /// is why `resetApplyState()` deliberately does not clear it and why the
+    /// phase is not used for it. Clearing the phase is something the UI does
+    /// routinely, and a guard that no second batch can start has to survive
+    /// that.
+    @Published private(set) var isApplyingBatch = false
+
+    /// Claims the right to run a batch, or reports that one already holds it.
+    ///
+    /// A compare-and-set rather than a plain setter, so the invariant lives in
+    /// one place. Both calls are on the main actor — every caller is
+    /// `@MainActor` — so the read and the write cannot interleave.
+    ///
+    /// Two concurrent batches would take turns losing. The execution lock
+    /// (`src/executor/lock.rs`) is exclusive and non-blocking: one child takes
+    /// it and the other is refused `busy`, which halts that batch and tells the
+    /// user another execution is already in progress. That sentence would be
+    /// true and the cause would be us, so the fix is to not start the second
+    /// batch rather than to explain the collision afterwards.
+    func beginApplyingBatch() -> Bool {
+        if isApplyingBatch { return false }
+        isApplyingBatch = true
+        return true
+    }
+
+    func endApplyingBatch() {
+        isApplyingBatch = false
+    }
+
     /// Clears everything about a batch. Called when a new plan replaces the
     /// one a preview or result was about — a preview naming resources from a
     /// plan the user can no longer see is worse than no preview.

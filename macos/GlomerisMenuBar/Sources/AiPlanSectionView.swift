@@ -463,7 +463,13 @@ struct AiPlanSectionView: View {
                 plan.isPlanning = true
                 plan.planTask = Task { await runLlmPlan() }
             }
-            .disabled(plan.isPlanning)
+            // HORO-1366 adds `isApplyingBatch`. A new plan replaces the one a
+            // batch is running, and a batch cannot be stopped — so asking mid-
+            // batch would leave a result to be rendered under a plan it was not
+            // about, and let a second Apply start beside the first. Refusing the
+            // question for the few seconds deletions take is the honest answer;
+            // `applyPlan`'s own latch is the backstop, not the gate.
+            .disabled(plan.isPlanning || plan.isApplyingBatch)
 
             if plan.isPlanning {
                 Button("Stop") {
