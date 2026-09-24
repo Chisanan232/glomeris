@@ -149,24 +149,73 @@ final class GlomerisDesignSystemTests: XCTestCase {
     /// back, not have the panel run off the bottom of the screen. The panel
     /// still has to fit *with* its own header and footer, which is what the
     /// chrome allowance is for.
-    func testAShortDisplayGetsAShorterPanelRatherThanOneOffTheScreen() {
-        // Shorter than any Mac ships with, deliberately: the guard has to
-        // hold for a display nobody anticipated, not just for a small one.
-        let usableHeight: CGFloat = 600
-        let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+    ///
+    /// Swept across the whole band where the panel is between the two
+    /// regimes, rather than tested at one height. At any single height in
+    /// this band `max` happens to equal `height - panelChromeAllowance`
+    /// exactly, so a lone chrome-fit assertion there is an identity and
+    /// discriminates nothing; the same assertion across the band does
+    /// discriminate, because raising the floor or dropping the allowance term
+    /// breaks it at the bottom of the band while leaving the top intact.
+    func testEveryShortDisplayGetsAShorterPanelRatherThanOneOffTheScreen() {
+        let crossover = GlomerisDesign.floorBodyHeight + GlomerisDesign.panelChromeAllowance
+        let fullRange = GlomerisDesign.maxBodyHeight + GlomerisDesign.panelChromeAllowance
 
+        for usableHeight in stride(from: crossover, through: fullRange, by: 20) {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+
+            XCTAssertLessThanOrEqual(
+                limits.max + GlomerisDesign.panelChromeAllowance,
+                usableHeight,
+                "body + chrome is \(limits.max + GlomerisDesign.panelChromeAllowance)pt on a "
+                    + "\(usableHeight)pt display — the footer would be off-screen"
+            )
+            XCTAssertLessThanOrEqual(limits.min, limits.max, "the range inverted at \(usableHeight)pt")
+        }
+
+        // And the ceiling really does come down, rather than the band being
+        // vacuously satisfied by a range that never moves.
         XCTAssertLessThan(
-            limits.max,
+            GlomerisDesign.bodyHeightLimits(visibleScreenHeight: 600).max,
             GlomerisDesign.maxBodyHeight,
             "the ceiling did not come down on a display too short for it"
         )
-        XCTAssertLessThanOrEqual(
-            limits.max + GlomerisDesign.panelChromeAllowance,
-            usableHeight,
-            "body + chrome is \(limits.max + GlomerisDesign.panelChromeAllowance)pt on a "
-                + "\(usableHeight)pt display — the footer would be off-screen"
+    }
+
+    /// The one input range where the "gives the height back" promise stops
+    /// holding, pinned so it stays a documented exception rather than
+    /// becoming a surprise.
+    ///
+    /// Below `floorBodyHeight + panelChromeAllowance` the floor wins and the
+    /// panel asks for more than the display has. That is deliberate — a body
+    /// thinner than the floor is not a reading surface — and no display a Mac
+    /// can drive comes close. What this asserts is that the crossover is
+    /// exactly where the design system says it is, so the claim and the
+    /// arithmetic cannot drift apart.
+    func testTheHeightGivenBackStopsAtTheFloorAndNoLower() {
+        let crossover = GlomerisDesign.floorBodyHeight + GlomerisDesign.panelChromeAllowance
+
+        for usableHeight in [-1000.0, 0.0, 100.0, crossover - 1] as [CGFloat] {
+            let limits = GlomerisDesign.bodyHeightLimits(visibleScreenHeight: usableHeight)
+            XCTAssertEqual(
+                limits.max,
+                GlomerisDesign.floorBodyHeight,
+                "below the crossover the body must sit on the floor, not below it"
+            )
+            XCTAssertEqual(limits.min, limits.max, "at the floor there is no range left to offer")
+        }
+
+        XCTAssertGreaterThan(
+            GlomerisDesign.bodyHeightLimits(visibleScreenHeight: crossover).max,
+            GlomerisDesign.floorBodyHeight - 1,
+            "at the crossover the body should be exactly the floor and not less"
         )
-        XCTAssertLessThanOrEqual(limits.min, limits.max, "the range inverted")
+        XCTAssertLessThan(
+            crossover,
+            500,
+            "the exception must stay confined to displays no Mac can drive — \(crossover)pt is "
+                + "getting close to a real one"
+        )
     }
 
     /// Total, not just correct on the inputs that were thought of. A display
