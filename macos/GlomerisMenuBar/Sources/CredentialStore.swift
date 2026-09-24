@@ -122,6 +122,64 @@ struct KeychainCredentialStore: CredentialStore {
         self.service = service
     }
 
+    /// Shown by `SecurityAgent` when it asks the user about this item, so it
+    /// should read as a sentence a person can act on.
+    static let accessDescription = "Glomeris LLM provider key"
+
+    /// A `SecAccess` trusting exactly the running binary and nothing else.
+    ///
+    /// HORO-1455 AC 2, and it is an intent pin rather than a hardening change —
+    /// stated plainly because the opposite is the easy thing to believe.
+    /// Measured on a scratch keychain, `SecItemAdd` with no `kSecAttrAccess`,
+    /// with `SecAccessCreate(desc, nil)`, and with `SecAccessCreate(desc,
+    /// [self])` all produce the *same* ACL: three entries, the decrypt entry
+    /// trusting one application. The default was already self-only, so this
+    /// grants nothing and revokes nothing.
+    ///
+    /// What it buys is that the trusted list is now written down where a change
+    /// to it has to be deliberate. `scripts/check-credential-store-uses-keychain.sh`
+    /// and `CredentialStoreAccessTests` both assert this call is here, so a
+    /// later commit that adds a second application to the list, or that passes
+    /// `nil` for the applications — which means "no ACL restriction", not "the
+    /// default" — fails a check instead of quietly shipping an item any binary
+    /// can read.
+    ///
+    /// Returning `nil` on failure is deliberate, and `insertAttributes` treats it
+    /// as "omit the key" rather than as an error: an item created with the
+    /// default ACL is byte-for-byte what HORO-1309 shipped, so refusing to save
+    /// the user's key over it would turn a cosmetic failure into a visible one.
+    ///
+    /// Both calls below are deprecated (10.10, "SecKeychain is deprecated") and
+    /// the two warnings are left in place on purpose. They are not noise: they
+    /// are the compiler stating the same thing HORO-1455 asks the founder to
+    /// decide — that Apple's supported home for a secret is the data-protection
+    /// keychain, which needs an entitlement this app does not have. A file
+    /// keychain item has no other ACL mechanism, so there is no non-deprecated
+    /// way to write this while the file keychain is the choice. Silencing them
+    /// (by marking this method deprecated too, which does suppress them) would
+    /// only move the warning to the call site and would hide the one signal that
+    /// says which decision is outstanding.
+    static func selfOnlyAccess() -> SecAccess? {
+        var trustedSelf: SecTrustedApplication?
+        // A nil path means "the application making this call", resolved from the
+        // running code's identity. Correct across a rename or a move, which a
+        // hardcoded path would not be.
+        guard SecTrustedApplicationCreateFromPath(nil, &trustedSelf) == errSecSuccess,
+            let trustedSelf
+        else {
+            return nil
+        }
+
+        var access: SecAccess?
+        guard
+            SecAccessCreate(
+                accessDescription as CFString, [trustedSelf] as CFArray, &access) == errSecSuccess
+        else {
+            return nil
+        }
+        return access
+    }
+
     private func baseQuery(forKey key: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
@@ -213,6 +271,12 @@ struct KeychainCredentialStore: CredentialStore {
         // founder call recorded on HORO-1455, not something to decide in a
         // comment. See book/src/byok.md, which now says the same thing to a user.
         insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        // HORO-1455 AC 2. Trust this binary and nothing else. Produces the same
+        // ACL the default does — see `selfOnlyAccess()`; the point is that the
+        // list is declared rather than inherited.
+        if let access = Self.selfOnlyAccess() {
+            insert[kSecAttrAccess as String] = access
+        }
         return insert
     }
 
