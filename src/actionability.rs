@@ -10,14 +10,29 @@
 //! `reporting::dto`, so `detect --json` and `explain --json` stopped
 //! promising a Clean button that could not work.
 //!
-//! Five other surfaces choose an action *without* consulting that answer:
-//! the LLM prompt view, Autopilot, `clean --dry-run`, `free` and
-//! `emergency`. Each resolves from the registry keyed on resource kind and
-//! stops there. So the product could still nominate an action it already
-//! knew execution would refuse.
+//! Six other surfaces chose an action *without* consulting that answer,
+//! each resolving from the registry keyed on resource kind and stopping
+//! there. So the product could still nominate an action it already knew
+//! execution would refuse:
+//!
+//! | Surface | Reads | Fixed by |
+//! |---|---|---|
+//! | LLM prompt view | [`eligible_action_ids`] | HORO-1360 |
+//! | Autopilot | [`plan_refusal`] | HORO-1360 |
+//! | `clean --dry-run` | [`dry_run_explain`] | HORO-1359 |
+//! | `llm-plan`'s item rows | [`dry_run_explain`] | HORO-1359 |
+//! | `free`'s candidate selection | [`plan_refusal`] | HORO-1359 |
+//! | `emergency` | [`plan_refusal`] | HORO-1359 |
+//!
+//! `llm-plan`'s rows are not in HORO-1359's own enumeration of four
+//! surfaces. They have the identical shape to `clean --dry-run`'s, and the
+//! identical defect: the row's `candidate` field already carried
+//! `executable: false` with a truthful `refusal_reason` from HORO-1358,
+//! while its sibling `explain` field rendered the refused action as a live
+//! proposal. One JSON object disagreeing with itself.
 //!
 //! This module exists so the fix is one predicate that all of them read,
-//! rather than five restatements of the same rule that can drift apart. It
+//! rather than six restatements of the same rule that can drift apart. It
 //! is deliberately the *only* place the sequencing below is expressed.
 //!
 //! # This is not a safety boundary
@@ -101,6 +116,39 @@ pub fn static_refusal(
     };
 
     plan_refusal(action, ev)
+}
+
+/// The dry-run text to show for `action` against `ev`, or the reason
+/// there is none (HORO-1359).
+///
+/// `Ok(explain)` is an [`crate::actions::ActionPlan::explain`] nothing
+/// statically known refuses, so rendering it as a proposal is honest.
+/// `Err(reason)` is a sentence for the caller's `skip_reason` field.
+///
+/// The two are an `Err`/`Ok` rather than a pair on purpose. Both renderers
+/// (`print_clean_dry_run_report` and `print_llm_plan_report`) match on
+/// `(&item.explain, &item.skip_reason)` and print the *explain* whenever it
+/// is present, so an item carrying both would show the proposal and hide
+/// the refusal — which is the HORO-1359 defect restated in a different
+/// field. A caller cannot hold both at once here.
+///
+/// Reuses [`crate::executor::structural_refusal`] on the plan already
+/// built rather than going through [`plan_refusal`], which would plan a
+/// second time for the same answer. It is the same rule: `plan_refusal`
+/// calls exactly this function on exactly this plan.
+///
+/// Callers must have passed a [`PolicyClass::Protected`] gate first — this
+/// plans unconditionally, exactly as [`plan_refusal`] does.
+pub fn dry_run_explain(action: &dyn Action, ev: &Evidence) -> Result<String, String> {
+    match crate::executor::dry_run(action, ev) {
+        // `Display`, not `Debug`: this reaches a user through `skip_reason`,
+        // and `{:?}` showed them the literal text `ResourceMismatch`.
+        Err(e) => Err(e.to_string()),
+        Ok(plan) => match crate::executor::structural_refusal(&plan) {
+            Some(reason) => Err(reason),
+            None => Ok(plan.explain),
+        },
+    }
 }
 
 /// The subset of `actions.ids_for_kind(ev.resource.kind)` that nothing
