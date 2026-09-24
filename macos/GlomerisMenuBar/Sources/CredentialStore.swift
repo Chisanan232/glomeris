@@ -172,6 +172,28 @@ struct KeychainCredentialStore: CredentialStore {
         return secret
     }
 
+    /// The attributes a freshly created item is given.
+    ///
+    /// Split out of `setSecret` so it can be asserted on without a keychain.
+    /// `SecItemAdd` itself cannot run under test: an unsigned `xcodebuild` test
+    /// binary writing to the login keychain gets `errSecAuthFailed` (-25293),
+    /// and one asking for the data-protection keychain gets
+    /// `errSecMissingEntitlement` (-34018). A test that skipped itself on either
+    /// status would be the HORO-1253 failure mode — a gate that never ran
+    /// reading as a gate that passed. So the dictionary is built here, where a
+    /// test can look at exactly what would have been handed to the keychain, and
+    /// `setSecret` adds nothing to it.
+    func insertAttributes(forKey key: String, data: Data) -> [String: Any] {
+        var insert = baseQuery(forKey: key)
+        insert[kSecValueData as String] = data
+        // Available whenever the user has unlocked the Mac, and never synced
+        // to iCloud or included in a backup: a BYOK key is local to the
+        // machine the CLI runs on, so ThisDeviceOnly is both the tighter and
+        // the more accurate choice.
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        return insert
+    }
+
     @discardableResult
     func setSecret(_ secret: String, forKey key: String) -> Bool {
         guard let data = secret.data(using: .utf8) else { return false }
@@ -186,14 +208,8 @@ struct KeychainCredentialStore: CredentialStore {
         )
         if updated == errSecSuccess { return true }
 
-        var insert = baseQuery(forKey: key)
-        insert[kSecValueData as String] = data
-        // Available whenever the user has unlocked the Mac, and never synced
-        // to iCloud or included in a backup: a BYOK key is local to the
-        // machine the CLI runs on, so ThisDeviceOnly is both the tighter and
-        // the more accurate choice.
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
+        return SecItemAdd(insertAttributes(forKey: key, data: data) as CFDictionary, nil)
+            == errSecSuccess
     }
 
     @discardableResult
