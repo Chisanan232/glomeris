@@ -15,8 +15,15 @@
 //  take. A grep catches the line that has not been written yet.
 //
 
+// No `@testable import GlomerisMenuBar`. This test target does not import the
+// app module — `project.yml` compiles the individual `Sources/*.swift` files it
+// needs directly into the test bundle, so every type here is already in this
+// module. An `@testable import` resolves locally only when a previous app-target
+// build has left a module artefact in DerivedData, and fails on a clean
+// checkout; CI caught exactly that. `Combine` is for `$applyPhase`.
+import Combine
+import SwiftUI
 import XCTest
-@testable import GlomerisMenuBar
 
 final class ApplyPlanViewTests: XCTestCase {
 
