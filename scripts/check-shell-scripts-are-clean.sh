@@ -210,6 +210,12 @@ while IFS= read -r hit; do
   previous="$(sed -n "$((hit_line - 1))p" "$hit_file")"
   if [[ ! "$previous" =~ ^[[:space:]]*# ]]; then
     unexplained+=("${hit_file}:${hit_line} (no reason on the line, and the line above is not a comment)")
+  elif [[ "$previous" =~ ^#! ]]; then
+    # The shebang matches "starts with #" and explains nothing. Measured: without
+    # this branch, a file-wide directive pasted directly under the shebang — the
+    # most far-reaching placement there is — was accepted as explained by the
+    # shebang above it.
+    unexplained+=("${hit_file}:${hit_line} (no reason on the line, and the line above is the shebang)")
   elif [[ "$previous" =~ $DIRECTIVE_RE ]]; then
     unexplained+=("${hit_file}:${hit_line} (no reason on the line, and the line above is another directive)")
   fi
