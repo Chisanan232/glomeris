@@ -44,6 +44,7 @@
 		7765D1EC48C4DACF135BD63F /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
 		79370CF11525490DD5B73CC3 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
 		7994B235BE871884E2AEAB08 /* BundleIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F64EDD803CBF517A519597B /* BundleIdentity.swift */; };
+		7B6DDC175DFBFBB860E5CBA5 /* BundleIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */; };
 		7D61BB3D174236A429452646 /* OverviewStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */; };
 		81DD0203CA5AE10816276612 /* SpokenLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FAC22B023BB94EA556577 /* SpokenLabel.swift */; };
 		847FDF28A3C3FFE0307946CF /* GlomerisMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29CCC97F9DEA1F53F834AF90 /* GlomerisMenuBarApp.swift */; };
@@ -108,6 +109,7 @@
 		572A0F15A4840A54F5B9B4D8 /* HistoryAuditSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAuditSectionView.swift; sourceTree = "<group>"; };
 		5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialStore.swift; sourceTree = "<group>"; };
 		5F7646F95623F0FC1FF170C4 /* GlomerisByteFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisByteFormatTests.swift; sourceTree = "<group>"; };
+		67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleIdentityTests.swift; sourceTree = "<group>"; };
 		702FC176DA9694CDEA648E8A /* StatusHealthSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusHealthSectionView.swift; sourceTree = "<group>"; };
 		734678C2344EF491614D0692 /* GlomerisMenuBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GlomerisMenuBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatesSectionViewTests.swift; sourceTree = "<group>"; };
@@ -212,6 +214,7 @@
 				C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */,
 				D2EC959107399B1D4F311033 /* ApplyPlanViewTests.swift */,
 				9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */,
+				67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */,
 				3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */,
 				AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */,
 				7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */,
@@ -339,6 +342,7 @@
 				4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */,
 				F74F65D0FD1B4A09F0CD73ED /* AutopilotPreferencesView.swift in Sources */,
 				55B5C40973107DD6F226F493 /* BundleIdentity.swift in Sources */,
+				7B6DDC175DFBFBB860E5CBA5 /* BundleIdentityTests.swift in Sources */,
 				B67B4B02F9A450278A3D05E3 /* CandidateActionability.swift in Sources */,
 				C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */,
 				D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */,
