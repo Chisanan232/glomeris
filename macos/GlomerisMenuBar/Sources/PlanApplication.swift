@@ -547,13 +547,30 @@ struct PlanApplicationResult: Equatable {
     /// it is not.
     ///
     /// A single cleaned row needs none of that: it quotes Rust's own string.
+    ///
+    /// # Why the single row is gated on the measured bytes, not on the string
+    ///
+    /// A successful `execute` does not always measure what it freed.
+    /// `executor::execute_plan` reports `actual_reclaimed_bytes` as `Observed`
+    /// only for a plan made entirely of `DeletePath` steps; any `RunTool` step
+    /// makes it honestly `Unavailable`. `cargo.clean.target_dir` is a
+    /// `RunTool`, so a real cargo cleanup returns `"actual_reclaimed_bytes":
+    /// null` on *every* success — verified against the release binary, not
+    /// inferred — and `humanByteCount` renders that as the literal `"unknown"`.
+    ///
+    /// Quoting the string unconditionally therefore produced "Cleaned 1 item.
+    /// Reclaimed unknown." for the single commonest successful batch there is.
+    /// Two such rows already said nothing, because the sum branch has no total
+    /// to show — so the two branches disagreed about the same situation. Both
+    /// now require a measured figure, and saying nothing about space is the
+    /// truthful answer when nothing measured it.
     var reclaimedText: String? {
-        guard cleanedCount > 0 else { return nil }
-        let renderedByRust = items.compactMap { item -> String? in
-            if case .cleaned(_, let human) = item.status { return human }
+        let cleaned = items.compactMap { item -> (bytes: UInt64?, human: String)? in
+            if case .cleaned(let bytes, let human) = item.status { return (bytes, human) }
             return nil
         }
-        if cleanedCount == 1, let only = renderedByRust.first { return only }
+        guard !cleaned.isEmpty else { return nil }
+        if cleaned.count == 1, let only = cleaned.first, only.bytes != nil { return only.human }
         guard let total = reclaimedBytes else { return nil }
         return reclaimedIsIncomplete ? "at least \(total) bytes" : "\(total) bytes"
     }
