@@ -143,23 +143,68 @@ fn print_command_usage(name: &str) {
     }
 }
 
+/// The refusal a subcommand prints for an argument it cannot account for,
+/// followed by that subcommand's own usage, then exit 2.
+///
+/// `command` is the command as a user typed it, so a nested verb reads back
+/// as `glomeris actions list: ...`; the usage underneath is the table entry
+/// for its first word, because [`help::COMMANDS`] is keyed by subcommand.
+/// That is exactly what `actions history` already did by hand — shared here
+/// rather than restated a fifth time (HORO-1322).
+fn usage_error(command: &str, arg: &str) -> ! {
+    eprintln!("glomeris {command}: unrecognized argument '{arg}'");
+    print_command_usage(command.split_whitespace().next().unwrap_or(command));
+    std::process::exit(2);
+}
+
 /// Parses a flat argument list into a positional-args list and a set of
 /// bare `--flag` switches (no `--flag value` pairs handled here — callers
 /// that need a valued flag, e.g. `--target`, parse that one explicitly
-/// before calling this on what remains). Never panics on malformed input;
-/// every unrecognized `--...` token is treated as a flag, and every other
-/// token is positional.
-fn split_flags<'a>(args: &'a [String], known_flags: &[&str]) -> (Vec<&'a str>, Vec<&'a str>) {
+/// before calling this on what remains). Never panics on malformed input.
+///
+/// A token starting with `-` must be in `known_flags`, and is returned as
+/// `Err` otherwise. It used to become a *positional* instead (HORO-1322),
+/// which meant `detect --jsonn` ran a full discovery and printed prose while
+/// exiting 0, and `explain --resource-id <id>` searched for a candidate
+/// literally named `--resource-id` and reported it as not found — a syntax
+/// mistake reported as a fact about the machine.
+///
+/// A dash token is never a positional here, deliberately: none of the
+/// callers has a valued flag left to parse by this point, so there is
+/// nothing such a token could mean except a flag that does not exist. A
+/// genuine path beginning with a dash is still reachable as `./-name`.
+fn split_flags<'a>(
+    args: &'a [String],
+    known_flags: &[&str],
+) -> Result<(Vec<&'a str>, Vec<&'a str>), &'a str> {
     let mut positionals = Vec::new();
     let mut flags = Vec::new();
     for arg in args {
-        if known_flags.contains(&arg.as_str()) {
-            flags.push(arg.as_str());
+        let arg = arg.as_str();
+        if known_flags.contains(&arg) {
+            flags.push(arg);
+        } else if arg.starts_with('-') {
+            return Err(arg);
         } else {
-            positionals.push(arg.as_str());
+            positionals.push(arg);
         }
     }
-    (positionals, flags)
+    Ok((positionals, flags))
+}
+
+/// [`split_flags`] for a subcommand that takes no positional arguments at
+/// all — `status`, `detect`, `actions list`, `daemon status`. Refuses an
+/// unknown flag *and* a stray positional through [`usage_error`], so all
+/// four read identically to `clean` and `emergency`, which were already
+/// strict (HORO-1322).
+fn flags_only<'a>(command: &str, args: &'a [String], known_flags: &[&str]) -> Vec<&'a str> {
+    match split_flags(args, known_flags) {
+        Err(unknown) => usage_error(command, unknown),
+        Ok((positionals, flags)) => match positionals.first() {
+            Some(stray) => usage_error(command, stray),
+            None => flags,
+        },
+    }
 }
 
 fn print_json_or_exit(value: &impl serde::Serialize) {
@@ -257,7 +302,7 @@ fn run_status_command(args: &[String]) {
     use glomeris::monitor::{FsStat, ThresholdConfig};
     use glomeris::platform::macos::MacosFsStat;
 
-    let (_positionals, flags) = split_flags(args, &["--json"]);
+    let flags = flags_only("status", args, &["--json"]);
     let fs_stat = MacosFsStat;
     let usage = match fs_stat.stat(std::path::Path::new("/")) {
         Ok(u) => u,
@@ -450,7 +495,7 @@ fn run_detect_command(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let (_positionals, flags) = split_flags(&remaining, &["--json", "--progress-json"]);
+    let flags = flags_only("detect", &remaining, &["--json", "--progress-json"]);
     let progress_json = flags.contains(&"--progress-json");
 
     let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots.clone());
@@ -494,7 +539,10 @@ fn run_explain_command(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let (positionals, flags) = split_flags(&remaining, &["--json", "--progress-json"]);
+    let (positionals, flags) = match split_flags(&remaining, &["--json", "--progress-json"]) {
+        Ok(v) => v,
+        Err(unknown) => usage_error("explain", unknown),
+    };
     let progress_json = flags.contains(&"--progress-json");
 
     let Some(query) = positionals.first() else {
@@ -1814,7 +1862,7 @@ fn actions_history(args: &[String]) {
 }
 
 fn actions_list(args: &[String]) {
-    let (_positionals, flags) = split_flags(args, &["--json"]);
+    let flags = flags_only("actions list", args, &["--json"]);
 
     let registry = glomeris::actions::ActionRegistry::builtin();
     let report = glomeris::cli::build_action_list_report(&registry);
@@ -1910,7 +1958,7 @@ fn heartbeat_path() -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn daemon_status(args: &[String]) {
-    let (_positionals, flags) = split_flags(args, &["--json"]);
+    let flags = flags_only("daemon status", args, &["--json"]);
 
     let plist_path = match platform::macos::launchd::default_plist_path() {
         Ok(p) => p,
