@@ -541,9 +541,30 @@ fn run_explain_command(args: &[String]) {
     };
     let (positionals, flags) = match split_flags(&remaining, &["--json", "--progress-json"]) {
         Ok(v) => v,
-        Err(unknown) => usage_error("explain", unknown),
+        Err(unknown) => {
+            eprintln!("glomeris explain: unrecognized argument '{unknown}'");
+            // The shape HORO-1322 reported: someone reaches for
+            // `--resource-id <id>` because that is how the id is named in
+            // JSON output, and the only thing this command takes a flag for
+            // is output format. Saying so is the difference between a
+            // corrected invocation and a hunt for a resource that exists.
+            eprintln!(
+                "glomeris explain: the resource id or path is a positional argument, not a flag"
+            );
+            print_command_usage("explain");
+            std::process::exit(2);
+        }
     };
     let progress_json = flags.contains(&"--progress-json");
+
+    // A second positional was silently dropped, so `explain a b` explained
+    // `a` and said nothing about having been given two resources to explain.
+    if let Some(extra) = positionals.get(1) {
+        eprintln!("glomeris explain: unrecognized argument '{extra}'");
+        eprintln!("glomeris explain: exactly one resource id or path is explained per invocation");
+        print_command_usage("explain");
+        std::process::exit(2);
+    }
 
     let Some(query) = positionals.first() else {
         eprintln!("glomeris explain: a resource id or path argument is required");
