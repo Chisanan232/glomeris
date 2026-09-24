@@ -330,3 +330,52 @@ jobs:
           echo "$DEST" >> "$GITHUB_PATH"
       - name: Check every workflow file is valid
         run: bash scripts/check-workflows-are-valid.sh
+
+  shell-scripts-are-clean:
+    # HORO-1473: every job above runs its guard as a single line,
+    # `bash scripts/check-something.sh`, which is all the shellcheck inside
+    # workflows-are-valid ever saw. The several hundred lines inside each script
+    # were checked by nothing, so the guards protecting everything else were the
+    # least checked shell in the repository.
+    #
+    # The bug class that matters here is the one that makes a guard pass while
+    # proving nothing: an expansion that word-splits, a variable read before
+    # assignment, a pipeline whose status comes from the wrong stage. Two guards
+    # here have already been found reporting PASS over something they were meant
+    # to catch, for other reasons, so this is demonstrated rather than
+    # hypothetical.
+    #
+    # A separate job from workflows-are-valid, for the reason the drift jobs are
+    # separate from macos-app: steps in one job run in sequence and stop at the
+    # first failure, so sharing a job would mean a broken workflow file prevents
+    # the script lint from running at all — and those two are exactly the
+    # failures that must not be able to hide each other.
+    #
+    # That costs a second copy of the install step. Accepted because the two
+    # copies cannot disagree about anything that matters: both read the version
+    # and the hash out of .github/.actionlint-version, and the guard itself
+    # refuses to run if the binary on PATH is not that version.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned shellcheck
+        # Into RUNNER_TEMP rather than the checkout, so the extracted binary
+        # cannot show up as an untracked file in the repository being linted —
+        # which this guard would then discover and lint.
+        run: |
+          set -euo pipefail
+          VERSION_FILE=.github/.actionlint-version
+          pin() { grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2; }
+          SC_VERSION="$(pin shellcheck_version)"
+          SC_SHA256="$(pin shellcheck_linux_x86_64_sha256)"
+          DEST="$RUNNER_TEMP/pinned-linters"
+          mkdir -p "$DEST"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+          echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz -C "$DEST" --strip-components=1 \
+            "shellcheck-v${SC_VERSION}/shellcheck"
+          echo "$DEST" >> "$GITHUB_PATH"
+      - name: Check every shell script is clean
+        run: bash scripts/check-shell-scripts-are-clean.sh
