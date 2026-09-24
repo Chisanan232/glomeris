@@ -480,31 +480,40 @@ pub fn render_envelope(envelope: &AutopilotEnvelope) -> String {
 
 /// Writes `envelope` to `path`, creating parent directories as needed.
 ///
-/// Writes a sibling temp file and renames it over `path` — same atomic-write
-/// shape as [`crate::monitor::persistence::write_heartbeat`], for a sharper
-/// reason here: the GUI and the CLI both write this file, and a reader that
-/// caught a half-written one would see an envelope that is neither the old
-/// nor the new grant.
+/// Writes through [`crate::atomic_write::write_atomically`] — a temp file
+/// beside `path`, then `fs::rename` over it — for a sharper reason here
+/// than anywhere else this crate writes a file: the GUI and the CLI both
+/// write this one, and a reader that caught a half-written envelope would
+/// see neither the old nor the new grant.
+///
+/// Which is what the write itself could produce until HORO-1464. Two
+/// writers sharing a temp path derived from the target truncated each
+/// other's scratch file and renamed the mixture into place, so the atomic
+/// rename published exactly the envelope this comment says cannot be
+/// observed.
+///
+/// What that could and could not do, stated so the severity is not read as
+/// larger than it is: [`parse_envelope`] builds up from
+/// [`AutopilotEnvelope::revoked`] and only ever *adds* grants from lines it
+/// reads, so a torn envelope grants less, and an unparseable one is an
+/// error — fail-closed either way. The exception is the caps. `max_actions`,
+/// `max_bytes` and `max_duration` each fall back to their built-in default
+/// when their line is absent, so a tear that drops a cap line while keeping
+/// the grant lines widens that one cap back to the default, which is looser
+/// than any value the user had tightened it to.
 pub fn save_envelope_at(path: &Path, envelope: &AutopilotEnvelope) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("conf.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, render_envelope(envelope)) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(StoreError::Io(e));
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(StoreError::Io(e));
-    }
-    Ok(())
+    crate::atomic_write::write_atomically(path, render_envelope(envelope).as_bytes())
+        .map_err(StoreError::Io)
 }
 
 #[cfg(test)]
 mod tests {
     use super::super::envelope::{ACTIONS_CEILING, BYTES_CEILING, DURATION_CEILING};
     use super::*;
+    use crate::atomic_write::temp_paths_beside;
 
     fn load(contents: &str) -> Result<AutopilotEnvelope, StoreError> {
         parse_envelope(contents)
@@ -568,10 +577,49 @@ mod tests {
         let reloaded = load_envelope_at(&path).expect("load");
 
         assert_eq!(reloaded, original);
-        assert!(
-            !path.with_extension("conf.tmp").exists(),
+        // Scanned rather than named: since HORO-1464 the temp name carries
+        // this process's id and a sequence number, so asserting one fixed
+        // path would name a file that can never exist — a pass that tests
+        // nothing.
+        assert_eq!(
+            temp_paths_beside(&path),
+            Vec::<PathBuf>::new(),
             "the temp file must not survive a successful save"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the wiring: the envelope must go through `atomic_write`, whose
+    /// own tests prove a writer never truncates a file it did not create.
+    /// The pre-placed file sits at the name the old code derived from the
+    /// target, standing in for the other of the two writers this file's own
+    /// doc comment says to expect — the GUI while the CLI saves, or the
+    /// reverse. Fixed, known name, so no timing is involved.
+    #[test]
+    fn saving_the_envelope_cannot_disturb_a_file_at_the_old_predictable_temp_name() {
+        const SQUATTER: &str = "version = 1\nenabled = false\n# the other writer's scratch file\n";
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-autopilot-store-old-temp-name-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("autopilot.conf");
+        let old_temp_name = path.with_extension("conf.tmp");
+        std::fs::write(&old_temp_name, SQUATTER).expect("place the squatter");
+        let original = narrow();
+
+        save_envelope_at(&path, &original).expect("save");
+
+        assert_eq!(load_envelope_at(&path).expect("load"), original);
+        assert_eq!(
+            std::fs::read_to_string(&old_temp_name).expect("still readable"),
+            SQUATTER,
+            "the save must not have used — and so must not have truncated — \
+             the temp name it derived from the target before HORO-1464"
+        );
+        assert_eq!(temp_paths_beside(&path), Vec::<PathBuf>::new());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

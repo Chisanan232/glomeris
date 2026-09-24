@@ -6,6 +6,7 @@
 
 pub mod actionability;
 pub mod actions;
+pub mod atomic_write;
 pub mod autopilot;
 pub mod cli;
 pub mod detectors;

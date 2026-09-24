@@ -111,36 +111,30 @@ impl Heartbeat {
 /// non-fatal to the poll loop, matching `PersistenceBackend::record`'s
 /// failure philosophy — see this module's doc comment.
 ///
-/// Writes to a sibling temp file, then `fs::rename`s it over `path` — same
-/// atomic-write shape as `platform::macos::launchd::write_atomic` — so a
-/// concurrent `read_heartbeat` (a separate process, e.g. `daemon status
-/// --json`) can never observe a truncated or partially-written file. A
-/// plain truncate-then-write would let a reader briefly see an empty file,
-/// which `read_heartbeat` degrades to `None` — the exact signal that means
-/// "not polling", which would be a false report for an otherwise-healthy
-/// daemon.
+/// Writes through [`crate::atomic_write::write_atomically`] — a temp file
+/// beside `path`, then `fs::rename` over it — so a concurrent
+/// `read_heartbeat` (a separate process, e.g. `daemon status --json`) can
+/// never observe a truncated or partially-written file. A plain
+/// truncate-then-write would let a reader briefly see an empty file, which
+/// `read_heartbeat` degrades to `None` — the exact signal that means "not
+/// polling", which would be a false report for an otherwise-healthy daemon.
+///
+/// Until HORO-1464 the temp path was derived from `path`, so two daemons
+/// writing the same heartbeat shared one scratch file and could publish a
+/// mixture of their two JSON documents. `read_heartbeat` degrades malformed
+/// JSON to `None` exactly as it degrades an empty file, so that put back
+/// the same false "not polling" report this atomic write exists to prevent
+/// — and durably, not for the instant a truncate would have lasted.
+///
+/// Serializes into memory rather than streaming into the temp file, so that
+/// a serialization failure cannot leave a half-written document behind for
+/// the rename to publish. A `Heartbeat` is four scalar fields.
 pub fn write_heartbeat(path: &Path, heartbeat: &Heartbeat) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp_path = path.with_extension("json.tmp");
-    let write_result = (|| -> io::Result<()> {
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&tmp_path)?;
-        serde_json::to_writer(file, heartbeat).map_err(io::Error::from)
-    })();
-    if let Err(e) = write_result {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    Ok(())
+    let json = serde_json::to_vec(heartbeat).map_err(io::Error::from)?;
+    crate::atomic_write::write_atomically(path, &json)
 }
 
 /// Reads back the heartbeat previously written by `write_heartbeat`.
@@ -446,6 +440,7 @@ impl PersistenceBackend for AlwaysFailingPersistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atomic_write::temp_paths_beside;
 
     /// HORO-1312. The values are a wire vocabulary: `glomeris history`
     /// prints them, the menu-bar app looks them up in
@@ -650,9 +645,44 @@ mod tests {
 
         write_heartbeat(&path, &heartbeat).expect("write_heartbeat should succeed");
 
-        assert!(!path.with_extension("json.tmp").exists());
+        // Scanned rather than named: the temp name carries this process's
+        // id and a sequence number since HORO-1464, so an assertion about
+        // one fixed path would name a file that can never exist and would
+        // pass without testing anything.
+        assert_eq!(temp_paths_beside(&path), Vec::<PathBuf>::new());
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pins the wiring: the heartbeat must go through `atomic_write`, whose
+    /// own tests prove a writer never truncates a file it did not create.
+    /// A file pre-placed at the name the old code derived from the target
+    /// stands in for a second daemon's in-flight scratch file, and must be
+    /// left byte-identical. Deterministic — nothing here waits on timing.
+    #[test]
+    fn writing_the_heartbeat_cannot_disturb_a_file_at_the_old_predictable_temp_name() {
+        const SQUATTER: &str = "{\"another\": \"daemon's in-flight heartbeat\"}";
+        let path = unique_heartbeat_test_path("old-temp-name-untouched");
+        let old_temp_name = path.with_extension("json.tmp");
+        std::fs::write(&old_temp_name, SQUATTER).expect("place the squatter");
+        let heartbeat = Heartbeat::new(1_700_000_000, PressureState::Healthy, 10.0, 1_000_000);
+
+        write_heartbeat(&path, &heartbeat).expect("write_heartbeat should succeed");
+
+        assert_eq!(
+            read_heartbeat(&path).expect("the heartbeat must still be readable"),
+            heartbeat
+        );
+        assert_eq!(
+            std::fs::read_to_string(&old_temp_name).expect("still readable"),
+            SQUATTER,
+            "the write must not have used — and so must not have truncated — \
+             the temp name it derived from the target before HORO-1464"
+        );
+        assert_eq!(temp_paths_beside(&path), Vec::<PathBuf>::new());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&old_temp_name);
     }
 
     fn unique_audit_test_path(tag: &str) -> PathBuf {
