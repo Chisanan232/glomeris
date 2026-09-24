@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn a_resource_with_no_registered_action_says_exactly_that() {
         let ev = evidence_at(
-            &make_temp_dir("derived").as_path().to_path_buf(),
+            make_temp_dir("derived").as_path(),
             ResourceKind::XcodeDerivedData,
         );
         let decision = decision_for(&ev);
