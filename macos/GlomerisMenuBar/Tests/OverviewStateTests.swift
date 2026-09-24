@@ -351,22 +351,28 @@ final class OverviewStateTests: XCTestCase {
     ///
     /// An observable object on the scene makes every publish re-evaluate
     /// `App.body`, and `App.body` constructs the `Settings` tabs eagerly,
-    /// whether or not a Settings window exists. `AiProviderPreferencesView.init`
-    /// seeds its status from `GlomerisLlmSettingsStore.status()`, which reads the
-    /// keychain synchronously. A Refresh publishes on every progress line, so the
-    /// scene-level version fired a burst of main-thread `SecItemCopyMatching`
-    /// calls per scan; on a bundle whose code identity the keychain ACL did not
-    /// recognise, one blocked behind a `SecurityAgent` prompt and the menu-bar
-    /// item vanished mid-scan — the app became unreachable, with nothing on
-    /// screen to explain it. Strictly worse than the bug being fixed.
+    /// whether or not a Settings window exists. At the time this was measured,
+    /// `AiProviderPreferencesView.init` seeded its status from
+    /// `GlomerisLlmSettingsStore.status()`, which read the keychain synchronously.
+    /// A Refresh publishes on every progress line, so the scene-level version
+    /// fired a burst of main-thread `SecItemCopyMatching` calls per scan; on a
+    /// bundle whose code identity the keychain ACL did not recognise, one blocked
+    /// behind a `SecurityAgent` prompt and the menu-bar item vanished mid-scan —
+    /// the app became unreachable, with nothing on screen to explain it. Strictly
+    /// worse than the bug being fixed.
     ///
-    /// The synchronous keychain read at the far end of that chain is a defect in
-    /// its own right and is filed as HORO-1368 — this test deliberately does NOT
-    /// assert on `AiProviderPreferencesView`'s or `GlomerisLlmSettingsStore`'s
-    /// internals to prove the chain exists. Pinning another file's private
-    /// implementation from here would mean HORO-1368's fix has to come back and
-    /// edit a test about scene state, and a guard that fires on the repair is
-    /// worse than no guard.
+    /// HORO-1368 has since fixed the far end: the view seeds from UserDefaults
+    /// only, and every keychain touch happens on a background queue. That removes
+    /// the *consequence* measured above, not the reason for this guard — scene
+    /// state still means `App.body` and the whole `Settings` tab tree
+    /// re-evaluate on every publish, for a window that is usually not open.
+    ///
+    /// This test deliberately does NOT assert on `AiProviderPreferencesView`'s or
+    /// `GlomerisLlmSettingsStore`'s internals to prove the chain exists. Pinning
+    /// another file's private implementation from here is what would have made
+    /// HORO-1368's repair come back and edit a test about scene state, and a
+    /// guard that fires on the repair is worse than no guard. That it did not
+    /// have to is the evidence the split was drawn in the right place.
     func testTheAppSceneHoldsNoObservableStateBecauseItsBodyBuildsTheSettingsTabs() throws {
         let app = try strippedOfComments(readSource("GlomerisMenuBarApp.swift"))
         XCTAssertFalse(
