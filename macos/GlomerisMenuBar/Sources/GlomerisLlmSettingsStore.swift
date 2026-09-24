@@ -354,8 +354,15 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// then stops depending on a caller remembering to `await` from somewhere
     /// nonisolated. `MainActor.run` here — the one-line change that reintroduces
     /// the bug — is what the off-thread tests actually catch.
+    ///
+    /// The label is derived rather than written out (HORO-1456). A queue label
+    /// is diagnostic only — it namespaces nothing and no state is filed under
+    /// it — but it was the last place in `Sources/` spelling the release bundle
+    /// identifier out, and leaving it would have meant the guard script that
+    /// keeps that literal from coming back needed an exemption list. An
+    /// exemption list is where the next literal hides.
     private static let keychainQueue = DispatchQueue(
-        label: "dev.glomeris.GlomerisMenuBar.keychain",
+        label: "\(BundleIdentity.current).keychain",
         qos: .userInitiated
     )
 
