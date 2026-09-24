@@ -245,7 +245,10 @@ final class ApplyPlanViewTests: XCTestCase {
             return XCTFail("expected .skippedStale, got \(preview.steps[0].disposition)")
         }
         XCTAssertTrue(reason.hasPrefix("explain:"), "the reason names the call that failed: \(reason)")
-        XCTAssertNil(plan.applyErrorMessage, "a per-item problem is a step, not a preview error")
+        XCTAssertTrue(
+            preview.steps.allSatisfy { !$0.disposition.isRunnable },
+            "a step Glomeris could not describe is never runnable"
+        )
     }
 
     /// The opt-in is off at the start of every preview, whatever it was before.
@@ -280,7 +283,6 @@ final class ApplyPlanViewTests: XCTestCase {
 
         XCTAssertEqual(plan.applyPhase, .idle)
         XCTAssertNil(plan.applyProgressText)
-        XCTAssertNil(plan.applyErrorMessage, "a sweep the user stopped is not a failure to report")
     }
 
     // MARK: - The `execute` loop

@@ -164,10 +164,6 @@ final class PlanState: ObservableObject {
 
     @Published var applyProgressText: String?
 
-    /// Set only when the preview itself could not be assembled — every
-    /// per-item problem is a step in the preview, not an error here.
-    @Published var applyErrorMessage: String?
-
     /// The `explain` sweep that builds a preview, held so the user can cancel
     /// a slow one. Safe to cancel for the reason `GlomerisClient.runRaw`'s
     /// header gives: `explain` observes and advises, and interrupting one
@@ -239,6 +235,5 @@ final class PlanState: ObservableObject {
         applyIncludesConfirmable = false
         applyCompletedItems = []
         applyProgressText = nil
-        applyErrorMessage = nil
     }
 }

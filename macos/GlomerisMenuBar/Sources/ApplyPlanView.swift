@@ -120,10 +120,6 @@ struct ApplyPlanView: View {
             case .finished(let result):
                 resultBody(result)
             }
-
-            if let applyErrorMessage = plan.applyErrorMessage {
-                GlomerisStateMessageView(message: .failure(applyErrorMessage))
-            }
         }
     }
 
@@ -455,14 +451,14 @@ struct ApplyPlanView: View {
     /// A failure for one item is not a failure of the preview: it becomes a
     /// `.skippedStale` step carrying the CLI's own message, so a plan holding
     /// one resource that has since been deleted still previews and still
-    /// applies the rest. `plan.applyErrorMessage` is left for problems with the
-    /// sweep itself.
+    /// applies the rest — there is deliberately no wholesale "the preview
+    /// failed" state, because every way the sweep can fail is a fact about one
+    /// resource and belongs on that resource's row.
     ///
     /// `internal` so the tests can drive it against a fixture binary; its one
     /// production call site is the "Apply plan…" button.
     @MainActor
     func preparePreview() async {
-        plan.applyErrorMessage = nil
         plan.applyCompletedItems = []
         plan.applyIncludesConfirmable = false
         plan.applyPhase = .preparing
@@ -551,7 +547,6 @@ struct ApplyPlanView: View {
         guard plan.beginApplyingBatch() else { return }
         defer { plan.endApplyingBatch() }
 
-        plan.applyErrorMessage = nil
         plan.applyCompletedItems = []
         plan.applyPhase = .applying(preview)
 
