@@ -491,14 +491,21 @@ struct AiPlanSectionView: View {
     /// the second line is the one a first-time user needs — that pressing the
     /// button is what sends anything anywhere.
     ///
-    /// HORO-1367 shortened the second line from three sentences to one. Every
-    /// fact it carried is still here — that asking sends a summary, that it
-    /// goes to the user's own provider, that it may cost money, and that
-    /// Settings can show the payload without sending it — because each one is
-    /// a thing the user would be wronged by not knowing. What went was the
-    /// wording around them: at the old width this line wrapped to three lines
-    /// of tertiary caption directly above the button it describes, which is
-    /// the shape a reader skips.
+    /// HORO-1367 shortened the second line. Every fact it carried is still
+    /// here — that asking sends a summary, that it goes to the user's own
+    /// provider, that it may cost money, and that Settings shows *exactly*
+    /// what would be sent without sending it — because each one is a thing
+    /// the user would be wronged by not knowing. What went was the wording
+    /// around them: at the old width this line wrapped to three lines of
+    /// tertiary caption directly above the button it describes, which is the
+    /// shape a reader skips.
+    ///
+    /// "Shows exactly what would be sent" is the one phrase here that must
+    /// not be paraphrased. It was briefly shortened to "previews it", which
+    /// is true of a summary, a sample or an approximation as well — and the
+    /// claim being made is the stronger one, that what Settings displays is
+    /// the payload itself. On a product whose case rests on showing its
+    /// evidence, trading that for four words is the wrong trade.
     private var provenanceNote: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text("The model recommends. Glomeris decides what may run.")
@@ -507,7 +514,8 @@ struct AiPlanSectionView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(
                 "Asking sends a summary of what Glomeris found to your provider "
-                    + "and may cost money. Settings previews it without sending."
+                    + "and may cost money. "
+                    + "Settings shows exactly what would be sent, without sending it."
             )
             .font(GlomerisDesign.captionFont)
             .foregroundStyle(.tertiary)
