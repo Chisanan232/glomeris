@@ -54,6 +54,14 @@
 //  writers of `candidates` and `outcome`, so there is no appear-trigger,
 //  timer or navigation side effect that can invalidate either one.
 //
+//  HORO-1366 adds a third result to `PlanState` — what an Apply Plan run
+//  previewed and did — and it follows the same rule. Its writers are the Apply,
+//  Cancel and Dismiss buttons and the run itself; a new plan clears it through
+//  `resetApplyState()`, because a preview naming resources from a plan that is
+//  no longer on screen is worse than no preview. Nothing else invalidates it,
+//  so a finished batch's per-item detail survives a drill-down and a Back for
+//  the same reason the plan does.
+//
 //  A project-roots change keeps its existing documented behaviour and is
 //  deliberately NOT wired to anything here: `ProjectRootsStore` is read at
 //  spawn time, so changing the roots takes effect on the next explicit
@@ -93,7 +101,34 @@ final class ScanState: ObservableObject {
     @Published var safetyFilter: CandidateSafetyFilter = .all
 }
 
-/// The result of the last `llm-plan` run.
+/// Where an Apply Plan run has got to (HORO-1366).
+///
+/// One property rather than several flags, because the states are genuinely
+/// exclusive and the pairs that would be nonsense — reviewing a preview while a
+/// batch is mid-flight, or showing a finished result beside a live one — are
+/// the ones a set of booleans invites. The associated values are the
+/// already-assembled `PlanApplication` types, so this enum stores and does not
+/// compute.
+enum PlanApplicationPhase: Equatable {
+    /// No batch has been asked for since the plan arrived.
+    case idle
+    /// Re-running `explain` for each plan item. Read-only, and cancellable.
+    case preparing
+    /// The preview is on screen and nothing has run. The user can still
+    /// cancel, which is the "allow cancel before execution" the ticket asks
+    /// for — the only point at which cancelling is safe.
+    case reviewing(PlanApplicationPreview)
+    /// Items are being executed, one at a time. Not cancellable: see
+    /// `PlanState.applyTask`'s absence below.
+    case applying(PlanApplicationPreview)
+    /// Every authorised item was attempted, or the batch stopped. Kept on
+    /// screen until the user dismisses it or asks for a new plan, so a result
+    /// can be read afterwards rather than only as it happens.
+    case finished(PlanApplicationResult)
+}
+
+/// The result of the last `llm-plan` run, and what the user has asked Glomeris
+/// to do about it.
 final class PlanState: ObservableObject {
     @Published var outcome: AiPlanOutcome?
     @Published var lastPlannedAt: Date?
@@ -109,4 +144,96 @@ final class PlanState: ObservableObject {
     /// that case — a request the user stopped is not a failure to report
     /// (HORO-1308).
     var planTask: Task<Void, Never>?
+
+    // MARK: - Apply Plan (HORO-1366)
+
+    @Published var applyPhase: PlanApplicationPhase = .idle
+
+    /// Whether the user has opted in to including the items that ask first.
+    ///
+    /// Defaults to `false` on every new preview, and `resetApplyState()` puts
+    /// it back. An ASK item is one Glomeris will not touch without being told
+    /// to, and a control that remembers "yes" from a previous plan would carry
+    /// that instruction to resources the user never saw.
+    @Published var applyIncludesConfirmable = false
+
+    /// The rows that have already been attempted in the current run, so a
+    /// batch in progress shows what it has done rather than only a spinner.
+    /// Folded into the `.finished` result when the run ends.
+    @Published var applyCompletedItems: [PlanApplicationItemResult] = []
+
+    @Published var applyProgressText: String?
+
+    /// The `explain` sweep that builds a preview, held so the user can cancel
+    /// a slow one. Safe to cancel for the reason `GlomerisClient.runRaw`'s
+    /// header gives: `explain` observes and advises, and interrupting one
+    /// loses nothing but the answer.
+    var preparePreviewTask: Task<Void, Never>?
+
+    /// There is deliberately no `applyTask` handle, and the absence is the
+    /// safety property rather than an omission.
+    ///
+    /// `GlomerisClient.runRaw`'s header states the rule this enforces:
+    /// `execute` must never be reachable from a cancellable task, because a
+    /// `SIGTERM` partway through a deletion leaves the filesystem in a state
+    /// neither this app nor the audit log could describe. A stored handle is
+    /// what a future Stop button would reach for, and a batch is exactly the
+    /// surface on which one looks reasonable — so the handle does not exist.
+    /// `AiPlanSectionView` launches the run in a detached `Task {}` from a
+    /// button action and keeps nothing; the cancel the ticket asks for happens
+    /// in `.reviewing`, before anything has run.
+
+    /// `true` from the moment the `execute` loop starts until it ends.
+    ///
+    /// This is a fact about a running child process, not display state, which
+    /// is why `resetApplyState()` deliberately does not clear it and why the
+    /// phase is not used for it. Clearing the phase is something the UI does
+    /// routinely, and a guard that no second batch can start has to survive
+    /// that.
+    @Published private(set) var isApplyingBatch = false
+
+    /// Claims the right to run a batch, or reports that one already holds it.
+    ///
+    /// A compare-and-set rather than a plain setter, so the invariant lives in
+    /// one place. Both calls are on the main actor — every caller is
+    /// `@MainActor` — so the read and the write cannot interleave.
+    ///
+    /// Two concurrent batches would take turns losing. The execution lock
+    /// (`src/executor/lock.rs`) is exclusive and non-blocking: one child takes
+    /// it and the other is refused `busy`, which halts that batch and tells the
+    /// user another execution is already in progress. That sentence would be
+    /// true and the cause would be us, so the fix is to not start the second
+    /// batch rather than to explain the collision afterwards.
+    func beginApplyingBatch() -> Bool {
+        if isApplyingBatch { return false }
+        isApplyingBatch = true
+        return true
+    }
+
+    func endApplyingBatch() {
+        isApplyingBatch = false
+    }
+
+    /// Clears everything about a batch. Called when a new plan replaces the
+    /// one a preview or result was about — a preview naming resources from a
+    /// plan the user can no longer see is worse than no preview.
+    ///
+    /// Cancels the `explain` sweep as well as clearing the phase. Clearing the
+    /// phase alone was not enough: the sweep runs on its own task, and on
+    /// finishing it assigns `.reviewing(preview)` unconditionally. So a reset
+    /// during a sweep produced exactly the state this function exists to
+    /// prevent — a preview, with a live Apply button, naming resources from a
+    /// plan that is no longer on screen. The sweep is `explain` only, so
+    /// cancelling it loses nothing but the answer.
+    ///
+    /// It does **not** stop a running batch, because nothing can: see the
+    /// absent `applyTask` above.
+    func resetApplyState() {
+        preparePreviewTask?.cancel()
+        preparePreviewTask = nil
+        applyPhase = .idle
+        applyIncludesConfirmable = false
+        applyCompletedItems = []
+        applyProgressText = nil
+    }
 }

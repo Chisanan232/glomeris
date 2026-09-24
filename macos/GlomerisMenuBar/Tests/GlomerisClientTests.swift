@@ -86,10 +86,13 @@ final class GlomerisClientTests: XCTestCase {
     /// binary, and a fixture that lies about its own arguments is worse than
     /// one that fails to build. Bump it whenever the source changes
     /// (`-v2`: `linger-ms`, HORO-1308; `-v3`: the `GLOMERIS_FIXTURE_*`
-    /// environment override, HORO-1365).
+    /// environment override, HORO-1365; `-v4`: `GLOMERIS_FIXTURE_ARGV_LOG`
+    /// and `GLOMERIS_FIXTURE_LINGER_MS`, HORO-1366). The suffix lives in four
+    /// test files, all of which must move together — a half-bumped suite runs
+    /// two different fixtures depending on which suite compiled first.
     private static let fixtureURL: URL = {
         let binaryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glomeris-client-fixture-helper-v3")
+            .appendingPathComponent("glomeris-client-fixture-helper-v4")
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests
             .appendingPathComponent("Fixtures/glomeris_fixture_helper.c")

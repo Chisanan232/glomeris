@@ -88,6 +88,11 @@ targets:
       # card and the Clean button all read, asserted directly rather than
       # through whichever of the three views happens to render it.
       - path: Sources/CandidateActionability.swift
+      # HORO-1366: the Apply Plan preview/result vocabulary. Foundation-only
+      # and view-free, so its classification and its aggregate honesty are
+      # asserted against DTO fixtures directly rather than through the card
+      # that draws them.
+      - path: Sources/PlanApplication.swift
       - path: Sources/GlomerisDesignSystem.swift
       # HORO-1365: the scan and plan stores are exercised directly, so a
       # reset can be caught at the state boundary rather than only by a
@@ -107,6 +112,12 @@ targets:
       - path: Sources/CandidateDetailView.swift
       - path: Sources/HistoryAuditSectionView.swift
       - path: Sources/AiPlanSectionView.swift
+      # HORO-1366: the batch itself — the only place in the target that turns a
+      # provider's suggestion set into `execute` invocations. Here so its two
+      # call sites can be driven against a fixture binary, and so the guards
+      # that keep `execute` out of a cancellable task are assertions about a
+      # compiled type rather than only about source text.
+      - path: Sources/ApplyPlanView.swift
       - path: Sources/CredentialStore.swift
       - path: Sources/GlomerisLlmSettingsStore.swift
       - path: Sources/AiProviderPreferencesView.swift
