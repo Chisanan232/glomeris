@@ -589,6 +589,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Pins the wiring: the envelope must go through `atomic_write`, whose
+    /// own tests prove a writer never truncates a file it did not create.
+    /// The pre-placed file sits at the name the old code derived from the
+    /// target, standing in for the other of the two writers this file's own
+    /// doc comment says to expect — the GUI while the CLI saves, or the
+    /// reverse. Fixed, known name, so no timing is involved.
+    #[test]
+    fn saving_the_envelope_cannot_disturb_a_file_at_the_old_predictable_temp_name() {
+        const SQUATTER: &str = "version = 1\nenabled = false\n# the other writer's scratch file\n";
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-autopilot-store-old-temp-name-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("autopilot.conf");
+        let old_temp_name = path.with_extension("conf.tmp");
+        std::fs::write(&old_temp_name, SQUATTER).expect("place the squatter");
+        let original = narrow();
+
+        save_envelope_at(&path, &original).expect("save");
+
+        assert_eq!(load_envelope_at(&path).expect("load"), original);
+        assert_eq!(
+            std::fs::read_to_string(&old_temp_name).expect("still readable"),
+            SQUATTER,
+            "the save must not have used — and so must not have truncated — \
+             the temp name it derived from the target before HORO-1464"
+        );
+        assert_eq!(temp_paths_beside(&path), Vec::<PathBuf>::new());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn comments_blank_lines_and_surrounding_whitespace_are_ignored() {
         let envelope = load(
