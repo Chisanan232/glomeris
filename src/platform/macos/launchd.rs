@@ -143,21 +143,17 @@ fn extract_program_path(xml: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Writes `contents` to `path` atomically: writes to a sibling temp file
-/// in the same directory (so the final rename is on the same filesystem
-/// and therefore atomic), then `fs::rename`s over `path`. Cleans up the
-/// temp file on any failure before the rename.
+/// Writes `contents` to `path` atomically, through
+/// [`crate::atomic_write::write_atomically`].
+///
+/// Was a local temp-file-plus-rename with the temp path derived from
+/// `path` — which meant a second process installing the same plist picked
+/// the same temp path, truncated this one's scratch file, and published a
+/// torn plist through an otherwise correct atomic rename (HORO-1464). The
+/// shared writer names its temp file per writer instead; nothing else about
+/// this call site's behaviour changes.
 fn write_atomic(path: &Path, contents: &str) -> io::Result<()> {
-    let tmp_path = path.with_extension("plist.tmp");
-    if let Err(e) = std::fs::write(&tmp_path, contents) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    Ok(())
+    crate::atomic_write::write_atomically(path, contents.as_bytes())
 }
 
 /// Writes the generated plist to `plist_path`, creating parent directories
@@ -522,6 +518,7 @@ fn truncate_on_char_boundary(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atomic_write::temp_paths_beside;
 
     fn unique_temp_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -749,7 +746,7 @@ mod tests {
         let after = std::fs::read_to_string(&plist_path).unwrap();
         assert_eq!(before, after, "refusal must leave the plist byte-identical");
         assert!(!plist_path.with_extension("plist.bak").exists());
-        assert!(!plist_path.with_extension("plist.tmp").exists());
+        assert_eq!(temp_paths_beside(&plist_path), Vec::<PathBuf>::new());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -781,12 +778,17 @@ mod tests {
 
     #[test]
     fn interrupted_write_never_produces_a_partial_plist() {
-        // Proof 1: the success path never leaves a `.plist.tmp` sibling.
+        // Proof 1: the success path never leaves a scratch file behind.
+        // Asserted against every name `atomic_write` could have chosen,
+        // not one fixed name: the temp name now carries this process's id
+        // and a sequence number (HORO-1464), so a fixed-name assertion
+        // would name a path that can no longer exist and would pass
+        // without testing anything.
         let dir = unique_temp_dir("no-tmp-leftover");
         let plist_path = dir.join(format!("{LABEL}.plist"));
         let log_dir = dir.join("logs");
         install_impl(&plist_path, Path::new("/bin/echo"), false, &log_dir).unwrap();
-        assert!(!plist_path.with_extension("plist.tmp").exists());
+        assert_eq!(temp_paths_beside(&plist_path), Vec::<PathBuf>::new());
         let _ = std::fs::remove_dir_all(&dir);
 
         // Proof 2: `write_atomic` failing mid-write never disturbs an
@@ -806,7 +808,10 @@ mod tests {
             !target_path.exists(),
             "a failed atomic write must not leave a partial target file"
         );
-        assert!(!target_path.with_extension("plist.tmp").exists());
+        assert!(
+            !dir2.exists(),
+            "the write must fail because the directory is missing, not create it"
+        );
     }
 
     #[test]
@@ -1169,11 +1174,17 @@ mod tests {
         let writer_path = plist_path.clone();
         let writer_stop = Arc::clone(&stop);
         let writer = std::thread::spawn(move || {
-            // Write via the same temp-file+rename pattern `write_atomic`
-            // uses, so a reader can never observe a transiently-empty or
-            // partially-truncated file — a plain `fs::write` truncates
-            // before writing and would make this test flake on its own
-            // writer, not on anything `install_impl` does.
+            // Write via a temp-file+rename of its own, so a reader can
+            // never observe a transiently-empty or partially-truncated
+            // file — a plain `fs::write` truncates before writing and
+            // would make this test flake on its own writer, not on
+            // anything `install_impl` does.
+            //
+            // This name, `<plist>.plist.tmp`, is the one production used
+            // before HORO-1464 and no longer uses at all. So the racer can
+            // now only contend for the published plist, never for the
+            // scratch file `write_atomic` is writing into — which is the
+            // separation this test previously could not make.
             let tmp_path = writer_path.with_extension("plist.tmp");
             let mut i: u64 = 0;
             while !writer_stop.load(Ordering::Relaxed) {
