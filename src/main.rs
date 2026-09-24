@@ -43,7 +43,13 @@ fn main() {
         }
         Some("daemon") => run_daemon_command(&args[1..]),
         Some("actions") => run_actions_command(&args[1..]),
-        Some("scan") => glomeris::scanner::run_scan_cli(&args[1..]),
+        Some("scan") => {
+            if let Err(e) = glomeris::scanner::run_scan_cli(&args[1..]) {
+                eprintln!("glomeris scan: {e}");
+                print_command_usage("scan");
+                std::process::exit(2);
+            }
+        }
         Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(&args[1..]),
         Some("explain") => run_explain_command(&args[1..]),

@@ -18,9 +18,34 @@ pub use walker::{scan, ScanOptions, ScanReport};
 /// Minimal `glomeris scan [path] [top_k]` CLI entry point. Kept here (not
 /// in `main.rs`) so the binary's diff for wiring this in is a single
 /// function call.
-pub fn run_scan_cli(args: &[String]) {
+///
+/// `Err` is a usage error, worded for the caller to print and exit 2 with.
+/// Deciding the exit code is deliberately left to the binary, so this
+/// library function does not end the process (HORO-1322).
+///
+/// Both positionals used to be read by index with a silent fallback, which
+/// made three different mistakes invisible: `scan --json` read the flag as a
+/// directory and reported a successful scan of nothing, `scan . abc` scanned
+/// with the default 20 rather than saying `abc` is not a count, and a third
+/// argument was dropped without comment.
+pub fn run_scan_cli(args: &[String]) -> Result<(), String> {
+    // `scan` has no flags at all, so a dash token cannot be a mistyped one —
+    // it is either a flag this command does not have, or a path that needs
+    // writing as `./-name` to be unambiguous.
+    if let Some(flag) = args.iter().find(|arg| arg.starts_with('-')) {
+        return Err(format!("unrecognized argument '{flag}'"));
+    }
+    if let Some(extra) = args.get(2) {
+        return Err(format!("unrecognized argument '{extra}'"));
+    }
+
     let root = args.first().cloned().unwrap_or_else(|| ".".to_string());
-    let top_k: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(20);
+    let top_k: usize = match args.get(1) {
+        Some(value) => value
+            .parse()
+            .map_err(|_| format!("top_k must be a non-negative integer, got '{value}'"))?,
+        None => 20,
+    };
 
     let options = ScanOptions::new(root, top_k);
     let report = scan(&options);
@@ -37,4 +62,6 @@ pub fn run_scan_cli(args: &[String]) {
             candidate.path.display()
         );
     }
+
+    Ok(())
 }
