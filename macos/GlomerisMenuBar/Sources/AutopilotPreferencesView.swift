@@ -772,7 +772,8 @@ struct AutopilotPreferencesView: View {
                         }
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Never available: \(term.title). \(term.explanation)")
+                    .accessibilityLabel(
+                        AutopilotTermLabel.spoken(term, prefix: "Never available"))
                 }
             }
         }

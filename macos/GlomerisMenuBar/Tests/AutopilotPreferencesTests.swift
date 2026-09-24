@@ -563,6 +563,26 @@ final class AutopilotPreferencesTests: XCTestCase {
         }
     }
 
+    /// The never-allowlistable-kind rows were already correct, hand-built.
+    /// Routing them through the same composer must not change a byte of what
+    /// they say — this pins that against the literal they used to interpolate,
+    /// so the consolidation is provably output-preserving rather than assumed
+    /// to be.
+    func testTheNeverAvailableKindRowsAreUnchangedByTheComposer() throws {
+        let kinds = try enabledReport().neverAllowlistableKinds
+        XCTAssertFalse(kinds.isEmpty, "nothing to compare against")
+
+        for kind in kinds {
+            let term = GlomerisVocabulary.kind(kind)
+
+            XCTAssertEqual(
+                AutopilotTermLabel.spoken(term, prefix: "Never available"),
+                "Never available: \(term.title). \(term.explanation)",
+                "kind \(kind)"
+            )
+        }
+    }
+
     // MARK: - Helpers
 
     private func value(of flag: String, in arguments: [String]) -> String? {
