@@ -517,8 +517,7 @@ pub fn build_llm_plan_report(
     provider: &dyn LlmProvider,
     impact: ImpactContext,
 ) -> LlmPlanReport {
-    let evidences: Vec<Evidence> = candidates.iter().map(|(ev, _)| ev.clone()).collect();
-    let result = plan_with_llm(provider, &evidences, actions);
+    let result = plan_with_llm(provider, candidates, actions);
 
     let mut items = Vec::with_capacity(result.validated_items.len());
     for validated in result.validated_items {
@@ -643,8 +642,7 @@ pub fn build_llm_payload_report(
     candidates: &[(Evidence, PolicyDecision)],
     actions: &ActionRegistry,
 ) -> Result<LlmPayloadReport, crate::actions::llm::LlmError> {
-    let evidences: Vec<Evidence> = candidates.iter().map(|(ev, _)| ev.clone()).collect();
-    let payload = build_request_payload(&evidences, actions)?;
+    let payload = build_request_payload(candidates, actions)?;
 
     Ok(LlmPayloadReport {
         system_prompt: payload.system_prompt.to_string(),

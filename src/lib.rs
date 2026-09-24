@@ -4,6 +4,7 @@
 //! depend on being reachable from a binary's `main`, and so binary wiring
 //! in `main.rs` stays a thin CLI shim.
 
+pub mod actionability;
 pub mod actions;
 pub mod autopilot;
 pub mod cli;

@@ -11,7 +11,7 @@ use serde::Serialize;
 
 use crate::actions::Action;
 use crate::evidence::{Completeness, Confidence, Evidence, NativeCleanup, Regenerability};
-use crate::policy::{PolicyClass, PolicyDecision};
+use crate::policy::PolicyDecision;
 
 use super::bytes::human_bytes;
 use super::impact::{classify_impact, ImpactContext, ImpactThresholds};
@@ -115,69 +115,47 @@ pub struct OfferedAction {
 /// candidate labelled `AUTO_SAFE` with `executable: true` whose Clean button
 /// was guaranteed to fail with a refusal the user could not have predicted.
 ///
-/// So this asks the action for its plan and puts that plan to the executor's
-/// own structural rule. That keeps the two answers in agreement *by
-/// construction* rather than by comment: there is one definition of
+/// So the action is asked for its plan and that plan is put to the
+/// executor's own structural rule. That keeps the two answers in agreement
+/// *by construction* rather than by comment: there is one definition of
 /// "execution would refuse this outright", and both the offer and the
 /// execution read it.
+///
+/// HORO-1360 moved that sequencing — Protected first, then a missing action,
+/// then plan-and-check — into [`crate::actionability::static_refusal`], so
+/// that the LLM prompt view, Autopilot, `clean --dry-run`, `free` and
+/// `emergency` could read the same answer instead of restating it. This
+/// function keeps the part that is genuinely reporting's own: turning that
+/// verdict into the `executable`/`offered_actions`/`refusal_reason` triple,
+/// and deciding from the policy label whether an offer needs confirming.
 ///
 /// Clearing that check means "not already refused", **not** "guaranteed to
 /// succeed" — `structural_refusal` is deliberately blind to runtime state,
 /// and revalidation at execution time may still abort. That is the honest
 /// direction for this field to err in: it can no longer promise something
 /// impossible, and it never promises something merely uncertain.
-///
-/// Costs one `Action::plan` call per candidate. Of the three registered
-/// actions only `cargo.clean.target_dir` touches the filesystem while
-/// planning, and only for a single `is_file` stat on `Cargo.toml` — so a
-/// cargo target dir whose manifest has since vanished now also reports
-/// honestly as non-executable instead of failing at the Clean button.
 fn executable_fields(
     ev: &Evidence,
     decision: &PolicyDecision,
     resolved_action: Option<&dyn Action>,
 ) -> (bool, Vec<OfferedAction>, Option<String>) {
-    // MUST stay ahead of the `action.plan` call below: `build_llm_plan_report`
-    // relies on a protected resource's action never being planned, so that no
-    // LLM response can cause one to be. See that function's docs.
-    if decision.class == PolicyClass::Protected {
-        let reason = decision
-            .reasons
-            .first()
-            .map(|r| r.as_str().to_string())
-            .unwrap_or_else(|| "protected".to_string());
-        return (false, Vec::new(), Some(format!("PROTECTED: {reason}")));
+    // Protected-before-planning lives inside `static_refusal`, which is what
+    // `build_llm_plan_report` relies on so that no LLM response can cause a
+    // protected resource's action to be planned. See that function's docs.
+    if let Some(reason) = crate::actionability::static_refusal(ev, decision, resolved_action) {
+        return (false, Vec::new(), Some(reason));
     }
 
+    // `static_refusal` returned `None`, which it only does with an action in
+    // hand — a missing one is one of the refusals above.
     let Some(action) = resolved_action else {
+        debug_assert!(false, "static_refusal cleared a resource with no action");
         return (
             false,
             Vec::new(),
             Some("no registered cleanup action for this resource kind".to_string()),
         );
     };
-
-    // An action that cannot even produce a plan for this resource certainly
-    // cannot run against it. Reported with the planner's own words rather
-    // than a generic phrase, since `ActionError` already explains itself.
-    let plan = match action.plan(ev) {
-        Ok(plan) => plan,
-        Err(e) => {
-            return (
-                false,
-                Vec::new(),
-                Some(format!(
-                    "{} cannot be planned for this resource: {e}",
-                    action.id().0
-                )),
-            );
-        }
-    };
-
-    // The executor's rule, not a restatement of it.
-    if let Some(refusal) = crate::executor::structural_refusal(&plan) {
-        return (false, Vec::new(), Some(refusal));
-    }
 
     let requires_confirmation = matches!(
         label_for(decision),

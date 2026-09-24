@@ -110,6 +110,20 @@ pub enum AutopilotItemOutcome {
     AmbiguousAction {
         candidates: usize,
     },
+    /// Admitted, and exactly one action is registered — but
+    /// [`crate::executor::structural_refusal`] would reject that action for
+    /// this resource on sight, so there was nothing to attempt
+    /// (HORO-1360/1359).
+    ///
+    /// Deliberately not [`Self::Failed`]: nothing ran. No attempt was
+    /// charged and no budget was spent, because spending one of a run's
+    /// scarce attempts on an action already known to be unrunnable would
+    /// starve the candidates that could actually have freed something. A
+    /// report that said "failed" here would also send a reader looking for
+    /// a transient cause that does not exist.
+    Ineligible {
+        reason: String,
+    },
     /// Admitted and authorized; nothing was executed because this was a
     /// dry run. Still charged against the budget, so the plan shown is the
     /// real bounded plan.
@@ -143,6 +157,7 @@ impl AutopilotItemOutcome {
             Self::Refused(_)
             | Self::NoRegisteredAction
             | Self::AmbiguousAction { .. }
+            | Self::Ineligible { .. }
             | Self::Planned => None,
         }
     }
@@ -267,6 +282,9 @@ fn describe_outcome(outcome: &AutopilotItemOutcome) -> String {
             "skipped: {candidates} registered actions apply to this kind; \
              Autopilot will not choose between them"
         ),
+        AutopilotItemOutcome::Ineligible { reason } => {
+            format!("skipped, no attempt spent: {reason}")
+        }
         AutopilotItemOutcome::Planned => "would run (dry run)".to_string(),
         AutopilotItemOutcome::Succeeded { reclaimed_bytes } => match reclaimed_bytes {
             Some(bytes) => format!("reclaimed {}", human_bytes(*bytes)),
@@ -489,6 +507,26 @@ pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
                 .push(item(AutopilotItemOutcome::NoRegisteredAction));
             continue;
         };
+
+        // An action being registered for the kind is not the same claim as
+        // it being runnable against THIS resource (HORO-1360). Asked here,
+        // before an attempt is charged, so a `homebrew.cleanup.cache` in an
+        // allowlisted envelope is reported as ineligible instead of
+        // consuming one of the run's attempts to produce a failure that was
+        // certain in advance.
+        //
+        // Safe to plan at this point, and only at this point: `admit`
+        // refuses `PolicyClass::Protected` above, so nothing reaching here
+        // is protected. That is why the policy-free `plan_refusal` is the
+        // right half of the predicate to call — passing a decision would
+        // imply this site does the Protected ordering itself, which it does
+        // not; the gate does.
+        if let Some(reason) = crate::actionability::plan_refusal(action, &evidence) {
+            report
+                .items
+                .push(item(AutopilotItemOutcome::Ineligible { reason }));
+            continue;
+        }
 
         let fingerprint = evidence.fingerprint.clone();
         // For a pre-authorized `Ask`, the consent handed to `authorize` is
@@ -1049,6 +1087,90 @@ mod tests {
         assert!(derived.exists());
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1360 AC6 / HORO-1359 AC5: a registered-but-unrunnable action is
+    /// reported as ineligible, spends no attempt, and is a different outcome
+    /// from an execution that failed.
+    ///
+    /// `homebrew.cleanup.cache` is registered for `HomebrewCache` and its
+    /// step carries no scoped path, so `executor::structural_refusal`
+    /// rejects it unconditionally. Before this fix an allowlisted Homebrew
+    /// cache charged an attempt and came back `Failed`.
+    ///
+    /// The fixture is a directory this test creates under `temp_dir()` and
+    /// labels `HomebrewCache`. Nothing here reads or touches a real Homebrew
+    /// cache, and nothing here could: the whole point is that the action is
+    /// refused before it runs.
+    #[test]
+    fn an_unrunnable_action_is_ineligible_rather_than_a_failed_attempt() {
+        let fixture = fixture();
+        let brew_root = make_temp_dir("brew-cache");
+        let cache = brew_root.join("Cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("some.bottle.tar.gz"), vec![0u8; 8192]).unwrap();
+        let brew = evidence_for(
+            &cache,
+            ResourceKind::HomebrewCache,
+            Regenerability::RegenerableByTool,
+            8192,
+        );
+        // Positive control, same run: a candidate whose action IS runnable.
+        let (node_root, node) = node_fixture("ineligible-control", 4096);
+        let node_modules = node_root.join("node_modules");
+        let envelope = enabled_envelope(&[ResourceKind::HomebrewCache, ResourceKind::NodeModules]);
+
+        // A real run, not a dry one: `Planned` would hide the very thing
+        // under test, which is what happens on the way to execution.
+        let report = run(&fixture, &envelope, vec![brew, node], &[], false);
+
+        // The allowlist admitted it — this is not a policy refusal dressed
+        // up as something else.
+        assert_eq!(report.items[0].kind, ResourceKind::HomebrewCache);
+        assert_eq!(report.items[0].policy_label, "AUTO_SAFE");
+        assert_eq!(report.safety_refusals(), 0, "not a policy denial");
+
+        let AutopilotItemOutcome::Ineligible { reason } = &report.items[0].outcome else {
+            panic!(
+                "expected Ineligible, got {:?} — a `Failed` here is the bug \
+                 this test exists for",
+                report.items[0].outcome
+            );
+        };
+        assert!(
+            reason.contains("scoped_path"),
+            "the reason must be the executor's own, got {reason:?}"
+        );
+        assert!(cache.exists(), "nothing ran, so nothing was deleted");
+
+        // No attempt spent on it. The control succeeded in the same run, so
+        // `1` here is the control's attempt and not the brew candidate's:
+        // without the fix this would be 2.
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 1);
+        assert_eq!(
+            report.items[1].outcome,
+            AutopilotItemOutcome::Succeeded {
+                reclaimed_bytes: Some(4096)
+            },
+            "control invalid: the runnable candidate did not run either, so \
+             the outcome above proves nothing about unrunnability"
+        );
+        assert!(!node_modules.exists());
+
+        // And the two read differently to a human, not just to a matcher.
+        let rendered = report.to_string();
+        assert!(
+            rendered.contains("skipped, no attempt spent:"),
+            "the report must say it skipped, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("failed:"),
+            "nothing failed in this run, got:\n{rendered}"
+        );
+
+        fs::remove_dir_all(&brew_root).ok();
+        fs::remove_dir_all(&node_root).ok();
     }
 
     // --- budgets ---

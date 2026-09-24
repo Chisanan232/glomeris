@@ -1580,11 +1580,19 @@ fn autopilot_run(args: &[String]) {
         Some(acquire_execution_lock_or_exit("autopilot", false))
     };
 
-    let candidates: Vec<glomeris::evidence::Evidence> =
-        discover_and_classify_now(project_roots.clone())
-            .into_iter()
-            .map(|(evidence, _decision)| evidence)
-            .collect();
+    // The discovery-time decision is kept, not discarded: `plan_with_llm`
+    // needs it to decide which action ids may honestly be offered to a
+    // model (HORO-1360). It is NOT what authorizes anything — Autopilot
+    // re-runs `classify` on freshly correlated evidence for every candidate
+    // it considers, and that decision is the only one execution reads.
+    let classified: Vec<(
+        glomeris::evidence::Evidence,
+        glomeris::policy::PolicyDecision,
+    )> = discover_and_classify_now(project_roots.clone());
+    let candidates: Vec<glomeris::evidence::Evidence> = classified
+        .iter()
+        .map(|(evidence, _decision)| evidence.clone())
+        .collect();
 
     let actions = ActionRegistry::builtin();
 
@@ -1593,7 +1601,7 @@ fn autopilot_run(args: &[String]) {
         Some(path) => {
             let result = plan_with_llm(
                 &FilePlanProvider { path: path.clone() },
-                &candidates,
+                &classified,
                 &actions,
             );
             // A plan that could not be read or parsed is not a failure of the

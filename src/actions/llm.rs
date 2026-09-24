@@ -49,6 +49,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::evidence::model::{ActionId, Completeness, Evidence, Regenerability, ResourceId};
+use crate::policy::PolicyDecision;
 
 use super::ActionRegistry;
 
@@ -71,6 +72,15 @@ pub struct LlmResourceView {
     pub age_days: Option<u64>,
     pub regenerability: &'static str,
     pub completeness: &'static str,
+    /// The actions that may honestly be offered for this resource, from
+    /// [`crate::actionability::eligible_action_ids`] — **not** every action
+    /// the registry lists for the kind (HORO-1360).
+    ///
+    /// Naming an action here is asking a model to spend a ranking slot on
+    /// it. `homebrew.cleanup.cache` is registered for `HomebrewCache` but
+    /// its step carries no scoped path, so execution refuses it every time;
+    /// offering it bought a guaranteed-to-fail recommendation and a second
+    /// source of truth about what the product is willing to do.
     pub offered_action_ids: Vec<&'static str>,
 }
 
@@ -85,7 +95,20 @@ impl LlmResourceView {
     /// parameter here that a path could be passed through, so no call site
     /// — present or future — can reintroduce HORO-1298 by handing this
     /// function `ev.resource.to_string()`.
-    pub fn from_evidence(ev: &Evidence, actions: &ActionRegistry, index: usize) -> Self {
+    ///
+    /// `decision` is read for one purpose only (HORO-1360): deciding which
+    /// action ids may honestly be offered, via
+    /// [`crate::actionability::eligible_action_ids`], whose Protected check
+    /// is what keeps a protected resource's action from being planned here.
+    /// No field of `decision` reaches the wire — a policy verdict is this
+    /// machine's business, and the model is ranking evidence, not reviewing
+    /// classifications.
+    pub fn from_evidence(
+        ev: &Evidence,
+        decision: &PolicyDecision,
+        actions: &ActionRegistry,
+        index: usize,
+    ) -> Self {
         // `age_days` is derived from `last_modified` relative to when this
         // evidence was collected — never from an ambient `SystemTime::now()`
         // call, matching `crate::policy::engine::classify`'s "no ambient
@@ -105,7 +128,7 @@ impl LlmResourceView {
             age_days,
             regenerability: regenerability_tag(ev.regenerability),
             completeness: completeness_tag(&ev.completeness()),
-            offered_action_ids: actions.ids_for_kind(ev.resource.kind),
+            offered_action_ids: crate::actionability::eligible_action_ids(ev, decision, actions),
         }
     }
 }
@@ -170,25 +193,31 @@ impl LlmRequestPayload {
 }
 
 /// Builds the exact payload one [`plan_with_llm`] call would send for
-/// `evidence_set`, without sending it (HORO-1298). Deterministic: the same
-/// evidence in the same order always produces byte-identical prompts, with
+/// `candidates`, without sending it (HORO-1298). Deterministic: the same
+/// candidates in the same order always produce byte-identical prompts, with
 /// no clock or randomness involved, which is what makes
 /// `--print-payload`'s output a truthful preview of the request rather
 /// than an approximation of it.
+///
+/// Takes classified candidates rather than bare [`Evidence`] since
+/// HORO-1360: which action ids may be offered to a model depends on the
+/// policy decision, because a `Protected` resource must never be planned
+/// and planning is how the question is answered. The decisions themselves
+/// are never serialized.
 pub fn build_request_payload(
-    evidence_set: &[Evidence],
+    candidates: &[(Evidence, PolicyDecision)],
     actions: &ActionRegistry,
 ) -> Result<LlmRequestPayload, LlmError> {
-    let views: Vec<LlmResourceView> = evidence_set
+    let views: Vec<LlmResourceView> = candidates
         .iter()
         .enumerate()
-        .map(|(index, ev)| LlmResourceView::from_evidence(ev, actions, index))
+        .map(|(index, (ev, decision))| LlmResourceView::from_evidence(ev, decision, actions, index))
         .collect();
 
-    let aliases = evidence_set
+    let aliases = candidates
         .iter()
         .enumerate()
-        .map(|(index, ev)| (wire_resource_id(index), ev.resource.clone()))
+        .map(|(index, (ev, _))| (wire_resource_id(index), ev.resource.clone()))
         .collect();
 
     let user_prompt = serde_json::to_string(&views).map_err(|e| {
@@ -951,10 +980,10 @@ pub struct LlmPlanResult {
 /// falling back to rule-only ranking whenever `provider_error.is_some()`.
 pub fn plan_with_llm(
     provider: &dyn LlmProvider,
-    evidence_set: &[Evidence],
+    candidates: &[(Evidence, PolicyDecision)],
     actions: &ActionRegistry,
 ) -> LlmPlanResult {
-    let payload = match build_request_payload(evidence_set, actions) {
+    let payload = match build_request_payload(candidates, actions) {
         Ok(payload) => payload,
         Err(e) => {
             return LlmPlanResult {
@@ -1006,9 +1035,9 @@ pub fn plan_with_llm(
         let Some(resource) = payload
             .resolve(&item.resource_id)
             .or_else(|| {
-                evidence_set
+                candidates
                     .iter()
-                    .map(|ev| &ev.resource)
+                    .map(|(ev, _)| &ev.resource)
                     .find(|resource| resource.to_string() == item.resource_id)
             })
             .cloned()
@@ -1046,7 +1075,9 @@ and action_id only from the values you were given.";
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
 
     use crate::detectors::DetectorId;
@@ -1094,11 +1125,38 @@ mod tests {
         }
     }
 
+    /// A real cargo project on disk, because `offered_action_ids` now
+    /// depends on whether `cargo.clean.target_dir` can actually plan for
+    /// the resource, and planning stats `Cargo.toml` (HORO-1360). Returns
+    /// the target dir.
+    fn temp_cargo_project(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "glomeris-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).expect("create temp target dir");
+        fs::write(root.join("Cargo.toml"), "[package]\nname=\"x\"\n").expect("write manifest");
+        target_dir
+    }
+
     #[test]
     fn from_evidence_projects_expected_fields() {
-        let ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
+        let target_dir = temp_cargo_project("llm-view");
+        let ev = evidence_for(
+            ResourceKind::CargoTargetDir,
+            target_dir.to_str().expect("utf-8 temp path"),
+        );
         let actions = ActionRegistry::builtin();
-        let view = LlmResourceView::from_evidence(&ev, &actions, 0);
+        let view = LlmResourceView::from_evidence(&ev, &decision_for(&ev), &actions, 0);
 
         assert_eq!(view.resource_id, "resource_1");
         assert_eq!(view.kind, "cargo_target_dir");
@@ -1110,11 +1168,85 @@ mod tests {
     }
 
     #[test]
+    fn a_target_dir_with_no_manifest_is_offered_no_action() {
+        // The other direction of the assertion above, and the reason that
+        // one needed a real project: `cargo clean` needs a manifest to be
+        // told about, so a target dir whose `Cargo.toml` has vanished is a
+        // resource this action cannot run against. HORO-1358 already made
+        // `detect` say so; the prompt view now agrees rather than asking a
+        // model to rank an action that would be refused.
+        let ev = evidence_for(
+            ResourceKind::CargoTargetDir,
+            "/tmp/proj-with-no-manifest/target",
+        );
+        let actions = ActionRegistry::builtin();
+        let view = LlmResourceView::from_evidence(&ev, &decision_for(&ev), &actions, 0);
+
+        assert!(
+            view.offered_action_ids.is_empty(),
+            "expected no offerable action, got {:?}",
+            view.offered_action_ids
+        );
+        // Positive control in the same test: the registry does list an
+        // action for this kind, so the emptiness above is the filter
+        // working and not a registry that has nothing in it.
+        assert_eq!(
+            actions.ids_for_kind(ResourceKind::CargoTargetDir),
+            vec!["cargo.clean.target_dir"]
+        );
+    }
+
+    /// HORO-1360 AC5: the named case. A Homebrew cache is the resource the
+    /// old prompt view got wrong every single time, not just when the disk
+    /// happened to be in an awkward state — `brew cleanup -s` takes no path
+    /// to scope, so `structural_refusal` rejects its step unconditionally.
+    #[test]
+    fn a_homebrew_cache_contributes_no_action_id_to_the_prompt() {
+        let actions = ActionRegistry::builtin();
+        let brew = evidence_for(ResourceKind::HomebrewCache, "/opt/homebrew/cache");
+        let brew_view = LlmResourceView::from_evidence(&brew, &decision_for(&brew), &actions, 0);
+
+        assert!(
+            brew_view.offered_action_ids.is_empty(),
+            "a homebrew cache has no runnable action, so the model must not be \
+             asked to rank one; got {:?}",
+            brew_view.offered_action_ids
+        );
+
+        // Positive control, in this same test so the two cannot drift apart.
+        //
+        // Two things are being controlled for, because the emptiness above
+        // has two boring explanations. First, the registry does know an
+        // action for `HomebrewCache` — so the filter is what emptied the
+        // list, not an unpopulated registry. Second, `from_evidence` does
+        // still name actions when one is genuinely runnable — so the filter
+        // is not simply refusing everything.
+        assert_eq!(
+            actions.ids_for_kind(ResourceKind::HomebrewCache),
+            vec!["homebrew.cleanup.cache"],
+            "control invalid: the registry no longer lists an action for this kind, \
+             so the assertion above would pass for the wrong reason"
+        );
+
+        let target_dir = temp_cargo_project("llm-view-control");
+        let cargo = evidence_for(
+            ResourceKind::CargoTargetDir,
+            target_dir.to_str().expect("utf-8 temp path"),
+        );
+        let cargo_view = LlmResourceView::from_evidence(&cargo, &decision_for(&cargo), &actions, 1);
+        assert_eq!(
+            cargo_view.offered_action_ids,
+            vec!["cargo.clean.target_dir"],
+            "control invalid: nothing is being offered at all"
+        );
+    }
+
+    #[test]
     fn from_evidence_handles_missing_last_modified() {
         let mut ev = evidence_for(ResourceKind::CargoTargetDir, "/tmp/proj/target");
         ev.last_modified = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         let actions = ActionRegistry::builtin();
-        let view = LlmResourceView::from_evidence(&ev, &actions, 0);
+        let view = LlmResourceView::from_evidence(&ev, &decision_for(&ev), &actions, 0);
         assert_eq!(view.age_days, None);
     }
 
@@ -1125,6 +1257,24 @@ mod tests {
     /// `Display`-formatted provenance field, a "home-relative" rewrite
     /// that keeps the leading segment).
     const FIXTURE_ACCOUNT: &str = "someaccount";
+
+    /// The decision [`crate::policy::classify`] really produces for `ev`,
+    /// because the prompt view needs one since HORO-1360.
+    ///
+    /// The real policy engine rather than a hand-built `PolicyDecision`, so
+    /// a fixture cannot quietly acquire a class the product would never
+    /// assign it. `now` is the evidence's own `collected_at`, which is what
+    /// makes these fixtures non-stale by construction rather than by luck.
+    fn decision_for(ev: &Evidence) -> PolicyDecision {
+        crate::policy::classify(ev, &crate::policy::PolicyConfig::default(), ev.collected_at)
+    }
+
+    fn classified(evidence: &[Evidence]) -> Vec<(Evidence, PolicyDecision)> {
+        evidence
+            .iter()
+            .map(|ev| (ev.clone(), decision_for(ev)))
+            .collect()
+    }
 
     fn realistic_evidence_set() -> Vec<Evidence> {
         vec![
@@ -1146,7 +1296,8 @@ mod tests {
     #[test]
     fn payload_carries_no_path_or_account_name() {
         let actions = ActionRegistry::builtin();
-        let payload = build_request_payload(&realistic_evidence_set(), &actions).unwrap();
+        let payload =
+            build_request_payload(&classified(&realistic_evidence_set()), &actions).unwrap();
 
         // The two strings below are the ENTIRE machine-derived egress
         // surface of a `plan_with_llm` call: `complete()` receives these
@@ -1184,7 +1335,8 @@ mod tests {
     #[test]
     fn wire_ids_are_positional_and_independent_of_the_resource() {
         let actions = ActionRegistry::builtin();
-        let realistic = build_request_payload(&realistic_evidence_set(), &actions).unwrap();
+        let realistic =
+            build_request_payload(&classified(&realistic_evidence_set()), &actions).unwrap();
 
         let wire_ids: Vec<&str> = realistic
             .aliases()
@@ -1199,11 +1351,11 @@ mod tests {
         // is not a stable handle that could correlate this machine across
         // requests.
         let unrelated = build_request_payload(
-            &[
+            &classified(&[
                 evidence_for(ResourceKind::CargoTargetDir, "/opt/other/target"),
                 evidence_for(ResourceKind::NodeModules, "/opt/other/node_modules"),
                 evidence_for(ResourceKind::HomebrewCache, "/opt/homebrew/cache"),
-            ],
+            ]),
             &actions,
         )
         .unwrap();
@@ -1228,7 +1380,7 @@ mod tests {
         };
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(result.provider_error.is_none());
         assert_eq!(result.dropped_unknown_resource, 0);
@@ -1249,7 +1401,7 @@ mod tests {
         };
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(result.provider_error.is_none());
         assert!(result.validated_items.is_empty());
@@ -1269,7 +1421,7 @@ mod tests {
         };
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(result.provider_error.is_none());
         assert!(result.validated_items.is_empty());
@@ -1284,7 +1436,8 @@ mod tests {
         // the key set itself, so any new field fails here and has to be
         // justified deliberately.
         let actions = ActionRegistry::builtin();
-        let payload = build_request_payload(&realistic_evidence_set(), &actions).unwrap();
+        let payload =
+            build_request_payload(&classified(&realistic_evidence_set()), &actions).unwrap();
         let views: serde_json::Value = serde_json::from_str(&payload.user_prompt).unwrap();
 
         let mut keys: Vec<&str> = views[0]
@@ -1316,7 +1469,7 @@ mod tests {
         // together.
         let evidence_set = realistic_evidence_set();
         let actions = ActionRegistry::builtin();
-        let payload = build_request_payload(&evidence_set, &actions).unwrap();
+        let payload = build_request_payload(&classified(&evidence_set), &actions).unwrap();
 
         // Compared through the raw JSON rather than by deserializing:
         // `LlmResourceView` is serialize-only by design (nothing inbound
@@ -1331,7 +1484,9 @@ mod tests {
             assert_eq!(raw[index]["resource_id"], serde_json::json!(wire_id));
             assert_eq!(
                 raw[index]["kind"],
-                serde_json::json!(LlmResourceView::from_evidence(ev, &actions, index).kind)
+                serde_json::json!(
+                    LlmResourceView::from_evidence(ev, &decision_for(ev), &actions, index).kind
+                )
             );
             assert_eq!(*resource, ev.resource);
         }
@@ -1420,7 +1575,7 @@ mod tests {
         };
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert_eq!(result.validated_items.len(), 1);
         assert_eq!(result.validated_items[0].model_reason, None);
@@ -1506,7 +1661,7 @@ mod tests {
         let evidence_set = vec![evidence_for(ResourceKind::CargoTargetDir, "/tmp/x")];
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(matches!(
             result.provider_error,
@@ -1528,7 +1683,7 @@ mod tests {
         let evidence_set = vec![ev];
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(result.provider_error.is_none());
         assert!(result.validated_items.is_empty());
@@ -1546,7 +1701,7 @@ mod tests {
         let evidence_set = vec![ev];
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(result.provider_error.is_none());
         assert!(result.validated_items.is_empty());
@@ -1575,7 +1730,7 @@ mod tests {
 
         // The item survives plan_with_llm's validation: resource_id and
         // action_id are both real.
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
         assert!(result.provider_error.is_none());
         assert_eq!(result.validated_items.len(), 1);
 
@@ -1612,7 +1767,7 @@ mod tests {
         let evidence_set = vec![ev.clone()];
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(result.provider_error.is_none());
         assert_eq!(result.validated_items.len(), 1);
@@ -1700,7 +1855,7 @@ mod tests {
         let evidence_set = vec![evidence_for(ResourceKind::CargoTargetDir, "/tmp/x")];
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
 
         assert!(matches!(
             result.provider_error,
@@ -2106,7 +2261,7 @@ mod tests {
         )];
         let actions = ActionRegistry::builtin();
 
-        let result = plan_with_llm(&provider, &evidence_set, &actions);
+        let result = plan_with_llm(&provider, &classified(&evidence_set), &actions);
         server.join().expect("server thread");
 
         assert!(matches!(

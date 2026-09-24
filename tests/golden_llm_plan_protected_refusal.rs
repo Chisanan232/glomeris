@@ -116,8 +116,15 @@ fn golden_llm_plan_protected_refusal() {
         path: PathBuf::from(FIXTURE_PATH),
     };
     let actions = ActionRegistry::builtin();
-    let evidence_set = vec![ev.clone()];
-    let plan_result = plan_with_llm(&provider, &evidence_set, &actions);
+    // Paired with the Protected decision from step 1 since HORO-1360, which
+    // is the whole point of this step: even told outright that the resource
+    // is Protected, `plan_with_llm` still validates the model's item (the
+    // resource and action are both real), so the refusal asserted below has
+    // to come from policy and not from validation quietly dropping it.
+    // Offering the model no action id for a Protected resource does not
+    // narrow what it is allowed to *ask* for.
+    let candidates = vec![(ev.clone(), decision.clone())];
+    let plan_result = plan_with_llm(&provider, &candidates, &actions);
     assert!(plan_result.provider_error.is_none());
     assert_eq!(plan_result.validated_items.len(), 1);
 

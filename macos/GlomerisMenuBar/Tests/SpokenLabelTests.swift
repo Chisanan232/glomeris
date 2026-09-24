@@ -321,15 +321,36 @@ final class SpokenLabelTests: XCTestCase {
     /// refusals across a `\` continuation, so their text does not appear
     /// contiguously in the source and a grep for it would fail on a file that
     /// is perfectly correct.
+    ///
+    /// Reads every `.rs` file under `src/` rather than a list of filenames.
+    /// The list was `["src/reporting/dto.rs", "src/cli/mod.rs"]`, and HORO-1360
+    /// moved the two refusal *shapes* into a new `src/actionability.rs` without
+    /// changing a character of either — so this test failed over a refactor
+    /// that had not altered a single word the product says. What it means to
+    /// assert is "some Rust source still emits this", and which file that is
+    /// was never part of the claim.
     func testTheseFixturesAreTheWordsRustActuallyEmits() throws {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests
             .deletingLastPathComponent() // GlomerisMenuBar
             .deletingLastPathComponent() // macos
             .deletingLastPathComponent() // repo root
+        let srcRoot = repoRoot.appendingPathComponent("src")
 
-        let sources = try ["src/reporting/dto.rs", "src/cli/mod.rs"]
-            .map { try String(contentsOf: repoRoot.appendingPathComponent($0), encoding: .utf8) }
+        let enumerator = FileManager.default.enumerator(
+            at: srcRoot,
+            includingPropertiesForKeys: nil
+        )
+        var rustFiles: [URL] = []
+        while let url = enumerator?.nextObject() as? URL {
+            if url.pathExtension == "rs" { rustFiles.append(url) }
+        }
+        // A walk that found nothing would make every assertion below vacuous,
+        // and would read as a pass.
+        XCTAssertGreaterThan(rustFiles.count, 20, "no Rust sources found under \(srcRoot.path)")
+
+        let sources = try rustFiles
+            .map { try String(contentsOf: $0, encoding: .utf8) }
             .joined(separator: "\n")
 
         for literal in [
