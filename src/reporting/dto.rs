@@ -719,6 +719,104 @@ pub struct ExecuteReport {
     pub actual_reclaimed_human: Option<String>,
 }
 
+/// Why `glomeris execute` refused, as the machine-readable token
+/// [`ExecuteRefusalReport::reason`] carries.
+///
+/// HORO-1327. These eight strings used to be written as literals at their
+/// call sites in `main.rs`, which left the `refusal` vocabulary with no
+/// single producer for `scripts/check-vocabulary-covers-cli-tokens.sh` to
+/// diff the menu-bar app's wording against — so the guard reported 10 of 12
+/// and said so, rather than pretending to cover them.
+///
+/// That is not a theoretical gap. `AuditRecord::source` had the identical
+/// shape until HORO-1312, and in between HORO-1310 added two new source
+/// values at new call sites with nothing able to say whether the GUI had
+/// learned words for them. `refusal` is the vocabulary where that silence
+/// costs the most: an unrecognised token renders as "The CLI refused for a
+/// reason this app has no wording for" at exactly the moment a user is
+/// being told they may not delete something.
+///
+/// [`RefusalReason::as_str`] is now the sole producer, and it is load-bearing
+/// rather than parallel to serialization: the `Serialize` impl below goes
+/// through it, so serde cannot emit a token the guard has not seen. A
+/// `#[serde(rename_all = "snake_case")]` derive would have produced the same
+/// JSON while leaving the guard blind — the tokens would exist only as
+/// variant names transformed at compile time.
+///
+/// The Swift side stays tolerant on read, for the reason `AuditRecord::source`
+/// stayed a `String` (HORO-1312): a newer CLI's new reason code must degrade
+/// to the app's default wording, never erase the refusal it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    /// No discoverable candidate matches the `--resource-id` given.
+    ResourceNotFound,
+    /// No registered action resolves for the resource's kind.
+    ActionNotFound,
+    /// `--action-id` named a registered action other than the one this
+    /// resource resolves to.
+    ActionMismatch,
+    /// The resource is `PROTECTED`; no flag combination authorizes execution.
+    Protected,
+    /// The resource requires confirmation and none was supplied.
+    AskNoConsent,
+    /// A confirmation was supplied but does not match the resource's freshly
+    /// observed identity.
+    AskConsentMismatch,
+    /// An `AUTO_SAFE` decision failed to authorize, contradicting
+    /// `policy::approval::authorize`'s documented contract.
+    AutoSafeContractViolation,
+    /// The HORO-1054 execution lock is already held by another invocation.
+    /// The one refusal that happens before a `crate::cli::ExecuteResolution`
+    /// exists at all, which is why it has no counterpart variant there.
+    Busy,
+}
+
+impl RefusalReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RefusalReason::ResourceNotFound => "resource_not_found",
+            RefusalReason::ActionNotFound => "action_not_found",
+            RefusalReason::ActionMismatch => "action_mismatch",
+            RefusalReason::Protected => "protected",
+            RefusalReason::AskNoConsent => "ask_no_consent",
+            RefusalReason::AskConsentMismatch => "ask_consent_mismatch",
+            RefusalReason::AutoSafeContractViolation => "auto_safe_contract_violation",
+            RefusalReason::Busy => "busy",
+        }
+    }
+
+    /// Every reason, in the order `execute`'s own exit-code table documents
+    /// them (the five-code not-found pair, then the refusals, then the
+    /// pre-resolution lock). See the `all_lists_every_variant_exactly_once`
+    /// test for the compile-time guard that keeps this exhaustive.
+    pub const ALL: &'static [RefusalReason] = &[
+        RefusalReason::ResourceNotFound,
+        RefusalReason::ActionNotFound,
+        RefusalReason::ActionMismatch,
+        RefusalReason::Protected,
+        RefusalReason::AskNoConsent,
+        RefusalReason::AskConsentMismatch,
+        RefusalReason::AutoSafeContractViolation,
+        RefusalReason::Busy,
+    ];
+}
+
+impl std::fmt::Display for RefusalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Serialized as the bare token, so `--json` output is byte-identical to the
+/// string literals this type replaced. Hand-written rather than derived
+/// precisely so [`RefusalReason::as_str`] is the only place the tokens exist
+/// — see this type's doc comment.
+impl Serialize for RefusalReason {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 /// Structured `--json` rendering for every non-`Executed` branch of
 /// `crate::cli::ExecuteResolution` (HORO-1055 nit: `--json` callers — the
 /// interactive UI this subcommand exists for — previously got empty
@@ -728,19 +826,18 @@ pub struct ExecuteReport {
 /// already happened, not a mechanism for causing one.
 ///
 /// Also reused (HORO-1056) for the one `execute` refusal that happens
-/// BEFORE an `ExecuteResolution` exists at all: `reason: "busy"`, emitted
-/// by `main.rs`'s `acquire_execution_lock_or_exit` when the HORO-1054
-/// execution lock is already held by another invocation. Same shape,
-/// same `--json` contract, deliberately not a new DTO.
+/// BEFORE an `ExecuteResolution` exists at all:
+/// [`RefusalReason::Busy`], emitted by `main.rs`'s
+/// `acquire_execution_lock_or_exit` when the HORO-1054 execution lock is
+/// already held by another invocation. Same shape, same `--json` contract,
+/// deliberately not a new DTO.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ExecuteRefusalReport {
-    /// One of `"resource_not_found"`, `"action_not_found"`,
-    /// `"action_mismatch"`, `"protected"`, `"ask_no_consent"`,
-    /// `"ask_consent_mismatch"`, `"auto_safe_contract_violation"` —
-    /// mirrors `crate::cli::ExecuteResolution`'s non-`Executed` variants —
-    /// or `"busy"`, emitted before that enum exists at all (see this
-    /// struct's doc comment).
-    pub reason: &'static str,
+    /// Typed rather than a `&'static str` (HORO-1327): the token can then
+    /// only come from [`RefusalReason::as_str`], so a new refusal path
+    /// cannot introduce a ninth token by writing a literal the menu-bar app
+    /// has never heard of. The serialized JSON is unchanged.
+    pub reason: RefusalReason,
     pub message: String,
 }
 

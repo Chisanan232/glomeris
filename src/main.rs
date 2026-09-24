@@ -390,14 +390,14 @@ fn acquire_execution_lock_or_exit(
     json: bool,
 ) -> glomeris::executor::lock::ExecutionLockGuard {
     use glomeris::executor::lock::{acquire_execution_lock, LockError};
-    use glomeris::reporting::dto::ExecuteRefusalReport;
+    use glomeris::reporting::dto::{ExecuteRefusalReport, RefusalReason};
 
     match acquire_execution_lock() {
         Ok(guard) => guard,
         Err(LockError::AlreadyHeld) => {
             if json {
                 print_json_or_exit(&ExecuteRefusalReport {
-                    reason: "busy",
+                    reason: RefusalReason::Busy,
                     message: "another glomeris execution is already in progress (execution \
                               lock busy) — try again shortly"
                         .to_string(),
@@ -1063,7 +1063,7 @@ fn run_execute_command(_args: &[String]) {
 fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json: bool) {
     use glomeris::cli::ExecuteResolution;
     use glomeris::executor::ExecutionOutcome;
-    use glomeris::reporting::dto::ExecuteRefusalReport;
+    use glomeris::reporting::dto::{ExecuteRefusalReport, RefusalReason};
 
     // Every refusal/not-found branch shares this shape: render as
     // structured JSON when --json is passed, else the existing
@@ -1071,7 +1071,7 @@ fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json:
     // (the interactive UI this subcommand exists for) previously got
     // empty stdout plus a bare exit code here — exactly the cases a UI
     // most needs structured detail on.
-    let refuse = |reason: &'static str, message: String, code: i32| -> ! {
+    let refuse = |reason: RefusalReason, message: String, code: i32| -> ! {
         if json {
             print_json_or_exit(&ExecuteRefusalReport { reason, message });
         } else {
@@ -1082,12 +1082,12 @@ fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json:
 
     match resolution {
         ExecuteResolution::ResourceNotFound => refuse(
-            "resource_not_found",
+            RefusalReason::ResourceNotFound,
             "no discoverable candidate matches the given --resource-id".to_string(),
             5,
         ),
         ExecuteResolution::ActionNotFound => refuse(
-            "action_not_found",
+            RefusalReason::ActionNotFound,
             "no registered action resolves for this resource".to_string(),
             5,
         ),
@@ -1095,7 +1095,7 @@ fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json:
             requested,
             resolved,
         } => refuse(
-            "action_mismatch",
+            RefusalReason::ActionMismatch,
             format!(
                 "--action-id '{requested}' does not match the action this resource actually \
                  resolves to ('{resolved}') — refusing to substitute a different action than \
@@ -1104,28 +1104,28 @@ fn render_execute_resolution(resolution: glomeris::cli::ExecuteResolution, json:
             5,
         ),
         ExecuteResolution::RefusedProtected => refuse(
-            "protected",
+            RefusalReason::Protected,
             "refused — this resource is PROTECTED; no flag combination can authorize executing \
              against it"
                 .to_string(),
             3,
         ),
         ExecuteResolution::RefusedAskNoConsent => refuse(
-            "ask_no_consent",
+            RefusalReason::AskNoConsent,
             "refused — this resource requires confirmation (--confirm-ask plus a matching \
              --observed-fingerprint); none was supplied"
                 .to_string(),
             3,
         ),
         ExecuteResolution::RefusedAskConsentMismatch => refuse(
-            "ask_consent_mismatch",
+            RefusalReason::AskConsentMismatch,
             "refused — the supplied --observed-fingerprint does not match this resource's \
              freshly observed identity (stale, or observed for a different resource)"
                 .to_string(),
             3,
         ),
         ExecuteResolution::RefusedAutoSafeContractViolation => refuse(
-            "auto_safe_contract_violation",
+            RefusalReason::AutoSafeContractViolation,
             "refused — an AUTO_SAFE decision failed to authorize, which contradicts \
              policy::approval::authorize's documented contract; refusing rather than proceeding"
                 .to_string(),
