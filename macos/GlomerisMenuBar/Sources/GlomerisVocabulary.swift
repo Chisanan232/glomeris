@@ -581,11 +581,18 @@ enum GlomerisVocabulary {
                 "This resource always asks first, and no confirmation was given.",
                 "hand.raised.fill", .guarded
             )
+        // HORO-1326. The CLI emits this one reason for two causes, and says so
+        // itself: "(stale, or observed for a different resource)". The wording
+        // here named only the first — "The resource changed after you
+        // confirmed" — which under the second cause told the user something
+        // untrue about their own filesystem. Both the title and the detail
+        // avoid "no longer", because that asserts the confirmation was once
+        // valid for this resource, and in the second cause it never was.
         case "ask_consent_mismatch":
             return term(
-                token, refusalAxis, "Confirmation no longer valid",
-                "The resource changed after you confirmed, so the confirmation "
-                    + "no longer applied and Glomeris refused to reuse it.",
+                token, refusalAxis, "Confirmation did not match",
+                "The confirmation does not match this resource as Glomeris "
+                    + "just observed it, so it was refused rather than reused.",
                 "hand.raised.slash.fill", .guarded
             )
         case "auto_safe_contract_violation":
