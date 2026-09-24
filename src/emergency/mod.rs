@@ -797,6 +797,104 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    /// HORO-1359: an action mapped to a resource kind is not necessarily
+    /// runnable against a resource *of* that kind, and a degraded recovery
+    /// must not spend one of its very few attempts finding that out.
+    ///
+    /// `action_id_for_kind` maps `HomebrewCache` to
+    /// `homebrew.cleanup.cache`, whose step carries no scoped path, so
+    /// `execute` refused it every time — after `actions_attempted` had
+    /// already been charged for it.
+    #[test]
+    fn process_candidate_does_not_charge_an_attempt_to_an_action_that_cannot_run() {
+        let dir = make_temp_dir("candidate-ineligible-action");
+        let cache = dir.join("Homebrew");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("download.tar.gz"), vec![0u8; 4096]).unwrap();
+        let now = SystemTime::now();
+
+        let mut evidence = autosafe_evidence(cache.clone(), ResourceKind::HomebrewCache, now);
+        // A download cache is refetched by `brew`, not rebuilt from local
+        // sources. The shared helper's `RegenerableByRebuild` is the wrong
+        // claim for this kind and lands the decision in `Ask`, which would
+        // rob this test of its precondition.
+        evidence.recoverability = Recoverability::RegenerableByTool;
+
+        let mut report = EmergencyReport::default();
+        let audit_log_path = dir.join("actions.jsonl");
+        process_candidate(
+            evidence,
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            &mut report,
+            &audit_log_path,
+        );
+
+        assert_eq!(
+            report.actions_attempted, 0,
+            "an action that could never have run must not consume one of the run's attempts"
+        );
+        assert_eq!(report.actions_succeeded, 0);
+        // Two claims in one. `process_candidate` increments this for
+        // everything that is not `AutoSafe`, so a zero here is also the
+        // fixture-validity check: had the fixture drifted to `Ask`, the zero
+        // attempt count above would be the policy class's doing and would say
+        // nothing about action eligibility. Asserted this way rather than by
+        // calling `classify` directly, because the decision that matters is
+        // taken on the *post-correlation* evidence this function builds
+        // internally, and re-deriving that here would restate its prelude.
+        assert_eq!(
+            report.denied_candidates, 0,
+            "policy said yes: counting this as a denial would misreport why nothing happened"
+        );
+        assert_eq!(report.errors.len(), 1, "got {:?}", report.errors);
+        let error = &report.errors[0];
+        assert!(
+            error.contains("homebrew.cleanup.cache") && error.contains("is not eligible for"),
+            "the error must name the action and say it was never eligible, got {error:?}"
+        );
+        assert!(
+            error.contains("scoped_path"),
+            "the error must carry the executor's own reason, got {error:?}"
+        );
+        assert!(
+            !error.contains("failed"),
+            "an ineligible action is not a failed one; they mean different things to a reader: \
+             {error:?}"
+        );
+        // Nothing ran: the fixture is untouched, and no audit record was
+        // written because no execution was attempted.
+        assert!(cache.join("download.tar.gz").exists());
+        assert!(crate::monitor::read_audit_tail(&audit_log_path, 10).is_empty());
+
+        // Positive control: a runnable action IS still attempted, in the same
+        // function with the same collector and registry. Without this, a
+        // change that refused every candidate would pass the assertions
+        // above.
+        let node_modules = dir.join("proj/node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        fs::write(node_modules.join("pkg.js"), vec![0u8; 64]).unwrap();
+        let runnable = autosafe_evidence(node_modules.clone(), ResourceKind::NodeModules, now);
+
+        let mut ok_report = EmergencyReport::default();
+        process_candidate(
+            runnable,
+            &CleanCollector,
+            &ActionRegistry::builtin(),
+            now,
+            &mut ok_report,
+            &audit_log_path,
+        );
+
+        assert_eq!(ok_report.actions_attempted, 1);
+        assert_eq!(ok_report.actions_succeeded, 1);
+        assert!(ok_report.errors.is_empty(), "{:?}", ok_report.errors);
+        assert!(!node_modules.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
     /// Matches the executor/policy test suites' own helper shape — a
     /// fresh, per-test temp directory, never the developer's real home
     /// directory (see this repo's `CLAUDE.md` testing tooling policy).
