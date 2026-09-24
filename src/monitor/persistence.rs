@@ -654,6 +654,37 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// Pins the wiring: the heartbeat must go through `atomic_write`, whose
+    /// own tests prove a writer never truncates a file it did not create.
+    /// A file pre-placed at the name the old code derived from the target
+    /// stands in for a second daemon's in-flight scratch file, and must be
+    /// left byte-identical. Deterministic — nothing here waits on timing.
+    #[test]
+    fn writing_the_heartbeat_cannot_disturb_a_file_at_the_old_predictable_temp_name() {
+        const SQUATTER: &str = "{\"another\": \"daemon's in-flight heartbeat\"}";
+        let path = unique_heartbeat_test_path("old-temp-name-untouched");
+        let old_temp_name = path.with_extension("json.tmp");
+        std::fs::write(&old_temp_name, SQUATTER).expect("place the squatter");
+        let heartbeat = Heartbeat::new(1_700_000_000, PressureState::Healthy, 10.0, 1_000_000);
+
+        write_heartbeat(&path, &heartbeat).expect("write_heartbeat should succeed");
+
+        assert_eq!(
+            read_heartbeat(&path).expect("the heartbeat must still be readable"),
+            heartbeat
+        );
+        assert_eq!(
+            std::fs::read_to_string(&old_temp_name).expect("still readable"),
+            SQUATTER,
+            "the write must not have used — and so must not have truncated — \
+             the temp name it derived from the target before HORO-1464"
+        );
+        assert_eq!(temp_paths_beside(&path), Vec::<PathBuf>::new());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&old_temp_name);
+    }
+
     fn unique_audit_test_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "glomeris-audit-persistence-test-{tag}-{}-{}.jsonl",
