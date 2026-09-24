@@ -97,6 +97,11 @@ targets:
       # target so the golden fixture can be asserted against the real function
       # rather than against a copy of it in the test file.
       - path: Sources/GlomerisByteFormat.swift
+      # HORO-1453: the single-instance rule. `decide` takes constructed instances
+      # and returns a decision, so the convergence property is asserted against
+      # the real function rather than against a restatement of it — and without
+      # launching or terminating anything.
+      - path: Sources/SingleInstanceGuard.swift
       - path: Sources/GlomerisDesignSystem.swift
       # HORO-1365: the scan and plan stores are exercised directly, so a
       # reset can be caught at the state boundary rather than only by a
