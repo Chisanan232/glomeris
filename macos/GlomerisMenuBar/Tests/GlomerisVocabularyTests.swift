@@ -40,9 +40,12 @@ final class GlomerisVocabularyTests: XCTestCase {
         "HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY",
     ]
 
-    /// `src/reporting/policy_label.rs` — `PolicyLabel::as_str`.
+    /// `src/reporting/policy_label.rs` — `PolicyLabel::as_str`. Five, not
+    /// four: `NOT_POLICY_GOVERNED` (HORO-1468) is the label on an audit row
+    /// for a file Glomeris wrote itself, which no policy decision projects
+    /// to. It reaches this app only through the history section.
     private static let safetyTokens = [
-        "AUTO_SAFE", "ASK", "PROTECTED", "UNKNOWN_INCOMPLETE",
+        "AUTO_SAFE", "ASK", "PROTECTED", "UNKNOWN_INCOMPLETE", "NOT_POLICY_GOVERNED",
     ]
 
     /// `src/reporting/dto.rs` — `completeness_tag`.
@@ -435,17 +438,46 @@ final class GlomerisVocabularyTests: XCTestCase {
     }
 
     /// Only the AUTO_SAFE class may read as positive. ASK is a caution,
-    /// PROTECTED is held back, and an evidence gap is unknown — none of
-    /// the three may render with the reassuring tone.
+    /// PROTECTED is held back, an evidence gap is unknown, and a row about
+    /// Glomeris's own file is no judgement at all — none of the four may
+    /// render with the reassuring tone.
     func testOnlyAutoSafeReadsAsPositive() {
         XCTAssertEqual(GlomerisVocabulary.safety("AUTO_SAFE").tone, .positive)
-        for token in ["ASK", "PROTECTED", "UNKNOWN_INCOMPLETE"] {
+        for token in ["ASK", "PROTECTED", "UNKNOWN_INCOMPLETE", "NOT_POLICY_GOVERNED"] {
             XCTAssertNotEqual(
                 GlomerisVocabulary.safety(token).tone,
                 .positive,
                 "\(token) must not read as reassuring"
             )
         }
+    }
+
+    /// HORO-1468. This label is the one member of the safety axis that is
+    /// not a safety verdict, and both ways of getting it wrong are wrong in
+    /// the same direction as a lie: a reassuring tone would tell the user
+    /// policy cleared the deletion, and an alarming one would tell them
+    /// something is wrong with a file Glomeris is entitled to remove.
+    ///
+    /// Asserted as "not any of the loaded tones" rather than "== .neutral"
+    /// alone, so that changing the tone to any judgement-carrying value
+    /// fails here rather than only at review.
+    func testGlomerisOwnFileIsNeitherAClearanceNorAnAlarm() {
+        let term = GlomerisVocabulary.safety("NOT_POLICY_GOVERNED")
+
+        XCTAssertEqual(term.tone, .neutral)
+        for loaded: GlomerisTone in [.positive, .caution, .warning, .critical, .guarded, .unknown] {
+            XCTAssertNotEqual(
+                term.tone,
+                loaded,
+                "a row about Glomeris's own file must carry no safety judgement"
+            )
+        }
+        // And it must say whose file it was, or the row reads as a verdict
+        // on one of the user's resources with the wording left off.
+        XCTAssertTrue(
+            term.title.contains("Glomeris") || term.explanation.contains("itself"),
+            "the wording must say the file was Glomeris's own: \(term.title) / \(term.explanation)"
+        )
     }
 
     // MARK: - AI provider connection test (HORO-1309)
