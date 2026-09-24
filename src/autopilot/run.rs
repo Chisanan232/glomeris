@@ -110,6 +110,20 @@ pub enum AutopilotItemOutcome {
     AmbiguousAction {
         candidates: usize,
     },
+    /// Admitted, and exactly one action is registered — but
+    /// [`crate::executor::structural_refusal`] would reject that action for
+    /// this resource on sight, so there was nothing to attempt
+    /// (HORO-1360/1359).
+    ///
+    /// Deliberately not [`Self::Failed`]: nothing ran. No attempt was
+    /// charged and no budget was spent, because spending one of a run's
+    /// scarce attempts on an action already known to be unrunnable would
+    /// starve the candidates that could actually have freed something. A
+    /// report that said "failed" here would also send a reader looking for
+    /// a transient cause that does not exist.
+    Ineligible {
+        reason: String,
+    },
     /// Admitted and authorized; nothing was executed because this was a
     /// dry run. Still charged against the budget, so the plan shown is the
     /// real bounded plan.
@@ -143,6 +157,7 @@ impl AutopilotItemOutcome {
             Self::Refused(_)
             | Self::NoRegisteredAction
             | Self::AmbiguousAction { .. }
+            | Self::Ineligible { .. }
             | Self::Planned => None,
         }
     }
@@ -267,6 +282,9 @@ fn describe_outcome(outcome: &AutopilotItemOutcome) -> String {
             "skipped: {candidates} registered actions apply to this kind; \
              Autopilot will not choose between them"
         ),
+        AutopilotItemOutcome::Ineligible { reason } => {
+            format!("skipped, no attempt spent: {reason}")
+        }
         AutopilotItemOutcome::Planned => "would run (dry run)".to_string(),
         AutopilotItemOutcome::Succeeded { reclaimed_bytes } => match reclaimed_bytes {
             Some(bytes) => format!("reclaimed {}", human_bytes(*bytes)),
@@ -489,6 +507,26 @@ pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
                 .push(item(AutopilotItemOutcome::NoRegisteredAction));
             continue;
         };
+
+        // An action being registered for the kind is not the same claim as
+        // it being runnable against THIS resource (HORO-1360). Asked here,
+        // before an attempt is charged, so a `homebrew.cleanup.cache` in an
+        // allowlisted envelope is reported as ineligible instead of
+        // consuming one of the run's attempts to produce a failure that was
+        // certain in advance.
+        //
+        // Safe to plan at this point, and only at this point: `admit`
+        // refuses `PolicyClass::Protected` above, so nothing reaching here
+        // is protected. That is why the policy-free `plan_refusal` is the
+        // right half of the predicate to call — passing a decision would
+        // imply this site does the Protected ordering itself, which it does
+        // not; the gate does.
+        if let Some(reason) = crate::actionability::plan_refusal(action, &evidence) {
+            report
+                .items
+                .push(item(AutopilotItemOutcome::Ineligible { reason }));
+            continue;
+        }
 
         let fingerprint = evidence.fingerprint.clone();
         // For a pre-authorized `Ask`, the consent handed to `authorize` is
