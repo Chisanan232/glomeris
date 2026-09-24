@@ -432,20 +432,31 @@ struct ApplyPlanView: View {
         return "\(result.headline) Reclaimed \(reclaimedText)."
     }
 
+    /// HORO-1451. The `". "` join this used to do was the reported defect in
+    /// its other direction: the two permitted cleanup sentences already end in
+    /// a period, and so does every vocabulary term's `explanation`, so a step
+    /// read as "…review it and clean.. Path: …". `SpokenLabel` adds a mark only
+    /// where there is none.
     static func stepAccessibilityLabel(_ step: PlanApplicationStep, group: String) -> String {
-        var parts = [
+        SpokenLabel.compose([
             "\(group): \(step.kindTerm.title)",
-            "\(GlomerisVocabulary.impactAxis): \(step.reclaimableText)",
+            SpokenLabel.clause(GlomerisVocabulary.impactAxis, step.reclaimableText),
             step.safetyTerm.accessibilityLabel,
-            "\(CandidateActionability.axis): \(step.actionability.sentence)",
-        ]
-        parts.append("Path: \(step.resourceId)")
-        return parts.joined(separator: ". ") + "."
+            SpokenLabel.clause(CandidateActionability.axis, step.actionability.sentence),
+            "Path: \(step.resourceId)",
+        ])
     }
 
+    /// HORO-1451. `status.message` is the CLI's own text for every outcome
+    /// except `cleaned`, so a refused, aborted or failed item ran straight into
+    /// "Path:" — the same unterminated join as the AI plan row, on the surface
+    /// that reports what was just done to the user's disk.
     static func resultAccessibilityLabel(_ item: PlanApplicationItemResult) -> String {
-        "\(item.kindTerm.title). \(GlomerisVocabulary.outcomeAxis): \(item.status.message) "
-            + "Path: \(item.resourceId)."
+        SpokenLabel.compose([
+            item.kindTerm.title,
+            SpokenLabel.clause(GlomerisVocabulary.outcomeAxis, item.status.message),
+            "Path: \(item.resourceId)",
+        ])
     }
 
     // MARK: - The `explain` sweep
