@@ -552,6 +552,21 @@ struct AiPlanSectionView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // HORO-1366. Embedded, not implemented here: this card renders what
+            // a provider said and must stay a surface that cannot delete
+            // anything — its tests assert its source contains no `execute`, no
+            // `performClean` and no fingerprint token, and `ApplyPlanView` is a
+            // sibling precisely so those guards keep holding. Below the rows
+            // because a user should read the suggestions before being offered a
+            // way to act on all of them, and the decision about whether to offer
+            // one at all is made inside it from the items themselves.
+            ApplyPlanView(
+                plan: plan,
+                items: report.items,
+                client: client,
+                projectRootsStore: projectRootsStore
+            )
         }
     }
 
@@ -732,6 +747,12 @@ struct AiPlanSectionView: View {
         plan.isPlanning = true
         plan.progressStatusText = nil
         plan.lastErrorMessage = nil
+        // HORO-1366: a preview or a result belongs to the plan it was made
+        // from. Asking again replaces that plan, so anything the previous one
+        // was going to do — or had done — stops being on screen with it. Left
+        // behind, a preview would go on naming resources from a list the user
+        // can no longer see, and its Apply button would still be live.
+        plan.resetApplyState()
 
         do {
             // `withEnvironment` is what makes the Settings window's provider
