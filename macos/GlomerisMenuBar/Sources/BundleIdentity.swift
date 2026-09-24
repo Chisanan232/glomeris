@@ -17,6 +17,13 @@
 //  build ended up talking to the configured gateway instead of the local one
 //  it was built to talk to.
 //
+//  Corrects commit 9a04952, which introduced this file claiming the test
+//  process has no bundle identifier and therefore takes the fallback branch.
+//  Measured: it is `com.apple.dt.xctest.tool`. The fallback is still not the
+//  release identifier, for the reason below — but it is a branch nothing the
+//  app is normally run as takes, which is why the rule is now also exposed as
+//  a function a test can drive.
+//
 
 import Foundation
 
@@ -38,29 +45,38 @@ import Foundation
 ///   diagnostic build gets its own identifier and therefore its own state,
 ///   which is the whole point.
 /// - **The unit-test bundle** — `GlomerisMenuBarTests` is a
-///   `bundle.unit-test` target with no test host, so `Bundle.main` at test
-///   time is the `xctest` tool. Its embedded `Info.plist` declares no
-///   `CFBundleIdentifier`, so `bundleIdentifier` is `nil` and the fallback
-///   below is what every test run uses.
+///   `bundle.unit-test` target with no test host, so `Bundle.main` at test time
+///   is Xcode's `xctest` agent and this resolves to `com.apple.dt.xctest.tool`
+///   (measured, not assumed). Not the release identifier, which is the point:
+///   a test run cannot read or write the state of the app installed on the
+///   machine running it.
 ///
 /// ## Why the fallback is not the release identifier
 ///
-/// Because that branch is not hypothetical — it is the branch taken by every
-/// test run, and by anything else loading this code outside an app bundle. A
-/// fallback to the release identifier would hand exactly those processes the
-/// user's real keychain items, reintroducing the defect at the one place a
-/// reader would assume it had been fixed.
+/// A fallback to the release identifier would hand the user's real keychain
+/// items to whatever process took that branch — reintroducing the defect at the
+/// one place a reader would assume it had been fixed. So it is a distinct
+/// string, and ``identity(declaredBy:)`` exists so that branch can be asserted
+/// rather than reasoned about: nothing the app is normally run as takes it.
 ///
 /// It is not a `fatalError` either. A bundled app always has an identifier, so
-/// the crash would never protect a user; it would only turn "runs in a test
-/// process" into "cannot run in a test process".
+/// the crash could never protect a user; it would only turn "loaded outside an
+/// app bundle" into "cannot be loaded outside an app bundle".
 enum BundleIdentity {
     /// Stands in for the bundle identifier when the running executable has
-    /// none. Distinct from every identifier this project ships, so state filed
-    /// under it can never be the release app's state.
+    /// none — a bare Mach-O tool, for instance. Distinct from every identifier
+    /// this project ships, so state filed under it can never be the release
+    /// app's state.
     static let unidentifiedProcess = "dev.glomeris.unidentified-process"
+
+    /// The rule, as a function of what the bundle declares, so that both of its
+    /// branches can be asserted. `Bundle.main.bundleIdentifier` is whatever the
+    /// running process happens to be, and a test cannot make it `nil`.
+    static func identity(declaredBy bundleIdentifier: String?) -> String {
+        bundleIdentifier ?? unidentifiedProcess
+    }
 
     /// The running bundle's identifier, or ``unidentifiedProcess`` when the
     /// executable is not a bundle that declares one.
-    static let current: String = Bundle.main.bundleIdentifier ?? unidentifiedProcess
+    static let current: String = identity(declaredBy: Bundle.main.bundleIdentifier)
 }
