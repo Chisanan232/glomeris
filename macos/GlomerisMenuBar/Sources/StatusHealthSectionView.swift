@@ -147,26 +147,31 @@ struct StatusHealthSectionView: View {
     private let client: GlomerisClient
     private let projectRootsStore: ProjectRootsStore
     private let pollInterval: TimeInterval
+    private let cliIdentityProbe: GlomerisCliIdentityProbe
 
     @State private var statusReport: StatusReportDto?
     @State private var daemonReport: DaemonStatusReportDto?
+    @State private var cliIdentity: GlomerisCliIdentityOutcome?
     @State private var fetchErrors = SectionFetchErrors()
     @State private var pollTask: Task<Void, Never>?
 
     init(
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
-        pollInterval: TimeInterval = 10
+        pollInterval: TimeInterval = 10,
+        cliIdentityProbe: GlomerisCliIdentityProbe = GlomerisCliIdentityProbe()
     ) {
         self.client = client
         self.projectRootsStore = projectRootsStore
         self.pollInterval = pollInterval
+        self.cliIdentityProbe = cliIdentityProbe
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
             diskCard
             monitorCard
+            cliCard
         }
         .task {
             await refresh()
@@ -240,6 +245,85 @@ struct StatusHealthSectionView: View {
         }
     }
 
+    /// Which `glomeris` the app is driving (HORO-1466).
+    ///
+    /// Every row here exists because the alternative was measured to be
+    /// undiagnosable. Two binaries on one machine reported the same
+    /// `--version` while disagreeing about whether an unscoped mutating action
+    /// may be offered, so the version is not shown at all and the content
+    /// hash is: see `GlomerisCliIdentity`'s header.
+    ///
+    /// The path and the fingerprint are rendered together, always, from one
+    /// `GlomerisCliIdentity` — which cannot exist without both.
+    /// `scripts/check-cli-identity-is-reported.sh` pins that so this card
+    /// cannot regress to showing a path with no identity beside it, which is
+    /// the defect one level up from the one this ticket fixes.
+    @ViewBuilder
+    private var cliCard: some View {
+        GlomerisCard(title: GlomerisVocabulary.cliAxis) {
+            switch cliIdentity {
+            case .identified(let identity):
+                GlomerisBadgeView(
+                    term: GlomerisVocabulary.cliExpectation(
+                        identity.expectation,
+                        path: identity.location.url.path
+                    )
+                )
+                GlomerisDetailRow(label: "In use") {
+                    GlomerisPathText(path: identity.location.url.path)
+                }
+                GlomerisDetailRow(label: "Found") {
+                    Text(GlomerisVocabulary.cliSource(identity.location.source))
+                        .font(GlomerisDesign.secondaryFont)
+                }
+                GlomerisDetailRow(label: "Fingerprint") {
+                    fingerprintText(identity.content)
+                }
+                // Only when there is a second hash to show. Rendering an
+                // "Expected" row that repeated the one above would imply the
+                // comparison had been made in the cases where it has not.
+                if case .differs(let expected) = identity.expectation {
+                    GlomerisDetailRow(label: "Expected") {
+                        fingerprintText(.sha256(expected))
+                    }
+                }
+            case .notFound(let searched):
+                GlomerisStateMessageView(
+                    message: .failure(
+                        "No glomeris command-line tool was found. Looked in: "
+                            + searched.joined(separator: ", ") + "."
+                    )
+                )
+            case nil:
+                GlomerisStateMessageView(message: .loading("Checking which tool is in use…"))
+            }
+        }
+    }
+
+    /// A content hash, abbreviated on screen with the whole thing in the
+    /// tooltip and the accessibility label.
+    ///
+    /// Same reasoning as `GlomerisPathText`, for the same 260pt column: 64 hex
+    /// characters do not fit, and the abbreviation is the part that
+    /// discriminates. Nothing is withheld — hovering or VoiceOver gives the
+    /// full value.
+    @ViewBuilder
+    private func fingerprintText(_ content: GlomerisCliContent) -> some View {
+        switch content {
+        case .sha256(let hash):
+            Text(content.shortDescription)
+                .font(GlomerisDesign.monospacedFont)
+                .help(hash)
+                .accessibilityLabel("Fingerprint: \(hash)")
+        case .unreadable(let reason):
+            Text(content.shortDescription)
+                .font(GlomerisDesign.secondaryFont)
+                .foregroundStyle(.secondary)
+                .help(reason)
+                .accessibilityLabel(SpokenLabel.compose(["Fingerprint unavailable", reason]))
+        }
+    }
+
     /// A capacity bar, tinted by the pressure tone the badge above already
     /// states in words. It is a redundant second encoding of one fact, not
     /// a new one — which is the only reason a bare colour is acceptable
@@ -273,7 +357,11 @@ struct StatusHealthSectionView: View {
     private func refresh() async {
         async let status = fetchStatus()
         async let daemon = fetchDaemonStatus()
-        let (statusResult, daemonResult) = await (status, daemon)
+        // Runs alongside them and spawns nothing: the probe stats and hashes a
+        // file, so it answers even when the CLI is too broken to execute —
+        // which is exactly when knowing which file it is matters most.
+        async let identity = cliIdentityProbe.probeOffMainThread()
+        let (statusResult, daemonResult, identityResult) = await (status, daemon, identity)
 
         if let statusResult {
             statusReport = statusResult
@@ -281,6 +369,11 @@ struct StatusHealthSectionView: View {
         if let daemonResult {
             daemonReport = daemonResult
         }
+        // Assigned unconditionally: unlike the two fetches, every outcome of a
+        // probe is a fact worth replacing the previous one with. There is no
+        // "failed, keep the last known good" case, because not finding a
+        // binary is itself the answer rather than a failure to get one.
+        cliIdentity = identityResult
     }
 
     @MainActor
