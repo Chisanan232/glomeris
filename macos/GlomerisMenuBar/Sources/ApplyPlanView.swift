@@ -463,10 +463,16 @@ struct ApplyPlanView: View {
         plan.applyIncludesConfirmable = false
         plan.applyPhase = .preparing
 
+        // Collapsed before anything is measured or run: a resource the plan
+        // names twice would otherwise be counted twice in the estimate and
+        // attempted twice, the second attempt against what the first deleted.
+        // See `deduplicatedByResource`.
+        let itemsToRecheck = PlanApplicationPreview.deduplicatedByResource(items)
+
         var steps: [PlanApplicationStep] = []
-        for (index, item) in items.enumerated() {
+        for (index, item) in itemsToRecheck.enumerated() {
             if Task.isCancelled { break }
-            plan.applyProgressText = "Re-checking \(index + 1) of \(items.count)…"
+            plan.applyProgressText = "Re-checking \(index + 1) of \(itemsToRecheck.count)…"
             let resourceId = item.candidate.resourceId
             do {
                 let result = try await client.run(

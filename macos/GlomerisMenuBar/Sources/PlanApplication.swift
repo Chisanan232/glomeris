@@ -286,6 +286,43 @@ struct PlanApplicationPreview: Equatable {
         }
     }
 
+    /// The plan's items with any repeated resource collapsed to its first
+    /// mention. This is what the `explain` sweep walks.
+    ///
+    /// Nothing upstream promises the set is distinct. `llm-plan` correlates the
+    /// model's picks back to detected candidates; it does not assert that each
+    /// candidate is picked once, and a provider naming the same directory twice
+    /// is a thing a provider may do. Two rows for one resource are harmless in
+    /// the AI Plan card, which reports what the model said, and are not harmless
+    /// in a batch:
+    ///
+    ///   * the preview's estimate adds that resource's `reclaimable_bytes`
+    ///     twice, so the panel promises roughly double what the batch can free;
+    ///   * both copies are attempted, and the second runs against a resource the
+    ///     first just deleted. `execute` is safe about it — the identity
+    ///     snapshot no longer matches, so it aborts at revalidation or finds
+    ///     nothing — but the result then carries a row saying a resource did not
+    ///     clean directly beneath the row saying it did, and
+    ///     `isCompleteSuccess` is false for a batch that did everything the user
+    ///     asked for.
+    ///
+    /// Both of those are honesty defects in the two places AC2 and AC8 are
+    /// about, so the duplicate is removed before anything is measured or run
+    /// rather than explained afterwards. The *first* mention is kept because the
+    /// plan's order is the model's stated priority, and dropping the earlier of
+    /// two identical picks would silently re-rank it.
+    ///
+    /// Keyed on `candidate.resourceId` — the same field the sweep passes to
+    /// `explain` — so what is collapsed is exactly what would otherwise be
+    /// re-checked and run twice.
+    ///
+    /// Foundation only and `static`, so the collapse is assertable without a
+    /// process or a view.
+    static func deduplicatedByResource(_ items: [LlmPlanItemReportDto]) -> [LlmPlanItemReportDto] {
+        var seen = Set<String>()
+        return items.filter { seen.insert($0.candidate.resourceId).inserted }
+    }
+
     /// The positions of the steps that will actually be attempted, given the
     /// user's decision about items that ask first.
     ///

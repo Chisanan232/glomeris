@@ -683,6 +683,35 @@ final class ApplyPlanViewTests: XCTestCase {
         XCTAssertEqual(executeArgv[0].value(after: "--project-root"), "/Users/x/proj")
     }
 
+    /// The collapse, at the wire. A resource the plan names twice is re-checked
+    /// once, so the preview holds one step rather than two identical ones —
+    /// which is what keeps the estimate and the result honest. The unit-level
+    /// properties are in `PlanApplicationTests`; this is the assertion that the
+    /// sweep actually uses them.
+    @MainActor
+    func testARepeatedResourceIsReCheckedOnlyOnce() async throws {
+        let plan = PlanState()
+        let logPath = argvLogPath()
+        let view = try makeView(
+            plan: plan,
+            items: [planItem(), planItem(), planItem(resourceId: "/Users/x/other")],
+            stdout: Self.explainJson(),
+            argvLogPath: logPath
+        )
+
+        await view.preparePreview()
+
+        let invocations = try recordedInvocations(at: logPath)
+        XCTAssertEqual(
+            invocations.count, 2,
+            "three plan rows naming two resources is two `explain` calls: \(invocations)"
+        )
+        guard case .reviewing(let preview) = plan.applyPhase else {
+            return XCTFail("expected .reviewing, got \(plan.applyPhase)")
+        }
+        XCTAssertEqual(preview.steps.count, 2)
+    }
+
     // MARK: - Wording
 
     func testTheSummaryNamesWhatWillRunAndWhatWillNot() {

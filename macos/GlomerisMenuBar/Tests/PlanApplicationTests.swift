@@ -801,6 +801,104 @@ final class PlanApplicationTests: XCTestCase {
         XCTAssertFalse(result.isCompleteSuccess)
     }
 
+    // MARK: - A resource the plan names twice
+    //
+    // Two layers, and both are wanted. `attemptedIndices` answers in positions
+    // so that a preview holding a duplicate is still described correctly — that
+    // is the structural property just above, and it stays true. But a preview
+    // that *holds* a duplicate is a preview that double-counts its estimate and
+    // attempts the second copy against what the first deleted, so the sweep
+    // collapses the plan first. The tests below pin the collapse; the tests
+    // above pin what the types do if one ever gets through anyway.
+
+    /// The estimate AC2 shows and the headline AC8 shows are the two places a
+    /// duplicate is visible to the user, so both are asserted against the
+    /// collapsed list rather than only the count.
+    func testARepeatedResourceIsRecheckedAndAttemptedOnce() {
+        let twice = [
+            planItem(resourceId: "/Users/x/proj/target", policyLabel: "AUTO_SAFE", executable: true),
+            planItem(resourceId: "/Users/x/proj/target", policyLabel: "AUTO_SAFE", executable: true),
+        ]
+        let collapsed = PlanApplicationPreview.deduplicatedByResource(twice)
+        XCTAssertEqual(collapsed.map(\.candidate.resourceId), ["/Users/x/proj/target"])
+
+        // What the preview would then say, built from the collapsed list: one
+        // resource's size, once.
+        let preview = PlanApplicationPreview(steps: collapsed.map { item in
+            PlanApplicationStep(explain: explainReport(
+                resourceId: item.candidate.resourceId,
+                executable: true,
+                offeredActions: [OfferedActionDto(actionId: "cargo.clean.target_dir",
+                                                  requiresConfirmation: false)]
+            ))
+        })
+        XCTAssertEqual(preview.attemptedIndices(includingConfirmable: false), [0])
+        XCTAssertEqual(
+            preview.reclaimableEstimate(includingConfirmable: false).bytes,
+            1_048_576,
+            "a resource named twice must not promise twice its size"
+        )
+
+        let result = PlanApplicationResult.assemble(
+            preview: preview,
+            includingConfirmable: false,
+            statusesByStepIndex: [0: .cleaned(reclaimedBytes: 1_048_576, human: "1.0 MB")],
+            stoppedEarlyReason: nil
+        )
+        XCTAssertEqual(result.headline, "Cleaned 1 item.")
+        XCTAssertTrue(
+            result.isCompleteSuccess,
+            "a batch that did everything the user asked must not be marked incomplete by a "
+                + "duplicate the provider introduced"
+        )
+    }
+
+    /// The first mention wins, because the plan's order is the model's stated
+    /// priority and dropping the earlier of two identical picks would re-rank
+    /// it. Asserted through a field that differs between the two copies.
+    func testTheFirstMentionOfARepeatedResourceIsTheOneKept() {
+        let collapsed = PlanApplicationPreview.deduplicatedByResource([
+            planItem(resourceId: "/Users/x/proj/target", policyLabel: "AUTO_SAFE",
+                     executable: true, requiresConfirmation: false),
+            planItem(resourceId: "/Users/x/proj/target", policyLabel: "ASK",
+                     executable: true, requiresConfirmation: true),
+        ])
+        XCTAssertEqual(collapsed.count, 1)
+        XCTAssertEqual(collapsed[0].policyLabel, "AUTO_SAFE")
+    }
+
+    /// Distinct resources are left exactly as the model ordered them — the
+    /// collapse must not become a re-sort or a filter.
+    func testDistinctResourcesAreLeftInTheModelsOrder() {
+        let items = [
+            planItem(resourceId: "/Users/x/b/target", policyLabel: "AUTO_SAFE", executable: true),
+            planItem(resourceId: "/Users/x/a/target", policyLabel: "AUTO_SAFE", executable: true),
+            planItem(resourceId: "/Users/x/b/target", policyLabel: "AUTO_SAFE", executable: true),
+            planItem(resourceId: "/Users/x/c/target", policyLabel: "AUTO_SAFE", executable: true),
+        ]
+        XCTAssertEqual(
+            PlanApplicationPreview.deduplicatedByResource(items).map(\.candidate.resourceId),
+            ["/Users/x/b/target", "/Users/x/a/target", "/Users/x/c/target"]
+        )
+    }
+
+    /// A refused duplicate collapses too. It cannot be executed either way, but
+    /// two identical PROTECTED rows in a preview read as two resources Glomeris
+    /// declined when there is one.
+    func testARepeatedRefusedResourceAlsoCollapses() {
+        let collapsed = PlanApplicationPreview.deduplicatedByResource([
+            planItem(resourceId: "/Users/x/.aws/credentials", policyLabel: "PROTECTED",
+                     executable: false, refusalReason: Self.protectedRefusal),
+            planItem(resourceId: "/Users/x/.aws/credentials", policyLabel: "PROTECTED",
+                     executable: false, refusalReason: Self.protectedRefusal),
+        ])
+        XCTAssertEqual(collapsed.count, 1)
+    }
+
+    func testAnEmptyPlanCollapsesToNothing() {
+        XCTAssertTrue(PlanApplicationPreview.deduplicatedByResource([]).isEmpty)
+    }
+
     func testAttemptedIndicesArePositionsInTheModelsOrder() {
         let preview = mixedPreview()
         // Position 4 only: the runnable AUTO_SAFE item the model ranked last.
