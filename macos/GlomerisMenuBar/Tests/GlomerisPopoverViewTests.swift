@@ -127,6 +127,21 @@ final class GlomerisPopoverViewTests: XCTestCase {
             code.contains("GeometryReader"),
             "a geometry proxy inside the panel can only report the size the panel already has"
         )
+        // `NSScreen.main` is the screen with the *focused* window, and this
+        // panel is non-activating — it never becomes key, so `main` reports
+        // whichever display the user was in before they clicked the menu bar.
+        // Guessing too generously asks for height the panel's own display does
+        // not have, which is how the footer gets clipped; the shortest display
+        // attached has no such direction to fail in.
+        XCTAssertFalse(
+            code.contains("NSScreen.main"),
+            "a non-activating panel never owns the focused screen, so NSScreen.main can name a "
+                + "taller display than the one the panel opened on"
+        )
+        XCTAssertTrue(
+            code.contains(".min()"),
+            "the bound must come from the shortest display attached, not from one of them"
+        )
     }
 
     /// Primary state first, history last — and because this is a plain
