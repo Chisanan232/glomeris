@@ -249,6 +249,66 @@ names the variable and tells you to unset it too. Unsetting it means relaunching
 the app from an environment without it — a running process's environment is not
 editable from the settings screen.
 
+### What protects the stored key, and which programs can read it
+
+Honest version, because an earlier one of these notes overstated it (HORO-1455).
+
+The key is a generic-password item in your **login keychain**, which is a *file*
+keychain — `~/Library/Keychains/login.keychain-db`. That means:
+
+- **It is encrypted at rest, while the keychain is locked.** Normally your login
+  keychain is unlocked for your whole session, so for practical purposes the
+  protection during that session is the access control list below, not
+  encryption.
+- **It is not synced to iCloud.** True — a file keychain cannot sync at all.
+- **It *is* included in a file-level backup** of your home directory: Time
+  Machine, a cloned disk, an rsync of `~`. The item is still encrypted there and
+  is useless without your keychain password, but it is not excluded from backups.
+  The app sets the `ThisDeviceOnly` accessibility attribute, and that attribute
+  is **inert on a file keychain** — it is honoured by macOS's *data-protection*
+  keychain, which needs an entitlement an unsigned build does not have. It is set
+  so the value is already correct if Glomeris is ever signed and entitled.
+
+**Which programs can read it.** The item carries an access control list naming
+the binaries allowed to decrypt it. Glomeris creates the item trusting exactly
+one program: the copy of the app that created it. Any other program asking for
+the value — including a *different build* of Glomeris, such as one you just
+upgraded to — does not silently get it. macOS asks you, naming the program.
+
+You can see and edit that list yourself: open **Keychain Access**, find the item
+whose name matches the app's bundle identifier, and look at **Access Control**.
+Nothing about this is only inspectable from inside Glomeris.
+
+**If you press "Always Allow" on that prompt**, the program you allowed is added
+to the list permanently. Before HORO-1455 the list only ever grew: every build
+you upgraded past stayed on it, so over time the key became readable by every old
+Glomeris binary still on the disk.
+
+**How to reset the list.** Save the key again — paste it into the API key field
+and save. Glomeris now removes the old item and creates a fresh one rather than
+updating in place, so the trusted list is rebuilt from one entry and every
+previously allowed program is dropped. (This is also why the list cannot be
+narrowed without re-saving: macOS does not permit an item's access control list
+to be rewritten in place.) If you would rather start from nothing, **Remove key**
+deletes the item outright — read the note above first about what that promotes.
+
+Two consequences worth stating plainly:
+
+- **An upgrade will still prompt you once.** Resetting the list is not the same
+  as avoiding the prompt; a new build is not on the old item's list, and macOS
+  asks before letting it read *or* delete the item. What changed is that
+  answering once no longer leaves a permanent grant behind.
+- **If you decline that prompt, the save fails and your previously stored key is
+  left exactly as it was.** macOS refuses the deletion and the item stays put, so
+  nothing is lost — the app reports that the save did not happen rather than
+  quietly falling back to an in-place update, because that fallback is what let
+  the list grow. Try again and allow it.
+- **If the prompt is allowed but the re-add then fails**, there is no stored key
+  and the field falls back to the environment, as if you had removed it. That is
+  the one regression this change accepts: previously a failed write left the old
+  key in place. It is the safer direction — the cost is pasting the key again,
+  against a key that stayed readable by binaries you had stopped trusting.
+
 ### The privacy preview
 
 The same screen offers a preview of the outbound payload, over `glomeris
