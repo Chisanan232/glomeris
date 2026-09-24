@@ -225,6 +225,23 @@ jobs:
       - name: Check the BYOK credential never leaves the keychain
         run: bash scripts/check-credential-store-uses-keychain.sh
 
+  state-namespaced-by-bundle-id:
+    # HORO-1456: the keychain service holding the BYOK key and the UserDefaults
+    # domain holding the endpoint, model and project roots must be derived from
+    # the running bundle's identifier. They were string literals equal to the
+    # release identifier, so any other build read and wrote the release app's
+    # state and the only way to isolate one was to patch three source files.
+    #
+    # A separate job from credential-store-uses-keychain: "the key is in the
+    # keychain and nowhere else" and "the key is in *this build's* keychain
+    # items" are different properties, and a literal that happens to be
+    # correct satisfies the first while failing the second.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check stored state is namespaced by the running bundle
+        run: bash scripts/check-state-namespaced-by-bundle-id.sh
+
   vocabulary-covers-cli-tokens:
     # HORO-1306: the GUI's plain-language wording tables are transcribed from
     # the Rust enums by hand, so the drift that matters is the silent one —
