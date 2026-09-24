@@ -91,8 +91,14 @@ if [[ ! -f "$VERSION_FILE" ]]; then
 fi
 
 # `<key>=<value>` lines only; everything else in the pin file is prose.
+#
+# `|| true` is load-bearing under `set -euo pipefail`. Without it, a missing key
+# makes grep exit 1, pipefail propagates that out of the command substitution, and
+# `set -e` kills the script at the assignment below — so the empty-value message a
+# few lines down is unreachable and the guard exits 1 having printed nothing at
+# all. Measured: the mutation that deletes this key produced a zero-byte log.
 pinned() {
-  grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2
+  grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true
 }
 
 shellcheck_version="$(pinned shellcheck_version)"
