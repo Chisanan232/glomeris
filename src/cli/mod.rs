@@ -28,7 +28,7 @@ use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
-use crate::executor::{dry_run, execute, ExecutionOutcome, ExecutionReport};
+use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{
     ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
 };
@@ -339,10 +339,12 @@ pub fn resolve_action_for<'a>(
 
 /// Builds one [`CleanDryRunItem`] for `ev`/`decision`: resolves an action
 /// and renders its [`crate::actions::ActionPlan::explain`] via
-/// [`crate::actions::dry_run`] — never executing anything. A resource
-/// with no resolvable action, or whose `Action::plan` refuses (e.g.
-/// `ActionError::Unsupported`), is reported with `skip_reason` set rather
-/// than silently omitted.
+/// [`crate::actionability::dry_run_explain`] — never executing anything.
+/// Three things are reported with `skip_reason` set rather than silently
+/// omitted or, worse, rendered as a proposal: a resource with no resolvable
+/// action, one whose `Action::plan` refuses (e.g.
+/// `ActionError::Unsupported`), and one whose plan builds but which
+/// execution would refuse on sight (HORO-1359).
 ///
 /// SAFETY-CRITICAL: a [`PolicyClass::Protected`] decision short-circuits
 /// here, before `resolve_action_for`/`dry_run` ever run — this is what
@@ -372,23 +374,29 @@ pub fn build_clean_dry_run_item(
     }
 
     match resolve_action_for(ev, actions) {
-        Some(action) => match dry_run(action, ev) {
-            Ok(plan) => CleanDryRunItem {
+        // `dry_run_explain` rather than `dry_run` (HORO-1359). A plan built
+        // successfully is not the same claim as a plan execution would run:
+        // `homebrew.cleanup.cache` plans fine and is then refused on sight,
+        // so this used to print `Run \`brew cleanup -s\`…` as a live
+        // proposal for a resource `detect --json` was simultaneously
+        // reporting as `executable: false`. The refusal is now the row.
+        Some(action) => match crate::actionability::dry_run_explain(action, ev) {
+            Ok(explain) => CleanDryRunItem {
                 resource_id,
                 policy_label,
                 action_id: Some(action.id().0),
-                explain: Some(plan.explain),
+                explain: Some(explain),
                 skip_reason: None,
             },
-            // `Display`, not `Debug`: this string is printed to a user by
-            // `clean --dry-run`, and `{:?}` showed them the literal text
-            // `ResourceMismatch`.
-            Err(e) => CleanDryRunItem {
+            // `action_id` stays set: an action really was resolved for this
+            // resource, and naming the one that refused is more use than
+            // implying none was found.
+            Err(reason) => CleanDryRunItem {
                 resource_id,
                 policy_label,
                 action_id: Some(action.id().0),
                 explain: None,
-                skip_reason: Some(e.to_string()),
+                skip_reason: Some(reason),
             },
         },
         None => CleanDryRunItem {
@@ -568,32 +576,36 @@ pub fn build_llm_plan_report(
         }
 
         items.push(match actions.get(validated.action_id.0) {
-            Some(action) => match dry_run(action, ev) {
-                Ok(plan) => LlmPlanItemReport {
+            // `dry_run_explain` rather than `dry_run` (HORO-1359). The
+            // commonest refusal here is still a model naming a registered
+            // action that does not apply to the resource it named, which is
+            // the plan-error arm; the arm this change adds is the one where
+            // the plan builds and execution would refuse the step anyway. In
+            // that case `candidate.executable` was already `false` with a
+            // truthful `refusal_reason`, while this row's own `explain`
+            // rendered the action as a live proposal — one JSON object
+            // disagreeing with itself.
+            Some(action) => match crate::actionability::dry_run_explain(action, ev) {
+                Ok(explain) => LlmPlanItemReport {
                     resource_id,
                     policy_label,
                     requested_action_id: Some(action.id().0),
                     priority,
                     model_reason,
-                    explain: Some(plan.explain),
+                    explain: Some(explain),
                     skip_reason: None,
                     candidate,
                     completeness,
                     confidence,
                 },
-                // `Display`, not `Debug`. This is the commonest way a model's
-                // suggestion gets refused — it named a registered action that
-                // does not apply to the resource it named — so it is the one
-                // sentence on the row that has to explain itself. `{:?}`
-                // rendered it as the literal text `ResourceMismatch`.
-                Err(e) => LlmPlanItemReport {
+                Err(reason) => LlmPlanItemReport {
                     resource_id,
                     policy_label,
                     requested_action_id: Some(action.id().0),
                     priority,
                     model_reason,
                     explain: None,
-                    skip_reason: Some(e.to_string()),
+                    skip_reason: Some(reason),
                     candidate,
                     completeness,
                     confidence,
