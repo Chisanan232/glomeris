@@ -157,9 +157,19 @@ struct PlanApplicationStep: Equatable {
     /// The estimate, for the preview only. Never compared against, and never
     /// reported as an outcome: what a run reclaimed comes from
     /// `actual_reclaimed_bytes`.
+    ///
+    /// HORO-1452. The CLI's own string still wins. What changed is the case
+    /// where there is a measured count and no string for it — an older
+    /// `glomeris` on PATH: this used to say "size unknown" for a size it had,
+    /// while the batch total below counted those very bytes. A row that
+    /// disclaims a figure the total includes cannot be reconciled by a reader,
+    /// so the step now renders it by the same shared convention.
     var reclaimableText: String {
-        guard let reclaimableHuman, !reclaimableHuman.isEmpty else { return "size unknown" }
-        return reclaimableBytesIsLowerBound ? "at least \(reclaimableHuman)" : reclaimableHuman
+        guard reclaimableBytes != nil || !(reclaimableHuman ?? "").isEmpty else {
+            return "size unknown"
+        }
+        let text = humanByteCount(reclaimableBytes, rendered: reclaimableHuman)
+        return reclaimableBytesIsLowerBound ? "at least \(text)" : text
     }
 
     /// The normal path: `explain` came back, so every field is the CLI's.
@@ -379,17 +389,27 @@ struct PlanApplicationPreview: Equatable {
     /// showing a confident zero.
     ///
     /// Same convention as `PlanApplicationResult.reclaimedText`, for the same
-    /// reason: one step quotes Rust's own rendering, and a sum is raw bytes
-    /// because re-scaling it here would put a 1000-based number beside Rust's
-    /// 1024-based ones.
+    /// reason: one attempted step quotes Rust's own rendering of that step, and
+    /// a sum — which no CLI invocation ever produces — is rendered by the one
+    /// port of Rust's convention.
+    ///
+    /// HORO-1452. This used to print the sum as a raw integer, so the defect
+    /// was invisible in the single-step case and present in every case Apply
+    /// Plan exists for: "About 5242880 bytes would be reclaimed." sat between a
+    /// list of humanised per-item sizes above it and a humanised result line
+    /// after the run. Both branches now go through `humanByteCount`, in one call
+    /// shape, so the `"at least "` prefix is applied identically either way and
+    /// there is no branch where a number can escape unformatted.
     func reclaimableEstimateText(includingConfirmable: Bool) -> String? {
         let attempted = stepsToAttempt(includingConfirmable: includingConfirmable)
         let estimate = reclaimableEstimate(includingConfirmable: includingConfirmable)
         guard let bytes = estimate.bytes else { return nil }
-        if attempted.count == 1, let only = attempted.first?.reclaimableHuman, !only.isEmpty {
-            return estimate.isLowerBound ? "at least \(only)" : only
-        }
-        return estimate.isLowerBound ? "at least \(bytes) bytes" : "\(bytes) bytes"
+        // Rust's string for the one step, when there is exactly one step and it
+        // came with one; `nil` otherwise, which is what makes `humanByteCount`
+        // format the total instead.
+        let onlyRendering = attempted.count == 1 ? attempted.first?.reclaimableHuman : nil
+        let text = humanByteCount(bytes, rendered: onlyRendering)
+        return estimate.isLowerBound ? "at least \(text)" : text
     }
 }
 
@@ -570,20 +590,23 @@ struct PlanApplicationResult: Equatable {
     /// separate from `headline` so a caller cannot show a size without also
     /// showing how many items it came from.
     ///
-    /// # Why a multi-item total is raw bytes
+    /// # Where a multi-item total comes from
     ///
     /// Rust renders a human string per `execute`, and there is no batch report
     /// for it to render a sum into — the batch is N single-item invocations, by
-    /// design. So a total has to be assembled here, and `humanByteCount`'s
-    /// header already settled what to do in exactly this position: emit the raw
-    /// count with an explicit unit rather than scale it locally. Every other
-    /// size in this panel comes from Rust's 1024-based `human_bytes`, and a
-    /// locally-formatted "2.15 GB" beside Rust's own "2.0 GB" reads as though
-    /// 150 MB went missing. A number that looks unformatted is a truthful
-    /// signal; a number that looks finished and disagrees with the rows above
-    /// it is not.
+    /// design. So a total has to be assembled here, which before HORO-1452 meant
+    /// emitting the raw count: every other size in this panel comes from Rust's
+    /// 1024-based `human_bytes`, and a locally-formatted 1000-based "2.15 GB"
+    /// beside Rust's own "2.0 GB" reads as though 150 MB went missing.
     ///
-    /// A single cleaned row needs none of that: it quotes Rust's own string.
+    /// That objection was to a *disagreeing* rendering, not to rendering here,
+    /// and `GlomerisByteFormat` removes the disagreement by porting Rust's exact
+    /// rule under a golden fixture both languages assert against. So the total
+    /// now goes through `humanByteCount` with no CLI string to prefer, and a
+    /// single cleaned row still quotes Rust's own string through the same call.
+    /// "Reclaimed 5242880 bytes." was the second, undescribed half of HORO-1452:
+    /// the estimate before the run and the result after it were raw in exactly
+    /// the same cases, and are humanised now in exactly the same cases.
     ///
     /// # Why the single row is gated on the measured bytes, not on the string
     ///
@@ -609,7 +632,8 @@ struct PlanApplicationResult: Equatable {
         guard !cleaned.isEmpty else { return nil }
         if cleaned.count == 1, let only = cleaned.first, only.bytes != nil { return only.human }
         guard let total = reclaimedBytes else { return nil }
-        return reclaimedIsIncomplete ? "at least \(total) bytes" : "\(total) bytes"
+        let text = humanByteCount(total, rendered: nil)
+        return reclaimedIsIncomplete ? "at least \(text)" : text
     }
 
     /// Builds the result from the preview it was applied from, so the account

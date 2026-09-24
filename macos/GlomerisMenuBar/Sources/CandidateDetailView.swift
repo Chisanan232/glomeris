@@ -788,15 +788,27 @@ func describeExecuteOutcome(exitCode: Int32, stdout: Data, stderrText: String) -
 /// 2 GiB cleanup rendered as an estimate of "2.0 GB" and a result of "2.15 GB",
 /// and the honest reading of that is that 150 MB went missing.
 ///
-/// The fallback for an older binary on `PATH` that emits no `*_human` key is
-/// the raw count with an explicit unit, deliberately: it looks unformatted,
-/// which is a truthful signal, where a locally-scaled "2.15 GB" would look
-/// finished and be wrong. This app does not reimplement the convention —
-/// whoever owns it emits the string.
+/// The string Rust rendered is still preferred whenever there is one, which is
+/// every figure that arrives from a `*_human` key. HORO-1452 changed only what
+/// happens when there is not one: the fallback now renders the count through
+/// `GlomerisByteFormat.human`, a port of Rust's own `human_bytes` held to a
+/// shared golden fixture, rather than printing the raw integer.
+///
+/// The raw integer was chosen under HORO-1312 because the alternative then was
+/// `ByteCountFormatter`, which is 1000-based and therefore disagreed with every
+/// neighbouring figure — a 2 GiB cleanup estimated at "2.0 GB" and reported as
+/// "2.15 GB" reads as 150 MB going missing, and a number that looks unformatted
+/// is at least honest about being unfinished. The objection was to the
+/// disagreement, not to formatting in Swift, and a port that agrees on every
+/// input in `tests/fixtures/human_bytes_golden.tsv` does not disagree.
+///
+/// There is still only one formatter in this target. This is its only caller
+/// outside the two Apply Plan aggregates, and nothing else in the app scales a
+/// byte count.
 func humanByteCount(_ bytes: UInt64?, rendered: String?) -> String {
     if let rendered, !rendered.isEmpty { return rendered }
     guard let bytes else { return "unknown" }
-    return "\(bytes) bytes"
+    return GlomerisByteFormat.human(bytes)
 }
 
 #Preview {

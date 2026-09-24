@@ -612,19 +612,26 @@ final class CandidateDetailViewTests: XCTestCase {
         XCTAssertEqual(humanByteCount(nil, rendered: nil), "unknown")
         XCTAssertFalse(humanByteCount(987_654, rendered: nil).isEmpty)
         XCTAssertNotEqual(humanByteCount(987_654, rendered: nil), "unknown")
+        // HORO-1452: and it is the shared convention, not a local one.
+        XCTAssertEqual(humanByteCount(987_654, rendered: nil), "964.5 KB")
     }
 
-    /// HORO-1312. Rust's string wins whenever there is one, and the
-    /// fallback for an older binary is deliberately NOT a locally scaled
-    /// figure.
+    /// HORO-1312, amended by HORO-1452. Rust's string still wins whenever
+    /// there is one; what changed is the fallback when there isn't.
     ///
-    /// The bug this replaces was not a crash: `ByteCountFormatter` with
+    /// The bug HORO-1312 fixed was not a crash: `ByteCountFormatter` with
     /// `countStyle = .file` is 1000-based, so 2 GiB measured came back as
     /// "2.15 GB" next to Rust's own 1024-based "2.0 GB" estimate for the
     /// same bytes, in the same panel. Both looked finished; one was wrong.
-    /// Asserting on the exact "2.0 GB" here is what pins the convention to
-    /// the producer — a client that started scaling bytes again would have
-    /// to change this line to do it.
+    /// The fallback became the raw count because a visibly-raw number cannot
+    /// be mistaken for a scaled one.
+    ///
+    /// That objection was to a *disagreeing* rendering, not to rendering here,
+    /// and HORO-1452 removed the disagreement: `GlomerisByteFormat` ports
+    /// Rust's exact rule, and both languages assert against
+    /// `tests/fixtures/human_bytes_golden.tsv`. So this test now pins the
+    /// stronger property — for the same byte count, the fallback produces the
+    /// *same string* the CLI would have sent.
     func testHumanByteCountPrefersTheStringRustRendered() {
         XCTAssertEqual(
             humanByteCount(2_147_483_648, rendered: "2.0 GB"),
@@ -633,17 +640,26 @@ final class CandidateDetailViewTests: XCTestCase {
 
         // Empty is treated as absent: a blank label is not a byte count, and
         // showing nothing at all where a result belongs reads as a failure.
+        // The fallback then has to agree with the string above, for the same
+        // bytes — the whole point of porting the convention rather than
+        // inventing a second one.
         XCTAssertEqual(
             humanByteCount(2_147_483_648, rendered: ""),
-            "2147483648 bytes"
+            "2.0 GB"
         )
 
-        // No `*_human` key at all — an older `glomeris` on PATH. Unformatted
-        // on purpose: it is visibly raw, so it cannot be mistaken for a
-        // scaled figure, and it is still exactly the number Rust measured.
+        // No `*_human` key at all — an older `glomeris` on PATH. Same answer:
+        // the convention is the producer's, applied here.
         let fallback = humanByteCount(2_147_483_648, rendered: nil)
-        XCTAssertEqual(fallback, "2147483648 bytes")
-        XCTAssertFalse(fallback.contains("GB"))
+        XCTAssertEqual(fallback, "2.0 GB")
+        XCTAssertFalse(
+            fallback.contains("2.15"),
+            "a 1000-based formatter is back — that is the HORO-1312 regression"
+        )
+        XCTAssertFalse(
+            fallback.contains("bytes"),
+            "HORO-1452: the raw-count fallback is back"
+        )
     }
 
     // MARK: - HORO-1306: the sheet leads with the verdict, not the fields

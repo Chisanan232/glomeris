@@ -621,7 +621,10 @@ final class PlanApplicationTests: XCTestCase {
         ])
         XCTAssertEqual(outcome.reclaimedBytes, 3072)
         XCTAssertFalse(outcome.reclaimedIsIncomplete)
-        XCTAssertEqual(outcome.reclaimedText, "3072 bytes")
+        // HORO-1452: was "3072 bytes". The sum is rendered by the same
+        // convention as the per-item strings it was summed from, so a reader
+        // can check the arithmetic — 1.0 KB + 2.0 KB = 3.0 KB.
+        XCTAssertEqual(outcome.reclaimedText, "3.0 KB")
     }
 
     /// One cleaned row quotes Rust's rendering rather than re-rendering its
@@ -639,7 +642,9 @@ final class PlanApplicationTests: XCTestCase {
             .cleaned(reclaimedBytes: nil, human: "unknown"),
         ])
         XCTAssertTrue(outcome.reclaimedIsIncomplete)
-        XCTAssertEqual(outcome.reclaimedText, "at least 1024 bytes")
+        // HORO-1452: was "at least 1024 bytes". The floor wording is unchanged;
+        // only the figure inside it is now rendered like every other figure.
+        XCTAssertEqual(outcome.reclaimedText, "at least 1.0 KB")
     }
 
     func testNoMeasuredSizeAtAllReportsNoTotalRatherThanZero() {
@@ -1061,13 +1066,20 @@ final class PlanApplicationTests: XCTestCase {
         )
     }
 
-    /// A sum is raw bytes on purpose — scaling it here would put a 1000-based
-    /// number beside Rust's 1024-based ones and read as though space had gone
-    /// missing. Documented on `reclaimedText`, asserted here.
-    func testASummedEstimateIsRawBytesRatherThanALocallyScaledFigure() {
+    /// HORO-1452, the finding itself: this used to be "12582912 bytes", sitting
+    /// between a list of humanised per-item sizes above it and a humanised
+    /// result line after the run.
+    ///
+    /// A sum is not something any CLI invocation produces — a batch is N
+    /// single-item `execute` calls — so it has to be rendered here. What HORO-1312
+    /// objected to was a *disagreeing* rendering, and `GlomerisByteFormat` is a
+    /// port of Rust's rule under a fixture both languages assert against. So the
+    /// sum is now rendered, by the producer's convention, and 4.0 MB + 8.0 MB
+    /// reads as the 12.0 MB it is.
+    func testASummedEstimateIsRenderedByTheSharedConvention() {
         XCTAssertEqual(
             mixedPreview().reclaimableEstimateText(includingConfirmable: true),
-            "12582912 bytes"
+            "12.0 MB"
         )
     }
 
@@ -1090,7 +1102,7 @@ final class PlanApplicationTests: XCTestCase {
         ])
         XCTAssertEqual(
             preview.reclaimableEstimateText(includingConfirmable: false),
-            "at least 2048 bytes"
+            "at least 2.0 KB"
         )
     }
 
