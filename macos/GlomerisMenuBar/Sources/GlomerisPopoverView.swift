@@ -167,6 +167,25 @@ struct GlomerisPopoverView: View {
                 detail(resourceId)
             }
         }
+        // HORO-1367: a range, not a ceiling. `maxHeight` alone stated no
+        // preference a `ScrollView` would pass on, so the panel sized itself
+        // from `MenuBarExtra`'s own default and opened far shorter than the
+        // ceiling allowed — see `GlomerisDesign.minBodyHeight`. The floor is
+        // the preference; the ceiling still keeps the panel off the screen it
+        // is reporting on.
+        //
+        // On the ZStack and not on `sections`, which is where it went first.
+        // Both branches occupy this space, and the detail is the taller one:
+        // it stacks a back bar, a header, the Clean button, a refusal line and
+        // an outcome message around its own inner scroll region. Bounding only
+        // the overview would leave the one surface that can actually outgrow
+        // the display unbounded, and the detail's inner
+        // `.frame(maxHeight: maxBodyHeight)` is not that bound — it is the
+        // shape this ticket's own diagnosis says states no preference at all.
+        .frame(
+            minHeight: Self.bodyHeightLimits.min,
+            maxHeight: Self.bodyHeightLimits.max
+        )
     }
 
     // MARK: - Header
@@ -224,16 +243,6 @@ struct GlomerisPopoverView: View {
             }
             .padding(GlomerisDesign.outerPadding)
         }
-        // HORO-1367: a range, not a ceiling. `maxHeight` alone stated no
-        // preference a `ScrollView` would pass on, so the panel sized itself
-        // from `MenuBarExtra`'s own default and opened far shorter than the
-        // ceiling allowed — see `GlomerisDesign.minBodyHeight`. The floor is
-        // the preference; the ceiling still keeps the panel off the screen it
-        // is reporting on.
-        .frame(
-            minHeight: Self.bodyHeightLimits.min,
-            maxHeight: Self.bodyHeightLimits.max
-        )
     }
 
     /// The height range to offer the body, bounded by the display.
