@@ -486,7 +486,6 @@ struct ApplyPlanView: View {
                     // could not tell was partial.
                     plan.applyPhase = .idle
                     plan.applyProgressText = nil
-                    plan.preparePreviewTask = nil
                     return
                 }
                 steps.append(PlanApplicationStep(
@@ -504,7 +503,13 @@ struct ApplyPlanView: View {
             plan.applyPhase = .reviewing(PlanApplicationPreview(steps: steps))
         }
         plan.applyProgressText = nil
-        plan.preparePreviewTask = nil
+        // `plan.preparePreviewTask` is deliberately left alone. A finished
+        // sweep clearing it would, in the one ordering that matters, clear a
+        // *newer* sweep's handle: reset → new Apply plan → the old sweep
+        // finally returns and nils the handle belonging to the run now in
+        // flight, leaving nothing for the next reset to cancel. Cancelling an
+        // already-finished task is a no-op, so a stale handle is harmless and
+        // a missing one is not.
     }
 
     // MARK: - The `execute` loop

@@ -190,7 +190,20 @@ final class PlanState: ObservableObject {
     /// Clears everything about a batch. Called when a new plan replaces the
     /// one a preview or result was about — a preview naming resources from a
     /// plan the user can no longer see is worse than no preview.
+    ///
+    /// Cancels the `explain` sweep as well as clearing the phase. Clearing the
+    /// phase alone was not enough: the sweep runs on its own task, and on
+    /// finishing it assigns `.reviewing(preview)` unconditionally. So a reset
+    /// during a sweep produced exactly the state this function exists to
+    /// prevent — a preview, with a live Apply button, naming resources from a
+    /// plan that is no longer on screen. The sweep is `explain` only, so
+    /// cancelling it loses nothing but the answer.
+    ///
+    /// It does **not** stop a running batch, because nothing can: see the
+    /// absent `applyTask` above.
     func resetApplyState() {
+        preparePreviewTask?.cancel()
+        preparePreviewTask = nil
         applyPhase = .idle
         applyIncludesConfirmable = false
         applyCompletedItems = []
