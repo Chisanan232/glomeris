@@ -989,16 +989,144 @@ mod tests {
     fn free_self_owned_disposable_state_missing_file_does_not_fabricate_work() {
         let dir = make_temp_dir("self-state-missing");
         let history = dir.join("does-not-exist.tsv");
+        let audit_log_path = dir.join("actions.jsonl");
 
         let mut report = EmergencyReport::default();
-        free_self_owned_disposable_state(
-            &history,
-            &mut report,
-            &dir.join("actions.jsonl"),
-            SystemTime::now(),
-        );
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
 
         assert_eq!(report, EmergencyReport::default());
+        // HORO-1468: and no audit row either. "Nothing to free" must not
+        // become "deleted your pressure history" in `actions history`.
+        assert!(
+            crate::monitor::read_audit_tail(&audit_log_path, 10).is_empty(),
+            "a file that was never there must not produce an audit record"
+        );
+
+        // Anti-vacuity: the emptiness above must be a product behaviour and
+        // not a reader that can never see anything at this path. The same
+        // path, with the file present, yields exactly one row.
+        fs::write(&history, vec![0u8; 8]).unwrap();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+        assert_eq!(
+            crate::monitor::read_audit_tail(&audit_log_path, 10).len(),
+            1,
+            "control invalid: a real deletion is not visible at this audit path either"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1468: the one deletion in the product that no policy gate ever
+    /// sees is the one that most needs a record, and the record has to name
+    /// the file, the outcome and the bytes — a row that said only "something
+    /// happened" would not answer the question the founder asked, which was
+    /// what deleted the pressure history.
+    ///
+    /// Asserts every field rather than a subset: each one is read by a
+    /// different consumer (`actions history`'s table, the macOS history
+    /// section, and the `source` filter), so a wrong value is invisible to
+    /// whichever consumer does not read it.
+    #[test]
+    fn free_self_owned_disposable_state_audits_the_deletion_it_performed() {
+        let dir = make_temp_dir("self-state-audited");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 128]).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, now);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1, "expected exactly one audit record");
+        let record = &tail[0];
+        assert_eq!(record.action_id, "glomeris.self_state.free");
+        assert_eq!(record.resource_id, history.display().to_string());
+        assert_eq!(record.outcome, "succeeded");
+        assert_eq!(record.actual_reclaimed_bytes, Some(128));
+        assert_eq!(record.source, "emergency");
+        assert_eq!(record.abort_reason, None);
+        assert_eq!(record.model_rank, None);
+        // The timestamp is the run's `now`, not the moment of the append, so
+        // this row and the candidate rows of the same run agree.
+        assert_eq!(record.timestamp, 1_700_000_000);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed deletion is recorded too, and recorded as a failure with no
+    /// byte count. Both halves matter: dropping the row would make the log
+    /// read as though this file were only ever deleted cleanly, and carrying
+    /// a byte count would claim space that was never reclaimed — the same
+    /// class of fabrication HORO-1467 removed from the pressure history.
+    ///
+    /// The failure is produced by putting a directory where the file belongs:
+    /// `fs::metadata` succeeds (so the early returns are not taken) and
+    /// `fs::remove_file` cannot remove it. No permission bits, no `sudo`,
+    /// nothing outside the tempdir.
+    #[test]
+    fn free_self_owned_disposable_state_audits_a_failed_deletion_without_a_byte_count() {
+        let dir = make_temp_dir("self-state-undeletable");
+        let history = dir.join("history.tsv");
+        fs::create_dir_all(&history).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+
+        // Fixture control: the removal really did fail, so the assertions
+        // below describe the failure path and not a silent success.
+        assert!(
+            history.exists(),
+            "fixture invalid: the path was removed after all"
+        );
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 0);
+        assert_eq!(report.total_bytes_freed, 0);
+        assert_eq!(report.errors.len(), 1);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1, "a failed attempt is still an attempt");
+        assert_eq!(tail[0].outcome, "failed");
+        assert_eq!(
+            tail[0].actual_reclaimed_bytes, None,
+            "a failed deletion must not claim reclaimed bytes"
+        );
+        assert_eq!(tail[0].action_id, "glomeris.self_state.free");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The label on this row is the one that says policy never judged this,
+    /// and it is specifically not any of the four that say it did. Audited
+    /// against all four by name: `AUTO_SAFE` would be the worst of them —
+    /// it means "evidence shows a tool can recreate this and nothing is
+    /// using it", and no evidence was collected for this file at all.
+    #[test]
+    fn free_self_owned_disposable_state_audit_row_claims_no_policy_judgment() {
+        let dir = make_temp_dir("self-state-label");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 16]).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].policy_label, "NOT_POLICY_GOVERNED");
+        for judged in [
+            crate::reporting::policy_label::PolicyLabel::AutoSafe,
+            crate::reporting::policy_label::PolicyLabel::Ask,
+            crate::reporting::policy_label::PolicyLabel::Protected,
+            crate::reporting::policy_label::PolicyLabel::UnknownIncomplete,
+        ] {
+            assert_ne!(
+                tail[0].policy_label,
+                judged.as_str(),
+                "an ungated deletion must not be labelled as though policy cleared it"
+            );
+        }
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1259,6 +1387,54 @@ mod tests {
             !self_state.exists(),
             "step 1 removes the self-state fixture and nothing recreates it"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1468 end to end: step 1's record reaches the audit log the *run*
+    /// was given, not some path assembled inside the unit under test. This is
+    /// the wiring the unit tests above cannot see — before the fix,
+    /// `free_self_owned_disposable_state` was the one step `run_emergency`
+    /// called without handing it the audit log at all.
+    ///
+    /// Empty `DetectorRegistry`, never `builtin()`, for the reason given at
+    /// length on the test above: `builtin()`'s detectors run against the real
+    /// host machine's Homebrew/Docker state. With zero detectors the only
+    /// action in the run is the tempdir `self_state` fixture, so "exactly one
+    /// record, and it is step 1's" is deterministic.
+    #[test]
+    fn run_emergency_audits_the_self_state_deletion_it_performed() {
+        let dir = make_temp_dir("run-audits-self-state");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 64]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let report = run_emergency(
+            &CleanCollector,
+            &DetectorRegistry::from_detectors(vec![]),
+            &ActionRegistry::builtin(),
+            &DiscoveryContext::new(home_dir),
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &audit_log_path,
+        );
+
+        assert_eq!(report.actions_succeeded, 1);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(
+            tail.len(),
+            1,
+            "the run's only action must appear in the run's own audit log"
+        );
+        assert_eq!(tail[0].action_id, "glomeris.self_state.free");
+        assert_eq!(tail[0].resource_id, self_state.display().to_string());
+        assert_eq!(tail[0].outcome, "succeeded");
+        assert_eq!(tail[0].actual_reclaimed_bytes, Some(64));
+        assert_eq!(tail[0].policy_label, "NOT_POLICY_GOVERNED");
 
         fs::remove_dir_all(&dir).ok();
     }
