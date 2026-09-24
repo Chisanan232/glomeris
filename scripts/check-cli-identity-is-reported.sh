@@ -208,8 +208,13 @@ if ! grep -qE '^[[:space:]]+cliCard$' "${REPO_ROOT}/${STATUS_VIEW}"; then
 fi
 
 # All four states must have wording, or one of them renders as nothing.
+#
+# `\b` on the right is load-bearing. Without it, renaming the arm to
+# `case .notDeclaredRenamed` satisfies a search for `case .notDeclared` by
+# prefix, so the check passes over a file that no longer has wording for the
+# state — which is how this check read as coverage while proving nothing.
 for state in matches differs notDeclared notComparable; do
-  if ! grep -qE "case \.?${state}" <<<"$(without_comments "$VOCABULARY_FILE")"; then
+  if ! grep -qE "case \.?${state}\b" <<<"$(without_comments "$VOCABULARY_FILE")"; then
     fail "${VOCABULARY_FILE}: GlomerisVocabulary has no wording for the '${state}' identity state."
   fi
 done
@@ -263,7 +268,10 @@ fi
 # ---------------------------------------------------------------------------
 # 6. The workflow proves its own stamp survived and still matches.
 # ---------------------------------------------------------------------------
-if ! grep -qE "Print :${swift_key}" <<<"$workflow_body"; then
+# `\b` for the same reason as the wording loop above: `Print :<key>_GONE`
+# contains `Print :<key>`, so an unanchored search passes over a workflow that
+# no longer reads the real key back.
+if ! grep -qE "Print :${swift_key}\b" <<<"$workflow_body"; then
   fail "${RELEASE_WORKFLOW}: never reads ${swift_key} back. PlistBuddy fails loudly, but codesign --deep runs afterwards and a stamp that did not survive it would ship silently."
 fi
 
