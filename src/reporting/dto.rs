@@ -157,10 +157,21 @@ fn executable_fields(
         );
     };
 
-    let requires_confirmation = matches!(
-        label_for(decision),
-        PolicyLabel::Ask | PolicyLabel::UnknownIncomplete
-    );
+    // Exhaustive rather than `matches!` (HORO-1468): the default arm of a
+    // `matches!` is `false`, i.e. "offer this without asking", so a label this
+    // expression had not been taught about would fail open. `label_for` cannot
+    // return `NotPolicyGoverned` — `reporting::policy_label`'s
+    // `label_for_never_returns_not_policy_governed` asserts that over every
+    // class and reason shape — and a label meaning "policy never judged this"
+    // must still require confirmation if it ever arrives here, for the same
+    // reason `autopilot::gate::admit` refuses it outright.
+    let requires_confirmation = match label_for(decision) {
+        PolicyLabel::Ask | PolicyLabel::UnknownIncomplete | PolicyLabel::NotPolicyGoverned => true,
+        PolicyLabel::AutoSafe => false,
+        // Unreachable: `static_refusal` above returns early for a protected
+        // resource, which is why this is not a plain `_ => true`.
+        PolicyLabel::Protected => true,
+    };
 
     (
         true,
