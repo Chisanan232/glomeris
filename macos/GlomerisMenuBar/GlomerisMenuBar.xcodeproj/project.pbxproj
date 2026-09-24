@@ -17,6 +17,7 @@
 		3165A2E5224163803248FF2D /* MenuBarAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */; };
 		316F2E44994F8F44D10C01F6 /* ProjectRootsPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */; };
 		36F60F807942391399DB01D2 /* ProjectRootsPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */; };
+		3B5353546293268FBB22E4E6 /* ApplyPlanViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EC959107399B1D4F311033 /* ApplyPlanViewTests.swift */; };
 		3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */; };
 		3ED66478457DDD7A1A300158 /* GlomerisClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47250A5B4D152C9EE65C9F49 /* GlomerisClientTests.swift */; };
 		3F2B44719B74A21F10643721 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
@@ -119,6 +120,7 @@
 		C6C6CC02C2C88B2B364E5697 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		CCB103016472A37B7F09292B /* GlomerisPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisPopoverView.swift; sourceTree = "<group>"; };
 		D0EF776D63062A306819D429 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		D2EC959107399B1D4F311033 /* ApplyPlanViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplyPlanViewTests.swift; sourceTree = "<group>"; };
 		D4F2E709BCC8869676C1A53C /* AiPlanSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiPlanSectionView.swift; sourceTree = "<group>"; };
 		D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateDetailView.swift; sourceTree = "<group>"; };
 		DA84B79B4966F05DE18D3127 /* ProjectRootsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsStoreTests.swift; sourceTree = "<group>"; };
@@ -186,6 +188,7 @@
 			children = (
 				36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */,
 				C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */,
+				D2EC959107399B1D4F311033 /* ApplyPlanViewTests.swift */,
 				9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */,
 				3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */,
 				AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */,
@@ -307,6 +310,7 @@
 				EAA07A11FEF627787AF615A7 /* AiProviderPreferencesView.swift in Sources */,
 				24E8F3886E209400E58A9387 /* AiProviderPreferencesViewTests.swift in Sources */,
 				562ED5C34CC7EBDE31C962DE /* ApplyPlanView.swift in Sources */,
+				3B5353546293268FBB22E4E6 /* ApplyPlanViewTests.swift in Sources */,
 				4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */,
 				F74F65D0FD1B4A09F0CD73ED /* AutopilotPreferencesView.swift in Sources */,
 				B67B4B02F9A450278A3D05E3 /* CandidateActionability.swift in Sources */,
