@@ -436,6 +436,35 @@ fn process_candidate(
         return;
     };
 
+    // An action being mapped to the kind is not the same claim as it being
+    // runnable against THIS resource (HORO-1359). `action_id_for_kind` maps
+    // `HomebrewCache` to `homebrew.cleanup.cache`, whose step carries no
+    // scoped path, so `execute` refused it every time — and this function
+    // had already charged `actions_attempted` for it by then. In a degraded
+    // low-disk path that is one of very few attempts the run is allowed,
+    // spent on an outcome that was certain in advance.
+    //
+    // Asked here rather than by narrowing the map: the map answers "which
+    // action cleans this kind", which is a true and useful statement, and a
+    // kind whose only action is unrunnable today may become runnable
+    // without the map changing. Per this ticket's AC4 either form is
+    // acceptable, and filtering at the caller keeps the two facts separate.
+    //
+    // Safe to plan at this point, and only at this point: the `AutoSafe`
+    // check above has already returned for anything Protected, so this may
+    // use the policy-free half of the predicate.
+    if let Some(reason) = crate::actionability::plan_refusal(action, &evidence) {
+        // Not `denied_candidates` — policy said yes. Reported as an error so
+        // it is never silently dropped, and worded as an action that was
+        // never eligible rather than one that failed, because the two mean
+        // different things to whoever reads this report afterwards.
+        report.push_error(format!(
+            "action {action_id} is not eligible for {}: {reason}",
+            evidence.resource
+        ));
+        return;
+    }
+
     let fingerprint = evidence.fingerprint.clone();
     // Captured before `decision` is moved into `authorize` below —
     // HORO-1057's audit record needs the report-facing label for the
