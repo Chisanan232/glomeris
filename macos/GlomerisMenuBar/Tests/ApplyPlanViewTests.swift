@@ -161,13 +161,24 @@ final class ApplyPlanViewTests: XCTestCase {
         plan: PlanState,
         items: [LlmPlanItemReportDto],
         stdout: String,
-        exitCode: Int32 = 0
+        exitCode: Int32 = 0,
+        argvLogPath: String? = nil,
+        lingerMs: Int? = nil,
+        projectRoots: [String] = []
     ) throws -> ApplyPlanView {
-        ApplyPlanView(
+        let defaults = Self.throwawayDefaults()
+        let rootsStore = ProjectRootsStore(defaults: defaults)
+        for root in projectRoots { rootsStore.addRoot(root) }
+        return ApplyPlanView(
             plan: plan,
             items: items,
-            client: try Self.fixtureClient(stdout: stdout, exitCode: exitCode),
-            projectRootsStore: ProjectRootsStore(defaults: Self.throwawayDefaults())
+            client: try Self.fixtureClient(
+                stdout: stdout,
+                exitCode: exitCode,
+                argvLogPath: argvLogPath,
+                lingerMs: lingerMs
+            ),
+            projectRootsStore: rootsStore
         )
     }
 
@@ -190,7 +201,6 @@ final class ApplyPlanViewTests: XCTestCase {
         XCTAssertEqual(preview.steps[0].disposition, .willRun)
         XCTAssertEqual(preview.steps[0].actionId, "cargo.clean.target_dir")
         XCTAssertNil(plan.applyProgressText, "the progress line is cleared when the sweep ends")
-        XCTAssertNil(plan.preparePreviewTask)
     }
 
     /// AC4's first half, and the reason the sweep exists at all: the preview is
@@ -268,21 +278,59 @@ final class ApplyPlanViewTests: XCTestCase {
 
     /// Stopping the sweep abandons it rather than presenting a preview the user
     /// did not ask for and could not tell was partial.
+    ///
+    /// # Why this waits before cancelling
+    ///
+    /// This test used to create the task and cancel it immediately. Both the
+    /// test and `preparePreview()` are `@MainActor`, so the task body could not
+    /// begin until the test suspended at `await task.value` — by which point the
+    /// cancellation had already landed and the loop broke on its first
+    /// `Task.isCancelled` check, before any child was spawned. The `.idle`
+    /// assertion held, but nothing else did: `applyProgressText` was never set,
+    /// so asserting it nil proved nothing, and the branch that actually matters
+    /// — `SectionFetchErrors.shortMessage` returning `nil` for a child killed
+    /// mid-call, which is what abandons the sweep — was never executed by any
+    /// test in the suite.
+    ///
+    /// So the fixture lingers, and this waits for the argv log to prove a child
+    /// really started before cancelling. The log is the proof: the fixture
+    /// writes it before producing any output, and a `SIGTERM` afterwards cannot
+    /// unwrite it.
     @MainActor
-    func testCancellingTheSweepReturnsToIdleWithNoPreview() async throws {
+    func testCancellingTheSweepMidFlightAbandonsItWithNoPreview() async throws {
         let plan = PlanState()
+        let logPath = argvLogPath()
         let view = try makeView(
             plan: plan,
             items: [planItem(), planItem(resourceId: "/Users/x/other")],
-            stdout: Self.explainJson()
+            stdout: Self.explainJson(),
+            argvLogPath: logPath,
+            lingerMs: 3_000
         )
 
         let task = Task { await view.preparePreview() }
+        plan.preparePreviewTask = task
+
+        var waited = 0
+        while ((try? recordedInvocations(at: logPath).count) ?? 0) == 0, waited < 150 {
+            try await Task.sleep(nanoseconds: 20_000_000)
+            waited += 1
+        }
+        let inFlight = try recordedInvocations(at: logPath)
+        XCTAssertEqual(inFlight.count, 1, "a child must be in flight for this to be a mid-flight cancel")
+        XCTAssertEqual(inFlight[0].first, "explain", "the sweep's only call is explain")
+        XCTAssertNotNil(plan.applyProgressText, "the sweep had reached its first item")
+
         task.cancel()
         await task.value
 
-        XCTAssertEqual(plan.applyPhase, .idle)
-        XCTAssertNil(plan.applyProgressText)
+        XCTAssertEqual(plan.applyPhase, .idle, "an abandoned sweep presents no preview")
+        XCTAssertNil(plan.applyProgressText, "the progress line goes with the sweep")
+        XCTAssertEqual(
+            try recordedInvocations(at: logPath).count,
+            1,
+            "cancelling stops the sweep rather than letting it walk the rest of the plan"
+        )
     }
 
     // MARK: - The `execute` loop
@@ -734,14 +782,52 @@ final class ApplyPlanViewTests: XCTestCase {
     /// A client pinned to the fixture, carrying the fixture's script in its own
     /// environment — which is exactly how the production batch spawns, since it
     /// never calls `withEnvironment`.
-    private static func fixtureClient(stdout: String, exitCode: Int32 = 0) throws -> GlomerisClient {
-        GlomerisClient(
-            executableURL: try fixtureBinary(),
-            environment: [
-                "GLOMERIS_FIXTURE_STDOUT": stdout,
-                "GLOMERIS_FIXTURE_EXIT": String(exitCode),
-            ]
-        )
+    ///
+    /// `argvLogPath` turns on `GLOMERIS_FIXTURE_ARGV_LOG`, which is how a test
+    /// sees what production actually asked the CLI for. Without it the fixture
+    /// answers identically to every argument array, so a test asserting only on
+    /// the outcome passes whether or not `--confirm-ask` was sent — see
+    /// `recordedInvocations`.
+    ///
+    /// `lingerMs` makes the child outlive its own output, so a cancellation can
+    /// land while a call is genuinely in flight.
+    private static func fixtureClient(
+        stdout: String,
+        exitCode: Int32 = 0,
+        argvLogPath: String? = nil,
+        lingerMs: Int? = nil
+    ) throws -> GlomerisClient {
+        var environment = [
+            "GLOMERIS_FIXTURE_STDOUT": stdout,
+            "GLOMERIS_FIXTURE_EXIT": String(exitCode),
+        ]
+        if let argvLogPath { environment["GLOMERIS_FIXTURE_ARGV_LOG"] = argvLogPath }
+        if let lingerMs { environment["GLOMERIS_FIXTURE_LINGER_MS"] = String(lingerMs) }
+        return GlomerisClient(executableURL: try fixtureBinary(), environment: environment)
+    }
+
+    /// A fresh path for one test's argv log. Not `temporaryDirectory` plus a
+    /// fixed name: the fixture *appends*, so a shared path would accumulate
+    /// across tests and across runs.
+    private func argvLogPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("glomeris-argv-\(UUID().uuidString).log")
+            .path
+    }
+
+    /// Each invocation the fixture recorded, as its argument array, in order.
+    ///
+    /// The fixture writes one argument per line and a blank line between
+    /// invocations, and includes `argv[0]` — dropped here, since which binary
+    /// ran is `GlomerisClient`'s business and every assertion below is about the
+    /// arguments the batch chose.
+    private func recordedInvocations(at path: String) throws -> [[String]] {
+        let contents = try String(contentsOf: URL(fileURLWithPath: path), encoding: .utf8)
+        return contents
+            .components(separatedBy: "\n\n")
+            .map { $0.split(separator: "\n").map(String.init) }
+            .filter { !$0.isEmpty }
+            .map { Array($0.dropFirst()) }
     }
 
     /// Throwaway defaults, so no test reads or writes the app's own suite —
@@ -750,3 +836,4 @@ final class ApplyPlanViewTests: XCTestCase {
         UserDefaults(suiteName: "dev.glomeris.tests.applyplan.\(UUID().uuidString)")!
     }
 }
+
