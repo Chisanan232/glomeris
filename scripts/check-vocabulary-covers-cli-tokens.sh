@@ -25,28 +25,41 @@
 #
 # COVERAGE — deliberately partial, and it says so in the PASS line
 # ----------------------------------------------------------------
-# Ten of the twelve vocabularies are checked. The other two cannot be,
-# honestly, because they have no single canonical producer to diff
-# against: `ExecuteReport::outcome` and `ExecuteRefusalReport::reason` are
-# built from string literals at their call sites (src/cli/mod.rs,
-# src/main.rs) rather than from one `as_str`-style match. Grepping those
-# literals repo-wide also picks up test assertions and unrelated strings
-# — `"busy"` appears as a temp-lock filename in src/executor/lock.rs — so
-# a set-equality check built on it would produce false failures and,
-# worse, invite someone to loosen it until it passed. Those two stay
-# covered by the transcribed Swift tests only, and this script reports
-# 10/12 rather than printing a bare PASS that reads as "all twelve
+# Eleven of the twelve vocabularies are checked. The last one cannot be,
+# honestly, because it has no single canonical producer to diff against:
+# `ExecuteReport::outcome` is built from string literals at its call sites
+# in src/cli/mod.rs rather than from one `as_str`-style match. Grepping
+# those literals repo-wide also picks up test assertions and unrelated
+# strings, so a set-equality check built on it would produce false
+# failures and, worse, invite someone to loosen it until it passed. It
+# stays covered by the transcribed Swift tests only, and this script
+# reports 11/12 rather than printing a bare PASS that reads as "all twelve
 # verified".
 #
-# `AuditRecord::source` was the third such vocabulary until HORO-1312
-# gave it a producer. It did not stay merely unchecked: HORO-1310 added
-# `autopilot_auto_safe` and `autopilot_preauthorized_ask` at new call
-# sites, and nothing here could have told anyone whether the GUI had
-# learned words for them. `ActionSource::as_str` in
-# src/monitor/persistence.rs is now the sole producer, so it is diffed
-# like the rest.
+# Two vocabularies have been moved OUT of that list by giving them a
+# producer, which is the fix whenever this list is uncomfortable — not
+# loosening the extraction.
 #
-# Exit 0 = the ten checked vocabularies match. Exit 1 = drift, or an
+# `AuditRecord::source` was the first. It did not stay merely unchecked:
+# HORO-1310 added `autopilot_auto_safe` and `autopilot_preauthorized_ask`
+# at new call sites, and nothing here could have told anyone whether the
+# GUI had learned words for them. HORO-1312 made
+# `ActionSource::as_str` in src/monitor/persistence.rs the sole producer,
+# so it is diffed like the rest.
+#
+# `ExecuteRefusalReport::reason` was the second, and the one where silence
+# cost the most: an unrecognised refusal token renders as "The CLI refused
+# for a reason this app has no wording for" at exactly the moment a user is
+# being told they may not delete something. HORO-1327 made
+# `RefusalReason::as_str` in src/reporting/dto.rs the sole producer. Note
+# that the vocabulary is eight tokens, not the seven that mirror
+# `ExecuteResolution`: `busy` is emitted before that enum exists at all,
+# from the execution lock, and is a variant of `RefusalReason` for exactly
+# that reason. `"busy"` also appears as a temp-lock filename in
+# src/executor/lock.rs, which is why a repo-wide grep was never a
+# substitute for a producer here.
+#
+# Exit 0 = the eleven checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -89,6 +102,12 @@ VOCABULARIES=(
   # drop a user's history — but every writer now goes through this enum,
   # which is what makes the set diffable at all.
   'actionSource;;src/monitor/persistence.rs;;as_str;;ActionSource'
+  # HORO-1327. `ExecuteRefusalReport::reason` is typed as this enum, and its
+  # `Serialize` impl goes through `as_str`, so the JSON token cannot be
+  # produced anywhere else. Eight tokens: the seven that mirror
+  # `ExecuteResolution`'s non-`Executed` variants, plus `busy` from the
+  # execution lock (see this script's header).
+  'refusal;;src/reporting/dto.rs;;as_str;;RefusalReason'
 )
 
 # Print the body of a function, from its `fn <name>` line to the line
@@ -225,5 +244,5 @@ fi
 echo ""
 echo "PASS: ${checked} of 12 vocabularies verified against their Rust producer."
 echo "Not verified here (no single canonical producer to diff — see this script's header):"
-echo "  outcome, refusal — covered by the transcribed Swift tests only."
+echo "  outcome — covered by the transcribed Swift tests only."
 exit 0
