@@ -252,15 +252,23 @@ struct GlomerisPopoverView: View {
     /// geometry proxy inside the panel can only report the space the panel
     /// has already been given.
     ///
-    /// On a multi-display setup this may take its bound from the display the
-    /// user is acting on rather than the one the panel opened over. That
-    /// affects only how much height the panel asks for: the body scrolls
-    /// internally either way, so no state becomes unreachable if the guess is
-    /// the less generous of the two.
+    /// The shortest display attached, not `NSScreen.main`. `main` is the screen
+    /// with the focused window, and this panel is non-activating — it never
+    /// becomes key, so `main` reports whatever the user was in before they
+    /// clicked the menu bar. That guess has a safe direction and an unsafe one:
+    /// too *little* height costs nothing, because the body scrolls internally
+    /// and no state becomes unreachable, while too much asks for height the
+    /// display the panel actually opened on does not have, and puts the footer
+    /// — Settings and Quit — off the bottom of the screen. Taking the minimum
+    /// removes the unsafe direction outright. It is also free in practice:
+    /// every display that ships on or alongside a Mac clears the height at
+    /// which the comfortable range is capped anyway, so a second monitor only
+    /// changes this number if it is genuinely small, which is the case where
+    /// being conservative is right.
     private static var bodyHeightLimits: (min: CGFloat, max: CGFloat) {
-        let visibleHeight = NSScreen.main?.visibleFrame.height
-            ?? NSScreen.screens.first?.visibleFrame.height
-            ?? 0
+        let visibleHeight = NSScreen.screens
+            .map(\.visibleFrame.height)
+            .min() ?? 0
         return GlomerisDesign.bodyHeightLimits(visibleScreenHeight: visibleHeight)
     }
 
