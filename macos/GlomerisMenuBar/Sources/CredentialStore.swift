@@ -284,16 +284,48 @@ struct KeychainCredentialStore: CredentialStore {
     func setSecret(_ secret: String, forKey key: String) -> Bool {
         guard let data = secret.data(using: .utf8) else { return false }
 
-        // Update-then-add rather than add-then-handle-duplicate: an existing
-        // item must be replaced in place so its access control and creation
-        // date survive, and so a failed add can never leave the old key
-        // behind while the UI says the new one was saved.
-        let updated = SecItemUpdate(
-            baseQuery(forKey: key) as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if updated == errSecSuccess { return true }
+        // HORO-1455 AC 3. Delete-then-add, where this used to update-then-add.
+        // The old comment wanted an existing item "replaced in place so its
+        // access control ... survive[s]", and surviving access control is the
+        // defect: every "Always Allow" the user answers for a superseded build
+        // adds that build to the item's trusted list, and nothing ever takes it
+        // off again. After enough upgrades the key is readable by every past
+        // Glomeris binary on the disk.
+        //
+        // Measured on a scratch keychain, which is why this is delete-then-add
+        // and not something more surgical:
+        //
+        //   * `SecItemUpdate` with the value alone leaves the ACL untouched — a
+        //     list deliberately widened to two applications was still two
+        //     afterwards. That is the accretion, reproduced.
+        //   * `SecItemUpdate` carrying `kSecAttrAccess` does not narrow the list.
+        //     It blocks indefinitely, even with user interaction disabled, so it
+        //     cannot even fail usefully. An ACL cannot be rewritten in place.
+        //   * Creating a fresh item resets the decrypt entry to one trusted
+        //     application — and does so whether or not an access specification
+        //     is supplied, so the reset comes from the add, not from AC 2.
+        //
+        // This does not remove the upgrade prompt, and claiming it did would be
+        // wrong: a binary absent from the item's trusted list cannot delete it
+        // either. Measured, that delete returns errSecInvalidOwnerEdit (-25244)
+        // with interaction disabled and the item survives, which is the same
+        // authorisation a read needs. What it removes is the *permanence* —
+        // answering the prompt once replaces the widened item with a fresh
+        // one-application ACL, instead of appending to a list that only grows.
+        let deleted = SecItemDelete(baseQuery(forKey: key) as CFDictionary)
+        guard deleted == errSecSuccess || deleted == errSecItemNotFound else {
+            // The user declined the authorisation, or it failed. Report the save
+            // as failed rather than falling back to an update: the fallback is
+            // exactly the accretion above, and it would make the fix conditional
+            // on the user never pressing Deny.
+            return false
+        }
 
+        // The inverse of the old comment's other claim, and the honest cost of
+        // this change: a failed add now leaves no key at all, where before the
+        // old one survived. That is the trade AC 3 asks for, and it is the safer
+        // direction — the failure the user sees is "paste it again", not "your
+        // key is still readable by a binary you stopped trusting".
         return SecItemAdd(insertAttributes(forKey: key, data: data) as CFDictionary, nil)
             == errSecSuccess
     }
