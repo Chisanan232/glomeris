@@ -1,0 +1,50 @@
+# HORO-1452: the byte-formatting convention, pinned once for both languages.
+#
+# Rust's `reporting::bytes::human_bytes` owns this convention and renders every
+# size the CLI reports. The macOS app has to render two figures the CLI never
+# sees — the Apply Plan batch estimate and the batch reclaimed total, both sums
+# over N single-item invocations with no batch report to carry a rendered
+# string — so `GlomerisByteFormat.human` is a port of the same rule.
+#
+# A port is only safe while it agrees. Both sides assert against this file:
+#   Rust:  src/reporting/bytes.rs, `golden_fixture_pins_the_shared_convention`
+#   Swift: macos/GlomerisMenuBar/Tests/GlomerisByteFormatTests.swift
+# so a change to either implementation that moves a single rendering fails in
+# the language that moved, and a deliberate change to the convention has to be
+# made here first and will then fail in the language that has not followed.
+#
+# Chosen inputs, and what each one is here to catch:
+#   0, 1, 512, 1023        the bare-integer branch, including both its ends
+#   1024                   the first scaled value
+#   1025                   a value that must round DOWN to a whole unit
+#   1280                   an exact .25 tie — proves both sides round half to
+#                          even (1.2, not 1.3) rather than one of them rounding
+#                          half away from zero
+#   1536                   an exact .5 that is not a tie at one decimal place
+#   1048575, 1048576       the KB/MB boundary from either side; the first is
+#                          deliberately "1024.0 KB", not "1.0 MB", because the
+#                          loop tests the unscaled value
+#   5242880                the figure from this ticket's own reproduction
+#   142300000, 1288490189  the two values Rust's own unit tests already pin
+#   1 TB, 1 PB             each remaining unit label is reached at least once
+#   u64::MAX               the saturation case — the loop must stop at PB and
+#                          not index past the unit table
+#
+# Format: <bytes>\t<rendered>. Lines starting with # and blank lines are
+# comments. No trailing whitespace: both readers compare the field exactly.
+0	0 B
+1	1 B
+512	512 B
+1023	1023 B
+1024	1.0 KB
+1025	1.0 KB
+1280	1.2 KB
+1536	1.5 KB
+1048575	1024.0 KB
+1048576	1.0 MB
+5242880	5.0 MB
+142300000	135.7 MB
+1288490189	1.2 GB
+1099511627776	1.0 TB
+1125899906842624	1.0 PB
+18446744073709551615	16384.0 PB

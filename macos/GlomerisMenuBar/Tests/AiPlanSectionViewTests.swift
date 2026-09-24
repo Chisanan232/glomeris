@@ -741,6 +741,41 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertTrue(code.contains("planTask = Task { await runLlmPlan() }"))
     }
 
+    /// The key that Ask needs is fetched off the main thread (HORO-1368).
+    ///
+    /// `runLlmPlan()` is `@MainActor`, and the synchronous
+    /// `childEnvironment(basedOn:)` reads the API key's *value* — which
+    /// `SecItemCopyMatching` can only produce by decrypting the item, which
+    /// consults its ACL, which on a build the item does not admit waits on a
+    /// `SecurityAgent` prompt. A main thread waiting on that cannot service the
+    /// status item, and AppKit removes it: the app vanishes from the menu bar
+    /// with no way back in. So this is the one call site on this screen that can
+    /// really block, and it has to go through the store's `resolved` route.
+    ///
+    /// Asserted by name rather than by behaviour because the failure is a thread
+    /// identity, and the store's own tests already prove the `resolved` route
+    /// leaves the main thread. What can regress *here* is someone deleting an
+    /// `await` to quiet a warning.
+    func testTheProviderKeyForAskIsFetchedOffTheMainThread() throws {
+        let code = try Self.readCode()
+
+        XCTAssertTrue(
+            code.contains(".withEnvironment(await settingsStore.resolvedChildEnvironment())"),
+            "the Ask path must build its child environment through the off-thread route"
+        )
+        XCTAssertFalse(
+            code.contains("settingsStore.childEnvironment("),
+            "a main-thread keychain read here is HORO-1368: the menu-bar item disappears"
+        )
+        // Case-insensitive so this counts the `resolvedChildEnvironment` spelling
+        // too — and it has to, because counting only the lowercase one reported
+        // zero on a file that assembles the environment exactly once.
+        XCTAssertEqual(
+            code.lowercased().components(separatedBy: "childenvironment").count - 1, 1,
+            "exactly one place may assemble the provider environment"
+        )
+    }
+
     /// Stop cancels the request; it does not pretend to. And the cancellation
     /// goes through the `Task`, which is what `GlomerisClient` turns into a
     /// `SIGTERM` for the child (HORO-1308).

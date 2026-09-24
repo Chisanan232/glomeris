@@ -22,7 +22,7 @@ import Foundation
 /// Surfaced in the UI rather than kept internal, because a settings screen
 /// that cannot explain an inherited value is how a user ends up editing a
 /// field that has no effect.
-enum GlomerisLlmSettingSource: Equatable {
+enum GlomerisLlmSettingSource: Equatable, CaseIterable {
     /// Configured in this app: UserDefaults for the endpoint and model,
     /// the keychain for the key.
     case settings
@@ -31,6 +31,21 @@ enum GlomerisLlmSettingSource: Equatable {
     case environment
     /// Not available from either place.
     case absent
+    /// Stored here, but this app could not read it, and nothing was inherited
+    /// to fall back to (HORO-1368). Only the API key can reach this state; the
+    /// endpoint and model live in UserDefaults, which does not refuse.
+    ///
+    /// Distinct from `absent` because the remedy is different. "Not set" asks
+    /// the user for a value they never provided; this asks them to provide a
+    /// value they did, to a build that cannot get at the one they stored.
+    case unreadable
+
+    /// Whether a value will actually reach the CLI. `unreadable` will not:
+    /// nothing was inherited, and the stored item cannot be read, so a spawned
+    /// `glomeris` would see no variable and refuse with `NotConfigured`.
+    var isAvailable: Bool {
+        self == .settings || self == .environment
+    }
 }
 
 /// One field's resolved state, without its value.
@@ -42,14 +57,26 @@ enum GlomerisLlmSettingSource: Equatable {
 struct GlomerisLlmSettingsStatus: Equatable {
     var endpoint: GlomerisLlmSettingSource
     var model: GlomerisLlmSettingSource
-    var apiKey: GlomerisLlmSettingSource
+
+    /// `nil` while the answer is not known yet.
+    ///
+    /// Optional because of HORO-1368: this is the one field whose resolution
+    /// touches the keychain, the keychain must not be touched on the main
+    /// thread, and the screen has to render before an off-thread read can have
+    /// finished. A placeholder case would have been the alternative, and it
+    /// would have put "not configured yet" and "not looked at yet" into the
+    /// same value — the first is a state to act on, the second is a spinner.
+    var apiKey: GlomerisLlmSettingSource?
 
     /// Whether a live request could be attempted at all. All three are
     /// required — the CLI refuses with `NotConfigured` otherwise — so the UI
     /// can disable a connection-test button rather than invite a round trip
     /// that is guaranteed to fail locally.
+    ///
+    /// `false` while the key is still being resolved. A button that is briefly
+    /// disabled is a smaller wrong than one that is briefly enabled.
     var isComplete: Bool {
-        endpoint != .absent && model != .absent && apiKey != .absent
+        endpoint.isAvailable && model.isAvailable && apiKey?.isAvailable == true
     }
 }
 
@@ -78,7 +105,19 @@ struct GlomerisLlmSettingsStatus: Equatable {
 /// argument (visible in `ps` and refused by the CLI by flag name), never
 /// UserDefaults, never a file this app writes, never a log line. It is read
 /// from the keychain at the moment a command is spawned and not cached.
-struct GlomerisLlmSettingsStore {
+///
+/// ## Threads
+///
+/// Everything here is safe to call from any thread, and the two members that
+/// reach the keychain must be called off the main one — see
+/// [`resolvedStatus(environment:)`].
+///
+/// `@unchecked` for exactly one reason: `UserDefaults` is not marked `Sendable`
+/// by Foundation, while being documented as thread-safe. Everything else here
+/// is — `CredentialStore` requires it, and this struct has no mutable state of
+/// its own. The unchecked part is that one documented guarantee and nothing
+/// else.
+struct GlomerisLlmSettingsStore: @unchecked Sendable {
     private static let suiteName = "dev.glomeris.GlomerisMenuBar"
     private static let endpointKey = "llmBaseUrl"
     private static let modelKey = "llmModel"
@@ -114,13 +153,28 @@ struct GlomerisLlmSettingsStore {
         nonmutating set { Self.write(newValue, to: Self.modelKey, in: defaults) }
     }
 
-    /// Whether an API key is stored here. There is deliberately no getter for
-    /// the key itself on this type: the only code that needs the value is
+    /// Whether an API key is stored here, and whether that could be
+    /// established at all. There is deliberately no getter for the key itself
+    /// on this type: the only code that needs the value is
     /// [`childEnvironment(basedOn:)`], which puts it straight into a child
     /// process's environment. Anything else asking for it would be a leak in
     /// the making.
+    ///
+    /// Asks the store for *availability* and not for the value (HORO-1368).
+    /// Retrieving the value can block behind an authorisation prompt; asking
+    /// whether an item exists cannot.
+    var apiKeyAvailability: CredentialAvailability {
+        credentials.availability(forKey: Self.apiKeyAccount)
+    }
+
+    /// Whether an API key is stored here.
+    ///
+    /// `false` when the keychain refused the question, which is the same answer
+    /// this gave before HORO-1368 and is why the UI uses
+    /// [`status(environment:)`] instead: a `Bool` cannot tell "no key" apart
+    /// from "a key this build cannot reach".
     var hasStoredApiKey: Bool {
-        credentials.secret(forKey: Self.apiKeyAccount) != nil
+        apiKeyAvailability == .present
     }
 
     /// Stores the API key, trimmed — a pasted key routinely carries a trailing
@@ -142,11 +196,50 @@ struct GlomerisLlmSettingsStore {
         credentials.deleteSecret(forKey: Self.apiKeyAccount)
     }
 
+    /// [`setApiKey(_:)`] off the main thread.
+    ///
+    /// Writes block for the same reason reads do: `SecItemUpdate` replaces an
+    /// existing item's data, and the item's ACL guards that too, so saving over
+    /// a key stored by a different build can wait on an authorisation prompt
+    /// (HORO-1368 AC 1).
+    @discardableResult
+    func resolvedSetApiKey(_ key: String) async -> Bool {
+        await Self.offMainThread { self.setApiKey(key) }
+    }
+
+    /// [`deleteApiKey()`] off the main thread, for the same reason.
+    @discardableResult
+    func resolvedDeleteApiKey() async -> Bool {
+        await Self.offMainThread { self.deleteApiKey() }
+    }
+
     // MARK: - Resolution
 
     /// Where each field's effective value comes from, given `environment`
     /// (the launching environment, injectable for tests).
+    ///
+    /// Touches the keychain, so it must not be called on the main thread — use
+    /// [`resolvedStatus(environment:)`]. The read is non-blocking (availability,
+    /// not the value), but "non-blocking" is a property of today's
+    /// implementation and the main thread is the app's only entry point; see
+    /// this file's callers.
     func status(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> GlomerisLlmSettingsStatus {
+        var status = statusWithoutApiKey(environment: environment)
+        status.apiKey = Self.source(
+            availability: apiKeyAvailability,
+            inherited: environment[Self.apiKeyEnvironmentVariable])
+        return status
+    }
+
+    /// The endpoint and model only, with `apiKey` left `nil`.
+    ///
+    /// Reaches UserDefaults and nothing else, so it is safe on the main thread
+    /// and is what a view seeds itself with (HORO-1368 AC 2). The two fields it
+    /// does resolve are the two a user edits by typing, and re-resolving them on
+    /// every keystroke must not imply a keychain round trip per character.
+    func statusWithoutApiKey(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> GlomerisLlmSettingsStatus {
         GlomerisLlmSettingsStatus(
@@ -156,10 +249,33 @@ struct GlomerisLlmSettingsStore {
             model: Self.source(
                 stored: model != nil,
                 inherited: environment[Self.modelEnvironmentVariable]),
-            apiKey: Self.source(
-                stored: hasStoredApiKey,
-                inherited: environment[Self.apiKeyEnvironmentVariable])
+            apiKey: nil
         )
+    }
+
+    /// [`status(environment:)`] performed off the main thread.
+    ///
+    /// The point of the hop is not speed. A keychain operation can wait on a
+    /// person — `SecurityAgent` puts up an authorisation prompt and returns
+    /// nothing until it is answered — and a main thread that is waiting on a
+    /// person cannot service the status item, so AppKit removes it and the app
+    /// disappears from the menu bar with no way back in (HORO-1368).
+    func resolvedStatus(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) async -> GlomerisLlmSettingsStatus {
+        await Self.offMainThread { self.status(environment: environment) }
+    }
+
+    /// [`childEnvironment(basedOn:)`] performed off the main thread.
+    ///
+    /// This is the call that reads the key itself, so it is the one that really
+    /// can block on a prompt rather than merely being able to in principle
+    /// (AC 3). Callers are already `async` — both are button actions that then
+    /// spawn a `glomeris` child — so the hop costs them nothing.
+    func resolvedChildEnvironment(
+        basedOn environment: [String: String] = ProcessInfo.processInfo.environment
+    ) async -> [String: String] {
+        await Self.offMainThread { self.childEnvironment(basedOn: environment) }
     }
 
     /// The full environment to launch a `glomeris` child process with.
@@ -196,6 +312,49 @@ struct GlomerisLlmSettingsStore {
         if stored { return .settings }
         if normalized(inherited) != nil { return .environment }
         return .absent
+    }
+
+    /// The same rule for the one field whose storage can refuse the question.
+    ///
+    /// An inherited variable still wins over an unreadable item, and does so
+    /// silently, because in that case the app genuinely does work: the child
+    /// process gets the inherited key and the user has nothing to fix. The
+    /// degraded state is reported only when there is no fallback — which is
+    /// exactly when it changes what the user can do.
+    private static func source(
+        availability: CredentialAvailability,
+        inherited: String?
+    ) -> GlomerisLlmSettingSource {
+        if availability == .present { return .settings }
+        if normalized(inherited) != nil { return .environment }
+        return availability == .unreadable ? .unreadable : .absent
+    }
+
+    /// Keychain work, off the main thread and one at a time.
+    ///
+    /// Two separate properties, and only the second one needs this queue —
+    /// measured rather than assumed. Awaiting a nonisolated `async` function from
+    /// a main-actor caller already leaves the main actor, so replacing the body
+    /// below with a bare `work()` still runs the keychain call off the main
+    /// thread. What it loses is serialisation: two concurrent reads of the same
+    /// ACL-guarded item can raise two authorisation prompts, and a user facing a
+    /// stack of identical prompts cannot tell whether answering one did anything.
+    ///
+    /// The explicit queue is kept for that, and because "off the main thread"
+    /// then stops depending on a caller remembering to `await` from somewhere
+    /// nonisolated. `MainActor.run` here — the one-line change that reintroduces
+    /// the bug — is what the off-thread tests actually catch.
+    private static let keychainQueue = DispatchQueue(
+        label: "dev.glomeris.GlomerisMenuBar.keychain",
+        qos: .userInitiated
+    )
+
+    private static func offMainThread<T: Sendable>(
+        _ work: @escaping @Sendable () -> T
+    ) async -> T {
+        await withCheckedContinuation { continuation in
+            keychainQueue.async { continuation.resume(returning: work()) }
+        }
     }
 
     /// `nil` for absent, empty, or whitespace-only. One rule, applied to

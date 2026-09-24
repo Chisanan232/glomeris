@@ -78,8 +78,11 @@
 //  No provider environment reaches a child process here
 //  ---------------------------------------------------------------------
 //  `AiPlanSectionView.runLlmPlan()` wraps its client in
-//  `withEnvironment(settingsStore.childEnvironment())`, because `llm-plan` is
-//  the call that talks to a provider. Neither `explain` nor `execute` does, so
+//  `withEnvironment(await settingsStore.resolvedChildEnvironment())`, because
+//  `llm-plan` is the call that talks to a provider — and reading that key is
+//  the one thing on that screen that can wait on a keychain authorisation
+//  prompt, which is why it happens off the main thread (HORO-1368). Neither
+//  `explain` nor `execute` talks to a provider, so
 //  this file uses the client as handed to it and never touches the settings
 //  store. An API key is therefore absent from the environment of every child
 //  process a batch spawns, and `ApplyPlanViewTests` asserts that absence.

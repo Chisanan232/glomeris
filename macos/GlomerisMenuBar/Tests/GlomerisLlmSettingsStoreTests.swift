@@ -318,6 +318,324 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
 
         XCTAssertEqual(store.endpoint, "api.example.test/v1/chat/completions")
     }
+
+    // MARK: - Asking without reading (HORO-1368)
+
+    /// The change the whole ticket rests on. Establishing whether a key is
+    /// stored must not retrieve it: retrieving decrypts, decrypting consults the
+    /// item's ACL, and a build the ACL does not admit gets an authorisation
+    /// prompt instead of an answer — on the main thread, for as long as nobody
+    /// answers it.
+    ///
+    /// Before this, `status()` called `secret(forKey:)`. That is exactly the
+    /// touch this asserts is gone, so this test fails against the old
+    /// implementation rather than merely describing the new one.
+    func testAskingWhereTheKeyCameFromNeverRetrievesIt() {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
+        let (store, _, _) = makeStore(credentials: credentials)
+
+        let status = store.status(environment: [:])
+
+        XCTAssertEqual(status.apiKey, .settings, "it must still get the right answer")
+        XCTAssertEqual(
+            credentials.operations, [.availability],
+            "one existence query and nothing else; \(credentials.operations)")
+    }
+
+    /// The one call that legitimately needs the value, asserted as the only one,
+    /// so "the key is read at spawn time and nowhere else" is a measured claim.
+    func testOnlyBuildingAChildEnvironmentRetrievesTheKey() {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
+        let (store, _, _) = makeStore(credentials: credentials)
+
+        _ = store.status(environment: [:])
+        _ = store.hasStoredApiKey
+        _ = store.endpoint
+        _ = store.model
+        XCTAssertFalse(credentials.operations.contains(.secret))
+
+        _ = store.childEnvironment(basedOn: [:])
+
+        XCTAssertEqual(
+            credentials.operations.filter { $0 == .secret }.count, 1,
+            "the value is read once, at the moment a child process is spawned")
+    }
+
+    // MARK: - A refused read is not an absent key (AC 6)
+
+    /// The state that had no wording at all before this ticket, because it took
+    /// the menu-bar item with it and left nothing on screen to word.
+    ///
+    /// `unreadableKeys` is the only way to reproduce it without a keychain: the
+    /// real condition needs a binary whose code identity an existing item's ACL
+    /// rejects, which cannot be arranged from inside the test bundle that would
+    /// have to observe it.
+    func testAKeyTheKeychainRefusesIsReportedAsUnreadableRatherThanAbsent() {
+        let credentials = InMemoryCredentialStore(
+            secrets: ["llmApiKey": Self.key], unreadableKeys: ["llmApiKey"])
+        let (store, _, _) = makeStore(credentials: credentials)
+
+        let status = store.status(environment: [:])
+
+        XCTAssertEqual(store.apiKeyAvailability, .unreadable)
+        XCTAssertEqual(
+            status.apiKey, .unreadable,
+            "'Not set' about a key that is set sends the user to paste one they already have")
+        XCTAssertFalse(
+            status.isComplete,
+            "a key that cannot be read cannot reach the CLI, so a test would fail locally")
+        XCTAssertFalse(
+            store.hasStoredApiKey,
+            "the Bool cannot express this, which is why the UI does not use it")
+        XCTAssertNil(
+            store.childEnvironment(basedOn: [:])[
+                GlomerisLlmSettingsStore.apiKeyEnvironmentVariable],
+            "nothing readable means nothing to pass on — the CLI must refuse, not get a blank")
+    }
+
+    /// An inherited key wins over an unreadable one, and does so silently. In
+    /// that case the product genuinely works — the child process gets the
+    /// inherited key — so there is nothing for the user to fix and a warning
+    /// would be noise about a working setup.
+    func testAnInheritedKeyOutranksAnUnreadableStoredOneWithoutComplaining() {
+        let credentials = InMemoryCredentialStore(
+            secrets: ["llmApiKey": Self.key], unreadableKeys: ["llmApiKey"])
+        let (store, _, _) = makeStore(credentials: credentials)
+        store.endpoint = "https://configured.example.test/v1"
+        store.model = "a-model"
+
+        let environment = [
+            GlomerisLlmSettingsStore.apiKeyEnvironmentVariable: "inherited-key"
+        ]
+        let status = store.status(environment: environment)
+
+        XCTAssertEqual(status.apiKey, .environment)
+        XCTAssertTrue(status.isComplete, "this configuration works; it must not read as broken")
+        XCTAssertEqual(
+            store.childEnvironment(basedOn: environment)[
+                GlomerisLlmSettingsStore.apiKeyEnvironmentVariable],
+            "inherited-key")
+    }
+
+    /// The full truth table for the one field whose storage can refuse the
+    /// question, since three of the four rows are new and the interesting part is
+    /// which of availability and inheritance wins in each.
+    func testTheKeySourceTruthTable() {
+        let cases: [(CredentialAvailability, String?, GlomerisLlmSettingSource)] = [
+            (.present, nil, .settings),
+            (.present, "inherited", .settings),
+            (.absent, nil, .absent),
+            (.absent, "inherited", .environment),
+            (.unreadable, nil, .unreadable),
+            (.unreadable, "inherited", .environment),
+            // An exported-but-empty variable is not an inheritance, exactly as
+            // the Rust `provider_from_parts` reads it.
+            (.unreadable, "   ", .unreadable),
+            (.absent, "", .absent),
+        ]
+
+        for (availability, inherited, expected) in cases {
+            let unreadable: Set<String> = availability == .unreadable ? ["llmApiKey"] : []
+            let secrets = availability == .absent ? [:] : ["llmApiKey": Self.key]
+            let (store, _, _) = makeStore(
+                credentials: InMemoryCredentialStore(
+                    secrets: secrets, unreadableKeys: unreadable))
+            let environment =
+                inherited.map { [GlomerisLlmSettingsStore.apiKeyEnvironmentVariable: $0] } ?? [:]
+
+            XCTAssertEqual(
+                store.status(environment: environment).apiKey, expected,
+                "availability \(availability) with inherited \(inherited ?? "nil")")
+        }
+    }
+
+    // MARK: - Off the main thread (AC 1, AC 3)
+
+    /// The measured claim behind the fix. Every keychain touch must happen
+    /// somewhere other than the main thread, because a keychain operation can
+    /// wait on a person and a main thread that is waiting on a person cannot
+    /// service the status item — AppKit removes it, and the app disappears from
+    /// the menu bar with no way back in.
+    ///
+    /// `@MainActor` so the premise is real: these calls start on the thread the
+    /// app's UI runs on, which is the thread the bug was about.
+    ///
+    /// What this catches, measured: replacing the store's hop with
+    /// `await MainActor.run { work() }` fails this test and the one in
+    /// `AiProviderPreferencesViewTests`. Replacing it with a bare `work()` does
+    /// NOT — awaiting a nonisolated `async` function from a main-actor caller
+    /// already leaves the main actor, so that variant is off-thread too. The
+    /// queue's own contribution is serialisation, and
+    /// `testConcurrentResolutionIsSerialisedSoOnlyOnePromptCanEverBeOutstanding`
+    /// is the test that covers it.
+    @MainActor
+    func testEveryResolvedKeychainTouchHappensOffTheMainThread() async {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
+        let (store, _, _) = makeStore(credentials: credentials)
+        XCTAssertTrue(Thread.isMainThread, "the premise of this test")
+
+        _ = await store.resolvedStatus(environment: [:])
+        _ = await store.resolvedChildEnvironment(basedOn: [:])
+        _ = await store.resolvedSetApiKey("another-test-only-value")
+        _ = await store.resolvedDeleteApiKey()
+
+        XCTAssertEqual(
+            Set(credentials.touches.map(\.operation)),
+            [.availability, .secret, .set, .delete],
+            "all four kinds of touch are covered: \(credentials.touches)")
+        for touch in credentials.touches {
+            XCTAssertFalse(
+                touch.wasOnMainThread,
+                "\(touch.operation) ran on the main thread, which is the HORO-1368 defect")
+        }
+    }
+
+    /// Anti-vacuity for the test above: the recorder really can tell the main
+    /// thread apart, so "nothing ran on it" is a finding rather than a recorder
+    /// that always reports `false`. The synchronous members are what the
+    /// `resolved*` ones call, and calling one directly from here must be
+    /// recorded as main-thread.
+    @MainActor
+    func testTheThreadRecorderActuallyDetectsTheMainThread() {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
+        let (store, _, _) = makeStore(credentials: credentials)
+
+        _ = store.status(environment: [:])
+
+        XCTAssertEqual(credentials.touches.count, 1)
+        XCTAssertTrue(
+            credentials.touches[0].wasOnMainThread,
+            "if this is false the off-thread assertions above prove nothing")
+    }
+
+    /// Two overlapping reads of one ACL-guarded item can raise two authorisation
+    /// prompts, and a user facing a stack of identical prompts cannot tell
+    /// whether answering one did anything. The queue is serial for that reason,
+    /// so no two touches may overlap however many callers there are.
+    func testConcurrentResolutionIsSerialisedSoOnlyOnePromptCanEverBeOutstanding() async {
+        let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
+        let (store, _, _) = makeStore(credentials: credentials)
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<8 {
+                group.addTask { _ = await store.resolvedStatus(environment: [:]) }
+                group.addTask { _ = await store.resolvedChildEnvironment(basedOn: [:]) }
+            }
+        }
+
+        XCTAssertEqual(credentials.touches.count, 16, "every call must have happened")
+        XCTAssertEqual(
+            credentials.maxConcurrentTouches, 1,
+            "two keychain operations were in flight at once, which is two prompts")
+    }
+}
+
+/// A `CredentialStore` that records what was asked of it, and from where.
+///
+/// Exists for two claims a value-returning double cannot make: that establishing
+/// whether a key exists does not retrieve it (the substitution HORO-1368 turns
+/// on), and that every touch happens off the main thread. Both are about the
+/// calls made rather than the answers given, so the double has to be a recorder.
+final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {
+    enum Operation: Equatable {
+        case availability
+        case secret
+        case set
+        case delete
+    }
+
+    struct Touch: Equatable, CustomStringConvertible {
+        let operation: Operation
+        let wasOnMainThread: Bool
+
+        var description: String {
+            "\(operation)\(wasOnMainThread ? " on the main thread" : "")"
+        }
+    }
+
+    private let lock = NSLock()
+    private var recorded: [Touch] = []
+    private var secrets: [String: String]
+    private var inFlight = 0
+    private var peakInFlight = 0
+
+    init(secrets: [String: String] = [:]) {
+        self.secrets = secrets
+    }
+
+    var touches: [Touch] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    var operations: [Operation] { touches.map(\.operation) }
+
+    /// The high-water mark of overlapping calls. `1` means the caller serialised
+    /// them; anything more means two keychain operations — so potentially two
+    /// authorisation prompts — were outstanding together.
+    var maxConcurrentTouches: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return peakInFlight
+    }
+
+    /// Records the call, then holds briefly so genuinely concurrent callers
+    /// overlap observably. Without the hold, a caller that did fan out could
+    /// still finish each call before starting the next and look serial.
+    private func record<T>(_ operation: Operation, _ work: () -> T) -> T {
+        let touch = Touch(operation: operation, wasOnMainThread: Thread.isMainThread)
+        lock.lock()
+        recorded.append(touch)
+        inFlight += 1
+        peakInFlight = max(peakInFlight, inFlight)
+        lock.unlock()
+
+        let result = work()
+
+        Thread.sleep(forTimeInterval: 0.005)
+        lock.lock()
+        inFlight -= 1
+        lock.unlock()
+        return result
+    }
+
+    func availability(forKey key: String) -> CredentialAvailability {
+        record(.availability) {
+            lock.lock()
+            defer { lock.unlock() }
+            return secrets[key]?.isEmpty == false ? .present : .absent
+        }
+    }
+
+    func secret(forKey key: String) -> String? {
+        record(.secret) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let secret = secrets[key], !secret.isEmpty else { return nil }
+            return secret
+        }
+    }
+
+    @discardableResult
+    func setSecret(_ secret: String, forKey key: String) -> Bool {
+        record(.set) {
+            lock.lock()
+            defer { lock.unlock() }
+            secrets[key] = secret
+            return true
+        }
+    }
+
+    @discardableResult
+    func deleteSecret(forKey key: String) -> Bool {
+        record(.delete) {
+            lock.lock()
+            defer { lock.unlock() }
+            secrets.removeValue(forKey: key)
+            return true
+        }
+    }
 }
 
 /// The real keychain, covered by observing what it does rather than
