@@ -924,6 +924,37 @@ final class ApplyPlanViewTests: XCTestCase {
         XCTAssertFalse(source.contains("NSAlert"))
     }
 
+    /// HORO-1367 cut the visible caption under "Apply plan…" from two
+    /// sentences to one, because the sentence it dropped was already stated
+    /// in the button's own accessibility hint directly above it. That is only
+    /// a density win if both halves of the arrangement hold: the visible line
+    /// must keep the promise that nothing runs unprompted, and the hint must
+    /// keep the *whole* sentence, because a VoiceOver user gets the hint
+    /// instead of the caption rather than as well as it.
+    func testTheApplyEntryPointPromisesConsentOnScreenAndInFullToVoiceOver() throws {
+        let source = try strippedSource()
+
+        XCTAssertTrue(
+            source.contains("Nothing runs until you confirm."),
+            "the visible line must still say that pressing Apply deletes nothing"
+        )
+        XCTAssertTrue(
+            source.contains("Re-checks every suggestion against Glomeris"),
+            "the hint must still say that the plan is re-checked, since the caption no longer does"
+        )
+        XCTAssertTrue(
+            source.contains("Nothing is deleted until you confirm."),
+            "the hint must still carry the consent promise in full"
+        )
+        // The ellipsis is what tells a sighted user there is a step in
+        // between. Without it the shortened caption would be the only thing
+        // saying so.
+        XCTAssertTrue(
+            source.contains("Button(\"Apply plan…\")"),
+            "the ellipsis promises the review step the caption no longer spells out"
+        )
+    }
+
     // MARK: - Reading this file's own source
 
     private func strippedSource() throws -> String {
