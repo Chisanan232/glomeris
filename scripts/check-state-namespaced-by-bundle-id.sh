@@ -116,6 +116,22 @@ if [[ -z "$plist_identifier" ]]; then
   exit 1
 fi
 
+# The single quotes are the whole point of this comparison, so SC2016's
+# suggestion to use double quotes must not be taken. What is being compared
+# against is the literal text `$(PRODUCT_BUNDLE_IDENTIFIER)` that Info.plist has
+# to contain for Xcode to substitute the build setting at build time. Double
+# quotes would make it a command substitution: bash would report
+# `PRODUCT_BUNDLE_IDENTIFIER: command not found`, compare against that command's
+# empty output, and this check would then fail for every plist including the
+# correct one — at which point the obvious way to get CI green again is to delete
+# the check. Verified both ways rather than reasoned about.
+#
+# The directive's reach was measured too, because it is wider than the one line
+# it is for: it covers the whole `if ... fi` below, so a second single-quoted
+# expansion added inside this block would be silenced as well. Measured by adding
+# one and seeing it go unreported, and by the same line outside the block being
+# reported. Keep this block to the one comparison it makes.
+# shellcheck disable=SC2016
 if [[ "$plist_identifier" != '$(PRODUCT_BUNDLE_IDENTIFIER)' ]]; then
   fail "${INFO_PLIST}: CFBundleIdentifier is '${plist_identifier}', not \$(PRODUCT_BUNDLE_IDENTIFIER). A literal here decouples the running app's identifier from project.yml, so state would be filed under a stale name while the code still looked derived."
 fi
