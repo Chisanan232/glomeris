@@ -61,11 +61,48 @@ final class GlomerisPopoverViewTests: XCTestCase {
     /// A menu-bar popover that grows with its content ends up covering the
     /// screen whose disk it is reporting on — and the history card alone can
     /// hold twenty rows.
-    func testTheBodyScrollsWithinABoundedHeight() {
+    ///
+    /// HORO-1367 changed what this asserts, because the old shape did not
+    /// work: a lone `maxHeight` bounded nothing. A `ScrollView` accepts any
+    /// height it is offered, so it reported no preference, and
+    /// `MenuBarExtra(.window)` sized the panel from its own default — a
+    /// measured 289pt viewport while the ceiling stood at 520. So the body
+    /// now takes a *range*, and both ends of it have to be there: the floor
+    /// is what the panel actually adopts, the ceiling is what keeps it off
+    /// the screen it is reporting on.
+    func testTheBodyScrollsWithinABoundedHeightRange() {
         XCTAssertTrue(code.contains("ScrollView"))
         XCTAssertTrue(
-            code.contains("maxHeight: GlomerisDesign.maxBodyHeight"),
-            "the scrolling body must be bounded, and bounded by maxHeight so a short popover stays short"
+            code.contains("minHeight: Self.bodyHeightLimits.min"),
+            "without a floor the ScrollView states no height preference and the panel picks its own"
+        )
+        XCTAssertTrue(
+            code.contains("maxHeight: Self.bodyHeightLimits.max"),
+            "the scrolling body must still be capped, or it covers the screen it is reporting on"
+        )
+    }
+
+    /// The bound has to come from the display, not from inside the panel.
+    /// A `GeometryReader` here could only report the space the panel had
+    /// already been given, which is the number this ticket is trying to
+    /// change — so reading it would make the limit circular.
+    func testTheHeightBoundIsTakenFromTheDisplayAndNotFromInsideThePanel() {
+        XCTAssertTrue(
+            code.contains("NSScreen"),
+            "the panel's height limit must be bounded by the display it opens on"
+        )
+        XCTAssertTrue(
+            code.contains("GlomerisDesign.bodyHeightLimits(visibleScreenHeight:"),
+            "the shell must ask the design system for the range rather than computing its own"
+        )
+        XCTAssertTrue(
+            code.contains("visibleFrame"),
+            "frame rather than visibleFrame would include the menu bar and Dock, so the panel "
+                + "would ask for height that is not there"
+        )
+        XCTAssertFalse(
+            code.contains("GeometryReader"),
+            "a geometry proxy inside the panel can only report the size the panel already has"
         )
     }
 
