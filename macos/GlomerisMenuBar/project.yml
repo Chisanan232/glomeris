@@ -84,6 +84,11 @@ targets:
       - path: Sources/ProjectRootsPreferencesView.swift
       - path: Sources/GlomerisDtos.swift
       - path: Sources/GlomerisVocabulary.swift
+      # HORO-1451: the clause composer every spoken row label goes through.
+      # Compiled in so its termination rule is asserted against the real
+      # function, and so each row's label can be checked against it rather than
+      # against a restatement of the rule in the test file.
+      - path: Sources/SpokenLabel.swift
       # HORO-1323: the actionability wording the candidates list, the AI plan
       # card and the Clean button all read, asserted directly rather than
       # through whichever of the three views happens to render it.

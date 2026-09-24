@@ -39,6 +39,7 @@
 		7765D1EC48C4DACF135BD63F /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
 		79370CF11525490DD5B73CC3 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
 		7D61BB3D174236A429452646 /* OverviewStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */; };
+		81DD0203CA5AE10816276612 /* SpokenLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FAC22B023BB94EA556577 /* SpokenLabel.swift */; };
 		847FDF28A3C3FFE0307946CF /* GlomerisMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29CCC97F9DEA1F53F834AF90 /* GlomerisMenuBarApp.swift */; };
 		861A2E9ED2F71299D3BB44C9 /* ProjectRootsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017031320C8922881F4739BC /* ProjectRootsStore.swift */; };
 		86AAAE7934B24C3234B3C04D /* HistoryAuditSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A258960CB7D0D961F0980060 /* HistoryAuditSectionViewTests.swift */; };
@@ -48,6 +49,7 @@
 		8B353B39BE18016E0CA9624F /* ProjectRootsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA84B79B4966F05DE18D3127 /* ProjectRootsStoreTests.swift */; };
 		9105F63CB2E9FF2919AC35A0 /* AutopilotPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */; };
 		A2F3A16A6E272E1B72C78FBA /* GlomerisPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCB103016472A37B7F09292B /* GlomerisPopoverView.swift */; };
+		A407F3D2CBB4A2C23A6AED8E /* SpokenLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FAC22B023BB94EA556577 /* SpokenLabel.swift */; };
 		AC11DF07CE9974ECB729106B /* GlomerisVocabularyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FB1194E381928C94F7317F0 /* GlomerisVocabularyTests.swift */; };
 		AD262762180A887D1B0A3A98 /* GlomerisMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98E13E5FE5F4E90FE76683D /* GlomerisMark.swift */; };
 		AF71CB2F7EFCFF57F96E2F16 /* AiProviderPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */; };
@@ -110,6 +112,7 @@
 		A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisExecutableLocator.swift; sourceTree = "<group>"; };
 		A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiProviderPreferencesView.swift; sourceTree = "<group>"; };
 		A98E13E5FE5F4E90FE76683D /* GlomerisMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisMark.swift; sourceTree = "<group>"; };
+		A98FAC22B023BB94EA556577 /* SpokenLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpokenLabel.swift; sourceTree = "<group>"; };
 		AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateDetailViewTests.swift; sourceTree = "<group>"; };
 		B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutopilotPreferencesView.swift; sourceTree = "<group>"; };
 		B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsPreferencesView.swift; sourceTree = "<group>"; };
@@ -178,6 +181,7 @@
 				8906B36CF3E4AA34D9E7564C /* PlanApplication.swift */,
 				B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */,
 				017031320C8922881F4739BC /* ProjectRootsStore.swift */,
+				A98FAC22B023BB94EA556577 /* SpokenLabel.swift */,
 				702FC176DA9694CDEA648E8A /* StatusHealthSectionView.swift */,
 			);
 			path = Sources;
@@ -347,6 +351,7 @@
 				D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */,
 				89543AEC87E7A164FB4ABCB1 /* ProjectRootsStore.swift in Sources */,
 				8B353B39BE18016E0CA9624F /* ProjectRootsStoreTests.swift in Sources */,
+				81DD0203CA5AE10816276612 /* SpokenLabel.swift in Sources */,
 				56F73C2BCC1F258A41649D5E /* StatusHealthSectionView.swift in Sources */,
 				EBB34681F1C98CE6EAA54A59 /* StatusHealthSectionViewTests.swift in Sources */,
 			);
@@ -379,6 +384,7 @@
 				5574CDBBE4BC468971B1A704 /* PlanApplication.swift in Sources */,
 				316F2E44994F8F44D10C01F6 /* ProjectRootsPreferencesView.swift in Sources */,
 				861A2E9ED2F71299D3BB44C9 /* ProjectRootsStore.swift in Sources */,
+				A407F3D2CBB4A2C23A6AED8E /* SpokenLabel.swift in Sources */,
 				B30687757F8D76B7C8516A4B /* StatusHealthSectionView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
