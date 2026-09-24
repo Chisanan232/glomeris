@@ -646,6 +646,67 @@ final class GlomerisVocabularyTests: XCTestCase {
         }
     }
 
+    // MARK: - A refusal may not describe a narrower cause than it covers (HORO-1326)
+
+    /// `ask_consent_mismatch` fires for two causes, and the CLI's own message
+    /// names both: the fingerprint is stale, *or* it was observed for a
+    /// different resource. The wording here described only the first ("The
+    /// resource changed after you confirmed"), so in the second case the app
+    /// stated something untrue about the user's filesystem — on a product whose
+    /// whole claim is that it reports only what it observed. Nothing changed;
+    /// the confirmation simply never belonged to this resource.
+    ///
+    /// Asserted as a prohibition on the narrower claim, plus the minimum the
+    /// sentence must still convey. Deliberately *not* an equality against the
+    /// replacement copy: pinning the literal would fail on every legitimate
+    /// rewording and would teach the next person to update the fixture instead
+    /// of re-reading what the CLI means by the token.
+    func testConsentMismatchWordingCoversBothCausesRatherThanOnlyAChange() {
+        let term = GlomerisVocabulary.refusal("ask_consent_mismatch")
+        let copy = "\(term.title) \(term.explanation)".lowercased()
+
+        // Each of these asserts, or presupposes, that the resource used to
+        // match and then changed — true of one cause, false of the other.
+        for narrowing in ["changed", "no longer", "expired", "out of date", "stale"] {
+            XCTAssertFalse(
+                copy.contains(narrowing),
+                """
+                ask_consent_mismatch's wording says "\(narrowing)", which claims the \
+                resource changed. It also fires when a structurally valid \
+                confirmation was observed for a different resource, where nothing \
+                changed at all: \(term.title) / \(term.explanation)
+                """
+            )
+        }
+
+        // The prohibition above is satisfiable by saying nothing useful, so the
+        // sentence must still name what did not match and that nothing ran.
+        XCTAssertTrue(
+            copy.contains("confirmation"),
+            "the user has to know which of their actions this is about: \(copy)"
+        )
+        XCTAssertTrue(
+            copy.contains("match"),
+            "a mismatch is the actual fact, and it is what distinguishes this "
+                + "refusal from ask_no_consent: \(copy)"
+        )
+        XCTAssertTrue(
+            copy.contains("refused"),
+            "the reader must be told the action did not run: \(copy)"
+        )
+    }
+
+    /// The two consent refusals are different situations with different
+    /// remedies — one needs a confirmation, the other needs a fresh one — so
+    /// neither the title nor the explanation may be shared between them. A
+    /// widened sentence is the most likely way to collapse them by accident.
+    func testTheTwoConsentRefusalsDoNotReadAsTheSameSituation() {
+        let noConsent = GlomerisVocabulary.refusal("ask_no_consent")
+        let mismatch = GlomerisVocabulary.refusal("ask_consent_mismatch")
+        XCTAssertNotEqual(noConsent.title, mismatch.title)
+        XCTAssertNotEqual(noConsent.explanation, mismatch.explanation)
+    }
+
     /// Explanations are sentences shown to a non-expert. They must not
     /// simply re-emit the internal tag the title was supposed to replace.
     func testExplanationsDoNotLeakInternalTags() {
