@@ -153,7 +153,9 @@ done < <(
 # ---------------------------------------------------------------------------
 # 4. The keychain service is the derived identity.
 # ---------------------------------------------------------------------------
-service_line="$(grep -nE 'static let service' <<<"$(without_comments "$KEYCHAIN_FILE")" || true)"
+# No -n: without_comments already prefixes each line with its number, and a
+# second pass would report a violation at "24:117:".
+service_line="$(grep -E 'static let service' <<<"$(without_comments "$KEYCHAIN_FILE")" || true)"
 
 if [[ -z "$service_line" ]]; then
   echo "FAIL: found no 'static let service' in ${KEYCHAIN_FILE}."
