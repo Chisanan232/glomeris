@@ -541,6 +541,10 @@ mod tests {
         NativeCleanup, Recoverability, ResourceFingerprint, ResourceId, ResourceLocator,
     };
     use crate::evidence::probe::ProbeReason;
+    use crate::monitor::fs_stat::FsUsage;
+    use crate::monitor::persistence::{PersistenceBackend, PressureEvent};
+    use crate::monitor::pressure::PressureState;
+    use crate::monitor::ThresholdConfig;
 
     /// A collector reporting a fully clean, non-active resource on every
     /// call: empty process lists, no git repo, tool not live. Used where
@@ -1157,6 +1161,88 @@ mod tests {
         assert!(
             !self_state.exists(),
             "step 1 removes the self-state fixture and nothing recreates it"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1467: emergency mode must not write a pressure row asserting a
+    /// state the filesystem is not in.
+    ///
+    /// The fixture reproduces the live DogFood reading exactly — 79.58%
+    /// used with 94.0 GB free — which the shipped default thresholds
+    /// classify as `Warn`. Emergency needs 97.0% used or 3 GiB free. The
+    /// pre-fix code wrote `EMERGENCY -> EMERGENCY` while attaching those
+    /// real figures, so the row contradicted its own measurements.
+    ///
+    /// Reads back the same path it passes as `self_state_path`, because in
+    /// production that path and the pressure history are one file (see
+    /// `main.rs`), and the two being one file is what made the defect
+    /// visible to the founder.
+    #[test]
+    fn emergency_records_no_pressure_row_asserting_a_state_the_disk_is_not_in() {
+        // A 460.4 GB volume with 94.0 GB free.
+        const TOTAL_BYTES: u64 = 494_384_795_648;
+        const FREE_BYTES: u64 = 100_936_183_808;
+        let usage = FsUsage::new(TOTAL_BYTES, FREE_BYTES);
+
+        // Fixture control: judged by the same thresholds the polling loop
+        // uses, so an `EMERGENCY` row built from these readings is false
+        // rather than merely an unlucky sample.
+        assert_eq!(
+            ThresholdConfig::default().classify(usage.used_percent(), usage.free_bytes),
+            PressureState::Warn,
+            "fixture invalid: these readings must not classify as EMERGENCY"
+        );
+
+        let dir = make_temp_dir("no-false-pressure-row");
+        let self_state = dir.join("history.tsv");
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+
+        let ctx = DiscoveryContext::new(home_dir);
+        // Empty registry, never `builtin()`, for the same reason as the
+        // tests above — see their doc comments.
+        let registry = DetectorRegistry::from_detectors(vec![]);
+        let actions = ActionRegistry::builtin();
+
+        run_emergency(
+            &CleanCollector,
+            &registry,
+            &actions,
+            &ctx,
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
+        );
+
+        let recorded = fs::read_to_string(&self_state).unwrap_or_default();
+        assert!(
+            !recorded.contains("EMERGENCY"),
+            "emergency mode recorded a pressure row claiming EMERGENCY on a \
+             disk the same thresholds classify as WARN: {recorded:?}"
+        );
+
+        // Anti-vacuity: the assertion above must be capable of failing. A
+        // genuine EMERGENCY row, written through the same backend type to a
+        // sibling path, is caught by the identical predicate — so an empty
+        // or absent file above is the product's behaviour and not a
+        // matcher that can never see anything.
+        let control_path = dir.join("control-history.tsv");
+        crate::monitor::persistence::FilePersistence::new(&control_path)
+            .record(&PressureEvent {
+                unix_time_secs: 1,
+                from: PressureState::Critical,
+                to: PressureState::Emergency,
+                used_percent: 98.0,
+                free_bytes: 1,
+            })
+            .expect("control write must succeed");
+        let control = fs::read_to_string(&control_path).unwrap();
+        assert!(
+            control.contains("EMERGENCY"),
+            "control invalid: the predicate cannot see a real EMERGENCY row: {control:?}"
         );
 
         fs::remove_dir_all(&dir).ok();
