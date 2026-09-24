@@ -1089,6 +1089,90 @@ mod tests {
         fs::remove_dir_all(&root).ok();
     }
 
+    /// HORO-1360 AC6 / HORO-1359 AC5: a registered-but-unrunnable action is
+    /// reported as ineligible, spends no attempt, and is a different outcome
+    /// from an execution that failed.
+    ///
+    /// `homebrew.cleanup.cache` is registered for `HomebrewCache` and its
+    /// step carries no scoped path, so `executor::structural_refusal`
+    /// rejects it unconditionally. Before this fix an allowlisted Homebrew
+    /// cache charged an attempt and came back `Failed`.
+    ///
+    /// The fixture is a directory this test creates under `temp_dir()` and
+    /// labels `HomebrewCache`. Nothing here reads or touches a real Homebrew
+    /// cache, and nothing here could: the whole point is that the action is
+    /// refused before it runs.
+    #[test]
+    fn an_unrunnable_action_is_ineligible_rather_than_a_failed_attempt() {
+        let fixture = fixture();
+        let brew_root = make_temp_dir("brew-cache");
+        let cache = brew_root.join("Cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("some.bottle.tar.gz"), vec![0u8; 8192]).unwrap();
+        let brew = evidence_for(
+            &cache,
+            ResourceKind::HomebrewCache,
+            Regenerability::RegenerableByTool,
+            8192,
+        );
+        // Positive control, same run: a candidate whose action IS runnable.
+        let (node_root, node) = node_fixture("ineligible-control", 4096);
+        let node_modules = node_root.join("node_modules");
+        let envelope = enabled_envelope(&[ResourceKind::HomebrewCache, ResourceKind::NodeModules]);
+
+        // A real run, not a dry one: `Planned` would hide the very thing
+        // under test, which is what happens on the way to execution.
+        let report = run(&fixture, &envelope, vec![brew, node], &[], false);
+
+        // The allowlist admitted it — this is not a policy refusal dressed
+        // up as something else.
+        assert_eq!(report.items[0].kind, ResourceKind::HomebrewCache);
+        assert_eq!(report.items[0].policy_label, "AUTO_SAFE");
+        assert_eq!(report.safety_refusals(), 0, "not a policy denial");
+
+        let AutopilotItemOutcome::Ineligible { reason } = &report.items[0].outcome else {
+            panic!(
+                "expected Ineligible, got {:?} — a `Failed` here is the bug \
+                 this test exists for",
+                report.items[0].outcome
+            );
+        };
+        assert!(
+            reason.contains("scoped_path"),
+            "the reason must be the executor's own, got {reason:?}"
+        );
+        assert!(cache.exists(), "nothing ran, so nothing was deleted");
+
+        // No attempt spent on it. The control succeeded in the same run, so
+        // `1` here is the control's attempt and not the brew candidate's:
+        // without the fix this would be 2.
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 1);
+        assert_eq!(
+            report.items[1].outcome,
+            AutopilotItemOutcome::Succeeded {
+                reclaimed_bytes: Some(4096)
+            },
+            "control invalid: the runnable candidate did not run either, so \
+             the outcome above proves nothing about unrunnability"
+        );
+        assert!(!node_modules.exists());
+
+        // And the two read differently to a human, not just to a matcher.
+        let rendered = report.to_string();
+        assert!(
+            rendered.contains("skipped, no attempt spent:"),
+            "the report must say it skipped, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("failed:"),
+            "nothing failed in this run, got:\n{rendered}"
+        );
+
+        fs::remove_dir_all(&brew_root).ok();
+        fs::remove_dir_all(&node_root).ok();
+    }
+
     // --- budgets ---
 
     #[test]
