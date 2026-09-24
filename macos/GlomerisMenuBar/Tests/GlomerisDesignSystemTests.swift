@@ -63,6 +63,29 @@ final class GlomerisDesignSystemTests: XCTestCase {
         )
     }
 
+    /// The other end of the same argument, and the one HORO-1367 left
+    /// unguarded when it widened the panel: a menu-bar popover is a column
+    /// hanging off a menu-bar item, and a wide enough one stops reading as
+    /// that and starts crowding the item it belongs to.
+    ///
+    /// Expressed against the narrowest display the app is expected to run on
+    /// rather than as a bare number, because that is the reasoning the width
+    /// was actually chosen by — `popoverWidth`'s own note claims the panel is
+    /// a third of a 1280pt display, and nothing else in the suite would notice
+    /// if a later widening made that false.
+    func testThePopoverStaysAColumnAndNotAWindow() {
+        let narrowestSupportedDisplayWidth: CGFloat = 1280
+        XCTAssertLessThanOrEqual(
+            GlomerisDesign.popoverWidth * 3,
+            narrowestSupportedDisplayWidth,
+            """
+            \(GlomerisDesign.popoverWidth)pt is more than a third of a \
+            \(narrowestSupportedDisplayWidth)pt display — wide enough to crowd the menu-bar \
+            item it hangs from
+            """
+        )
+    }
+
     /// A menu-bar popover that can grow without limit stops being a glance
     /// and starts covering the screen whose disk it is reporting on.
     func testBodyHeightIsBounded() {
