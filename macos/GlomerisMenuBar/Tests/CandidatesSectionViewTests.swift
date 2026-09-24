@@ -103,7 +103,7 @@ final class CandidatesSectionViewTests: XCTestCase {
             // builds. It used to be the unsuffixed name, which meant this test
             // silently kept its own never-rebuilt copy — the exact staleness
             // the revision suffix exists to prevent (HORO-1365).
-            .appendingPathComponent("glomeris-client-fixture-helper-v3")
+            .appendingPathComponent("glomeris-client-fixture-helper-v4")
         // Reuse the same compiled fixture GlomerisClientTests builds; if
         // this test runs before that one has compiled it, build it here.
         if !FileManager.default.isExecutableFile(atPath: binaryURL.path) {

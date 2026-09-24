@@ -28,17 +28,71 @@
  * and `GLOMERIS_FIXTURE_EXIT` are read first when set, and reach the child
  * through `GlomerisClient(executableURL:environment:)`. Both are ignored when
  * unset, so every argv-driven test above is untouched.
+ *
+ * HORO-1366 adds two more environment knobs, because the override above has a
+ * blind spot: it answers before ever looking at `argv`, so a fixture-driven
+ * test cannot tell what production actually asked for. That matters most for
+ * the one argument the batch path must never lose — `--confirm-ask` — since a
+ * test asserting only "the item was cleaned" passes identically whether or not
+ * consent was requested.
+ *
+ *   GLOMERIS_FIXTURE_ARGV_LOG   append this invocation's argv to that path,
+ *                               one argument per line, terminated by a blank
+ *                               line so a test can split one log into separate
+ *                               invocations and assert on each in order.
+ *                               Written BEFORE answering, and appended rather
+ *                               than truncated, so a sequence of children
+ *                               driven by one production loop all land in it.
+ *   GLOMERIS_FIXTURE_LINGER_MS  the argv protocol's `linger-ms`, available to
+ *                               the environment protocol too, so a test can
+ *                               cancel a production-driven call while a child
+ *                               is genuinely in flight rather than before the
+ *                               loop has started.
+ *
+ * Both are ignored when unset, so nothing above changes.
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
+/* argv[0] is included: which binary ran is part of what a caller chose. */
+static void log_argv(int argc, char **argv) {
+    const char *log_path = getenv("GLOMERIS_FIXTURE_ARGV_LOG");
+    if (log_path == NULL) {
+        return;
+    }
+    FILE *log = fopen(log_path, "a");
+    if (log == NULL) {
+        return;
+    }
+    for (int i = 0; i < argc; i++) {
+        fprintf(log, "%s\n", argv[i]);
+    }
+    fputs("\n", log);
+    fclose(log);
+}
+
+static void linger_from_env(void) {
+    const char *linger = getenv("GLOMERIS_FIXTURE_LINGER_MS");
+    if (linger == NULL) {
+        return;
+    }
+    long linger_ms = atol(linger);
+    if (linger_ms > 0) {
+        usleep((useconds_t)linger_ms * 1000);
+    }
+}
+
 int main(int argc, char **argv) {
+    log_argv(argc, argv);
+
     const char *env_stdout = getenv("GLOMERIS_FIXTURE_STDOUT");
     const char *env_exit = getenv("GLOMERIS_FIXTURE_EXIT");
     if (env_stdout != NULL) {
         fputs(env_stdout, stdout);
+        /* Flushed before lingering, for the argv protocol's reason below. */
         fflush(stdout);
+        linger_from_env();
         return env_exit != NULL ? atoi(env_exit) : 0;
     }
 

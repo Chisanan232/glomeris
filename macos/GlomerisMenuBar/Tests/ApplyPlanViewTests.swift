@@ -715,7 +715,7 @@ final class ApplyPlanViewTests: XCTestCase {
 
     private static func fixtureBinary() throws -> URL {
         let binaryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glomeris-client-fixture-helper-v3")
+            .appendingPathComponent("glomeris-client-fixture-helper-v4")
         guard !FileManager.default.isExecutableFile(atPath: binaryURL.path) else { return binaryURL }
 
         let sourceURL = URL(fileURLWithPath: #filePath)
