@@ -224,9 +224,35 @@ struct GlomerisPopoverView: View {
             }
             .padding(GlomerisDesign.outerPadding)
         }
-        // `maxHeight`, not `height`: a popover showing one healthy status
-        // card should be the size of one healthy status card.
-        .frame(maxHeight: GlomerisDesign.maxBodyHeight)
+        // HORO-1367: a range, not a ceiling. `maxHeight` alone stated no
+        // preference a `ScrollView` would pass on, so the panel sized itself
+        // from `MenuBarExtra`'s own default and opened far shorter than the
+        // ceiling allowed — see `GlomerisDesign.minBodyHeight`. The floor is
+        // the preference; the ceiling still keeps the panel off the screen it
+        // is reporting on.
+        .frame(
+            minHeight: Self.bodyHeightLimits.min,
+            maxHeight: Self.bodyHeightLimits.max
+        )
+    }
+
+    /// The height range to offer the body, bounded by the display.
+    ///
+    /// Read from `NSScreen` rather than a `GeometryReader`, because the
+    /// question is how much room the *panel* may take on the display, and a
+    /// geometry proxy inside the panel can only report the space the panel
+    /// has already been given.
+    ///
+    /// On a multi-display setup this may take its bound from the display the
+    /// user is acting on rather than the one the panel opened over. That
+    /// affects only how much height the panel asks for: the body scrolls
+    /// internally either way, so no state becomes unreachable if the guess is
+    /// the less generous of the two.
+    private static var bodyHeightLimits: (min: CGFloat, max: CGFloat) {
+        let visibleHeight = NSScreen.main?.visibleFrame.height
+            ?? NSScreen.screens.first?.visibleFrame.height
+            ?? 0
+        return GlomerisDesign.bodyHeightLimits(visibleScreenHeight: visibleHeight)
     }
 
     // MARK: - Detail
