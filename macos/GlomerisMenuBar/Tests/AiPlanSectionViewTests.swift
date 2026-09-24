@@ -711,4 +711,57 @@ final class AiPlanSectionViewTests: XCTestCase {
             "the card must not send the user to a terminal for something the GUI now does"
         )
     }
+
+    // MARK: - HORO-1363: the suggestion row stays actionable
+
+    /// The same defect, and the same fix, as the candidate row — see
+    /// `CandidatesSectionViewTests.testTheCandidateRowRemainsAPressableButton`.
+    /// A suggestion row carries the model's reason and nothing else in this app
+    /// repeats it, so a row a VoiceOver user cannot press is a row whose
+    /// evidence they cannot reach.
+    func testTheSuggestionRowRemainsAPressableButton() throws {
+        let body = try Self.rowViewBody(in: try Self.readCode())
+
+        XCTAssertTrue(
+            body.contains("Button {"),
+            "the row must stay a Button — that is where AXPress comes from"
+        )
+        XCTAssertFalse(
+            Self.ignoresItsChildren(body),
+            "HORO-1363: .accessibilityElement(children: .ignore) is back on the AI Plan row, "
+                + "which costs it the AXButton role and the AXPress action"
+        )
+        XCTAssertTrue(body.contains(".accessibilityLabel(row.accessibilityLabel)"))
+        XCTAssertTrue(body.contains(".accessibilityHint("))
+        XCTAssertFalse(body.contains("func modelQuote"), "the rowView window over-ran its function")
+    }
+
+    /// Anti-vacuity for the test above.
+    func testThePressableSuggestionRowGuardWouldCatchTheModifierReturning() throws {
+        let body = try Self.rowViewBody(in: try Self.readCode())
+        let regressed = body.replacingOccurrences(
+            of: ".buttonStyle(.plain)",
+            with: ".buttonStyle(.plain)\n        .accessibilityElement(children: .ignore)"
+        )
+        XCTAssertNotEqual(regressed, body, "no .buttonStyle(.plain) to splice onto — the row changed shape")
+        XCTAssertTrue(
+            Self.ignoresItsChildren(regressed),
+            "the guard would not notice the modifier returning"
+        )
+    }
+
+    /// `rowView`'s body, windowed at the function's own indentation.
+    private static func rowViewBody(in source: String) throws -> String {
+        let signature = try XCTUnwrap(
+            source.range(of: "private func rowView("),
+            "no `private func rowView(` — renamed, or no longer a function"
+        )
+        let rest = source[signature.upperBound...]
+        let end = try XCTUnwrap(rest.range(of: "\n    }\n"), "could not find the end of rowView")
+        return String(rest[..<end.upperBound])
+    }
+
+    private static func ignoresItsChildren(_ body: String) -> Bool {
+        body.contains(".accessibilityElement(children: .ignore)")
+    }
 }

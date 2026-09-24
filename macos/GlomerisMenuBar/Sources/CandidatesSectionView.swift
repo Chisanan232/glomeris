@@ -650,7 +650,17 @@ struct CandidatesSectionView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
+        // HORO-1363: deliberately NO `.accessibilityElement(children: .ignore)`
+        // here. A `Button` is already one accessibility element, and its
+        // children are already replaced by the explicit label below, so the
+        // modifier bought this row nothing — but it cost it the AXButton role
+        // and the AXPress action, because `.ignore` creates a plain container
+        // element in place of the button rather than relabelling it. In the
+        // live tree the row read as `AXUnknown` with an empty actions array:
+        // VoiceOver could read the row but had nothing to activate, and the
+        // detail view was unreachable without a sighted click. Removing the
+        // modifier restores `AXButton [AXPress] enabled=1` with a
+        // byte-identical label.
         .accessibilityLabel(row.accessibilityLabel)
         .accessibilityHint("Opens the evidence and the available actions for this resource.")
     }

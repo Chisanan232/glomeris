@@ -708,7 +708,12 @@ struct AiPlanSectionView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityElement(children: .ignore)
+        // HORO-1363: deliberately NO `.accessibilityElement(children: .ignore)`
+        // here — same reason as the candidates-list row. `.ignore` replaced
+        // this `Button` with a plain container in the live tree, so the row
+        // read as `AXUnknown` with no actions and a VoiceOver user had no way
+        // to open the suggestion. The explicit label below already collapses
+        // the row to one element without discarding the role.
         .accessibilityLabel(row.accessibilityLabel)
         .accessibilityHint("Opens the evidence and the available actions for this resource.")
     }

@@ -699,7 +699,86 @@ final class CandidatesSectionViewTests: XCTestCase {
         }
     }
 
+    // MARK: - HORO-1363: the row stays actionable, not merely readable
+
+    /// A candidate row must keep the `AXButton` role and the `AXPress` action
+    /// that `Button` gives it.
+    ///
+    /// `.accessibilityElement(children: .ignore)` was on this row until
+    /// HORO-1363 and looked harmless — the row already had an explicit label,
+    /// so "ignore the children" read as a tidy-up. What it actually does is
+    /// substitute a plain container element for the button, and the live
+    /// accessibility tree showed the consequence: the row came back as
+    /// `AXUnknown` with an empty actions array. VoiceOver could read every
+    /// fact on the row and could not open it, so the evidence behind a
+    /// deletion was reachable only by sighted click.
+    ///
+    /// Asserted as an absence inside a window on `rowView` alone, because the
+    /// modifier is correct elsewhere in this app (badge groups, history rows)
+    /// and a file-wide ban would be wrong.
+    func testTheCandidateRowRemainsAPressableButton() throws {
+        let body = try Self.rowViewBody(in: Self.strippedOfComments(try Self.readSource("CandidatesSectionView.swift")))
+
+        XCTAssertTrue(
+            body.contains("Button {"),
+            "the row must stay a Button — that is where AXPress comes from"
+        )
+        XCTAssertFalse(
+            Self.ignoresItsChildren(body),
+            "HORO-1363: .accessibilityElement(children: .ignore) is back on the candidate row, "
+                + "which costs it the AXButton role and the AXPress action"
+        )
+
+        // Positive controls, so the test cannot pass because the row lost its
+        // accessibility treatment altogether: the label the modifier was
+        // supposed to be helping install is installed without it, and the hint
+        // still describes what pressing does.
+        XCTAssertTrue(body.contains(".accessibilityLabel(row.accessibilityLabel)"))
+        XCTAssertTrue(body.contains(".accessibilityHint("))
+
+        // And the window really is a window: `runDetect` is the next thing in
+        // the file after `rowView`, so its absence proves the search above did
+        // not quietly scan the rest of the source.
+        XCTAssertFalse(body.contains("func runDetect"), "the rowView window over-ran its function")
+    }
+
+    /// Anti-vacuity for the test above. Splices the modifier back in at the
+    /// place it used to sit and asserts the same predicate then trips, so a
+    /// future rename of `rowView` or of the modifier cannot turn that guard
+    /// into an assertion about nothing.
+    func testThePressableRowGuardWouldCatchTheModifierReturning() throws {
+        let body = try Self.rowViewBody(in: Self.strippedOfComments(try Self.readSource("CandidatesSectionView.swift")))
+        let regressed = body.replacingOccurrences(
+            of: ".buttonStyle(.plain)",
+            with: ".buttonStyle(.plain)\n        .accessibilityElement(children: .ignore)"
+        )
+        XCTAssertNotEqual(regressed, body, "no .buttonStyle(.plain) to splice onto — the row changed shape")
+        XCTAssertTrue(
+            Self.ignoresItsChildren(regressed),
+            "the guard would not notice the modifier returning"
+        )
+    }
+
     // MARK: - Helpers
+
+    /// `rowView`'s body, so an accessibility assertion cannot be satisfied —
+    /// or broken — by a modifier on some other view in the same file.
+    ///
+    /// The closing brace is matched at the function's own indentation, which
+    /// no brace inside the body shares.
+    private static func rowViewBody(in source: String) throws -> String {
+        let signature = try XCTUnwrap(
+            source.range(of: "private func rowView("),
+            "no `private func rowView(` — renamed, or no longer a function"
+        )
+        let rest = source[signature.upperBound...]
+        let end = try XCTUnwrap(rest.range(of: "\n    }\n"), "could not find the end of rowView")
+        return String(rest[..<end.upperBound])
+    }
+
+    private static func ignoresItsChildren(_ body: String) -> Bool {
+        body.contains(".accessibilityElement(children: .ignore)")
+    }
 
     private static func readSource(_ fileName: String) throws -> String {
         let sourceURL = URL(fileURLWithPath: #filePath)
