@@ -991,6 +991,102 @@ mod tests {
     };
     use crate::policy::{PolicyClass, ReasonCode};
 
+    // --- HORO-1327: RefusalReason is the sole producer of execute's tokens ---
+
+    /// Every reason must map to a distinct, non-empty token: this is the
+    /// machine-readable string a `--json` caller switches on, and the key the
+    /// menu-bar app looks its wording up by.
+    #[test]
+    fn as_str_is_distinct_and_non_empty_for_every_variant() {
+        let mut tokens: Vec<&'static str> = RefusalReason::ALL.iter().map(|r| r.as_str()).collect();
+        let original_len = tokens.len();
+        tokens.sort_unstable();
+        tokens.dedup();
+        assert_eq!(tokens.len(), original_len, "as_str tokens must be distinct");
+        assert!(tokens.iter().all(|t| !t.is_empty()));
+    }
+
+    /// Compile-time guard, mirroring `ReasonCode`'s: the `match` is
+    /// exhaustive, so a variant missing from [`RefusalReason::ALL`] fails to
+    /// build here. The length assertion catches the reverse — a stale or
+    /// duplicated entry.
+    ///
+    /// `ALL` matters more here than for a type that only needs iteration:
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` diffs `as_str` against
+    /// the Swift table, and a variant absent from `ALL` would still be
+    /// *emitted* by the CLI. The guard would catch that too, but only after
+    /// it shipped; this fails at build time.
+    #[test]
+    fn all_lists_every_variant_exactly_once() {
+        for (index, reason) in RefusalReason::ALL.iter().enumerate() {
+            let expected_index = match reason {
+                RefusalReason::ResourceNotFound => 0,
+                RefusalReason::ActionNotFound => 1,
+                RefusalReason::ActionMismatch => 2,
+                RefusalReason::Protected => 3,
+                RefusalReason::AskNoConsent => 4,
+                RefusalReason::AskConsentMismatch => 5,
+                RefusalReason::AutoSafeContractViolation => 6,
+                RefusalReason::Busy => 7,
+            };
+            assert_eq!(
+                index, expected_index,
+                "{reason} is at index {index} of RefusalReason::ALL, expected {expected_index}"
+            );
+        }
+        assert_eq!(
+            RefusalReason::ALL.len(),
+            8,
+            "RefusalReason::ALL has gained, lost, or duplicated an entry"
+        );
+    }
+
+    /// The typed field must serialize to the bare token, unchanged from the
+    /// string literals it replaced — a `--json` caller parsing `reason` sees
+    /// no difference, which is the whole point of typing it.
+    #[test]
+    fn a_refusal_report_serializes_its_reason_as_the_bare_token() {
+        let json = serde_json::to_value(ExecuteRefusalReport {
+            reason: RefusalReason::AskConsentMismatch,
+            message: "irrelevant here".to_string(),
+        })
+        .expect("serialize");
+        assert_eq!(json["reason"], "ask_consent_mismatch");
+        assert!(
+            json["reason"].is_string(),
+            "must be the token itself, not an object or a variant name: {}",
+            json["reason"]
+        );
+    }
+
+    /// Every variant, not just a representative one: it is `as_str` that
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` reads, so any variant
+    /// whose serialized token differs from it would be a token the guard
+    /// verified and the CLI never emits.
+    ///
+    /// Near-tautological against the hand-written `Serialize` impl, and
+    /// deliberately kept anyway: it is what makes a future switch to
+    /// `#[serde(rename_all = "snake_case")]` detectable the moment any token
+    /// stops equalling the snake_case of its variant name. It would not catch
+    /// that switch on its own today, because all eight currently agree — the
+    /// type's doc comment is where the reason for hand-writing the impl is
+    /// recorded, and this test is the tripwire, not the argument.
+    #[test]
+    fn every_variant_serializes_to_exactly_its_as_str() {
+        for reason in RefusalReason::ALL {
+            let json = serde_json::to_value(ExecuteRefusalReport {
+                reason: *reason,
+                message: String::new(),
+            })
+            .expect("serialize");
+            assert_eq!(
+                json["reason"],
+                reason.as_str(),
+                "{reason} serializes to something other than its own as_str"
+            );
+        }
+    }
+
     fn base_evidence() -> Evidence {
         Evidence {
             resource: ResourceId::new(
