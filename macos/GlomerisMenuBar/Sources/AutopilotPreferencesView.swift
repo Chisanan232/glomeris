@@ -393,6 +393,18 @@ struct AutopilotStatusViewModel: Equatable {
     let symbolName: String
     let tone: GlomerisTone
 
+    /// What VoiceOver reads for the status card (HORO-1470).
+    ///
+    /// The card shows `title` and `detail` as two separate `Text` views, so
+    /// sighted users get the boundary from layout. Left to
+    /// `.accessibilityElement(children: .combine)`, SwiftUI joined them with
+    /// ", " and a listener heard "Autopilot is off, No run can delete
+    /// anything." — a comma splice followed by a capital letter. The
+    /// separator is not configurable, so the label has to be stated.
+    var accessibilityLabel: String {
+        SpokenLabel.compose([title, detail])
+    }
+
     static func make(_ report: AutopilotEnvelopeDto) -> AutopilotStatusViewModel {
         guard report.enabled else {
             return AutopilotStatusViewModel(
@@ -416,6 +428,28 @@ struct AutopilotStatusViewModel: Equatable {
             // their own grant is a fault.
             tone: .caution
         )
+    }
+}
+
+/// What VoiceOver reads for a row in this pane that stacks a vocabulary
+/// term's title over its explanation (HORO-1470).
+///
+/// Three such rows exist here: the never-allowlistable kinds, the
+/// never-pre-authorizable reasons, and the pre-authorizable reasons' own
+/// toggles. Each is one accessibility element showing two `Text` views, and
+/// each therefore needs the sentence boundary that layout gives a sighted
+/// user to be said out loud.
+///
+/// Deliberately not `GlomerisTerm.accessibilityLabel`: that prefixes the
+/// vocabulary axis, which is what a bare chip needs ("Safety: Asks first")
+/// but adds a word these rows do not show. What is spoken here stays what is
+/// on screen.
+enum AutopilotTermLabel {
+    /// `prefix` names why the row is shown, for the cases where the
+    /// surrounding layout does not already say it.
+    static func spoken(_ term: GlomerisTerm, prefix: String? = nil) -> String {
+        let head = prefix.flatMap { SpokenLabel.clause($0, term.title) } ?? term.title
+        return SpokenLabel.compose([head, term.explanation])
     }
 }
 
@@ -627,6 +661,7 @@ struct AutopilotPreferencesView: View {
                 }
             }
             .accessibilityElement(children: .combine)
+            .accessibilityLabel(status.accessibilityLabel)
 
             inForceSummary(report)
 
@@ -737,7 +772,8 @@ struct AutopilotPreferencesView: View {
                         }
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("Never available: \(term.title). \(term.explanation)")
+                    .accessibilityLabel(
+                        AutopilotTermLabel.spoken(term, prefix: "Never available"))
                 }
             }
         }
@@ -960,6 +996,7 @@ struct AutopilotPreferencesView: View {
                                 }
                             }
                             .accessibilityElement(children: .combine)
+                            .accessibilityLabel(AutopilotTermLabel.spoken(term))
                         }
                     }
                     .padding(.top, 2)
