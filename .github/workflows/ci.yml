@@ -273,3 +273,60 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check the book documents every CLI command
         run: bash scripts/check-docs-cover-cli-commands.sh
+
+  workflows-are-valid:
+    # HORO-1472: every other job in this file guards something in the
+    # repository, and nothing guarded these files. The only thing that reported
+    # a mistake in a workflow was GitHub, when it tried to run it — a red run
+    # with zero jobs and a zero-second duration, which is what a parse-time
+    # rejection looks like.
+    #
+    # That failure mode is worse than an ordinary red X. There is no job log to
+    # read; the failure is attributed to whichever pull request happened to
+    # trigger the workflow rather than to the one that broke it; and a rejected
+    # workflow has not run, so every check it contains goes absent rather than
+    # failing. A typo in this file could therefore remove the ten guards above
+    # it and read as "no checks reported" instead of as a failure.
+    #
+    # A separate job from the guards above on purpose, and deliberately not
+    # path-filtered to `.github/**`: the set of workflow files is exactly what a
+    # path filter here would be deciding, and the filter itself would be inside
+    # the file being validated.
+    #
+    # The tools are pinned and downloaded rather than taken from the image, for
+    # the reason .github/.actionlint-version gives: `ubuntu-latest` ships an
+    # unpinned shellcheck, and actionlint routes every `run:` block through it,
+    # so an image refresh could turn this job red on an unrelated pull request.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned actionlint and shellcheck
+        # Into RUNNER_TEMP rather than the checkout, so the extracted binaries
+        # cannot show up as untracked files in the repository being linted.
+        # GITHUB_PATH prepends, so these take precedence over the shellcheck
+        # already on the image — and if they somehow did not, the guard's
+        # version comparison fails rather than silently linting with the wrong
+        # ruleset.
+        run: |
+          set -euo pipefail
+          VERSION_FILE=.github/.actionlint-version
+          pin() { grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2; }
+          AL_VERSION="$(pin actionlint_version)"
+          AL_SHA256="$(pin actionlint_linux_amd64_sha256)"
+          SC_VERSION="$(pin shellcheck_version)"
+          SC_SHA256="$(pin shellcheck_linux_x86_64_sha256)"
+          DEST="$RUNNER_TEMP/pinned-linters"
+          mkdir -p "$DEST"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
+          echo "${AL_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz -C "$DEST" actionlint
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+          echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz -C "$DEST" --strip-components=1 \
+            "shellcheck-v${SC_VERSION}/shellcheck"
+          echo "$DEST" >> "$GITHUB_PATH"
+      - name: Check every workflow file is valid
+        run: bash scripts/check-workflows-are-valid.sh

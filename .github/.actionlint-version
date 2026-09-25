@@ -1,0 +1,27 @@
+# HORO-1472: the linter versions `scripts/check-workflows-are-valid.sh` runs,
+# pinned so the guard's result is a statement about this repository's workflows
+# rather than about whatever the runner image happens to ship.
+#
+# Both tools are pinned, not just actionlint. actionlint delegates every `run:`
+# block to shellcheck, so shellcheck's ruleset is part of this guard's verdict:
+# a runner image that silently moves to a newer shellcheck can turn the job red
+# on an unrelated pull request, which is the fastest way to get a guard
+# disabled. `ubuntu-latest` ships shellcheck preinstalled at an unpinned
+# version, so the workflow installs these two instead of using it.
+#
+# sha256 is of the release asset CI downloads and executes, per platform.
+# GitHub release assets can be replaced after publication, so the version tag
+# alone is not a sufficient pin for something CI runs.
+#
+# actionlint publishes a checksums file with each release
+# (https://github.com/rhysd/actionlint/releases). shellcheck does not, so its
+# hash was computed from the downloaded asset.
+#
+# Both the guard script and the `workflows-are-valid` job in
+# `.github/workflows/ci.yml` read this file, so the versions live in exactly
+# one place. To upgrade: bump the version and its sha256 together, then run the
+# guard locally and fix whatever the new ruleset finds in the same commit.
+actionlint_version=1.7.12
+actionlint_linux_amd64_sha256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+shellcheck_version=0.11.0
+shellcheck_linux_x86_64_sha256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
