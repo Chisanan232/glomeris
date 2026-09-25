@@ -33,9 +33,16 @@
 #    the expectation. Checked on the rendering surface, not just the model,
 #    because a correct model rendered incompletely is the same defect.
 # 5. The release workflow stamps the expected hash, under exactly the key the
-#    Swift reads, and before `codesign`. Any of the three being wrong leaves a
-#    released app that reports "this build records no expected tool" — the
-#    developer-build state — and does so silently.
+#    Swift reads. If the stamp is missing or the key differs, a released app
+#    reports "this build records no expected tool" — the developer-build state —
+#    and does so silently.
+#    Its ORDER relative to signing is checked too, and HORO-1480 reversed what
+#    that check requires. A deep `codesign` re-signs the embedded CLI and
+#    rewrites its bytes, so hashing before it records something the release does
+#    not ship. The required order is: deep sign, hash, stamp, then an
+#    outer-bundle re-seal that is NOT deep. The last clause matters as much as
+#    the first, and this script enforced the opposite of all of it until
+#    HORO-1480.
 # 6. The release workflow verifies its own stamp against the embedded bytes.
 # 7. The documentation states that a locally built app embeds no CLI.
 #
@@ -248,24 +255,77 @@ if ! grep -qE "(Add|Set) :${swift_key}\b" <<<"$workflow_body"; then
   fail "${RELEASE_WORKFLOW}: never writes '${swift_key}', the Info.plist key the app reads. Without the stamp, every released app reports that it records no expected tool — indistinguishable from a developer build, and silently so."
 fi
 
+# `|| true` per HORO-1479: there is a `-z` check on this variable below, and
+# without tolerance here a non-matching grep would end the script at this line
+# under `set -e` and that check could never run. Found by
+# check-failure-diagnostics-are-reachable.sh, on this very change.
 stamp_line="$(
   grep -nE "(Add|Set) :${swift_key}\b" "${REPO_ROOT}/${RELEASE_WORKFLOW}" \
-    | head -n 1 | cut -d: -f1
+    | head -n 1 | cut -d: -f1 || true
 )"
-codesign_line="$(grep -nE '^[[:space:]]*codesign ' "${REPO_ROOT}/${RELEASE_WORKFLOW}" | head -n 1 | cut -d: -f1 || true)"
 
-if [[ -z "$codesign_line" ]]; then
-  echo "FAIL: found no codesign invocation in ${RELEASE_WORKFLOW}."
-  echo "The ordering check below depends on it. If signing moved, update this script."
+# HORO-1480: this check used to require the stamp to come BEFORE signing, and
+# that requirement was the defect. A deep sign signs the embedded CLI as nested
+# code and rewrites its bytes, so a hash taken before it records bytes that are
+# not the ones shipped. The stamp and the binary could never agree, the verify
+# step further down the workflow compares exactly those two values, and the
+# release job therefore failed on itself.
+#
+# The old reasoning — editing Info.plist breaks the seal, so the re-sign must be
+# last — is correct and is not the whole picture. Both requirements hold at once
+# in one order, because the nested binary's final bytes are settled by its own
+# signature and do not depend on Info.plist content:
+#
+#   1. deep-sign, settling the embedded CLI's bytes
+#   2. hash the embedded CLI
+#   3. write the stamp, which invalidates the seal
+#   4. re-seal the OUTER bundle only
+#
+# Step 4 must not be deep. A second deep sign would re-sign the embedded CLI
+# again and change its bytes again, reintroducing the mismatch. That is the
+# non-obvious half, so it is asserted rather than left to a comment.
+deep_sign_line="$(
+  grep -nE '^[[:space:]]*codesign .*--deep' "${REPO_ROOT}/${RELEASE_WORKFLOW}" \
+    | head -n 1 | cut -d: -f1 || true
+)"
+last_sign_line="$(
+  grep -nE '^[[:space:]]*codesign ' "${REPO_ROOT}/${RELEASE_WORKFLOW}" \
+    | tail -n 1 | cut -d: -f1 || true
+)"
+
+if [[ -z "$deep_sign_line" ]]; then
+  echo "FAIL: found no deep codesign invocation in ${RELEASE_WORKFLOW}."
+  echo "The ordering checks below depend on it. If signing moved, update this script."
   exit 1
 fi
 
-if [[ -n "$stamp_line" && "$stamp_line" -gt "$codesign_line" ]]; then
-  fail "${RELEASE_WORKFLOW}:${stamp_line}: writes ${swift_key} at line ${stamp_line}, after codesign at line ${codesign_line}. Editing Info.plist invalidates the bundle's seal, so the re-sign has to be the last thing that touches the bundle."
+if [[ -z "$stamp_line" ]]; then
+  echo "FAIL: could not locate the ${swift_key} write in ${RELEASE_WORKFLOW}."
+  echo "The presence check above passed, so this is a bug in this script rather than"
+  echo "in the workflow. Refusing to report an ordering verdict over nothing."
+  exit 1
 fi
 
-if ! grep -qE 'shasum -a 256' <<<"$workflow_body"; then
+hash_line="$(
+  grep -nE 'shasum -a 256' "${REPO_ROOT}/${RELEASE_WORKFLOW}" \
+    | head -n 1 | cut -d: -f1 || true
+)"
+
+if [[ -z "$hash_line" ]]; then
   fail "${RELEASE_WORKFLOW}: computes no SHA-256, so whatever it stamps is not a hash of the shipped bytes."
+elif [[ "$hash_line" -lt "$deep_sign_line" ]]; then
+  fail "${RELEASE_WORKFLOW}:${hash_line}: hashes the embedded CLI at line ${hash_line}, before the deep codesign at line ${deep_sign_line}. A deep sign rewrites the embedded binary, so this records bytes the release does not ship and the app would report its own CLI as the wrong build (HORO-1480)."
+fi
+
+if [[ "$stamp_line" -lt "$deep_sign_line" ]]; then
+  fail "${RELEASE_WORKFLOW}:${stamp_line}: writes ${swift_key} at line ${stamp_line}, before the deep codesign at line ${deep_sign_line}. The value stamped there is a hash of the pre-signature binary (HORO-1480)."
+fi
+
+if [[ -z "$last_sign_line" || "$last_sign_line" -lt "$stamp_line" ]]; then
+  fail "${RELEASE_WORKFLOW}: nothing re-seals the bundle after ${swift_key} is written at line ${stamp_line}. Editing Info.plist invalidates the seal codesign applied, so a released bundle would ship with a broken signature."
+elif grep -nE '^[[:space:]]*codesign ' "${REPO_ROOT}/${RELEASE_WORKFLOW}" \
+  | awk -F: -v after="$stamp_line" '$1 > after' | grep -q -- '--deep'; then
+  fail "${RELEASE_WORKFLOW}: deep-signs again after ${swift_key} is written at line ${stamp_line}. That re-signs the embedded CLI and changes its bytes, so the stamp stops matching what ships — the same defect as stamping too early, arrived at from the other side (HORO-1480). The final re-seal must be an outer-bundle sign without --deep."
 fi
 
 # ---------------------------------------------------------------------------
@@ -294,5 +354,5 @@ if [[ "$violations" -gt 0 ]]; then
   exit 1
 fi
 
-echo "PASS: the resolved CLI's path, source and content hash are reported together; ${swift_key} is stamped before signing and verified after it."
+echo "PASS: the resolved CLI's path, source and content hash are reported together; ${swift_key} is hashed and stamped after the deep sign, re-sealed without --deep, and verified afterwards."
 exit 0

@@ -165,13 +165,30 @@ jobs:
           # expansion fails SILENTLY — an unset setting leaves an empty string
           # — and an empty expected hash would read to the app as "this build
           # records none", i.e. exactly the developer-build state, in a
-          # released bundle. Doing it after the copy also means the value is
-          # computed from the bytes that actually shipped, not from a
-          # download that a later step could have replaced.
+          # released bundle.
           #
-          # Before `codesign` below, because editing Info.plist invalidates
-          # the seal; the re-sign has to be the last thing that touches the
-          # bundle.
+          # HORO-1480: the ORDER below is the whole content of that ticket, so
+          # it is spelled out. Ad-hoc self-sign only (identity "-", no Apple
+          # Developer account or certificate involved). Embedding a new
+          # executable after the build invalidates the bundle's original seal,
+          # so it has to be re-sealed. This is NOT the code signing and
+          # notarization Gatekeeper requires for a browser download (which sets
+          # the quarantine xattr) — that needs a real Developer ID and is
+          # deliberately out of scope; see HORO-1071.
+          #
+          # Signing comes FIRST, before the hash is taken, because a deep sign
+          # signs $DEST as nested code and rewrites its bytes. This step used
+          # to hash and stamp before signing, on the reasoning that editing
+          # Info.plist breaks the seal so the re-sign must come last. That
+          # reasoning is right about the seal and silent about the binary: the
+          # stamp recorded the pre-signature hash while the bundle shipped the
+          # post-signature bytes, so the two could never agree. The verify step
+          # below compares exactly those two values, which means the release
+          # job failed on itself and no release could complete. Measured, on a
+          # bundle assembled locally in the old order: stamped
+          # b04d1ee6..., shipped 24cdc9d0..., the verify step exiting 1.
+          codesign --force --deep --sign - "$APP"
+
           # `|| true` is load-bearing: a missing or unreadable $DEST makes shasum
           # exit non-zero, and without this the step dies here instead of printing
           # the length error below that names the file. Note the sibling site in
@@ -187,16 +204,16 @@ jobs:
             "$APP/Contents/Info.plist"
           echo "embedded CLI SHA-256: $CLI_SHA256"
 
-          # Ad-hoc self-sign only (identity "-", no Apple Developer account
-          # or certificate involved). Embedding a new executable after the
-          # build invalidates the bundle's original ad-hoc seal, so this
-          # re-seals it well enough to launch locally on the machine that
-          # unzips it. This is NOT the code signing / notarization that
-          # Gatekeeper requires for a binary downloaded via a browser
-          # (which sets the quarantine xattr) — that requires a real
-          # Developer ID and notarization ticket and is deliberately out of
-          # scope here; see HORO-1071.
-          codesign --force --deep --sign - "$APP"
+          # Re-seal the outer bundle, because the PlistBuddy write above
+          # invalidated the seal the deep sign just applied.
+          #
+          # Deliberately NOT a deep sign. A second deep sign would re-sign
+          # $DEST again and change its bytes again, reintroducing the exact
+          # mismatch this ordering exists to remove. Measured: the outer-only
+          # re-seal leaves $DEST byte-identical, the stamp matches the shipped
+          # bytes, and `codesign --verify --deep --strict` still validates the
+          # bundle including the nested glomeris.
+          codesign --force --sign - "$APP"
 
       - name: Verify the bundle, the embedded CLI and the tag all agree
         # HORO-1329. Three numbers that were previously unrelated:
