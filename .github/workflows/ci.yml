@@ -310,7 +310,22 @@ jobs:
         run: |
           set -euo pipefail
           VERSION_FILE=.github/.actionlint-version
-          pin() { grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2; }
+          # Named failure rather than a silent one. `grep` exits 1 on no match,
+          # which under `pipefail` is the function's status, which under
+          # `set -e` ends the step at the caller's assignment — with nothing
+          # printed. A renamed pin key used to show up as a red step and an
+          # empty log. `exit 1` here leaves only the subshell, so the caller's
+          # assignment still fails; the difference is that stderr says which
+          # key is missing.
+          pin() {
+            local value
+            value="$(grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true)"
+            if [[ -z "$value" ]]; then
+              echo "FAIL: no '$1=' line in ${VERSION_FILE} — the pin was renamed or removed." >&2
+              exit 1
+            fi
+            printf '%s\n' "$value"
+          }
           AL_VERSION="$(pin actionlint_version)"
           AL_SHA256="$(pin actionlint_linux_amd64_sha256)"
           SC_VERSION="$(pin shellcheck_version)"
@@ -365,7 +380,22 @@ jobs:
         run: |
           set -euo pipefail
           VERSION_FILE=.github/.actionlint-version
-          pin() { grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2; }
+          # Named failure rather than a silent one. `grep` exits 1 on no match,
+          # which under `pipefail` is the function's status, which under
+          # `set -e` ends the step at the caller's assignment — with nothing
+          # printed. A renamed pin key used to show up as a red step and an
+          # empty log. `exit 1` here leaves only the subshell, so the caller's
+          # assignment still fails; the difference is that stderr says which
+          # key is missing.
+          pin() {
+            local value
+            value="$(grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true)"
+            if [[ -z "$value" ]]; then
+              echo "FAIL: no '$1=' line in ${VERSION_FILE} — the pin was renamed or removed." >&2
+              exit 1
+            fi
+            printf '%s\n' "$value"
+          }
           SC_VERSION="$(pin shellcheck_version)"
           SC_SHA256="$(pin shellcheck_linux_x86_64_sha256)"
           DEST="$RUNNER_TEMP/pinned-linters"
