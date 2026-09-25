@@ -49,7 +49,8 @@ done
 commands="$(
   grep -oE '^[[:space:]]+name: "[a-z-]+",' "${REPO_ROOT}/${HELP_FILE}" \
     | sed -E 's/.*name: "([a-z-]+)",/\1/' \
-    | sort -u
+    | sort -u \
+    || true
 )"
 
 # Section headings of the form:  ## `glomeris <name> ...`
@@ -58,7 +59,8 @@ commands="$(
 documented="$(
   grep -oE '^## `glomeris [a-z-]+' "${REPO_ROOT}/${DOC_FILE}" \
     | sed -E 's/^## `glomeris ([a-z-]+)/\1/' \
-    | sort -u
+    | sort -u \
+    || true
 )"
 
 if [[ -z "$commands" ]]; then

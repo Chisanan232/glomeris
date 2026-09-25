@@ -107,7 +107,7 @@ plist_identifier="$(
       print line
       exit
     }
-  ' "${REPO_ROOT}/${INFO_PLIST}"
+  ' "${REPO_ROOT}/${INFO_PLIST}" || true
 )"
 
 if [[ -z "$plist_identifier" ]]; then

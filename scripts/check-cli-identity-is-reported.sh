@@ -106,7 +106,7 @@ outcome_cases="$(
     /^enum GlomerisCliIdentityOutcome/ { inside = 1; next }
     inside && /^}/ { exit }
     inside && /^[[:space:]]*case / { print }
-  ' "${REPO_ROOT}/${IDENTITY_FILE}"
+  ' "${REPO_ROOT}/${IDENTITY_FILE}" || true
 )"
 
 if [[ -z "$outcome_cases" ]]; then
@@ -228,7 +228,7 @@ done
 # ---------------------------------------------------------------------------
 swift_key="$(
   /usr/bin/sed -n 's/.*static let expectedHashInfoKey = "\([^"]*\)".*/\1/p' \
-    "${REPO_ROOT}/${IDENTITY_FILE}"
+    "${REPO_ROOT}/${IDENTITY_FILE}" || true
 )"
 
 if [[ -z "$swift_key" ]]; then
@@ -252,7 +252,7 @@ stamp_line="$(
   grep -nE "(Add|Set) :${swift_key}\b" "${REPO_ROOT}/${RELEASE_WORKFLOW}" \
     | head -n 1 | cut -d: -f1
 )"
-codesign_line="$(grep -nE '^[[:space:]]*codesign ' "${REPO_ROOT}/${RELEASE_WORKFLOW}" | head -n 1 | cut -d: -f1)"
+codesign_line="$(grep -nE '^[[:space:]]*codesign ' "${REPO_ROOT}/${RELEASE_WORKFLOW}" | head -n 1 | cut -d: -f1 || true)"
 
 if [[ -z "$codesign_line" ]]; then
   echo "FAIL: found no codesign invocation in ${RELEASE_WORKFLOW}."

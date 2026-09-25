@@ -89,7 +89,7 @@ crate_version="$(
       gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, "")
       print; exit
     }
-  ' "$CARGO_TOML"
+  ' "$CARGO_TOML" || true
 )"
 if [[ -z "$crate_version" ]]; then
   echo "FAIL: no 'version' under [package] in ${CARGO_TOML}."
