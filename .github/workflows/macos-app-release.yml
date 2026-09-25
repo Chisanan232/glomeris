@@ -217,18 +217,38 @@ jobs:
         run: |
           set -euo pipefail
           APP="build/GlomerisMenuBar.app"
+          # HORO-1479: both substitutions are failure-tolerant so that the
+          # echoes and comparisons below run in the case they were written for.
+          # PlistBuddy exits non-zero when the key is absent, and the CLI read is
+          # a pipeline under `pipefail`, so either one used to end the step on
+          # its own line — leaving a reader a red step, an empty log, and no
+          # indication of which of the three versions could not be read. This is
+          # the shape `STAMPED_SHA256` further down already had.
           BUNDLE_VERSION="$(
             /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
-              "$APP/Contents/Info.plist"
+              "$APP/Contents/Info.plist" || true
           )"
-          EMBEDDED_VERSION="$("$APP/Contents/MacOS/glomeris" --version | awk 'NR==1 {print $2}')"
+          EMBEDDED_VERSION="$("$APP/Contents/MacOS/glomeris" --version | awk 'NR==1 {print $2}' || true)"
           TAG_VERSION="${TAG#v}"
 
-          echo "bundle CFBundleShortVersionString: $BUNDLE_VERSION"
-          echo "embedded CLI --version:            $EMBEDDED_VERSION"
+          echo "bundle CFBundleShortVersionString: ${BUNDLE_VERSION:-<unreadable>}"
+          echo "embedded CLI --version:            ${EMBEDDED_VERSION:-<unreadable>}"
           echo "release tag (leading v stripped):  $TAG_VERSION"
 
           status=0
+          # Named before the comparisons, because comparing an empty string
+          # against a real version reports a mismatch and blames the wrong half.
+          if [ -z "$BUNDLE_VERSION" ]; then
+            echo "::error::CFBundleShortVersionString could not be read from $APP/Contents/Info.plist, so the bundle cannot be compared against the tag"
+            status=1
+          fi
+          if [ -z "$EMBEDDED_VERSION" ]; then
+            echo "::error::no version could be read from the CLI embedded at $APP/Contents/MacOS/glomeris, so the binary being released cannot be identified"
+            status=1
+          fi
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           if [ "$BUNDLE_VERSION" != "$EMBEDDED_VERSION" ]; then
             echo "::error::the app bundle reports $BUNDLE_VERSION but the CLI it embeds reports $EMBEDDED_VERSION"
             status=1
@@ -248,10 +268,17 @@ jobs:
             /usr/libexec/PlistBuddy -c "Print :GlomerisExpectedCLISHA256" \
               "$APP/Contents/Info.plist" 2>/dev/null || true
           )"
-          ACTUAL_SHA256="$(/usr/bin/shasum -a 256 "$APP/Contents/MacOS/glomeris" | awk '{print $1}')"
+          # HORO-1479: `|| true` for the same reason as its sibling two lines
+          # above, which already had it. A pipeline under `pipefail` ends the
+          # step on this line, so the echo below it and the whole comparison
+          # that follows could not run in the case they exist to report.
+          ACTUAL_SHA256="$(/usr/bin/shasum -a 256 "$APP/Contents/MacOS/glomeris" | awk '{print $1}' || true)"
           echo "stamped GlomerisExpectedCLISHA256: ${STAMPED_SHA256:-<absent>}"
-          echo "actual embedded CLI SHA-256:       $ACTUAL_SHA256"
-          if [ -z "$STAMPED_SHA256" ]; then
+          echo "actual embedded CLI SHA-256:       ${ACTUAL_SHA256:-<unreadable>}"
+          if [ -z "$ACTUAL_SHA256" ]; then
+            echo "::error::could not hash the embedded CLI at $APP/Contents/MacOS/glomeris, so there is nothing to check the Info.plist stamp against"
+            status=1
+          elif [ -z "$STAMPED_SHA256" ]; then
             echo "::error::Info.plist carries no GlomerisExpectedCLISHA256, so the app cannot tell whether the glomeris it resolves is the one shipped with it (HORO-1466)"
             status=1
           elif [ "$STAMPED_SHA256" != "$ACTUAL_SHA256" ]; then
