@@ -49,7 +49,13 @@ for required in "$SPEC_PATH" "$VERSION_FILE"; do
 done
 
 # `version=` / `sha256=` lines only; everything else in the file is prose.
-expected_version="$(grep -E '^version=' "$VERSION_FILE" | head -1 | cut -d= -f2)"
+#
+# `|| true` because `grep` exits 1 when it matches nothing, and under
+# `pipefail` that is the pipeline's status, and under `set -e` that ends the
+# script at this assignment — so the message below could never print. A missing
+# pin is precisely the case this is here to report; the report has to survive
+# the thing it reports on.
+expected_version="$(grep -E '^version=' "$VERSION_FILE" | head -1 | cut -d= -f2 || true)"
 if [[ -z "$expected_version" ]]; then
   echo "FAIL: no 'version=' line in ${VERSION_FILE}."
   exit 1
@@ -62,7 +68,12 @@ if ! command -v xcodegen >/dev/null 2>&1; then
 fi
 
 # `xcodegen --version` prints "Version: 2.46.0".
-actual_version="$(xcodegen --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)"
+#
+# `|| true` for the same reason as above, and the empty case is reachable here:
+# a wrapper, a shim, or a build that prints no number at all leaves `grep` with
+# nothing to match. The `${actual_version:-unknown}` below was written for that
+# case and could not run, because the script died one line earlier.
+actual_version="$(xcodegen --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || true)"
 if [[ "$actual_version" != "$expected_version" ]]; then
   echo "FAIL: xcodegen version mismatch — this guard cannot tell drift from a toolchain difference."
   echo "  pinned (${VERSION_FILE}): ${expected_version}"

@@ -213,14 +213,14 @@ for entry in "${VOCABULARIES[@]}"; do
 
   if [[ -n "$missing_in_swift" ]]; then
     echo "VIOLATION: ${rust_type} emits tokens ${SWIFT_FILE} has no wording for:"
-    echo "$missing_in_swift" | sed 's/^/    /'
+    while IFS= read -r token; do echo "    ${token}"; done <<<"$missing_in_swift"
     echo "    The GUI would render the unrecognised fallback for a state the CLI really emits."
     failures=$((failures + 1))
   fi
 
   if [[ -n "$missing_in_rust" ]]; then
     echo "VIOLATION: ${swift_fn}() has wording for tokens ${rust_type} never emits:"
-    echo "$missing_in_rust" | sed 's/^/    /'
+    while IFS= read -r token; do echo "    ${token}"; done <<<"$missing_in_rust"
     echo "    Either dead copy, or a typo in a case label that routes a live token to the fallback."
     failures=$((failures + 1))
   fi
