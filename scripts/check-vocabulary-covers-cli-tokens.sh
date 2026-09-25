@@ -208,8 +208,8 @@ for entry in "${VOCABULARIES[@]}"; do
     continue
   fi
 
-  missing_in_swift="$(comm -23 <(echo "$rust_tokens") <(echo "$swift_tokens"))"
-  missing_in_rust="$(comm -13 <(echo "$rust_tokens") <(echo "$swift_tokens"))"
+  missing_in_swift="$(comm -23 <(echo "$rust_tokens") <(echo "$swift_tokens") || true)"
+  missing_in_rust="$(comm -13 <(echo "$rust_tokens") <(echo "$swift_tokens") || true)"
 
   if [[ -n "$missing_in_swift" ]]; then
     echo "VIOLATION: ${rust_type} emits tokens ${SWIFT_FILE} has no wording for:"
