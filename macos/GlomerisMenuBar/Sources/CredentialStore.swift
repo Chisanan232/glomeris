@@ -122,6 +122,64 @@ struct KeychainCredentialStore: CredentialStore {
         self.service = service
     }
 
+    /// Shown by `SecurityAgent` when it asks the user about this item, so it
+    /// should read as a sentence a person can act on.
+    static let accessDescription = "Glomeris LLM provider key"
+
+    /// A `SecAccess` trusting exactly the running binary and nothing else.
+    ///
+    /// HORO-1455 AC 2, and it is an intent pin rather than a hardening change —
+    /// stated plainly because the opposite is the easy thing to believe.
+    /// Measured on a scratch keychain, `SecItemAdd` with no `kSecAttrAccess`,
+    /// with `SecAccessCreate(desc, nil)`, and with `SecAccessCreate(desc,
+    /// [self])` all produce the *same* ACL: three entries, the decrypt entry
+    /// trusting one application. The default was already self-only, so this
+    /// grants nothing and revokes nothing.
+    ///
+    /// What it buys is that the trusted list is now written down where a change
+    /// to it has to be deliberate. `scripts/check-credential-store-uses-keychain.sh`
+    /// and `CredentialStoreAccessTests` both assert this call is here, so a
+    /// later commit that adds a second application to the list, or that passes
+    /// `nil` for the applications — which means "no ACL restriction", not "the
+    /// default" — fails a check instead of quietly shipping an item any binary
+    /// can read.
+    ///
+    /// Returning `nil` on failure is deliberate, and `insertAttributes` treats it
+    /// as "omit the key" rather than as an error: an item created with the
+    /// default ACL is byte-for-byte what HORO-1309 shipped, so refusing to save
+    /// the user's key over it would turn a cosmetic failure into a visible one.
+    ///
+    /// Both calls below are deprecated (10.10, "SecKeychain is deprecated") and
+    /// the two warnings are left in place on purpose. They are not noise: they
+    /// are the compiler stating the same thing HORO-1455 asks the founder to
+    /// decide — that Apple's supported home for a secret is the data-protection
+    /// keychain, which needs an entitlement this app does not have. A file
+    /// keychain item has no other ACL mechanism, so there is no non-deprecated
+    /// way to write this while the file keychain is the choice. Silencing them
+    /// (by marking this method deprecated too, which does suppress them) would
+    /// only move the warning to the call site and would hide the one signal that
+    /// says which decision is outstanding.
+    static func selfOnlyAccess() -> SecAccess? {
+        var trustedSelf: SecTrustedApplication?
+        // A nil path means "the application making this call", resolved from the
+        // running code's identity. Correct across a rename or a move, which a
+        // hardcoded path would not be.
+        guard SecTrustedApplicationCreateFromPath(nil, &trustedSelf) == errSecSuccess,
+            let trustedSelf
+        else {
+            return nil
+        }
+
+        var access: SecAccess?
+        guard
+            SecAccessCreate(
+                accessDescription as CFString, [trustedSelf] as CFArray, &access) == errSecSuccess
+        else {
+            return nil
+        }
+        return access
+    }
+
     private func baseQuery(forKey key: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
@@ -172,28 +230,104 @@ struct KeychainCredentialStore: CredentialStore {
         return secret
     }
 
+    /// The attributes a freshly created item is given.
+    ///
+    /// Split out of `setSecret` so it can be asserted on without a keychain.
+    /// `SecItemAdd` itself cannot run under test: an unsigned `xcodebuild` test
+    /// binary writing to the login keychain gets `errSecAuthFailed` (-25293),
+    /// and one asking for the data-protection keychain gets
+    /// `errSecMissingEntitlement` (-34018). A test that skipped itself on either
+    /// status would be the HORO-1253 failure mode — a gate that never ran
+    /// reading as a gate that passed. So the dictionary is built here, where a
+    /// test can look at exactly what would have been handed to the keychain, and
+    /// `setSecret` adds nothing to it.
+    func insertAttributes(forKey key: String, data: Data) -> [String: Any] {
+        var insert = baseQuery(forKey: key)
+        insert[kSecValueData as String] = data
+        // HORO-1455 AC 1. This is a *file* keychain item — the login keychain —
+        // and `kSecAttrAccessible` is honoured by the data-protection keychain,
+        // not by a file keychain. Reaching the data-protection keychain needs an
+        // entitlement this app does not have: measured, an unsigned build passing
+        // `kSecUseDataProtectionKeychain` gets errSecMissingEntitlement (-34018).
+        // So the attribute is stored and inert.
+        //
+        // It is set anyway, because it is the correct value to already be
+        // carrying if Glomeris becomes a signed, entitled app, and because
+        // removing it would read as a decision to allow syncing. But the comment
+        // that used to be here claimed the protection it describes was in force,
+        // and two thirds of that claim were false. What actually holds today:
+        //
+        //   * Encrypted at rest while the login keychain is locked. True, and it
+        //     is the login keychain's doing, not this attribute's.
+        //   * Not synced to iCloud. True, but because a file keychain is not
+        //     syncable at all — `kSecAttrSynchronizable` is a data-protection
+        //     attribute too.
+        //   * Not included in a backup. FALSE. ~/Library/Keychains is an
+        //     ordinary directory, so any file-level backup of the home directory
+        //     contains the item. It is still encrypted there, and useless
+        //     without the keychain password.
+        //
+        // Whether to move to the data-protection keychain and pay its costs is a
+        // founder call recorded on HORO-1455, not something to decide in a
+        // comment. See book/src/byok.md, which now says the same thing to a user.
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        // HORO-1455 AC 2. Trust this binary and nothing else. Produces the same
+        // ACL the default does — see `selfOnlyAccess()`; the point is that the
+        // list is declared rather than inherited.
+        if let access = Self.selfOnlyAccess() {
+            insert[kSecAttrAccess as String] = access
+        }
+        return insert
+    }
+
     @discardableResult
     func setSecret(_ secret: String, forKey key: String) -> Bool {
         guard let data = secret.data(using: .utf8) else { return false }
 
-        // Update-then-add rather than add-then-handle-duplicate: an existing
-        // item must be replaced in place so its access control and creation
-        // date survive, and so a failed add can never leave the old key
-        // behind while the UI says the new one was saved.
-        let updated = SecItemUpdate(
-            baseQuery(forKey: key) as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if updated == errSecSuccess { return true }
+        // HORO-1455 AC 3. Delete-then-add, where this used to update-then-add.
+        // The old comment wanted an existing item "replaced in place so its
+        // access control ... survive[s]", and surviving access control is the
+        // defect: every "Always Allow" the user answers for a superseded build
+        // adds that build to the item's trusted list, and nothing ever takes it
+        // off again. After enough upgrades the key is readable by every past
+        // Glomeris binary on the disk.
+        //
+        // Measured on a scratch keychain, which is why this is delete-then-add
+        // and not something more surgical:
+        //
+        //   * `SecItemUpdate` with the value alone leaves the ACL untouched — a
+        //     list deliberately widened to two applications was still two
+        //     afterwards. That is the accretion, reproduced.
+        //   * `SecItemUpdate` carrying `kSecAttrAccess` does not narrow the list.
+        //     It blocks indefinitely, even with user interaction disabled, so it
+        //     cannot even fail usefully. An ACL cannot be rewritten in place.
+        //   * Creating a fresh item resets the decrypt entry to one trusted
+        //     application — and does so whether or not an access specification
+        //     is supplied, so the reset comes from the add, not from AC 2.
+        //
+        // This does not remove the upgrade prompt, and claiming it did would be
+        // wrong: a binary absent from the item's trusted list cannot delete it
+        // either. Measured, that delete returns errSecInvalidOwnerEdit (-25244)
+        // with interaction disabled and the item survives, which is the same
+        // authorisation a read needs. What it removes is the *permanence* —
+        // answering the prompt once replaces the widened item with a fresh
+        // one-application ACL, instead of appending to a list that only grows.
+        let deleted = SecItemDelete(baseQuery(forKey: key) as CFDictionary)
+        guard deleted == errSecSuccess || deleted == errSecItemNotFound else {
+            // The user declined the authorisation, or it failed. Report the save
+            // as failed rather than falling back to an update: the fallback is
+            // exactly the accretion above, and it would make the fix conditional
+            // on the user never pressing Deny.
+            return false
+        }
 
-        var insert = baseQuery(forKey: key)
-        insert[kSecValueData as String] = data
-        // Available whenever the user has unlocked the Mac, and never synced
-        // to iCloud or included in a backup: a BYOK key is local to the
-        // machine the CLI runs on, so ThisDeviceOnly is both the tighter and
-        // the more accurate choice.
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
+        // The inverse of the old comment's other claim, and the honest cost of
+        // this change: a failed add now leaves no key at all, where before the
+        // old one survived. That is the trade AC 3 asks for, and it is the safer
+        // direction — the failure the user sees is "paste it again", not "your
+        // key is still readable by a binary you stopped trusting".
+        return SecItemAdd(insertAttributes(forKey: key, data: data) as CFDictionary, nil)
+            == errSecSuccess
     }
 
     @discardableResult
