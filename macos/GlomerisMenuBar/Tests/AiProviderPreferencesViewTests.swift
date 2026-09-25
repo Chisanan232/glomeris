@@ -520,6 +520,47 @@ final class AiProviderPreferencesViewTests: XCTestCase {
             "stored-but-unreachable and never-stored need different remedies")
     }
 
+    /// HORO-1471 AC 1. Silence and refusal are told apart because their remedies
+    /// are opposite: `.unreadable` is fixed by pasting the key again, and doing
+    /// that here would simply block on the same unanswered keychain. Four things
+    /// have to be in this sentence — where the silence came from, that it is not
+    /// the same as having no key, that nothing was lost, and what actually helps
+    /// — and the one thing that must be out of it is any suggestion to re-paste.
+    func testAKeychainThatWentQuietIsNotExplainedAsARefusal() {
+        let explanation = GlomerisLlmSettingSourceWording.unresponsiveExplanation.lowercased()
+
+        XCTAssertTrue(explanation.contains("keychain"), "name what went quiet")
+        XCTAssertTrue(
+            explanation.contains("did not answer"),
+            "silence, not a refusal: \(explanation)")
+        XCTAssertTrue(
+            explanation.contains("not the same as"),
+            "the user must not read this as 'you have no key stored'")
+        XCTAssertTrue(
+            explanation.contains("changed or removed"),
+            "nothing was lost, and saying so is the difference between worry and patience")
+        XCTAssertTrue(
+            explanation.contains("log out") || explanation.contains("restart"),
+            "the only remedy is restarting the service: \(explanation)")
+
+        // The remedy for a refusal, applied to silence, is actively wrong: the
+        // write goes to the same place the read is stuck in.
+        for misdirection in ["paste", "not set", "try saving it again"] {
+            XCTAssertFalse(
+                explanation.contains(misdirection),
+                "\"\(misdirection)\" sends the user at a keychain that is not answering")
+        }
+
+        XCTAssertNotEqual(
+            GlomerisLlmSettingSourceWording.unresponsiveExplanation,
+            GlomerisLlmSettingSourceWording.unreadableExplanation,
+            "a refusal and a silence cannot share one sentence")
+        XCTAssertFalse(
+            GlomerisLlmSettingSourceWording.title(.unresponsive).lowercased()
+                .contains("not set"),
+            "an unknown key must not be titled as no key")
+    }
+
     func testTheEnvironmentSourceNamesWhereTheValueCameFrom() {
         let title = GlomerisLlmSettingSourceWording.title(.environment)
 
