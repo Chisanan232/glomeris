@@ -80,7 +80,7 @@ use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::persistence::{append_audit_record, ActionSource, AuditRecord};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig};
-use crate::reporting::policy_label::label_for;
+use crate::reporting::policy_label::{label_for, PolicyLabel};
 
 /// Per-`collect()` probe timeout used while revalidating one emergency
 /// candidate. Kept short — unlike [`crate::executor`]'s own internal 5s
@@ -164,7 +164,23 @@ impl std::fmt::Display for EmergencyReport {
 /// rather than fabricating work, exactly as this ticket asks: "if no such
 /// self-owned disposable state exists/it's already minimal, just move
 /// on, don't fabricate work."
-fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
+///
+/// HORO-1468: every deletion attempt this function makes is appended to
+/// `audit_log_path`. It used to be the one deletion in the whole product
+/// that left no trace there — `process_candidate` records each candidate it
+/// executes, and this step, which needs no policy approval and no evidence
+/// and runs before anything else, recorded nothing. The run's own
+/// [`EmergencyReport`] counted it, but that goes to stdout and is gone when
+/// the terminal scrolls, so a user asking `glomeris actions history` "what
+/// deleted my pressure history?" got an answer that did not contain it.
+/// Auditing an unaudited privileged action is worth more than auditing a
+/// gated one.
+fn free_self_owned_disposable_state(
+    path: &Path,
+    report: &mut EmergencyReport,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
     let metadata = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -179,16 +195,85 @@ fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
 
     let size = metadata.len();
     report.actions_attempted += 1;
+    // Audited on exactly the paths that charge `actions_attempted` above,
+    // and never on the two early returns before it: a file that is not
+    // there and a file that could not be stat'd are both states in which
+    // nothing was deleted, and a row saying otherwise would make the audit
+    // trail describe work that never happened — the same fabrication
+    // HORO-1467 removed from the pressure history.
     match fs::remove_file(path) {
         Ok(()) => {
             report.actions_succeeded += 1;
             report.total_bytes_freed += size;
+            append_self_state_audit_record(path, "succeeded", Some(size), audit_log_path, now);
         }
-        Err(e) => report.push_error(format!(
-            "failed to remove self-owned disposable state {}: {e}",
-            path.display()
-        )),
+        Err(e) => {
+            report.push_error(format!(
+                "failed to remove self-owned disposable state {}: {e}",
+                path.display()
+            ));
+            // Recorded too, with no byte count: "emergency mode tried to
+            // delete this and could not" is a fact worth keeping, and a
+            // failed attempt that vanished from the log while a successful
+            // one appeared would make the trail read as though the file
+            // were only ever deleted cleanly.
+            append_self_state_audit_record(path, "failed", None, audit_log_path, now);
+        }
     }
+}
+
+/// [`AuditRecord::action_id`] for the step-1 deletion. Deliberately NOT an
+/// [`crate::actions::ActionRegistry`] id, because there is no registered
+/// action for this and inventing one would imply a policy-governed cleanup
+/// of a developer resource. Every registry id is named for the third-party
+/// tool it cleans (`cargo.clean.target_dir`, `homebrew.cleanup.cache`), so
+/// the `glomeris.` prefix is what tells a reader the tool acted on itself.
+const SELF_STATE_ACTION_ID: &str = "glomeris.self_state.free";
+
+/// Appends one [`AuditRecord`] for the step-1 deletion, discarding the
+/// `Result` exactly as [`append_emergency_audit_record`] does and for the
+/// same reason: this is a degraded low-disk path, an audit append is the
+/// kind of write that fails there, and a failure to log must never change
+/// what the report says was done.
+///
+/// Two field choices are deliberate.
+///
+/// `policy_label` is [`PolicyLabel::NotPolicyGoverned`] (HORO-1468) because
+/// every other label would assert that [`crate::policy::classify`] ran and
+/// cleared this, and it never ran at all. `AUTO_SAFE` in particular would
+/// be the worst available lie: it is the label that means "evidence shows a
+/// tool can recreate this and nothing is using it", and no evidence was
+/// collected here.
+///
+/// `resource_id` is the bare path, not the `kind_tag:locator` shape
+/// [`crate::evidence::ResourceId`] renders. This file has no
+/// [`crate::evidence::ResourceKind`] — it is not a discoverable developer
+/// resource, and adding a kind for it would put the tool's own log inside
+/// the vocabulary detectors and policy range over. The macOS history view
+/// renders this field verbatim as a path either way.
+fn append_self_state_audit_record(
+    path: &Path,
+    outcome: &str,
+    reclaimed_bytes: Option<u64>,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
+    let record = AuditRecord {
+        timestamp: now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: SELF_STATE_ACTION_ID.to_string(),
+        resource_id: path.display().to_string(),
+        policy_label: PolicyLabel::NotPolicyGoverned.as_str().to_string(),
+        outcome: outcome.to_string(),
+        abort_reason: None,
+        actual_reclaimed_bytes: reclaimed_bytes,
+        source: ActionSource::Emergency.to_string(),
+        // No model is consulted anywhere in this module (see its docs).
+        model_rank: None,
+    };
+    let _ = append_audit_record(audit_log_path, &record);
 }
 
 /// Runs emergency recovery end to end. See the module docs for the
@@ -240,8 +325,10 @@ pub fn run_emergency(
 
     // Step 1: free the tool's own disposable state first — the safest
     // possible thing to reclaim, and the only step here that does not
-    // depend on detectors/policy/executor at all.
-    free_self_owned_disposable_state(self_state_path, &mut report);
+    // depend on detectors/policy/executor at all. It does depend on the
+    // audit log since HORO-1468: being ungated is the reason it is the step
+    // that most needs a record, not a reason it needs one least.
+    free_self_owned_disposable_state(self_state_path, &mut report, audit_log_path, now);
 
     // Step 2: bounded, cheap candidate discovery — detectors only, never
     // the scanner's full filesystem walk (see module docs).
@@ -882,7 +969,12 @@ mod tests {
         fs::write(&history, vec![0u8; 128]).unwrap();
 
         let mut report = EmergencyReport::default();
-        free_self_owned_disposable_state(&history, &mut report);
+        free_self_owned_disposable_state(
+            &history,
+            &mut report,
+            &dir.join("actions.jsonl"),
+            SystemTime::now(),
+        );
 
         assert!(!history.exists());
         assert_eq!(report.actions_attempted, 1);
@@ -897,11 +989,144 @@ mod tests {
     fn free_self_owned_disposable_state_missing_file_does_not_fabricate_work() {
         let dir = make_temp_dir("self-state-missing");
         let history = dir.join("does-not-exist.tsv");
+        let audit_log_path = dir.join("actions.jsonl");
 
         let mut report = EmergencyReport::default();
-        free_self_owned_disposable_state(&history, &mut report);
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
 
         assert_eq!(report, EmergencyReport::default());
+        // HORO-1468: and no audit row either. "Nothing to free" must not
+        // become "deleted your pressure history" in `actions history`.
+        assert!(
+            crate::monitor::read_audit_tail(&audit_log_path, 10).is_empty(),
+            "a file that was never there must not produce an audit record"
+        );
+
+        // Anti-vacuity: the emptiness above must be a product behaviour and
+        // not a reader that can never see anything at this path. The same
+        // path, with the file present, yields exactly one row.
+        fs::write(&history, vec![0u8; 8]).unwrap();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+        assert_eq!(
+            crate::monitor::read_audit_tail(&audit_log_path, 10).len(),
+            1,
+            "control invalid: a real deletion is not visible at this audit path either"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1468: the one deletion in the product that no policy gate ever
+    /// sees is the one that most needs a record, and the record has to name
+    /// the file, the outcome and the bytes — a row that said only "something
+    /// happened" would not answer the question the founder asked, which was
+    /// what deleted the pressure history.
+    ///
+    /// Asserts every field rather than a subset: each one is read by a
+    /// different consumer (`actions history`'s table, the macOS history
+    /// section, and the `source` filter), so a wrong value is invisible to
+    /// whichever consumer does not read it.
+    #[test]
+    fn free_self_owned_disposable_state_audits_the_deletion_it_performed() {
+        let dir = make_temp_dir("self-state-audited");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 128]).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, now);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1, "expected exactly one audit record");
+        let record = &tail[0];
+        assert_eq!(record.action_id, "glomeris.self_state.free");
+        assert_eq!(record.resource_id, history.display().to_string());
+        assert_eq!(record.outcome, "succeeded");
+        assert_eq!(record.actual_reclaimed_bytes, Some(128));
+        assert_eq!(record.source, "emergency");
+        assert_eq!(record.abort_reason, None);
+        assert_eq!(record.model_rank, None);
+        // The timestamp is the run's `now`, not the moment of the append, so
+        // this row and the candidate rows of the same run agree.
+        assert_eq!(record.timestamp, 1_700_000_000);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed deletion is recorded too, and recorded as a failure with no
+    /// byte count. Both halves matter: dropping the row would make the log
+    /// read as though this file were only ever deleted cleanly, and carrying
+    /// a byte count would claim space that was never reclaimed — the same
+    /// class of fabrication HORO-1467 removed from the pressure history.
+    ///
+    /// The failure is produced by putting a directory where the file belongs:
+    /// `fs::metadata` succeeds (so the early returns are not taken) and
+    /// `fs::remove_file` cannot remove it. No permission bits, no `sudo`,
+    /// nothing outside the tempdir.
+    #[test]
+    fn free_self_owned_disposable_state_audits_a_failed_deletion_without_a_byte_count() {
+        let dir = make_temp_dir("self-state-undeletable");
+        let history = dir.join("history.tsv");
+        fs::create_dir_all(&history).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+
+        // Fixture control: the removal really did fail, so the assertions
+        // below describe the failure path and not a silent success.
+        assert!(
+            history.exists(),
+            "fixture invalid: the path was removed after all"
+        );
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 0);
+        assert_eq!(report.total_bytes_freed, 0);
+        assert_eq!(report.errors.len(), 1);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1, "a failed attempt is still an attempt");
+        assert_eq!(tail[0].outcome, "failed");
+        assert_eq!(
+            tail[0].actual_reclaimed_bytes, None,
+            "a failed deletion must not claim reclaimed bytes"
+        );
+        assert_eq!(tail[0].action_id, "glomeris.self_state.free");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The label on this row is the one that says policy never judged this,
+    /// and it is specifically not any of the four that say it did. Audited
+    /// against all four by name: `AUTO_SAFE` would be the worst of them —
+    /// it means "evidence shows a tool can recreate this and nothing is
+    /// using it", and no evidence was collected for this file at all.
+    #[test]
+    fn free_self_owned_disposable_state_audit_row_claims_no_policy_judgment() {
+        let dir = make_temp_dir("self-state-label");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 16]).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].policy_label, "NOT_POLICY_GOVERNED");
+        for judged in [
+            crate::reporting::policy_label::PolicyLabel::AutoSafe,
+            crate::reporting::policy_label::PolicyLabel::Ask,
+            crate::reporting::policy_label::PolicyLabel::Protected,
+            crate::reporting::policy_label::PolicyLabel::UnknownIncomplete,
+        ] {
+            assert_ne!(
+                tail[0].policy_label,
+                judged.as_str(),
+                "an ungated deletion must not be labelled as though policy cleared it"
+            );
+        }
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1162,6 +1387,54 @@ mod tests {
             !self_state.exists(),
             "step 1 removes the self-state fixture and nothing recreates it"
         );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1468 end to end: step 1's record reaches the audit log the *run*
+    /// was given, not some path assembled inside the unit under test. This is
+    /// the wiring the unit tests above cannot see — before the fix,
+    /// `free_self_owned_disposable_state` was the one step `run_emergency`
+    /// called without handing it the audit log at all.
+    ///
+    /// Empty `DetectorRegistry`, never `builtin()`, for the reason given at
+    /// length on the test above: `builtin()`'s detectors run against the real
+    /// host machine's Homebrew/Docker state. With zero detectors the only
+    /// action in the run is the tempdir `self_state` fixture, so "exactly one
+    /// record, and it is step 1's" is deterministic.
+    #[test]
+    fn run_emergency_audits_the_self_state_deletion_it_performed() {
+        let dir = make_temp_dir("run-audits-self-state");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 64]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let report = run_emergency(
+            &CleanCollector,
+            &DetectorRegistry::from_detectors(vec![]),
+            &ActionRegistry::builtin(),
+            &DiscoveryContext::new(home_dir),
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &audit_log_path,
+        );
+
+        assert_eq!(report.actions_succeeded, 1);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(
+            tail.len(),
+            1,
+            "the run's only action must appear in the run's own audit log"
+        );
+        assert_eq!(tail[0].action_id, "glomeris.self_state.free");
+        assert_eq!(tail[0].resource_id, self_state.display().to_string());
+        assert_eq!(tail[0].outcome, "succeeded");
+        assert_eq!(tail[0].actual_reclaimed_bytes, Some(64));
+        assert_eq!(tail[0].policy_label, "NOT_POLICY_GOVERNED");
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -199,9 +199,14 @@ enum GlomerisVocabulary {
 
     static let safetyAxis = "Safety"
 
-    /// Wording for the four `PolicyLabel` values. Every sentence describes
+    /// Wording for the five `PolicyLabel` values. Every sentence describes
     /// what Rust has already decided; none of it is a decision taken here,
     /// and nothing in this app reads these strings back to gate an action.
+    ///
+    /// Four of the five are safety judgements. `NOT_POLICY_GOVERNED`
+    /// (HORO-1468) is not one — see its case below — and it appears only in
+    /// the history section, never on a candidate row, because the CLI only
+    /// ever writes it to the audit log.
     static func safety(_ token: String) -> GlomerisTerm {
         switch token {
         case "AUTO_SAFE":
@@ -231,6 +236,19 @@ enum GlomerisVocabulary {
                 "A measurement did not finish, went stale, or failed, so no "
                     + "safety judgement was reached. Treated as off-limits until it is.",
                 "questionmark.circle.fill", .unknown
+            )
+        case "NOT_POLICY_GOVERNED":
+            // Deliberately toneless. The other four answer "may Glomeris
+            // touch your resource?"; this one says the row is not about a
+            // resource of yours at all — Glomeris cleaned up a file it wrote
+            // itself, so there was nothing for the safety rules to judge.
+            // `.positive` would read as a safety clearance that never
+            // happened, and `.unknown` would claim a measurement stalled.
+            return term(
+                token, safetyAxis, "Glomeris's own file",
+                "Not one of your resources: Glomeris removed a file it wrote "
+                    + "itself, so its safety rules were never involved.",
+                "gearshape.fill", .neutral
             )
         default:
             return unrecognised(

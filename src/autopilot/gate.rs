@@ -319,6 +319,19 @@ pub fn admit(
             true
         }
         PolicyLabel::AutoSafe => false,
+        // Unreachable by construction, and refused rather than omitted for
+        // the same reason `ReclaimSizeUnknown` exists above: `label_for`
+        // projects a decision and so never yields this (asserted by
+        // `reporting::policy_label`'s own
+        // `label_for_never_returns_not_policy_governed`), but if that ever
+        // drifts, a label whose entire meaning is "policy did not judge
+        // this" must not reach the pre-authorization path. Autopilot acts on
+        // developer resources; the one action that carries this label
+        // (HORO-1468, emergency's own state file) is not one of them and
+        // never passes through this gate.
+        PolicyLabel::NotPolicyGoverned => {
+            return Admission::Refused(RefusalReason::UnknownIncompleteRefused)
+        }
     };
 
     // Defensive: `label_for` derives `AutoSafe`/`Ask` from `decision.class`,
