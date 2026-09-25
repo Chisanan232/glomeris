@@ -98,6 +98,115 @@ struct GlomerisLlmSettingsStatus: Equatable {
     }
 }
 
+/// How long a keychain query may take before its answer is presumed not to be
+/// coming, and the memory of that having happened (HORO-1471).
+///
+/// ## Why there is a memory at all
+///
+/// A deadline on its own is not enough, and the reason is specific rather than
+/// defensive. The stall this exists for was traced into a one-time initialiser
+/// inside the Security framework: the first caller to reach it takes a
+/// `dispatch_once` token, sends a message to `securityd`, and waits. When no
+/// reply ever comes the token is never released, so *every* later caller —
+/// on any thread, any queue, in any part of the app — waits on the same token
+/// for the life of the process. Timing out the first query therefore does not
+/// restore the next one; it only stops the first from waiting forever.
+///
+/// So a missed deadline is recorded, and later queries are answered from the
+/// record instead of being issued. That is the second half of HORO-1471 AC2 —
+/// "a timed-out query is treated as terminal for the session and is not
+/// re-issued" — chosen over the first half, isolating each query, because
+/// isolation cannot help against a process-wide `dispatch_once`. Two isolated
+/// queues would both stop at the same token.
+///
+/// ## What it costs
+///
+/// The abandoned work item is not cancelled, because a synchronous
+/// `SecItemCopyMatching` cannot be cancelled. It keeps a thread parked for the
+/// life of the process. That is the price of returning at all, and it is
+/// bounded at one thread precisely because the miss is recorded and nothing
+/// else is dispatched behind it.
+///
+/// A class rather than a value, because the record has to be shared by every
+/// store instance in the process: the settings view constructs a new
+/// `GlomerisLlmSettingsStore` on each re-evaluation, and a per-instance flag
+/// would forget the miss immediately. Injectable so a test gets its own, since
+/// a test that tripped the shared record would silently change what every later
+/// test observes.
+///
+/// `@unchecked` for the mutable flag, which the lock below actually protects.
+final class KeychainDeadline: @unchecked Sendable {
+    /// The one the app uses. Deliberately shared, per the note above.
+    static let shared = KeychainDeadline()
+
+    /// Three seconds. An availability query is an attributes lookup with no
+    /// decryption and no authorisation, which completes in well under a
+    /// millisecond on a working system — measured in the low hundreds of
+    /// microseconds — so this is not a performance budget, it is the point at
+    /// which "slow" has stopped being a plausible explanation.
+    ///
+    /// Not shorter, because the cost of being wrong is asymmetric: a premature
+    /// miss tells a user with a perfectly good keychain that it went quiet, and
+    /// then keeps telling them that for the rest of the session. Not longer,
+    /// because this is a settings pane a person is looking at.
+    static let defaultSeconds: TimeInterval = 3
+
+    let seconds: TimeInterval
+
+    private let lock = NSLock()
+    private var missed = false
+
+    init(seconds: TimeInterval = KeychainDeadline.defaultSeconds) {
+        self.seconds = seconds
+    }
+
+    /// Whether a query has already run out of time in this process.
+    var hasBeenMissed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return missed
+    }
+
+    /// Records that one did. Not reversible: nothing this app can observe
+    /// distinguishes "the daemon recovered" from "the token is still held", and
+    /// a flag that cleared itself on a timer would re-park a thread per
+    /// attempt.
+    func recordMiss() {
+        lock.lock()
+        defer { lock.unlock() }
+        missed = true
+    }
+}
+
+/// A continuation that two places may try to resume, and that resumes once.
+///
+/// Needed because the deadline and the work are genuinely racing, and resuming
+/// a checked continuation twice is a crash rather than a warning. The loser's
+/// call is dropped.
+private final class FirstAnswer<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value?, Never>?
+
+    /// Called synchronously inside `withCheckedContinuation`'s closure, before
+    /// anything that could deliver is dispatched — so there is no window in
+    /// which an answer arrives with nowhere to go.
+    func attach(_ continuation: CheckedContinuation<Value?, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.continuation = continuation
+    }
+
+    func deliver(_ value: Value?) {
+        lock.lock()
+        let waiting = continuation
+        continuation = nil
+        lock.unlock()
+        // Outside the lock: `resume` hands control to the awaiting task, and
+        // holding a lock across that is how a deadlock gets written.
+        waiting?.resume(returning: value)
+    }
+}
+
 /// Reads and writes the BYOK provider settings, and builds the environment a
 /// `glomeris` child process should run with.
 ///
@@ -389,6 +498,37 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     ) async -> T {
         await withCheckedContinuation { continuation in
             keychainQueue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    /// Where the deadline is timed.
+    ///
+    /// Load-bearing that this is not `keychainQueue`. The case the deadline
+    /// exists for is a work item on `keychainQueue` that never finishes, and a
+    /// serial queue holding a stuck item runs nothing else — so a deadline
+    /// scheduled there would be queued behind the very stall it is meant to
+    /// break, and would never fire. The one-line change that reintroduces
+    /// HORO-1471 is moving this `asyncAfter` onto the keychain queue.
+    private static let deadlineQueue = DispatchQueue(
+        label: "\(BundleIdentity.current).keychain.deadline",
+        qos: .userInitiated
+    )
+
+    /// [`offMainThread(_:)`] with a deadline. `nil` means the deadline passed
+    /// first; it does not mean the work produced nothing.
+    ///
+    /// The work item is still running when `nil` is returned — see
+    /// `KeychainDeadline` for why it cannot be cancelled and why that is
+    /// survivable.
+    private static func offMainThread<T: Sendable>(
+        within seconds: TimeInterval,
+        _ work: @escaping @Sendable () -> T
+    ) async -> T? {
+        let answer = FirstAnswer<T>()
+        return await withCheckedContinuation { continuation in
+            answer.attach(continuation)
+            keychainQueue.async { answer.deliver(work()) }
+            deadlineQueue.asyncAfter(deadline: .now() + seconds) { answer.deliver(nil) }
         }
     }
 
