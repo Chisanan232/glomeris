@@ -451,6 +451,41 @@ without a restart.
 If no binary is found, each section says so and lists the locations it
 searched, rather than failing silently or naming a path it only assumed.
 
+### Seeing which binary is in use
+
+The **Command-line tool** card names the binary the app resolved: its full
+path, which of the three rules above chose it, and a fingerprint — the first
+twelve characters of the SHA-256 of its contents, with the whole hash in the
+tooltip.
+
+The fingerprint is there because the version number cannot do this job. Two
+`glomeris` binaries on one machine both reported version `0.2.0` while
+disagreeing about whether an action with no scoped path may be offered at
+all: the version is stamped from the crate version, so it does not change
+between merges and is not a build identity. The hash is.
+
+A release build records the hash of the CLI it ships, so the card can say
+whether the binary in use is that one. The four things it can say:
+
+| The card says | What it means |
+|---|---|
+| Matches this app | The resolved binary is the one this app ships. |
+| Not the build this app ships | Both hashes are known and differ. The app still works, and still drives that binary — what it does may differ from what the app describes. |
+| Nothing to compare against | This app records no expected hash. Normal for a locally built app; see below. |
+| Cannot be checked | The binary can be run but its contents could not be read, so no comparison was possible. |
+
+**A locally built app embeds no CLI.** The embed step lives in the release
+workflow, not in the Xcode project, so an app built with `xcodebuild` — or
+from Xcode — contains no `Contents/MacOS/glomeris` and always falls through
+to `PATH` or the Homebrew prefixes. Whatever is installed on the machine is
+what your build drives, and that may be older or newer than the tree you
+built from. A local build also records no expected hash, which is why the
+card reads "Nothing to compare against" rather than reporting a mismatch.
+
+If you are testing a change to the CLI from a local app build, the path on
+the card is the one to check: `cargo build` alone does not put a binary
+anywhere the app looks.
+
 ## Every screen maps back to a CLI command
 
 | Card | CLI command(s) |

@@ -739,6 +739,112 @@ final class GlomerisVocabularyTests: XCTestCase {
         XCTAssertNotEqual(noConsent.explanation, mismatch.explanation)
     }
 
+    // MARK: - Resolved command-line tool (HORO-1466)
+
+    private static let cliStates: [GlomerisCliExpectation] = [
+        .matches,
+        .differs(expected: String(repeating: "ab", count: 32)),
+        .notDeclared,
+        .notComparable,
+    ]
+
+    /// The ticket's AC: the card must state WHICH binary is in use, not merely
+    /// that something is wrong. "Glomeris may be running an old version" is not
+    /// actionable, and is in effect what the product said before this ticket —
+    /// the path existed only inside the error raised when nothing was found.
+    ///
+    /// Asserted for every state including the healthy one, because a user who
+    /// only ever sees a path when something is broken has no way to know what
+    /// normal looks like.
+    func testEveryCliExpectationNamesTheResolvedPath() {
+        let path = "/opt/homebrew/bin/glomeris"
+        for state in Self.cliStates {
+            let term = GlomerisVocabulary.cliExpectation(state, path: path)
+            XCTAssertTrue(
+                term.explanation.contains(path),
+                "\(state) must name the binary it is talking about: \(term.explanation)"
+            )
+        }
+    }
+
+    /// Four states that call for four different responses — nothing, replace
+    /// the tool, nothing (it is a developer build), and look at the file's
+    /// permissions. Sharing wording between any two would tell a user to do the
+    /// wrong thing, so titles and explanations must all be distinct.
+    func testTheFourCliExpectationsAreAllDistinguishable() {
+        let terms = Self.cliStates.map {
+            GlomerisVocabulary.cliExpectation($0, path: "/usr/local/bin/glomeris")
+        }
+        XCTAssertEqual(Set(terms.map(\.title)).count, terms.count)
+        XCTAssertEqual(Set(terms.map(\.explanation)).count, terms.count)
+        XCTAssertEqual(Set(terms.map(\.token)).count, terms.count)
+    }
+
+    /// Only a real mismatch is a warning.
+    ///
+    /// `notDeclared` is the normal state for every locally built app, since one
+    /// embeds no CLI and stamps no expected hash. Colouring it as a problem
+    /// would make the warning permanent for the one audience that reads this
+    /// card, and a permanent warning is one nobody reads — which would cost
+    /// exactly the signal this ticket adds.
+    func testOnlyAGenuineMismatchIsTonedAsAWarning() {
+        let path = "/usr/local/bin/glomeris"
+        XCTAssertEqual(GlomerisVocabulary.cliExpectation(.matches, path: path).tone, .positive)
+        XCTAssertEqual(
+            GlomerisVocabulary.cliExpectation(
+                .differs(expected: String(repeating: "ab", count: 32)),
+                path: path
+            ).tone,
+            .warning
+        )
+        for cannotSay: GlomerisCliExpectation in [.notDeclared, .notComparable] {
+            XCTAssertEqual(
+                GlomerisVocabulary.cliExpectation(cannotSay, path: path).tone,
+                .unknown,
+                "\(cannotSay) is 'cannot say', which is not the same as 'bad'"
+            )
+        }
+    }
+
+    /// The whole hash is 64 characters and the row is ~260pt wide, so the
+    /// expected value is not what the badge sentence carries — the card renders
+    /// it as its own row. A sentence quoting it would be truncated mid-hash,
+    /// which is worse than not showing it.
+    func testTheMismatchSentenceDoesNotTryToQuoteTheWholeHash() {
+        let expected = String(repeating: "ab", count: 32)
+        let term = GlomerisVocabulary.cliExpectation(
+            .differs(expected: expected),
+            path: "/usr/local/bin/glomeris"
+        )
+        XCTAssertFalse(term.explanation.contains(expected))
+    }
+
+    /// Two `glomeris` binaries differing only by directory is the ordinary
+    /// case, not an exotic one, so the directory is the fact worth carrying.
+    func testCliSourceNamesTheDirectoryItFoundTheBinaryIn() {
+        XCTAssertTrue(
+            GlomerisVocabulary.cliSource(.pathEntry("/usr/local/bin")).contains("/usr/local/bin")
+        )
+        XCTAssertTrue(
+            GlomerisVocabulary.cliSource(.knownInstallDirectory("/opt/homebrew/bin"))
+                .contains("/opt/homebrew/bin")
+        )
+
+        let phrases = [
+            GlomerisVocabulary.cliSource(.bundled),
+            GlomerisVocabulary.cliSource(.pathEntry("/usr/local/bin")),
+            GlomerisVocabulary.cliSource(.knownInstallDirectory("/usr/local/bin")),
+        ]
+        // The last two resolve to the same directory by different rules, and
+        // that difference matters: one is on the user's PATH and one was found
+        // only because the app knows to look there.
+        XCTAssertEqual(Set(phrases).count, phrases.count)
+        for phrase in phrases {
+            XCTAssertFalse(phrase.isEmpty)
+            XCTAssertFalse(phrase.contains("_"), "\(phrase) reads like an internal tag")
+        }
+    }
+
     /// Explanations are sentences shown to a non-expert. They must not
     /// simply re-emit the internal tag the title was supposed to replace.
     func testExplanationsDoNotLeakInternalTags() {

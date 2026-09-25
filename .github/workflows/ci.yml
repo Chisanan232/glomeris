@@ -242,6 +242,24 @@ jobs:
       - name: Check stored state is namespaced by the running bundle
         run: bash scripts/check-state-namespaced-by-bundle-id.sh
 
+  cli-identity-is-reported:
+    # HORO-1466: the app hands all policy and execution authority to a
+    # `glomeris` it resolves at runtime, and used to surface which one only in
+    # the error raised when NOTHING was found. Two binaries on one machine both
+    # answered `--version` with 0.2.0 while disagreeing about whether an
+    # unscoped mutating action may be offered at all, so the identity has to be
+    # a hash of the bytes and it has to be on a non-error surface.
+    #
+    # A separate job from app-version-matches-crate, which is the reason this
+    # one exists: that job pins the version numbers to each other, and this
+    # ticket is the case those numbers cannot detect. Folding the two together
+    # would let "the versions agree" stand in for "it is the same build".
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the resolved CLI's path and identity are reported together
+        run: bash scripts/check-cli-identity-is-reported.sh
+
   vocabulary-covers-cli-tokens:
     # HORO-1306: the GUI's plain-language wording tables are transcribed from
     # the Rust enums by hand, so the drift that matters is the silent one —
