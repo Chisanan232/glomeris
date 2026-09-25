@@ -258,6 +258,7 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
 
     private let defaults: UserDefaults
     private let credentials: CredentialStore
+    private let keychainDeadline: KeychainDeadline
 
     /// `UserDefaults.standard` is the default rather than a named suite: for a
     /// bundled app it *is* the domain named by its bundle identifier, so the
@@ -270,9 +271,19 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// that initialiser when handed the calling process's own bundle
     /// identifier, so in the app the fallback was always the branch taken —
     /// the storage is unchanged, and nothing needs migrating.
-    init(defaults: UserDefaults? = nil, credentials: CredentialStore? = nil) {
+    ///
+    /// `keychainDeadline` defaults to the shared one rather than to a fresh one
+    /// on purpose (HORO-1471): a new store is constructed on every re-evaluation
+    /// of the settings view, and a per-instance record of a missed deadline
+    /// would be forgotten before it could stop the next query.
+    init(
+        defaults: UserDefaults? = nil,
+        credentials: CredentialStore? = nil,
+        keychainDeadline: KeychainDeadline = .shared
+    ) {
         self.defaults = defaults ?? .standard
         self.credentials = credentials ?? KeychainCredentialStore()
+        self.keychainDeadline = keychainDeadline
     }
 
     // MARK: - Stored values
@@ -397,10 +408,44 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// nothing until it is answered — and a main thread that is waiting on a
     /// person cannot service the status item, so AppKit removes it and the app
     /// disappears from the menu bar with no way back in (HORO-1368).
+    /// And under a deadline, since HORO-1471. The endpoint and model are
+    /// resolved here rather than inside the hop because they reach UserDefaults
+    /// only — putting them behind the keychain query is what made a stalled
+    /// keychain able to leave the whole pane unresolved.
     func resolvedStatus(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async -> GlomerisLlmSettingsStatus {
-        await Self.offMainThread { self.status(environment: environment) }
+        var status = statusWithoutApiKey(environment: environment)
+        status.apiKey = await resolvedApiKeySource(environment: environment)
+        return status
+    }
+
+    /// Where the API key comes from, or `unresponsive` if the keychain did not
+    /// say in time (HORO-1471).
+    ///
+    /// The deadline is not a retry. Once one query has run out of time the
+    /// answer is served from the record and the keychain is not asked again,
+    /// because the stall is a process-wide `dispatch_once` and a second attempt
+    /// would wait out a second deadline to be told the same thing — see
+    /// `KeychainDeadline`. This is AC2's "terminal for the session".
+    ///
+    /// An inherited `GLOMERIS_LLM_API_KEY` still outranks the silence, exactly
+    /// as it outranks a refusal: the child process gets the inherited key and
+    /// the user has nothing to fix, so there is nothing to report.
+    private func resolvedApiKeySource(
+        environment: [String: String]
+    ) async -> GlomerisLlmSettingSource {
+        let inherited = environment[Self.apiKeyEnvironmentVariable]
+
+        if keychainDeadline.hasBeenMissed {
+            return Self.source(availability: nil, inherited: inherited)
+        }
+
+        let availability = await Self.offMainThread(within: keychainDeadline.seconds) {
+            self.apiKeyAvailability
+        }
+        if availability == nil { keychainDeadline.recordMiss() }
+        return Self.source(availability: availability, inherited: inherited)
     }
 
     /// [`childEnvironment(basedOn:)`] performed off the main thread.
@@ -451,20 +496,31 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
         return .absent
     }
 
-    /// The same rule for the one field whose storage can refuse the question.
+    /// The same rule for the one field whose storage can refuse the question —
+    /// or, since HORO-1471, not answer it at all.
     ///
-    /// An inherited variable still wins over an unreadable item, and does so
-    /// silently, because in that case the app genuinely does work: the child
-    /// process gets the inherited key and the user has nothing to fix. The
-    /// degraded state is reported only when there is no fallback — which is
-    /// exactly when it changes what the user can do.
+    /// `nil` availability means no answer arrived before the deadline. It is
+    /// deliberately not `unreadable`: that is a refusal, which is an answer.
+    ///
+    /// An inherited variable still wins over either, and does so silently,
+    /// because in that case the app genuinely does work: the child process gets
+    /// the inherited key and the user has nothing to fix. The degraded state is
+    /// reported only when there is no fallback — which is exactly when it
+    /// changes what the user can do.
     private static func source(
-        availability: CredentialAvailability,
+        availability: CredentialAvailability?,
         inherited: String?
     ) -> GlomerisLlmSettingSource {
         if availability == .present { return .settings }
         if normalized(inherited) != nil { return .environment }
-        return availability == .unreadable ? .unreadable : .absent
+        switch availability {
+        case .unreadable: return .unreadable
+        // No answer. Anything else here — `absent` in particular — would be
+        // this app stating something about the user's data that it does not
+        // know (AC1).
+        case nil: return .unresponsive
+        default: return .absent
+        }
     }
 
     /// Keychain work, off the main thread and one at a time.
