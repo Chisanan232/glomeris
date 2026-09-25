@@ -95,12 +95,27 @@ jobs:
             exit 1
           fi
       - name: Test GlomerisMenuBar
+        # Output is teed rather than just streamed, because the next step reads
+        # it. `pipefail` so `tee` cannot mask a failing xcodebuild — without it
+        # this step would report tee's status and a broken build would pass.
         run: |
+          set -euo pipefail
           xcodebuild test \
             -project macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj \
             -scheme GlomerisMenuBar \
             -destination 'platform=macOS' \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO 2>&1 | tee "$RUNNER_TEMP/xcodebuild.log"
+      - name: No Swift 6 language-mode errors
+        # HORO-1478. The target builds at SWIFT_VERSION = 5.0, so a diagnostic
+        # Swift 6 classes as an error is only a warning here: xcodebuild exits
+        # 0, the tests pass, and nothing notices. That is exactly how HORO-1478
+        # sat in the log across several green runs.
+        #
+        # `if: always()` so it still reports when the tests themselves failed.
+        # The two are independent findings and one should not hide the other —
+        # the same reason xcodeproj-drift is its own job.
+        if: always()
+        run: bash scripts/check-no-swift6-concurrency-errors.sh "$RUNNER_TEMP/xcodebuild.log"
 
   xcodeproj-drift:
     # HORO-1296: GlomerisMenuBar.xcodeproj is generated from project.yml and
