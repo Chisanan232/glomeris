@@ -85,6 +85,18 @@ protocol CredentialStore: Sendable {
     /// which is what "make sure this is gone" should mean.
     @discardableResult
     func deleteSecret(forKey key: String) -> Bool
+
+    /// Which binaries may read the stored secret, without reading it.
+    ///
+    /// HORO-1474. On the protocol rather than only on the keychain store for the
+    /// same reason `availability(forKey:)` is: the settings store has to be able
+    /// to ask, and what it asks has to be substitutable in a test bundle that
+    /// has no keychain item of its own to inspect.
+    ///
+    /// Reads the item's access control list and never its value — see
+    /// `CredentialAccessList.swift`, which is where the real implementation and
+    /// everything measured about it lives.
+    func accessList(forKey key: String) -> CredentialAccessListReading
 }
 
 /// The real store: a generic-password keychain item in the user's login
@@ -180,7 +192,11 @@ struct KeychainCredentialStore: CredentialStore {
         return access
     }
 
-    private func baseQuery(forKey key: String) -> [String: Any] {
+    /// Not `private`: HORO-1474's ACL read is an extension in
+    /// `CredentialAccessList.swift`, and it must look the item up by the same
+    /// service and account this file writes it under. A second copy of these
+    /// three attributes over there is how the two would come to disagree.
+    func baseQuery(forKey key: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -365,15 +381,28 @@ final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()
     private var secrets: [String: String] = [:]
     private let unreadableKeys: Set<String>
+    private let accessLists: [String: CredentialAccessListReading]
 
     /// `unreadableKeys` makes the keychain's refusal reproducible without a
     /// keychain. It is the only way to cover the degraded-provider path
     /// (HORO-1368 AC 6) in a test: the real condition needs a binary whose code
     /// identity an existing item's ACL rejects, which cannot be arranged from
     /// inside the test bundle that would have to observe it.
-    init(secrets: [String: String] = [:], unreadableKeys: Set<String> = []) {
+    ///
+    /// `accessLists` does the same for HORO-1474. An ACL with a dangling entry
+    /// in it needs a keychain item created while a binary existed and read back
+    /// after it was deleted, which a test has no safe way to arrange — so the
+    /// *classification* is asserted against the real function in
+    /// `CredentialTrustedApplicationReading`, and what the settings store does
+    /// with each answer is asserted against these.
+    init(
+        secrets: [String: String] = [:],
+        unreadableKeys: Set<String> = [],
+        accessLists: [String: CredentialAccessListReading] = [:]
+    ) {
         self.secrets = secrets
         self.unreadableKeys = unreadableKeys
+        self.accessLists = accessLists
     }
 
     func availability(forKey key: String) -> CredentialAvailability {
@@ -403,5 +432,14 @@ final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
         defer { lock.unlock() }
         secrets.removeValue(forKey: key)
         return true
+    }
+
+    /// Whatever the test supplied, or — when it supplied nothing — the answer
+    /// that follows from whether a secret is held. Defaulting to an empty
+    /// application list rather than to `noItem` would tell a caller that nothing
+    /// is stored while `availability` says something is.
+    func accessList(forKey key: String) -> CredentialAccessListReading {
+        if let supplied = accessLists[key] { return supplied }
+        return secret(forKey: key) == nil ? .noItem : .applications([])
     }
 }

@@ -146,6 +146,13 @@ targets:
       # compiled type rather than only about source text.
       - path: Sources/ApplyPlanView.swift
       - path: Sources/CredentialStore.swift
+      # HORO-1474: the trusted-application list the AI Provider pane shows.
+      # Compiled in because the two cases AC 6 pins — an empty list and an entry
+      # whose binary is gone — are asserted against the real classification
+      # function. Reaching them through a keychain would need an item created
+      # while a binary existed and read back after it was deleted, which is not
+      # something a test may arrange on the machine it runs on.
+      - path: Sources/CredentialAccessList.swift
       - path: Sources/GlomerisLlmSettingsStore.swift
       - path: Sources/AiProviderPreferencesView.swift
       - path: Sources/AutopilotPreferencesView.swift
