@@ -120,7 +120,11 @@ rig_pids() {
     return 0
 }
 
-rig_count() { rig_pids | wc -l | tr -d ' '; }
+# `return 0` for the same reason as `rig_pids` above: counting zero processes is
+# a normal answer, and leaving the function's status to whatever the pipeline did
+# means a caller's plain assignment can be killed by `set -e` instead of reading
+# the zero.
+rig_count() { rig_pids | wc -l | tr -d ' '; return 0; }
 
 # The bundle each rig process was launched from, and the version of that bundle.
 survivor_bundle() {
@@ -178,6 +182,9 @@ menu_bar_items() {
         total=$(( total + count ))
     done
     echo "$total"
+    # Explicit for the same reason as the helpers above — every exit from this
+    # function is a normal answer, including the two "unavailable:" ones.
+    return 0
 }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -213,7 +220,11 @@ expect_count() {
 expect_survivor() {
     local want_bundle=$1 want_version=$2 got_bundle got_version
     got_bundle=$(survivor_bundle) || fail "no surviving instance to identify"
-    got_version=$(survivor_version)
+    # Handled for the same reason as the line above, which already was. Without
+    # it this assignment aborts the function under `set -e` when there is no
+    # survivor, and the two comparisons below — the whole point of this helper —
+    # are skipped silently.
+    got_version=$(survivor_version) || fail "cannot read the surviving instance's version"
     [[ $got_bundle == "$want_bundle" ]] ||
         fail "the survivor is $got_bundle, expected $want_bundle"
     [[ $got_version == "$want_version" ]] ||
@@ -310,8 +321,13 @@ done
 # --- Quit, and come back -----------------------------------------------------
 
 echo "quit and relaunch"
-survivor=$(survivor_bundle)
-survivor_version_now=$(survivor_version)
+# `survivor_bundle` and `survivor_version` both return 1 when there is no rig
+# instance to describe. `expect_count 1` ran above, so that would be a real
+# regression — but as plain assignments they would abort the script here under
+# `set -e`, printing nothing, and the next thing in the log would be silence
+# where "quit and relaunch" had just been announced.
+survivor=$(survivor_bundle) || fail "no surviving instance to quit and relaunch"
+survivor_version_now=$(survivor_version) || fail "cannot read the surviving instance's version"
 for pid in $(rig_pids); do kill "$pid"; done
 sleep 2
 expect_count 0 "quitting leaves nothing behind"
