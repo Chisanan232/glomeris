@@ -351,6 +351,10 @@ enum GlomerisLlmSettingSourceWording {
         case .environment: return "From the environment this app was launched with"
         case .absent: return "Not set"
         case .unreadable: return "Stored here, but this app could not read it"
+        // HORO-1471. Worded as the keychain's silence and not as the key's
+        // absence, because the two are different facts and only one of them is
+        // known. "Not set" here would be this screen inventing an answer.
+        case .unresponsive: return "Your keychain did not answer, so this is unknown"
         }
     }
 
@@ -361,6 +365,7 @@ enum GlomerisLlmSettingSourceWording {
         case .environment: return "terminal"
         case .absent: return "circle.dashed"
         case .unreadable: return "exclamationmark.triangle"
+        case .unresponsive: return "clock.badge.exclamationmark"
         }
     }
 
@@ -378,6 +383,28 @@ enum GlomerisLlmSettingSourceWording {
         "macOS did not let this app read the key from your keychain, so Glomeris cannot use "
         + "it. This usually means the app was replaced by a different build after the key was "
         + "saved. Paste the key again to store it for this build."
+
+    /// The sentence shown when the keychain never answered (HORO-1471 AC1).
+    ///
+    /// Three things have to be in it, and one thing has to be kept out.
+    ///
+    /// In: that the question went unanswered rather than answered "no", because
+    /// the user's own belief about whether they stored a key is better evidence
+    /// than this screen has; that nothing was changed, because the natural fear
+    /// on seeing this is that the key was lost; and a remedy, which is not about
+    /// the key at all — a keychain service that has stopped answering is cleared
+    /// by logging out or restarting, and no amount of re-pasting will help.
+    ///
+    /// Out: any suggestion to paste the key again. That is the remedy for
+    /// `unreadable` and it is actively wrong here. The write path goes to the
+    /// same service that is not answering, so a save would wait exactly where
+    /// the read did, and the user would be left believing their key is the
+    /// problem.
+    static let unresponsiveExplanation =
+        "Your Mac's keychain service did not answer, so Glomeris could not find out whether a "
+        + "key is stored. This is not the same as there being none, and nothing has been "
+        + "changed or removed. Saving a key now would wait in the same place. Log out and back "
+        + "in, or restart, and open this screen again."
 }
 
 // MARK: - Addressing the provider
@@ -708,6 +735,19 @@ struct AiProviderPreferencesView: View {
             // nothing for the user to do.
             if status.apiKey == .unreadable {
                 Text(GlomerisLlmSettingSourceWording.unreadableExplanation)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // HORO-1471 AC1. A separate branch and not an `||` with the one
+            // above: the two conditions share a slot on screen but not a
+            // sentence, and the remedy for one is the wrong thing to do in the
+            // other. The Save button stays enabled — this app does not know the
+            // service is unusable, only that it did not answer once — but the
+            // sentence says what saving would do.
+            if status.apiKey == .unresponsive {
+                Text(GlomerisLlmSettingSourceWording.unresponsiveExplanation)
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

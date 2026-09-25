@@ -188,15 +188,25 @@ struct KeychainCredentialStore: CredentialStore {
         ]
     }
 
-    /// Asks for the item's attributes and never for its data, which is what
-    /// makes this the non-blocking half of the store: with no `kSecReturnData`
-    /// there is nothing to decrypt, so the item's ACL is not consulted and no
-    /// authorisation prompt can appear. The returned attributes are discarded
-    /// unread — the answer is the `OSStatus`.
+    /// Asks for the item's attributes and never for its data: with no
+    /// `kSecReturnData` there is nothing to decrypt, so the item's ACL is not
+    /// consulted and no authorisation prompt can appear. The returned
+    /// attributes are discarded unread — the answer is the `OSStatus`.
     ///
     /// A return key must be requested explicitly. `SecItemCopyMatching` with no
     /// `kSecReturn*` key at all defaults to returning data for a generic
-    /// password, which is exactly the blocking call this exists to avoid.
+    /// password, which is exactly the prompting call this exists to avoid.
+    ///
+    /// This used to be described as the store's *non-blocking* half. It is not,
+    /// and HORO-1471 is what that cost. Not prompting means it cannot block on
+    /// a *person*, which is the only claim the paragraph above supports. It is
+    /// still a synchronous request to another process, and on a Mac where
+    /// `securityd` accepts the connection and then never replies — measured on
+    /// one, not hypothesised — this call does not return, ever. It cannot be
+    /// cancelled either: the thread is parked inside the Security framework.
+    /// Callers must therefore treat it as unbounded and impose their own
+    /// deadline; `KeychainDeadline` in `GlomerisLlmSettingsStore.swift` is the
+    /// one the settings screen uses.
     func availability(forKey key: String) -> CredentialAvailability {
         var query = baseQuery(forKey: key)
         query[kSecReturnAttributes as String] = true

@@ -40,9 +40,27 @@ enum GlomerisLlmSettingSource: Equatable, CaseIterable {
     /// value they did, to a build that cannot get at the one they stored.
     case unreadable
 
-    /// Whether a value will actually reach the CLI. `unreadable` will not:
-    /// nothing was inherited, and the stored item cannot be read, so a spawned
-    /// `glomeris` would see no variable and refuse with `NotConfigured`.
+    /// The keychain did not answer within the deadline, so whether a key is
+    /// stored here is simply unknown (HORO-1471). Like `unreadable`, only the
+    /// API key can reach this state.
+    ///
+    /// Distinct from `unreadable`, which is a *refusal*: an answer arrived and
+    /// it was "no". This is the absence of any answer, and the remedies are
+    /// opposite. A refusal is fixed by saving the key again under the running
+    /// build's identity; a silence means the system's keychain service has
+    /// stopped responding, and saving again would wait in the same place.
+    ///
+    /// Emphatically distinct from `absent`. "Not set" is a claim about the
+    /// user's data, and making that claim because a system daemon went quiet is
+    /// how a user gets told they have no key while their key sits in the
+    /// keychain — and invited to paste it again into a store that cannot
+    /// receive it.
+    case unresponsive
+
+    /// Whether a value will actually reach the CLI. Neither `unreadable` nor
+    /// `unresponsive` will: nothing was inherited, and the stored item was
+    /// either refused or never spoken about, so a spawned `glomeris` would see
+    /// no variable and refuse with `NotConfigured`.
     var isAvailable: Bool {
         self == .settings || self == .environment
     }
@@ -77,6 +95,115 @@ struct GlomerisLlmSettingsStatus: Equatable {
     /// disabled is a smaller wrong than one that is briefly enabled.
     var isComplete: Bool {
         endpoint.isAvailable && model.isAvailable && apiKey?.isAvailable == true
+    }
+}
+
+/// How long a keychain query may take before its answer is presumed not to be
+/// coming, and the memory of that having happened (HORO-1471).
+///
+/// ## Why there is a memory at all
+///
+/// A deadline on its own is not enough, and the reason is specific rather than
+/// defensive. The stall this exists for was traced into a one-time initialiser
+/// inside the Security framework: the first caller to reach it takes a
+/// `dispatch_once` token, sends a message to `securityd`, and waits. When no
+/// reply ever comes the token is never released, so *every* later caller —
+/// on any thread, any queue, in any part of the app — waits on the same token
+/// for the life of the process. Timing out the first query therefore does not
+/// restore the next one; it only stops the first from waiting forever.
+///
+/// So a missed deadline is recorded, and later queries are answered from the
+/// record instead of being issued. That is the second half of HORO-1471 AC2 —
+/// "a timed-out query is treated as terminal for the session and is not
+/// re-issued" — chosen over the first half, isolating each query, because
+/// isolation cannot help against a process-wide `dispatch_once`. Two isolated
+/// queues would both stop at the same token.
+///
+/// ## What it costs
+///
+/// The abandoned work item is not cancelled, because a synchronous
+/// `SecItemCopyMatching` cannot be cancelled. It keeps a thread parked for the
+/// life of the process. That is the price of returning at all, and it is
+/// bounded at one thread precisely because the miss is recorded and nothing
+/// else is dispatched behind it.
+///
+/// A class rather than a value, because the record has to be shared by every
+/// store instance in the process: the settings view constructs a new
+/// `GlomerisLlmSettingsStore` on each re-evaluation, and a per-instance flag
+/// would forget the miss immediately. Injectable so a test gets its own, since
+/// a test that tripped the shared record would silently change what every later
+/// test observes.
+///
+/// `@unchecked` for the mutable flag, which the lock below actually protects.
+final class KeychainDeadline: @unchecked Sendable {
+    /// The one the app uses. Deliberately shared, per the note above.
+    static let shared = KeychainDeadline()
+
+    /// Three seconds. An availability query is an attributes lookup with no
+    /// decryption and no authorisation, which completes in well under a
+    /// millisecond on a working system — measured in the low hundreds of
+    /// microseconds — so this is not a performance budget, it is the point at
+    /// which "slow" has stopped being a plausible explanation.
+    ///
+    /// Not shorter, because the cost of being wrong is asymmetric: a premature
+    /// miss tells a user with a perfectly good keychain that it went quiet, and
+    /// then keeps telling them that for the rest of the session. Not longer,
+    /// because this is a settings pane a person is looking at.
+    static let defaultSeconds: TimeInterval = 3
+
+    let seconds: TimeInterval
+
+    private let lock = NSLock()
+    private var missed = false
+
+    init(seconds: TimeInterval = KeychainDeadline.defaultSeconds) {
+        self.seconds = seconds
+    }
+
+    /// Whether a query has already run out of time in this process.
+    var hasBeenMissed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return missed
+    }
+
+    /// Records that one did. Not reversible: nothing this app can observe
+    /// distinguishes "the daemon recovered" from "the token is still held", and
+    /// a flag that cleared itself on a timer would re-park a thread per
+    /// attempt.
+    func recordMiss() {
+        lock.lock()
+        defer { lock.unlock() }
+        missed = true
+    }
+}
+
+/// A continuation that two places may try to resume, and that resumes once.
+///
+/// Needed because the deadline and the work are genuinely racing, and resuming
+/// a checked continuation twice is a crash rather than a warning. The loser's
+/// call is dropped.
+private final class FirstAnswer<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value?, Never>?
+
+    /// Called synchronously inside `withCheckedContinuation`'s closure, before
+    /// anything that could deliver is dispatched — so there is no window in
+    /// which an answer arrives with nowhere to go.
+    func attach(_ continuation: CheckedContinuation<Value?, Never>) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.continuation = continuation
+    }
+
+    func deliver(_ value: Value?) {
+        lock.lock()
+        let waiting = continuation
+        continuation = nil
+        lock.unlock()
+        // Outside the lock: `resume` hands control to the awaiting task, and
+        // holding a lock across that is how a deadlock gets written.
+        waiting?.resume(returning: value)
     }
 }
 
@@ -131,6 +258,7 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
 
     private let defaults: UserDefaults
     private let credentials: CredentialStore
+    private let keychainDeadline: KeychainDeadline
 
     /// `UserDefaults.standard` is the default rather than a named suite: for a
     /// bundled app it *is* the domain named by its bundle identifier, so the
@@ -143,9 +271,19 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// that initialiser when handed the calling process's own bundle
     /// identifier, so in the app the fallback was always the branch taken —
     /// the storage is unchanged, and nothing needs migrating.
-    init(defaults: UserDefaults? = nil, credentials: CredentialStore? = nil) {
+    ///
+    /// `keychainDeadline` defaults to the shared one rather than to a fresh one
+    /// on purpose (HORO-1471): a new store is constructed on every re-evaluation
+    /// of the settings view, and a per-instance record of a missed deadline
+    /// would be forgotten before it could stop the next query.
+    init(
+        defaults: UserDefaults? = nil,
+        credentials: CredentialStore? = nil,
+        keychainDeadline: KeychainDeadline = .shared
+    ) {
         self.defaults = defaults ?? .standard
         self.credentials = credentials ?? KeychainCredentialStore()
+        self.keychainDeadline = keychainDeadline
     }
 
     // MARK: - Stored values
@@ -229,10 +367,17 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// (the launching environment, injectable for tests).
     ///
     /// Touches the keychain, so it must not be called on the main thread — use
-    /// [`resolvedStatus(environment:)`]. The read is non-blocking (availability,
-    /// not the value), but "non-blocking" is a property of today's
-    /// implementation and the main thread is the app's only entry point; see
-    /// this file's callers.
+    /// [`resolvedStatus(environment:)`].
+    ///
+    /// The read asks for availability and not for the value, so it cannot raise
+    /// an authorisation prompt and cannot wait on a person. This used to be
+    /// written down as the read being "non-blocking", which is a different and
+    /// false claim, and HORO-1471 is what it cost: it is a synchronous call into
+    /// `securityd`, it has no bound of its own, and on a Mac where that daemon
+    /// stops replying it never returns. That is why the async wrapper, and not
+    /// this function, is the one the app calls — only the wrapper has a
+    /// deadline. This one is kept for tests and for callers that are already off
+    /// the main thread and want the raw answer.
     func status(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> GlomerisLlmSettingsStatus {
@@ -263,17 +408,55 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
         )
     }
 
-    /// [`status(environment:)`] performed off the main thread.
+    /// What [`status(environment:)`] answers, obtained off the main thread and,
+    /// for the one field that needs the keychain, under a deadline.
     ///
     /// The point of the hop is not speed. A keychain operation can wait on a
     /// person — `SecurityAgent` puts up an authorisation prompt and returns
     /// nothing until it is answered — and a main thread that is waiting on a
     /// person cannot service the status item, so AppKit removes it and the app
     /// disappears from the menu bar with no way back in (HORO-1368).
+    ///
+    /// The point of the deadline is different, and is HORO-1471: waiting off the
+    /// main thread is only bounded if the thing being waited on answers. The
+    /// endpoint and the model are resolved out here rather than inside the hop
+    /// because they reach UserDefaults and nothing else — putting them behind
+    /// the keychain query is what let a silent keychain leave the whole pane
+    /// unresolved instead of just the one row it actually concerns.
     func resolvedStatus(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async -> GlomerisLlmSettingsStatus {
-        await Self.offMainThread { self.status(environment: environment) }
+        var status = statusWithoutApiKey(environment: environment)
+        status.apiKey = await resolvedApiKeySource(environment: environment)
+        return status
+    }
+
+    /// Where the API key comes from, or `unresponsive` if the keychain did not
+    /// say in time (HORO-1471).
+    ///
+    /// The deadline is not a retry. Once one query has run out of time the
+    /// answer is served from the record and the keychain is not asked again,
+    /// because the stall is a process-wide `dispatch_once` and a second attempt
+    /// would wait out a second deadline to be told the same thing — see
+    /// `KeychainDeadline`. This is AC2's "terminal for the session".
+    ///
+    /// An inherited `GLOMERIS_LLM_API_KEY` still outranks the silence, exactly
+    /// as it outranks a refusal: the child process gets the inherited key and
+    /// the user has nothing to fix, so there is nothing to report.
+    private func resolvedApiKeySource(
+        environment: [String: String]
+    ) async -> GlomerisLlmSettingSource {
+        let inherited = environment[Self.apiKeyEnvironmentVariable]
+
+        if keychainDeadline.hasBeenMissed {
+            return Self.source(availability: nil, inherited: inherited)
+        }
+
+        let availability = await Self.offMainThread(within: keychainDeadline.seconds) {
+            self.apiKeyAvailability
+        }
+        if availability == nil { keychainDeadline.recordMiss() }
+        return Self.source(availability: availability, inherited: inherited)
     }
 
     /// [`childEnvironment(basedOn:)`] performed off the main thread.
@@ -324,20 +507,31 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
         return .absent
     }
 
-    /// The same rule for the one field whose storage can refuse the question.
+    /// The same rule for the one field whose storage can refuse the question —
+    /// or, since HORO-1471, not answer it at all.
     ///
-    /// An inherited variable still wins over an unreadable item, and does so
-    /// silently, because in that case the app genuinely does work: the child
-    /// process gets the inherited key and the user has nothing to fix. The
-    /// degraded state is reported only when there is no fallback — which is
-    /// exactly when it changes what the user can do.
+    /// `nil` availability means no answer arrived before the deadline. It is
+    /// deliberately not `unreadable`: that is a refusal, which is an answer.
+    ///
+    /// An inherited variable still wins over either, and does so silently,
+    /// because in that case the app genuinely does work: the child process gets
+    /// the inherited key and the user has nothing to fix. The degraded state is
+    /// reported only when there is no fallback — which is exactly when it
+    /// changes what the user can do.
     private static func source(
-        availability: CredentialAvailability,
+        availability: CredentialAvailability?,
         inherited: String?
     ) -> GlomerisLlmSettingSource {
         if availability == .present { return .settings }
         if normalized(inherited) != nil { return .environment }
-        return availability == .unreadable ? .unreadable : .absent
+        switch availability {
+        case .unreadable: return .unreadable
+        // No answer. Anything else here — `absent` in particular — would be
+        // this app stating something about the user's data that it does not
+        // know (AC1).
+        case nil: return .unresponsive
+        default: return .absent
+        }
     }
 
     /// Keychain work, off the main thread and one at a time.
@@ -371,6 +565,37 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     ) async -> T {
         await withCheckedContinuation { continuation in
             keychainQueue.async { continuation.resume(returning: work()) }
+        }
+    }
+
+    /// Where the deadline is timed.
+    ///
+    /// Load-bearing that this is not `keychainQueue`. The case the deadline
+    /// exists for is a work item on `keychainQueue` that never finishes, and a
+    /// serial queue holding a stuck item runs nothing else — so a deadline
+    /// scheduled there would be queued behind the very stall it is meant to
+    /// break, and would never fire. The one-line change that reintroduces
+    /// HORO-1471 is moving this `asyncAfter` onto the keychain queue.
+    private static let deadlineQueue = DispatchQueue(
+        label: "\(BundleIdentity.current).keychain.deadline",
+        qos: .userInitiated
+    )
+
+    /// [`offMainThread(_:)`] with a deadline. `nil` means the deadline passed
+    /// first; it does not mean the work produced nothing.
+    ///
+    /// The work item is still running when `nil` is returned — see
+    /// `KeychainDeadline` for why it cannot be cancelled and why that is
+    /// survivable.
+    private static func offMainThread<T: Sendable>(
+        within seconds: TimeInterval,
+        _ work: @escaping @Sendable () -> T
+    ) async -> T? {
+        let answer = FirstAnswer<T>()
+        return await withCheckedContinuation { continuation in
+            answer.attach(continuation)
+            keychainQueue.async { answer.deliver(work()) }
+            deadlineQueue.asyncAfter(deadline: .now() + seconds) { answer.deliver(nil) }
         }
     }
 
