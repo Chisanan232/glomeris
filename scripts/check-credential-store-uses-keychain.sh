@@ -72,13 +72,52 @@ for needle in \
   'kSecClassGenericPassword' \
   'SecItemCopyMatching' \
   'SecItemAdd' \
-  'SecItemUpdate' \
   'SecItemDelete' \
   'kSecAttrAccessibleWhenUnlockedThisDeviceOnly'; do
   if ! grep -qF "$needle" <<<"$store_body"; then
-    fail "${STORE_FILE}: no mention of ${needle}. The keychain-backed store must actually use the keychain API, and a BYOK key must not be iCloud-synced or backed up."
+    fail "${STORE_FILE}: no mention of ${needle}. The keychain-backed store must actually use the keychain API, and the accessibility attribute must stay at its non-syncable value."
   fi
 done
+
+# ---------------------------------------------------------------------------
+# 1b. The item's access control list is declared, and saving resets it.
+# ---------------------------------------------------------------------------
+# HORO-1455. Two properties that are one line each to lose and invisible in
+# review, and that no test in the bundle can establish: `SecItemAdd` cannot run
+# in an unsigned test binary (-25293 against the login keychain, -34018 if it
+# asks for the data-protection one), so what reaches the keychain is asserted
+# here. CredentialStoreAccessTests asserts what the dictionary *contains*; this
+# asserts that the dictionary is what `setSecret` actually uses.
+#
+# Several of these span lines in the source, so match against a
+# whitespace-collapsed copy rather than line by line.
+store_collapsed="$(tr '\n' ' ' <<<"$store_body" | tr -s '[:space:]' ' ')"
+
+if ! grep -qF 'kSecAttrAccess as String' <<<"$store_collapsed"; then
+  fail "${STORE_FILE}: the created item carries no kSecAttrAccess. Its ACL would then be whatever the keychain defaults to — self-only today, but undeclared, so a change in that default silently changes who can read the user's provider key."
+fi
+
+# The trusted list must be built from the RUNNING binary. A literal path would
+# trust whatever sits there, including a binary replaced after the fact.
+if ! grep -qF 'SecTrustedApplicationCreateFromPath(nil' <<<"$store_collapsed"; then
+  fail "${STORE_FILE}: does not build the trusted application from a nil path. Only nil means 'the application making this call'; a literal path trusts whatever is at that path instead."
+fi
+
+# `SecAccessCreate(description, nil, &access)` does not mean "the default ACL".
+# It means no trusted-application restriction at all — the one variant that is
+# genuinely worse than omitting kSecAttrAccess, and it looks harmless.
+if grep -qE 'SecAccessCreate\([^)]*, *nil,' <<<"$store_collapsed"; then
+  fail "${STORE_FILE}: passes nil as SecAccessCreate's trusted-application list. That is not 'the default', it is no restriction — every binary could read the key. Pass an explicit one-element array."
+fi
+
+# AC 3. An in-place update preserves the ACL, so every "Always Allow" a
+# superseded build collected survives every later save. Measured: a list widened
+# to two applications was still two after SecItemUpdate, and an update carrying
+# kSecAttrAccess blocks indefinitely rather than narrowing it. Only a fresh add
+# resets the list, so the write path must not have an update in it at all.
+while IFS= read -r match; do
+  fail "${STORE_FILE}:${match%%:*}: calls SecItemUpdate. An update preserves the item's trusted-application list, which is how the ACL accreted in the first place (HORO-1455). Saving must delete and re-add so the list is rebuilt: ${match#*:}"
+done < <(grep -F 'SecItemUpdate' <<<"$store_body" || true)
 
 # A keychain-backed store has no business knowing about UserDefaults. This
 # is the check that catches "fall back to UserDefaults if the keychain

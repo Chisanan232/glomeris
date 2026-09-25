@@ -77,13 +77,13 @@ status=0
 
 if [[ -n "$undocumented" ]]; then
   echo "FAIL: these commands ship but have no section in ${DOC_FILE}:"
-  echo "$undocumented" | sed 's/^/  - glomeris /'
+  while IFS= read -r name; do echo "  - glomeris ${name}"; done <<<"$undocumented"
   status=1
 fi
 
 if [[ -n "$unknown" ]]; then
   echo "FAIL: ${DOC_FILE} documents these, but they are not in ${HELP_FILE}'s COMMANDS table:"
-  echo "$unknown" | sed 's/^/  - glomeris /'
+  while IFS= read -r name; do echo "  - glomeris ${name}"; done <<<"$unknown"
   status=1
 fi
 

@@ -51,9 +51,21 @@
 //! - **Near-zero-real-disk-space testing was not performed.** Actually
 //!   driving a test machine's free space to near zero is destructive to
 //!   that machine and was judged not worth the risk for this pass. Fault
-//!   injection via fakes (`AlwaysFailingPersistence`, an always-failing
-//!   `EvidenceCollector`, a nonexistent self-state path, …) exercises the
-//!   equivalent failure modes without that risk.
+//!   injection via fakes (an always-failing `EvidenceCollector`, a
+//!   nonexistent self-state path, …) exercises the equivalent failure
+//!   modes without that risk.
+//!
+//!   This list used to name a persistence fake too. HORO-1467 removed both
+//!   of this module's local `PersistenceBackend` fakes along with the
+//!   pressure-history write they injected faults into. (The similarly named
+//!   `monitor::persistence::AlwaysFailingPersistence` is a
+//!   different, shared fake, still used by `monitor::poller`'s tests, and
+//!   untouched.) The contract they protected — a failure in this module's
+//!   best-effort tail must never stop the run or lose step 1's reclamation
+//!   — still holds, and now holds structurally rather than by test: the
+//!   only remaining best-effort tail is `append_emergency_audit_record`
+//!   (private, below), which discards its `Result` outright and so has no
+//!   failure path into the report at all.
 
 use std::fs;
 use std::path::Path;
@@ -65,15 +77,10 @@ use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{Evidence, ResourceKind};
 use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::fs_stat::FsStat;
-use crate::monitor::persistence::{
-    append_audit_record, unix_now_secs, ActionSource, AuditRecord, PersistenceBackend,
-    PressureEvent,
-};
-use crate::monitor::pressure::PressureState;
+use crate::monitor::persistence::{append_audit_record, ActionSource, AuditRecord};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig};
-use crate::reporting::policy_label::label_for;
+use crate::reporting::policy_label::{label_for, PolicyLabel};
 
 /// Per-`collect()` probe timeout used while revalidating one emergency
 /// candidate. Kept short — unlike [`crate::executor`]'s own internal 5s
@@ -157,7 +164,23 @@ impl std::fmt::Display for EmergencyReport {
 /// rather than fabricating work, exactly as this ticket asks: "if no such
 /// self-owned disposable state exists/it's already minimal, just move
 /// on, don't fabricate work."
-fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
+///
+/// HORO-1468: every deletion attempt this function makes is appended to
+/// `audit_log_path`. It used to be the one deletion in the whole product
+/// that left no trace there — `process_candidate` records each candidate it
+/// executes, and this step, which needs no policy approval and no evidence
+/// and runs before anything else, recorded nothing. The run's own
+/// [`EmergencyReport`] counted it, but that goes to stdout and is gone when
+/// the terminal scrolls, so a user asking `glomeris actions history` "what
+/// deleted my pressure history?" got an answer that did not contain it.
+/// Auditing an unaudited privileged action is worth more than auditing a
+/// gated one.
+fn free_self_owned_disposable_state(
+    path: &Path,
+    report: &mut EmergencyReport,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
     let metadata = match fs::metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -172,16 +195,85 @@ fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
 
     let size = metadata.len();
     report.actions_attempted += 1;
+    // Audited on exactly the paths that charge `actions_attempted` above,
+    // and never on the two early returns before it: a file that is not
+    // there and a file that could not be stat'd are both states in which
+    // nothing was deleted, and a row saying otherwise would make the audit
+    // trail describe work that never happened — the same fabrication
+    // HORO-1467 removed from the pressure history.
     match fs::remove_file(path) {
         Ok(()) => {
             report.actions_succeeded += 1;
             report.total_bytes_freed += size;
+            append_self_state_audit_record(path, "succeeded", Some(size), audit_log_path, now);
         }
-        Err(e) => report.push_error(format!(
-            "failed to remove self-owned disposable state {}: {e}",
-            path.display()
-        )),
+        Err(e) => {
+            report.push_error(format!(
+                "failed to remove self-owned disposable state {}: {e}",
+                path.display()
+            ));
+            // Recorded too, with no byte count: "emergency mode tried to
+            // delete this and could not" is a fact worth keeping, and a
+            // failed attempt that vanished from the log while a successful
+            // one appeared would make the trail read as though the file
+            // were only ever deleted cleanly.
+            append_self_state_audit_record(path, "failed", None, audit_log_path, now);
+        }
     }
+}
+
+/// [`AuditRecord::action_id`] for the step-1 deletion. Deliberately NOT an
+/// [`crate::actions::ActionRegistry`] id, because there is no registered
+/// action for this and inventing one would imply a policy-governed cleanup
+/// of a developer resource. Every registry id is named for the third-party
+/// tool it cleans (`cargo.clean.target_dir`, `homebrew.cleanup.cache`), so
+/// the `glomeris.` prefix is what tells a reader the tool acted on itself.
+const SELF_STATE_ACTION_ID: &str = "glomeris.self_state.free";
+
+/// Appends one [`AuditRecord`] for the step-1 deletion, discarding the
+/// `Result` exactly as [`append_emergency_audit_record`] does and for the
+/// same reason: this is a degraded low-disk path, an audit append is the
+/// kind of write that fails there, and a failure to log must never change
+/// what the report says was done.
+///
+/// Two field choices are deliberate.
+///
+/// `policy_label` is [`PolicyLabel::NotPolicyGoverned`] (HORO-1468) because
+/// every other label would assert that [`crate::policy::classify`] ran and
+/// cleared this, and it never ran at all. `AUTO_SAFE` in particular would
+/// be the worst available lie: it is the label that means "evidence shows a
+/// tool can recreate this and nothing is using it", and no evidence was
+/// collected here.
+///
+/// `resource_id` is the bare path, not the `kind_tag:locator` shape
+/// [`crate::evidence::ResourceId`] renders. This file has no
+/// [`crate::evidence::ResourceKind`] — it is not a discoverable developer
+/// resource, and adding a kind for it would put the tool's own log inside
+/// the vocabulary detectors and policy range over. The macOS history view
+/// renders this field verbatim as a path either way.
+fn append_self_state_audit_record(
+    path: &Path,
+    outcome: &str,
+    reclaimed_bytes: Option<u64>,
+    audit_log_path: &Path,
+    now: SystemTime,
+) {
+    let record = AuditRecord {
+        timestamp: now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: SELF_STATE_ACTION_ID.to_string(),
+        resource_id: path.display().to_string(),
+        policy_label: PolicyLabel::NotPolicyGoverned.as_str().to_string(),
+        outcome: outcome.to_string(),
+        abort_reason: None,
+        actual_reclaimed_bytes: reclaimed_bytes,
+        source: ActionSource::Emergency.to_string(),
+        // No model is consulted anywhere in this module (see its docs).
+        model_rank: None,
+    };
+    let _ = append_audit_record(audit_log_path, &record);
 }
 
 /// Runs emergency recovery end to end. See the module docs for the
@@ -193,27 +285,34 @@ fn free_self_owned_disposable_state(path: &Path, report: &mut EmergencyReport) {
 /// two ways, both required to make every failure mode this ticket must
 /// fault-inject actually injectable from a test, per this crate's "fully
 /// unit-testable with fakes" constraint:
-/// - `persistence`/`discovery_ctx`/`self_state_path` are explicit
-///   parameters rather than resolved internally from `$HOME` the way
-///   `main.rs`'s `daemon_run`/`run_detect_command` do for the real binary
-///   — a test must never depend on, or mutate, the developer's real home
-///   directory (this repo's `CLAUDE.md`: "never depend on the developer's
-///   real home directory contents in a test"). The real CLI wiring in
-///   `main.rs` computes these the same way `daemon_run` does and passes
-///   them in.
-/// - `#[allow(clippy::too_many_arguments)]`: ten parameters, every one
+/// - `discovery_ctx`/`self_state_path` are explicit parameters rather than
+///   resolved internally from `$HOME` the way `main.rs`'s
+///   `daemon_run`/`run_detect_command` do for the real binary — a test must
+///   never depend on, or mutate, the developer's real home directory (this
+///   repo's `CLAUDE.md`: "never depend on the developer's real home
+///   directory contents in a test"). The real CLI wiring in `main.rs`
+///   computes these the same way `daemon_run` does and passes them in.
+/// - `#[allow(clippy::too_many_arguments)]`: eight parameters, every one
 ///   an independently fakeable seam — bundling them into a config struct
 ///   would only rename this list, not shrink it. Precedented in this
 ///   crate at `detectors::discovery_evidence`. `audit_log_path`
 ///   (HORO-1057) is one more such seam: a plain `&Path`, matching
 ///   `self_state_path`'s own shape, rather than an injected backend.
+///
+/// HORO-1467 removed a `persistence` seam and an `fs_stat` seam from this
+/// list along with the pressure-history write they existed to serve. That
+/// write was the only thing here that read filesystem usage, so emergency
+/// mode no longer stats the volume at all. Note what that means: this
+/// function does not verify that the disk is actually under pressure
+/// before acting. It never did — the stat was only ever used to decorate
+/// the record it wrote, never to gate anything — so this is an unchanged
+/// property being made visible, not a new one. Gating is HORO-1468's
+/// territory.
 #[allow(clippy::too_many_arguments)]
 pub fn run_emergency(
-    fs_stat: &dyn FsStat,
     collector: &dyn EvidenceCollector,
     registry: &DetectorRegistry,
     actions: &ActionRegistry,
-    persistence: &dyn PersistenceBackend,
     discovery_ctx: &DiscoveryContext,
     self_state_path: &Path,
     max_actions: u32,
@@ -226,8 +325,10 @@ pub fn run_emergency(
 
     // Step 1: free the tool's own disposable state first — the safest
     // possible thing to reclaim, and the only step here that does not
-    // depend on detectors/policy/executor at all.
-    free_self_owned_disposable_state(self_state_path, &mut report);
+    // depend on detectors/policy/executor at all. It does depend on the
+    // audit log since HORO-1468: being ungated is the reason it is the step
+    // that most needs a record, not a reason it needs one least.
+    free_self_owned_disposable_state(self_state_path, &mut report, audit_log_path, now);
 
     // Step 2: bounded, cheap candidate discovery — detectors only, never
     // the scanner's full filesystem walk (see module docs).
@@ -256,65 +357,40 @@ pub fn run_emergency(
         audit_log_path,
     );
 
-    // Step 3: best-effort persistence, recorded LAST, deliberately AFTER
-    // step 1's deletion. In production `self_state_path` and this
-    // record's destination are the same file (see `main.rs`): step 1
-    // reclaims whatever bulk history had accumulated, and this step then
-    // appends exactly one small fresh line documenting the run — a
-    // deliberate net-positive trade (`FilePersistence::record` recreates
-    // the file via `create_dir_all` + append either way; ordering it
-    // last just means the "before" byte count step 1 reports reflects
-    // the accumulated history, not this run's own single-line record).
-    // Any failure here is caught and pushed into `report.errors`, never
-    // propagated as a panic or early-return — see `record_emergency_run`.
-    record_emergency_run(fs_stat, persistence, &mut report);
+    // No pressure-history write (HORO-1467). There used to be a step 3
+    // here that appended a `PressureEvent` with both state fields
+    // hardcoded to `EMERGENCY` and the used-percentage/free-byte figures
+    // taken from a real stat. Its stated purpose was to record *that
+    // emergency mode ran*, which is a different claim from *the disk was
+    // in the emergency state*, and the pressure history's stream
+    // semantics are the second: `monitor::poller` appends a row only
+    // inside `if let Some(transition) = machine.observe(..)`, so every
+    // legitimate row is an observed state change. Asserting the
+    // classification to express "a command was invoked" produced rows
+    // that contradicted their own measurements — the founder's DogFood
+    // store holds `EMERGENCY EMERGENCY 79.58 100936183808`, i.e. "out of
+    // space" with 94 GB free.
+    //
+    // Nothing is lost by dropping it. `append_emergency_audit_record`
+    // (HORO-1057) already records the run in the stream meant for it,
+    // with `source: "emergency"` and correct semantics. Classifying the
+    // reading instead of asserting it was the other candidate fix and was
+    // rejected: it would still emit a `from == to` row, which this stream
+    // has no meaning for, and the history view would still render "went
+    // from X to X".
 
     report
-}
-
-/// Best-effort: records that emergency mode ran, via the exact same
-/// [`crate::monitor::persistence::PersistenceBackend`] contract the
-/// healthy polling loop uses. ANY failure here — including one
-/// manufactured by a fake backend in a test, or a failure to even read
-/// filesystem usage via `fs_stat` — is caught and pushed into
-/// `report.errors`. It is NEVER allowed to panic or make this function
-/// (or its caller) return early: no feature in this crate may depend on
-/// persistence succeeding.
-fn record_emergency_run(
-    fs_stat: &dyn FsStat,
-    persistence: &dyn PersistenceBackend,
-    report: &mut EmergencyReport,
-) {
-    let usage = match fs_stat.stat(Path::new("/")) {
-        Ok(u) => u,
-        Err(e) => {
-            report.push_error(format!(
-                "failed to read filesystem usage for emergency history record: {e}"
-            ));
-            return;
-        }
-    };
-
-    let event = PressureEvent {
-        unix_time_secs: unix_now_secs(),
-        from: PressureState::Emergency,
-        to: PressureState::Emergency,
-        used_percent: usage.used_percent(),
-        free_bytes: usage.free_bytes,
-    };
-
-    if let Err(e) = persistence.record(&event) {
-        report.push_error(format!("failed to persist emergency run record: {e}"));
-    }
 }
 
 /// Builds an [`AuditRecord`] (HORO-1057, `source: "emergency"`) from a
 /// real [`ExecutionReport`] and appends it to `audit_log_path`,
 /// unconditionally discarding the `Result` — matching
 /// [`crate::monitor::persistence::append_audit_record`]'s best-effort
-/// contract, same reasoning as [`record_emergency_run`] above: an
-/// audit-write failure must never influence this module's own report
-/// bookkeeping. Never called for [`ExecutionOutcome::DryRun`]'s tag,
+/// contract: an audit-write failure must never influence this module's own
+/// report bookkeeping. Since HORO-1467 removed the pressure-history write,
+/// this is the only best-effort call left in this module, and the only
+/// record that emergency mode ran. Never called for
+/// [`ExecutionOutcome::DryRun`]'s tag,
 /// since `execute()` never actually produces that variant (see this
 /// module's own comment on that arm below).
 fn append_emergency_audit_record(
@@ -541,7 +617,6 @@ fn action_id_for_kind(kind: ResourceKind) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
@@ -554,37 +629,9 @@ mod tests {
     };
     use crate::evidence::probe::ProbeReason;
     use crate::monitor::fs_stat::FsUsage;
-
-    /// A fixed-reading `FsStat` fake — never touches the real filesystem.
-    struct FakeFsStat(FsUsage);
-    impl FsStat for FakeFsStat {
-        fn stat(&self, _path: &Path) -> io::Result<FsUsage> {
-            Ok(self.0)
-        }
-    }
-
-    /// A backend that always fails a plain write — simulates a genuine
-    /// persistence I/O failure (e.g. disk full, permission denied).
-    struct AlwaysFailingPersistence;
-    impl PersistenceBackend for AlwaysFailingPersistence {
-        fn record(&self, _event: &PressureEvent) -> io::Result<()> {
-            Err(io::Error::other("simulated persistence write failure"))
-        }
-    }
-
-    /// A backend that always fails specifically at the temp/log
-    /// directory-creation step `FilePersistence::record` performs before
-    /// writing — a distinct simulated cause from
-    /// `AlwaysFailingPersistence`, exercising the same "any persistence
-    /// call is wrapped" contract from a different failure origin.
-    struct AlwaysFailingDirCreationPersistence;
-    impl PersistenceBackend for AlwaysFailingDirCreationPersistence {
-        fn record(&self, _event: &PressureEvent) -> io::Result<()> {
-            Err(io::Error::other(
-                "simulated failure creating history log directory",
-            ))
-        }
-    }
+    use crate::monitor::persistence::{PersistenceBackend, PressureEvent};
+    use crate::monitor::pressure::PressureState;
+    use crate::monitor::ThresholdConfig;
 
     /// A collector reporting a fully clean, non-active resource on every
     /// call: empty process lists, no git repo, tool not live. Used where
@@ -922,7 +969,12 @@ mod tests {
         fs::write(&history, vec![0u8; 128]).unwrap();
 
         let mut report = EmergencyReport::default();
-        free_self_owned_disposable_state(&history, &mut report);
+        free_self_owned_disposable_state(
+            &history,
+            &mut report,
+            &dir.join("actions.jsonl"),
+            SystemTime::now(),
+        );
 
         assert!(!history.exists());
         assert_eq!(report.actions_attempted, 1);
@@ -937,11 +989,144 @@ mod tests {
     fn free_self_owned_disposable_state_missing_file_does_not_fabricate_work() {
         let dir = make_temp_dir("self-state-missing");
         let history = dir.join("does-not-exist.tsv");
+        let audit_log_path = dir.join("actions.jsonl");
 
         let mut report = EmergencyReport::default();
-        free_self_owned_disposable_state(&history, &mut report);
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
 
         assert_eq!(report, EmergencyReport::default());
+        // HORO-1468: and no audit row either. "Nothing to free" must not
+        // become "deleted your pressure history" in `actions history`.
+        assert!(
+            crate::monitor::read_audit_tail(&audit_log_path, 10).is_empty(),
+            "a file that was never there must not produce an audit record"
+        );
+
+        // Anti-vacuity: the emptiness above must be a product behaviour and
+        // not a reader that can never see anything at this path. The same
+        // path, with the file present, yields exactly one row.
+        fs::write(&history, vec![0u8; 8]).unwrap();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+        assert_eq!(
+            crate::monitor::read_audit_tail(&audit_log_path, 10).len(),
+            1,
+            "control invalid: a real deletion is not visible at this audit path either"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1468: the one deletion in the product that no policy gate ever
+    /// sees is the one that most needs a record, and the record has to name
+    /// the file, the outcome and the bytes — a row that said only "something
+    /// happened" would not answer the question the founder asked, which was
+    /// what deleted the pressure history.
+    ///
+    /// Asserts every field rather than a subset: each one is read by a
+    /// different consumer (`actions history`'s table, the macOS history
+    /// section, and the `source` filter), so a wrong value is invisible to
+    /// whichever consumer does not read it.
+    #[test]
+    fn free_self_owned_disposable_state_audits_the_deletion_it_performed() {
+        let dir = make_temp_dir("self-state-audited");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 128]).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, now);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1, "expected exactly one audit record");
+        let record = &tail[0];
+        assert_eq!(record.action_id, "glomeris.self_state.free");
+        assert_eq!(record.resource_id, history.display().to_string());
+        assert_eq!(record.outcome, "succeeded");
+        assert_eq!(record.actual_reclaimed_bytes, Some(128));
+        assert_eq!(record.source, "emergency");
+        assert_eq!(record.abort_reason, None);
+        assert_eq!(record.model_rank, None);
+        // The timestamp is the run's `now`, not the moment of the append, so
+        // this row and the candidate rows of the same run agree.
+        assert_eq!(record.timestamp, 1_700_000_000);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A failed deletion is recorded too, and recorded as a failure with no
+    /// byte count. Both halves matter: dropping the row would make the log
+    /// read as though this file were only ever deleted cleanly, and carrying
+    /// a byte count would claim space that was never reclaimed — the same
+    /// class of fabrication HORO-1467 removed from the pressure history.
+    ///
+    /// The failure is produced by putting a directory where the file belongs:
+    /// `fs::metadata` succeeds (so the early returns are not taken) and
+    /// `fs::remove_file` cannot remove it. No permission bits, no `sudo`,
+    /// nothing outside the tempdir.
+    #[test]
+    fn free_self_owned_disposable_state_audits_a_failed_deletion_without_a_byte_count() {
+        let dir = make_temp_dir("self-state-undeletable");
+        let history = dir.join("history.tsv");
+        fs::create_dir_all(&history).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+
+        // Fixture control: the removal really did fail, so the assertions
+        // below describe the failure path and not a silent success.
+        assert!(
+            history.exists(),
+            "fixture invalid: the path was removed after all"
+        );
+        assert_eq!(report.actions_attempted, 1);
+        assert_eq!(report.actions_succeeded, 0);
+        assert_eq!(report.total_bytes_freed, 0);
+        assert_eq!(report.errors.len(), 1);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1, "a failed attempt is still an attempt");
+        assert_eq!(tail[0].outcome, "failed");
+        assert_eq!(
+            tail[0].actual_reclaimed_bytes, None,
+            "a failed deletion must not claim reclaimed bytes"
+        );
+        assert_eq!(tail[0].action_id, "glomeris.self_state.free");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The label on this row is the one that says policy never judged this,
+    /// and it is specifically not any of the four that say it did. Audited
+    /// against all four by name: `AUTO_SAFE` would be the worst of them —
+    /// it means "evidence shows a tool can recreate this and nothing is
+    /// using it", and no evidence was collected for this file at all.
+    #[test]
+    fn free_self_owned_disposable_state_audit_row_claims_no_policy_judgment() {
+        let dir = make_temp_dir("self-state-label");
+        let history = dir.join("history.tsv");
+        fs::write(&history, vec![0u8; 16]).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let mut report = EmergencyReport::default();
+        free_self_owned_disposable_state(&history, &mut report, &audit_log_path, SystemTime::now());
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(tail.len(), 1);
+        assert_eq!(tail[0].policy_label, "NOT_POLICY_GOVERNED");
+        for judged in [
+            crate::reporting::policy_label::PolicyLabel::AutoSafe,
+            crate::reporting::policy_label::PolicyLabel::Ask,
+            crate::reporting::policy_label::PolicyLabel::Protected,
+            crate::reporting::policy_label::PolicyLabel::UnknownIncomplete,
+        ] {
+            assert_ne!(
+                tail[0].policy_label,
+                judged.as_str(),
+                "an ungated deletion must not be labelled as though policy cleared it"
+            );
+        }
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -1137,135 +1322,53 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// Persistence-failure fault injection at the whole-`run_emergency`
-    /// level: a backend whose `record()` always fails must never stop
-    /// the run, and at least one safe fixture (the self-owned disposable
-    /// history file) is still freed.
+    /// End-to-end happy path: the run completes, step 1's fixture is
+    /// freed and counted, and — since HORO-1467 — nothing is written back
+    /// to the pressure history.
     ///
-    /// Uses an empty `DetectorRegistry` — never `builtin()` — deliberately.
-    /// `builtin()`'s Homebrew/Docker detectors shell out to whatever
-    /// `brew`/`docker` the *real host machine* actually has, ignoring
-    /// `DiscoveryContext::home_dir` entirely (see `DetectorRegistry::
-    /// from_detectors`'s own doc comment). Post-HORO-994, a genuinely
-    /// `AutoSafe` real-machine Homebrew cache candidate is no longer
-    /// masked by the revalidation abort this module's tests used to rely
-    /// on — `process_candidate` would actually authorize and execute
-    /// `brew cleanup -s` against the developer's real cache. This test
-    /// must only ever mutate its own tempdir fixtures.
-    #[test]
-    fn run_emergency_survives_persistence_write_failure_and_frees_self_owned_state() {
-        let dir = make_temp_dir("run-persistence-failure");
-        let self_state = dir.join("history.tsv");
-        fs::write(&self_state, vec![0u8; 256]).unwrap();
-        let home_dir = dir.join("home");
-        fs::create_dir_all(&home_dir).unwrap();
-
-        let ctx = DiscoveryContext::new(home_dir);
-        let registry = DetectorRegistry::from_detectors(vec![]);
-        let actions = ActionRegistry::builtin();
-        let fs_stat = FakeFsStat(FsUsage::new(100, 3));
-
-        let report = run_emergency(
-            &fs_stat,
-            &CleanCollector,
-            &registry,
-            &actions,
-            &AlwaysFailingPersistence,
-            &ctx,
-            &self_state,
-            10,
-            Duration::from_secs(10),
-            &dir.join("actions.jsonl"),
-        );
-
-        assert!(!self_state.exists());
-        assert_eq!(report.actions_succeeded, 1);
-        assert_eq!(report.total_bytes_freed, 256);
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.contains("failed to persist emergency run record")));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// Same wrap point, a distinct simulated cause: a backend whose
-    /// `record()` fails specifically at the temp/log directory-creation
-    /// step must be handled identically — never fatal, never a panic.
+    /// This replaces two fault-injection tests removed along with the write
+    /// they injected into. Both drove a local `PersistenceBackend` fake
+    /// (not to be confused with
+    /// [`crate::monitor::persistence::AlwaysFailingPersistence`], which is
+    /// shared, still used by `monitor::poller`'s tests, and untouched
+    /// here). Their real subject was "a
+    /// failure in this module's best-effort tail must not stop the run or
+    /// lose step 1's reclamation". There is no longer a tail that can
+    /// report a failure: the only remaining best-effort call,
+    /// `append_emergency_audit_record`, discards its `Result` outright, so
+    /// that contract now holds by construction. What is still worth
+    /// asserting is what this test asserts — the run's own bookkeeping,
+    /// and the absence of a record.
     ///
-    /// Uses an empty `DetectorRegistry` for the same reason as
-    /// `run_emergency_survives_persistence_write_failure_and_frees_self_owned_state`
-    /// above — see its doc comment.
+    /// Uses an empty `DetectorRegistry` — never `builtin()` —
+    /// deliberately. `builtin()`'s Homebrew/Docker detectors shell out to
+    /// whatever `brew`/`docker` the *real host machine* actually has,
+    /// ignoring `DiscoveryContext::home_dir` entirely (see
+    /// `DetectorRegistry::from_detectors`'s own doc comment). Post-HORO-994
+    /// a genuinely `AutoSafe` real-machine Homebrew cache candidate is no
+    /// longer masked by the revalidation abort this module's tests used to
+    /// rely on — `process_candidate` would actually authorize and execute
+    /// `brew cleanup -s` against the developer's real cache. This test must
+    /// only ever mutate its own tempdir fixtures. With detection scoped to
+    /// zero detectors the only action in this run is freeing the tempdir
+    /// `self_state` fixture, so the assertions below are deterministic
+    /// rather than "tolerate zero-or-more" hedges.
     #[test]
-    fn run_emergency_survives_history_directory_creation_failure_and_frees_self_owned_state() {
-        let dir = make_temp_dir("run-dircreate-failure");
-        let self_state = dir.join("history.tsv");
-        fs::write(&self_state, vec![0u8; 64]).unwrap();
-        let home_dir = dir.join("home");
-        fs::create_dir_all(&home_dir).unwrap();
-
-        let ctx = DiscoveryContext::new(home_dir);
-        let registry = DetectorRegistry::from_detectors(vec![]);
-        let actions = ActionRegistry::builtin();
-        let fs_stat = FakeFsStat(FsUsage::new(100, 3));
-
-        let report = run_emergency(
-            &fs_stat,
-            &CleanCollector,
-            &registry,
-            &actions,
-            &AlwaysFailingDirCreationPersistence,
-            &ctx,
-            &self_state,
-            10,
-            Duration::from_secs(10),
-            &dir.join("actions.jsonl"),
-        );
-
-        assert!(!self_state.exists());
-        assert_eq!(report.actions_succeeded, 1);
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.contains("failed to persist emergency run record")));
-
-        fs::remove_dir_all(&dir).ok();
-    }
-
-    /// End-to-end happy path with a real, working `FilePersistence`:
-    /// proves the non-failure path also works, not just the fault
-    /// injection above.
-    ///
-    /// Uses an empty `DetectorRegistry` — never `builtin()` — for the same
-    /// reason as `run_emergency_survives_persistence_write_failure_and_frees_self_owned_state`
-    /// above: post-HORO-994, `builtin()`'s real Homebrew/Docker detectors
-    /// finding genuine machine state is no longer masked by a revalidation
-    /// abort, so this run would actually authorize and execute a real
-    /// `brew cleanup -s` against the host's real cache. With detection
-    /// scoped to zero fake detectors, the only action in this run is
-    /// freeing the tempdir `self_state` fixture, so the assertions below
-    /// are deterministic rather than "tolerate zero-or-more" hedges.
-    #[test]
-    fn run_emergency_end_to_end_with_working_persistence_frees_self_state_and_records_history() {
+    fn run_emergency_frees_self_state_and_writes_no_history_record() {
         let dir = make_temp_dir("run-happy-path");
         let self_state = dir.join("history.tsv");
         fs::write(&self_state, vec![0u8; 32]).unwrap();
         let home_dir = dir.join("home");
         fs::create_dir_all(&home_dir).unwrap();
-        let history_log = dir.join("persisted-history.tsv");
 
         let ctx = DiscoveryContext::new(home_dir);
         let registry = DetectorRegistry::from_detectors(vec![]);
         let actions = ActionRegistry::builtin();
-        let fs_stat = FakeFsStat(FsUsage::new(100, 3));
-        let persistence = crate::monitor::persistence::FilePersistence::new(&history_log);
 
         let report = run_emergency(
-            &fs_stat,
             &CleanCollector,
             &registry,
             &actions,
-            &persistence,
             &ctx,
             &self_state,
             10,
@@ -1273,7 +1376,6 @@ mod tests {
             &dir.join("actions.jsonl"),
         );
 
-        assert!(!self_state.exists());
         assert_eq!(report.actions_succeeded, 1);
         assert_eq!(report.total_bytes_freed, 32);
         assert!(
@@ -1282,8 +1384,138 @@ mod tests {
             report.errors
         );
         assert!(
-            history_log.exists(),
-            "a working backend must actually persist a record"
+            !self_state.exists(),
+            "step 1 removes the self-state fixture and nothing recreates it"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1468 end to end: step 1's record reaches the audit log the *run*
+    /// was given, not some path assembled inside the unit under test. This is
+    /// the wiring the unit tests above cannot see — before the fix,
+    /// `free_self_owned_disposable_state` was the one step `run_emergency`
+    /// called without handing it the audit log at all.
+    ///
+    /// Empty `DetectorRegistry`, never `builtin()`, for the reason given at
+    /// length on the test above: `builtin()`'s detectors run against the real
+    /// host machine's Homebrew/Docker state. With zero detectors the only
+    /// action in the run is the tempdir `self_state` fixture, so "exactly one
+    /// record, and it is step 1's" is deterministic.
+    #[test]
+    fn run_emergency_audits_the_self_state_deletion_it_performed() {
+        let dir = make_temp_dir("run-audits-self-state");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 64]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let audit_log_path = dir.join("actions.jsonl");
+
+        let report = run_emergency(
+            &CleanCollector,
+            &DetectorRegistry::from_detectors(vec![]),
+            &ActionRegistry::builtin(),
+            &DiscoveryContext::new(home_dir),
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &audit_log_path,
+        );
+
+        assert_eq!(report.actions_succeeded, 1);
+
+        let tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(
+            tail.len(),
+            1,
+            "the run's only action must appear in the run's own audit log"
+        );
+        assert_eq!(tail[0].action_id, "glomeris.self_state.free");
+        assert_eq!(tail[0].resource_id, self_state.display().to_string());
+        assert_eq!(tail[0].outcome, "succeeded");
+        assert_eq!(tail[0].actual_reclaimed_bytes, Some(64));
+        assert_eq!(tail[0].policy_label, "NOT_POLICY_GOVERNED");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1467: emergency mode must not write a pressure row asserting a
+    /// state the filesystem is not in.
+    ///
+    /// The fixture reproduces the live DogFood reading exactly — 79.58%
+    /// used with 94.0 GB free — which the shipped default thresholds
+    /// classify as `Warn`. Emergency needs 97.0% used or 3 GiB free. The
+    /// pre-fix code wrote `EMERGENCY -> EMERGENCY` while attaching those
+    /// real figures, so the row contradicted its own measurements.
+    ///
+    /// Reads back the same path it passes as `self_state_path`, because in
+    /// production that path and the pressure history are one file (see
+    /// `main.rs`), and the two being one file is what made the defect
+    /// visible to the founder.
+    #[test]
+    fn emergency_records_no_pressure_row_asserting_a_state_the_disk_is_not_in() {
+        // A 460.4 GB volume with 94.0 GB free.
+        const TOTAL_BYTES: u64 = 494_384_795_648;
+        const FREE_BYTES: u64 = 100_936_183_808;
+        let usage = FsUsage::new(TOTAL_BYTES, FREE_BYTES);
+
+        // Fixture control: judged by the same thresholds the polling loop
+        // uses, so an `EMERGENCY` row built from these readings is false
+        // rather than merely an unlucky sample.
+        assert_eq!(
+            ThresholdConfig::default().classify(usage.used_percent(), usage.free_bytes),
+            PressureState::Warn,
+            "fixture invalid: these readings must not classify as EMERGENCY"
+        );
+
+        let dir = make_temp_dir("no-false-pressure-row");
+        let self_state = dir.join("history.tsv");
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+
+        let ctx = DiscoveryContext::new(home_dir);
+        // Empty registry, never `builtin()`, for the same reason as the
+        // tests above — see their doc comments.
+        let registry = DetectorRegistry::from_detectors(vec![]);
+        let actions = ActionRegistry::builtin();
+
+        run_emergency(
+            &CleanCollector,
+            &registry,
+            &actions,
+            &ctx,
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
+        );
+
+        let recorded = fs::read_to_string(&self_state).unwrap_or_default();
+        assert!(
+            !recorded.contains("EMERGENCY"),
+            "emergency mode recorded a pressure row claiming EMERGENCY on a \
+             disk the same thresholds classify as WARN: {recorded:?}"
+        );
+
+        // Anti-vacuity: the assertion above must be capable of failing. A
+        // genuine EMERGENCY row, written through the same backend type to a
+        // sibling path, is caught by the identical predicate — so an empty
+        // or absent file above is the product's behaviour and not a
+        // matcher that can never see anything.
+        let control_path = dir.join("control-history.tsv");
+        crate::monitor::persistence::FilePersistence::new(&control_path)
+            .record(&PressureEvent {
+                unix_time_secs: 1,
+                from: PressureState::Critical,
+                to: PressureState::Emergency,
+                used_percent: 98.0,
+                free_bytes: 1,
+            })
+            .expect("control write must succeed");
+        let control = fs::read_to_string(&control_path).unwrap();
+        assert!(
+            control.contains("EMERGENCY"),
+            "control invalid: the predicate cannot see a real EMERGENCY row: {control:?}"
         );
 
         fs::remove_dir_all(&dir).ok();

@@ -199,9 +199,14 @@ enum GlomerisVocabulary {
 
     static let safetyAxis = "Safety"
 
-    /// Wording for the four `PolicyLabel` values. Every sentence describes
+    /// Wording for the five `PolicyLabel` values. Every sentence describes
     /// what Rust has already decided; none of it is a decision taken here,
     /// and nothing in this app reads these strings back to gate an action.
+    ///
+    /// Four of the five are safety judgements. `NOT_POLICY_GOVERNED`
+    /// (HORO-1468) is not one — see its case below — and it appears only in
+    /// the history section, never on a candidate row, because the CLI only
+    /// ever writes it to the audit log.
     static func safety(_ token: String) -> GlomerisTerm {
         switch token {
         case "AUTO_SAFE":
@@ -231,6 +236,19 @@ enum GlomerisVocabulary {
                 "A measurement did not finish, went stale, or failed, so no "
                     + "safety judgement was reached. Treated as off-limits until it is.",
                 "questionmark.circle.fill", .unknown
+            )
+        case "NOT_POLICY_GOVERNED":
+            // Deliberately toneless. The other four answer "may Glomeris
+            // touch your resource?"; this one says the row is not about a
+            // resource of yours at all — Glomeris cleaned up a file it wrote
+            // itself, so there was nothing for the safety rules to judge.
+            // `.positive` would read as a safety clearance that never
+            // happened, and `.unknown` would claim a measurement stalled.
+            return term(
+                token, safetyAxis, "Glomeris's own file",
+                "Not one of your resources: Glomeris removed a file it wrote "
+                    + "itself, so its safety rules were never involved.",
+                "gearshape.fill", .neutral
             )
         default:
             return unrecognised(
@@ -867,6 +885,89 @@ enum GlomerisVocabulary {
             return unrecognised(
                 token, llmCheckAxis, "Unrecognised result",
                 "The CLI reported a connection-test result this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Resolved command-line tool (HORO-1466)
+
+    static let cliAxis = "Command-line tool"
+
+    /// Where the resolved binary was found, as a phrase that completes "found
+    /// …". Not a CLI token: `GlomerisExecutableSource` is this app's own enum,
+    /// and the wording lives here for the same reason every other display
+    /// string does — so there is one place to read to know what the app says.
+    ///
+    /// The directory is named in the PATH and install-directory cases because
+    /// that is the fact worth having: two `glomeris` binaries on one machine
+    /// differing only by directory is the ordinary case, not an exotic one.
+    static func cliSource(_ source: GlomerisExecutableSource) -> String {
+        switch source {
+        case .bundled:
+            return "shipped inside this app"
+        case .pathEntry(let directory):
+            return "on your PATH, in \(directory)"
+        case .knownInstallDirectory(let directory):
+            return "installed in \(directory)"
+        }
+    }
+
+    /// Whether the resolved binary is the one this app was built against.
+    ///
+    /// Every explanation names the path, because "something is wrong with the
+    /// CLI" is not actionable and was in effect what the product said before
+    /// this ticket: the path existed only inside the not-found error. A user
+    /// told which file is in use can go and look at it.
+    ///
+    /// `notDeclared` is deliberately `.unknown` rather than `.caution`. A
+    /// locally built app embeds no CLI and stamps no expected hash, so this is
+    /// the normal state for every developer build — colouring it as a warning
+    /// would train the one audience that reads this card to ignore it, and the
+    /// state genuinely is "cannot say", not "bad".
+    static func cliExpectation(
+        _ expectation: GlomerisCliExpectation,
+        path: String
+    ) -> GlomerisTerm {
+        switch expectation {
+        case .matches:
+            return GlomerisTerm(
+                token: "matches",
+                axis: cliAxis,
+                title: "Matches this app",
+                explanation: "Glomeris is running \(path), which is the build this app ships.",
+                symbolName: "checkmark.seal.fill",
+                tone: .positive
+            )
+        case .differs:
+            return GlomerisTerm(
+                token: "differs",
+                axis: cliAxis,
+                title: "Not the build this app ships",
+                explanation: "Glomeris is running \(path), which is not the build this app "
+                    + "ships. What it does may differ from what this app describes.",
+                symbolName: "exclamationmark.triangle.fill",
+                tone: .warning
+            )
+        case .notDeclared:
+            return GlomerisTerm(
+                token: "not_declared",
+                axis: cliAxis,
+                title: "Nothing to compare against",
+                explanation: "Glomeris is running \(path). This app does not record which "
+                    + "build it was made against, so that cannot be checked — locally built "
+                    + "apps include no copy of the tool and find one on this machine.",
+                symbolName: "questionmark.circle",
+                tone: .unknown
+            )
+        case .notComparable:
+            return GlomerisTerm(
+                token: "not_comparable",
+                axis: cliAxis,
+                title: "Cannot be checked",
+                explanation: "Glomeris is running \(path), but its contents could not be "
+                    + "read, so it cannot be checked against the build this app ships.",
+                symbolName: "questionmark.circle",
+                tone: .unknown
             )
         }
     }

@@ -9,6 +9,10 @@
 //! Ask-because-of-observed-risk judgment. This module does not change,
 //! and is never consulted by, [`crate::policy::classify`] itself — it is
 //! a read-only projection for report text.
+//!
+//! [`PolicyLabel::NotPolicyGoverned`] (HORO-1468) is the one label that is
+//! not a projection of any [`crate::policy::PolicyDecision`] at all — see
+//! its own doc comment.
 
 use crate::policy::{PolicyClass, PolicyDecision, ReasonCode};
 
@@ -20,6 +24,27 @@ pub enum PolicyLabel {
     Ask,
     Protected,
     UnknownIncomplete,
+    /// Not a judgment about a developer resource: the audit trail's label
+    /// for an action on the tool's OWN disposable state, which
+    /// [`crate::policy::classify`] never sees (HORO-1468).
+    ///
+    /// Exactly one action needs it today — `glomeris emergency`'s step 1,
+    /// which deletes the pressure-history file this tool wrote itself. That
+    /// deletion is deliberately not policy-governed (see
+    /// `crate::emergency::free_self_owned_disposable_state`), and before
+    /// HORO-1468 it was also not audited, so the one action in the product
+    /// that runs with no policy gate at all left no trace in
+    /// `actions.jsonl`. Auditing it required a label, and every other value
+    /// in this enum would have been a false claim that policy ran and
+    /// cleared it.
+    ///
+    /// [`label_for`] can never return this — it projects a decision, and
+    /// every decision has a class. `label_for_never_returns_not_policy_
+    /// governed` below asserts that over every class/reason shape rather
+    /// than leaving it to the doc comment. It follows that any match on
+    /// this variant in an authorization path is unreachable today and must
+    /// fail closed regardless; `crate::autopilot::gate::admit` does.
+    NotPolicyGoverned,
 }
 
 impl PolicyLabel {
@@ -29,6 +54,7 @@ impl PolicyLabel {
             PolicyLabel::Ask => "ASK",
             PolicyLabel::Protected => "PROTECTED",
             PolicyLabel::UnknownIncomplete => "UNKNOWN_INCOMPLETE",
+            PolicyLabel::NotPolicyGoverned => "NOT_POLICY_GOVERNED",
         }
     }
 }
@@ -140,5 +166,59 @@ mod tests {
     fn display_matches_as_str() {
         let d = decision(PolicyClass::AutoSafe, vec![]);
         assert_eq!(label_for(&d).to_string(), "AUTO_SAFE");
+    }
+
+    /// HORO-1468. `NOT_POLICY_GOVERNED` exists for the audit trail of an
+    /// action policy never classified, so the thing that would make it
+    /// dangerous is it ever appearing as the projection of a real decision:
+    /// a reader — or `autopilot::gate::admit` — would then be told policy
+    /// did not judge a resource that it did judge.
+    ///
+    /// Driven over every class crossed with every reason singly and all
+    /// reasons at once, from `ReasonCode::ALL`, so a new reason code is
+    /// covered without editing this test. Sampling a few shapes would pass
+    /// just as well today and stop covering the enum the moment it grew.
+    #[test]
+    fn label_for_never_returns_not_policy_governed() {
+        let classes = [
+            PolicyClass::AutoSafe,
+            PolicyClass::Ask,
+            PolicyClass::Protected,
+        ];
+        let mut reason_sets: Vec<Vec<ReasonCode>> =
+            ReasonCode::ALL.iter().map(|r| vec![*r]).collect();
+        reason_sets.push(ReasonCode::ALL.to_vec());
+        reason_sets.push(Vec::new());
+
+        for class in classes {
+            for reasons in &reason_sets {
+                let d = decision(class, reasons.clone());
+                assert_ne!(
+                    label_for(&d),
+                    PolicyLabel::NotPolicyGoverned,
+                    "class {class:?} with reasons {reasons:?} projected to a label \
+                     that means policy never ran"
+                );
+            }
+        }
+    }
+
+    /// The token is what lands in `AuditRecord::policy_label` and what the
+    /// macOS app switches on, so it has to be distinct from all four real
+    /// labels rather than merely non-empty.
+    #[test]
+    fn not_policy_governed_has_its_own_token() {
+        assert_eq!(
+            PolicyLabel::NotPolicyGoverned.as_str(),
+            "NOT_POLICY_GOVERNED"
+        );
+        for other in [
+            PolicyLabel::AutoSafe,
+            PolicyLabel::Ask,
+            PolicyLabel::Protected,
+            PolicyLabel::UnknownIncomplete,
+        ] {
+            assert_ne!(other.as_str(), PolicyLabel::NotPolicyGoverned.as_str());
+        }
     }
 }

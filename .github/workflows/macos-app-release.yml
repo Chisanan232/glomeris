@@ -140,6 +140,39 @@ jobs:
           DEST="$APP/Contents/MacOS/glomeris"
           cp "$bin_path" "$DEST"
           chmod +x "$DEST"
+
+          # HORO-1466: record WHICH binary this is, so the app can tell at
+          # runtime whether the `glomeris` it resolved is this one.
+          #
+          # A hash and not the version string: two binaries measured on one
+          # machine both answered `--version` with 0.2.0 while disagreeing
+          # about whether an unscoped mutating action may be offered at all.
+          # The version is stamped from the crate version and does not change
+          # between merges, so a version comparison in the app would be a
+          # check that cannot fail for the case it exists to catch.
+          #
+          # Written with PlistBuddy here rather than expanded from a build
+          # setting in Sources/Info.plist deliberately. Info.plist variable
+          # expansion fails SILENTLY — an unset setting leaves an empty string
+          # — and an empty expected hash would read to the app as "this build
+          # records none", i.e. exactly the developer-build state, in a
+          # released bundle. Doing it after the copy also means the value is
+          # computed from the bytes that actually shipped, not from a
+          # download that a later step could have replaced.
+          #
+          # Before `codesign` below, because editing Info.plist invalidates
+          # the seal; the re-sign has to be the last thing that touches the
+          # bundle.
+          CLI_SHA256="$(/usr/bin/shasum -a 256 "$DEST" | awk '{print $1}')"
+          if [ ${#CLI_SHA256} -ne 64 ]; then
+            echo "::error::expected a 64-character SHA-256 for $DEST, got '$CLI_SHA256'"
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy \
+            -c "Add :GlomerisExpectedCLISHA256 string $CLI_SHA256" \
+            "$APP/Contents/Info.plist"
+          echo "embedded CLI SHA-256: $CLI_SHA256"
+
           # Ad-hoc self-sign only (identity "-", no Apple Developer account
           # or certificate involved). Embedding a new executable after the
           # build invalidates the bundle's original ad-hoc seal, so this
@@ -188,6 +221,27 @@ jobs:
           fi
           if [ "$EMBEDDED_VERSION" != "$TAG_VERSION" ]; then
             echo "::error::the embedded CLI reports $EMBEDDED_VERSION but this asset is being attached to tag $TAG"
+            status=1
+          fi
+
+          # HORO-1466: the same "prove the construction worked" rule applied to
+          # the identity stamp. PlistBuddy would have failed loudly above, but
+          # `codesign --deep` runs between there and here, and a stamp that did
+          # not survive it would leave a shipped app that reports "this build
+          # records no expected tool" — indistinguishable from a developer
+          # build, and silently so.
+          STAMPED_SHA256="$(
+            /usr/libexec/PlistBuddy -c "Print :GlomerisExpectedCLISHA256" \
+              "$APP/Contents/Info.plist" 2>/dev/null || true
+          )"
+          ACTUAL_SHA256="$(/usr/bin/shasum -a 256 "$APP/Contents/MacOS/glomeris" | awk '{print $1}')"
+          echo "stamped GlomerisExpectedCLISHA256: ${STAMPED_SHA256:-<absent>}"
+          echo "actual embedded CLI SHA-256:       $ACTUAL_SHA256"
+          if [ -z "$STAMPED_SHA256" ]; then
+            echo "::error::Info.plist carries no GlomerisExpectedCLISHA256, so the app cannot tell whether the glomeris it resolves is the one shipped with it (HORO-1466)"
+            status=1
+          elif [ "$STAMPED_SHA256" != "$ACTUAL_SHA256" ]; then
+            echo "::error::Info.plist expects CLI $STAMPED_SHA256 but the embedded binary is $ACTUAL_SHA256 — a released app would report its own CLI as the wrong build"
             status=1
           fi
           exit "$status"

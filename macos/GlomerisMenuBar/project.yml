@@ -83,6 +83,12 @@ targets:
       - path: Sources/BundleIdentity.swift
       - path: Sources/GlomerisClient.swift
       - path: Sources/GlomerisExecutableLocator.swift
+      # HORO-1466: which binary was resolved and whether it is the one this app
+      # was built against. Compiled in so the comparison rule is asserted
+      # against the real function over all four of its outcomes — including the
+      # blank-declared-hash case a silently-failed build-setting expansion
+      # produces, which no real bundle in this repo can be made to exhibit.
+      - path: Sources/GlomerisCliIdentity.swift
       - path: Sources/MenuBarAppearance.swift
       - path: Sources/GlomerisMark.swift
       - path: Sources/ProjectRootsStore.swift

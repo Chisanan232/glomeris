@@ -40,9 +40,12 @@ final class GlomerisVocabularyTests: XCTestCase {
         "HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY",
     ]
 
-    /// `src/reporting/policy_label.rs` — `PolicyLabel::as_str`.
+    /// `src/reporting/policy_label.rs` — `PolicyLabel::as_str`. Five, not
+    /// four: `NOT_POLICY_GOVERNED` (HORO-1468) is the label on an audit row
+    /// for a file Glomeris wrote itself, which no policy decision projects
+    /// to. It reaches this app only through the history section.
     private static let safetyTokens = [
-        "AUTO_SAFE", "ASK", "PROTECTED", "UNKNOWN_INCOMPLETE",
+        "AUTO_SAFE", "ASK", "PROTECTED", "UNKNOWN_INCOMPLETE", "NOT_POLICY_GOVERNED",
     ]
 
     /// `src/reporting/dto.rs` — `completeness_tag`.
@@ -435,17 +438,46 @@ final class GlomerisVocabularyTests: XCTestCase {
     }
 
     /// Only the AUTO_SAFE class may read as positive. ASK is a caution,
-    /// PROTECTED is held back, and an evidence gap is unknown — none of
-    /// the three may render with the reassuring tone.
+    /// PROTECTED is held back, an evidence gap is unknown, and a row about
+    /// Glomeris's own file is no judgement at all — none of the four may
+    /// render with the reassuring tone.
     func testOnlyAutoSafeReadsAsPositive() {
         XCTAssertEqual(GlomerisVocabulary.safety("AUTO_SAFE").tone, .positive)
-        for token in ["ASK", "PROTECTED", "UNKNOWN_INCOMPLETE"] {
+        for token in ["ASK", "PROTECTED", "UNKNOWN_INCOMPLETE", "NOT_POLICY_GOVERNED"] {
             XCTAssertNotEqual(
                 GlomerisVocabulary.safety(token).tone,
                 .positive,
                 "\(token) must not read as reassuring"
             )
         }
+    }
+
+    /// HORO-1468. This label is the one member of the safety axis that is
+    /// not a safety verdict, and both ways of getting it wrong are wrong in
+    /// the same direction as a lie: a reassuring tone would tell the user
+    /// policy cleared the deletion, and an alarming one would tell them
+    /// something is wrong with a file Glomeris is entitled to remove.
+    ///
+    /// Asserted as "not any of the loaded tones" rather than "== .neutral"
+    /// alone, so that changing the tone to any judgement-carrying value
+    /// fails here rather than only at review.
+    func testGlomerisOwnFileIsNeitherAClearanceNorAnAlarm() {
+        let term = GlomerisVocabulary.safety("NOT_POLICY_GOVERNED")
+
+        XCTAssertEqual(term.tone, .neutral)
+        for loaded: GlomerisTone in [.positive, .caution, .warning, .critical, .guarded, .unknown] {
+            XCTAssertNotEqual(
+                term.tone,
+                loaded,
+                "a row about Glomeris's own file must carry no safety judgement"
+            )
+        }
+        // And it must say whose file it was, or the row reads as a verdict
+        // on one of the user's resources with the wording left off.
+        XCTAssertTrue(
+            term.title.contains("Glomeris") || term.explanation.contains("itself"),
+            "the wording must say the file was Glomeris's own: \(term.title) / \(term.explanation)"
+        )
     }
 
     // MARK: - AI provider connection test (HORO-1309)
@@ -705,6 +737,112 @@ final class GlomerisVocabularyTests: XCTestCase {
         let mismatch = GlomerisVocabulary.refusal("ask_consent_mismatch")
         XCTAssertNotEqual(noConsent.title, mismatch.title)
         XCTAssertNotEqual(noConsent.explanation, mismatch.explanation)
+    }
+
+    // MARK: - Resolved command-line tool (HORO-1466)
+
+    private static let cliStates: [GlomerisCliExpectation] = [
+        .matches,
+        .differs(expected: String(repeating: "ab", count: 32)),
+        .notDeclared,
+        .notComparable,
+    ]
+
+    /// The ticket's AC: the card must state WHICH binary is in use, not merely
+    /// that something is wrong. "Glomeris may be running an old version" is not
+    /// actionable, and is in effect what the product said before this ticket —
+    /// the path existed only inside the error raised when nothing was found.
+    ///
+    /// Asserted for every state including the healthy one, because a user who
+    /// only ever sees a path when something is broken has no way to know what
+    /// normal looks like.
+    func testEveryCliExpectationNamesTheResolvedPath() {
+        let path = "/opt/homebrew/bin/glomeris"
+        for state in Self.cliStates {
+            let term = GlomerisVocabulary.cliExpectation(state, path: path)
+            XCTAssertTrue(
+                term.explanation.contains(path),
+                "\(state) must name the binary it is talking about: \(term.explanation)"
+            )
+        }
+    }
+
+    /// Four states that call for four different responses — nothing, replace
+    /// the tool, nothing (it is a developer build), and look at the file's
+    /// permissions. Sharing wording between any two would tell a user to do the
+    /// wrong thing, so titles and explanations must all be distinct.
+    func testTheFourCliExpectationsAreAllDistinguishable() {
+        let terms = Self.cliStates.map {
+            GlomerisVocabulary.cliExpectation($0, path: "/usr/local/bin/glomeris")
+        }
+        XCTAssertEqual(Set(terms.map(\.title)).count, terms.count)
+        XCTAssertEqual(Set(terms.map(\.explanation)).count, terms.count)
+        XCTAssertEqual(Set(terms.map(\.token)).count, terms.count)
+    }
+
+    /// Only a real mismatch is a warning.
+    ///
+    /// `notDeclared` is the normal state for every locally built app, since one
+    /// embeds no CLI and stamps no expected hash. Colouring it as a problem
+    /// would make the warning permanent for the one audience that reads this
+    /// card, and a permanent warning is one nobody reads — which would cost
+    /// exactly the signal this ticket adds.
+    func testOnlyAGenuineMismatchIsTonedAsAWarning() {
+        let path = "/usr/local/bin/glomeris"
+        XCTAssertEqual(GlomerisVocabulary.cliExpectation(.matches, path: path).tone, .positive)
+        XCTAssertEqual(
+            GlomerisVocabulary.cliExpectation(
+                .differs(expected: String(repeating: "ab", count: 32)),
+                path: path
+            ).tone,
+            .warning
+        )
+        for cannotSay: GlomerisCliExpectation in [.notDeclared, .notComparable] {
+            XCTAssertEqual(
+                GlomerisVocabulary.cliExpectation(cannotSay, path: path).tone,
+                .unknown,
+                "\(cannotSay) is 'cannot say', which is not the same as 'bad'"
+            )
+        }
+    }
+
+    /// The whole hash is 64 characters and the row is ~260pt wide, so the
+    /// expected value is not what the badge sentence carries — the card renders
+    /// it as its own row. A sentence quoting it would be truncated mid-hash,
+    /// which is worse than not showing it.
+    func testTheMismatchSentenceDoesNotTryToQuoteTheWholeHash() {
+        let expected = String(repeating: "ab", count: 32)
+        let term = GlomerisVocabulary.cliExpectation(
+            .differs(expected: expected),
+            path: "/usr/local/bin/glomeris"
+        )
+        XCTAssertFalse(term.explanation.contains(expected))
+    }
+
+    /// Two `glomeris` binaries differing only by directory is the ordinary
+    /// case, not an exotic one, so the directory is the fact worth carrying.
+    func testCliSourceNamesTheDirectoryItFoundTheBinaryIn() {
+        XCTAssertTrue(
+            GlomerisVocabulary.cliSource(.pathEntry("/usr/local/bin")).contains("/usr/local/bin")
+        )
+        XCTAssertTrue(
+            GlomerisVocabulary.cliSource(.knownInstallDirectory("/opt/homebrew/bin"))
+                .contains("/opt/homebrew/bin")
+        )
+
+        let phrases = [
+            GlomerisVocabulary.cliSource(.bundled),
+            GlomerisVocabulary.cliSource(.pathEntry("/usr/local/bin")),
+            GlomerisVocabulary.cliSource(.knownInstallDirectory("/usr/local/bin")),
+        ]
+        // The last two resolve to the same directory by different rules, and
+        // that difference matters: one is on the user's PATH and one was found
+        // only because the app knows to look there.
+        XCTAssertEqual(Set(phrases).count, phrases.count)
+        for phrase in phrases {
+            XCTAssertFalse(phrase.isEmpty)
+            XCTAssertFalse(phrase.contains("_"), "\(phrase) reads like an internal tag")
+        }
     }
 
     /// Explanations are sentences shown to a non-expert. They must not

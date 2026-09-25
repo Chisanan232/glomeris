@@ -127,7 +127,11 @@ survivor_bundle() {
     local exe
     exe=$(all_instances | awk -v rig="$RIG/" 'index($2, rig) == 1 { print $2; exit }')
     [[ -n $exe ]] || return 1
-    printf '%s' "${exe%/Contents/MacOS/$EXECUTABLE}"
+    # $EXECUTABLE quoted separately so it is stripped as a literal. Unquoted it
+    # is a glob pattern, and CFBundleExecutable is read from a plist rather than
+    # written here, so a `?` or `*` in it would silently strip the tail of a
+    # bundle whose executable is a different name.
+    printf '%s' "${exe%/Contents/MacOS/"$EXECUTABLE"}"
 }
 
 survivor_version() {

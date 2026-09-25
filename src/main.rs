@@ -441,8 +441,6 @@ fn run_emergency_command(args: &[String]) {
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::emergency::run_emergency;
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
-    use glomeris::monitor::FilePersistence;
-    use glomeris::platform::macos::MacosFsStat;
     use std::time::Duration;
 
     // HORO-1054: held for the duration of the real-execution portion
@@ -453,24 +451,23 @@ fn run_emergency_command(args: &[String]) {
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    // Same history path `daemon_run` uses — emergency mode's own history
-    // record is this tool's self-owned disposable state (see the
-    // `emergency` module docs' step 1).
+    // Same history path `daemon_run` uses — the pressure history the
+    // polling loop appends to is what emergency mode treats as this tool's
+    // self-owned disposable state (see the `emergency` module docs' step
+    // 1). Since HORO-1467 emergency mode only ever deletes this file; it
+    // no longer writes a record of its own into it. Whether deleting it is
+    // right at all is HORO-1468.
     let self_state_path = home_dir.join("Library/Application Support/Glomeris/history.tsv");
 
     let ctx = DiscoveryContext::new(home_dir);
     let registry = DetectorRegistry::builtin();
     let actions = ActionRegistry::builtin();
     let collector = DefaultEvidenceCollector::default();
-    let fs_stat = MacosFsStat;
-    let persistence = FilePersistence::new(&self_state_path);
 
     let report = run_emergency(
-        &fs_stat,
         &collector,
         &registry,
         &actions,
-        &persistence,
         &ctx,
         &self_state_path,
         20,

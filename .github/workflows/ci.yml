@@ -242,6 +242,24 @@ jobs:
       - name: Check stored state is namespaced by the running bundle
         run: bash scripts/check-state-namespaced-by-bundle-id.sh
 
+  cli-identity-is-reported:
+    # HORO-1466: the app hands all policy and execution authority to a
+    # `glomeris` it resolves at runtime, and used to surface which one only in
+    # the error raised when NOTHING was found. Two binaries on one machine both
+    # answered `--version` with 0.2.0 while disagreeing about whether an
+    # unscoped mutating action may be offered at all, so the identity has to be
+    # a hash of the bytes and it has to be on a non-error surface.
+    #
+    # A separate job from app-version-matches-crate, which is the reason this
+    # one exists: that job pins the version numbers to each other, and this
+    # ticket is the case those numbers cannot detect. Folding the two together
+    # would let "the versions agree" stand in for "it is the same build".
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the resolved CLI's path and identity are reported together
+        run: bash scripts/check-cli-identity-is-reported.sh
+
   vocabulary-covers-cli-tokens:
     # HORO-1306: the GUI's plain-language wording tables are transcribed from
     # the Rust enums by hand, so the drift that matters is the silent one —
@@ -273,3 +291,139 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check the book documents every CLI command
         run: bash scripts/check-docs-cover-cli-commands.sh
+
+  workflows-are-valid:
+    # HORO-1472: every other job in this file guards something in the
+    # repository, and nothing guarded these files. The only thing that reported
+    # a mistake in a workflow was GitHub, when it tried to run it — a red run
+    # with zero jobs and a zero-second duration, which is what a parse-time
+    # rejection looks like.
+    #
+    # That failure mode is worse than an ordinary red X. There is no job log to
+    # read; the failure is attributed to whichever pull request happened to
+    # trigger the workflow rather than to the one that broke it; and a rejected
+    # workflow has not run, so every check it contains goes absent rather than
+    # failing. A typo in this file could therefore remove the ten guards above
+    # it and read as "no checks reported" instead of as a failure.
+    #
+    # A separate job from the guards above on purpose, and deliberately not
+    # path-filtered to `.github/**`: the set of workflow files is exactly what a
+    # path filter here would be deciding, and the filter itself would be inside
+    # the file being validated.
+    #
+    # The tools are pinned and downloaded rather than taken from the image, for
+    # the reason .github/.actionlint-version gives: `ubuntu-latest` ships an
+    # unpinned shellcheck, and actionlint routes every `run:` block through it,
+    # so an image refresh could turn this job red on an unrelated pull request.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned actionlint and shellcheck
+        # Into RUNNER_TEMP rather than the checkout, so the extracted binaries
+        # cannot show up as untracked files in the repository being linted.
+        # GITHUB_PATH prepends, so these take precedence over the shellcheck
+        # already on the image — and if they somehow did not, the guard's
+        # version comparison fails rather than silently linting with the wrong
+        # ruleset.
+        run: |
+          set -euo pipefail
+          VERSION_FILE=.github/.actionlint-version
+          # Named failure rather than a silent one. `grep` exits 1 on no match,
+          # which under `pipefail` is the function's status, which under
+          # `set -e` ends the step at the caller's assignment — with nothing
+          # printed. A renamed pin key used to show up as a red step and an
+          # empty log. `exit 1` here leaves only the subshell, so the caller's
+          # assignment still fails; the difference is that stderr says which
+          # key is missing.
+          pin() {
+            local value
+            value="$(grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true)"
+            if [[ -z "$value" ]]; then
+              echo "FAIL: no '$1=' line in ${VERSION_FILE} — the pin was renamed or removed." >&2
+              exit 1
+            fi
+            printf '%s\n' "$value"
+          }
+          AL_VERSION="$(pin actionlint_version)"
+          AL_SHA256="$(pin actionlint_linux_amd64_sha256)"
+          SC_VERSION="$(pin shellcheck_version)"
+          SC_SHA256="$(pin shellcheck_linux_x86_64_sha256)"
+          DEST="$RUNNER_TEMP/pinned-linters"
+          mkdir -p "$DEST"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${AL_VERSION}/actionlint_${AL_VERSION}_linux_amd64.tar.gz"
+          echo "${AL_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz -C "$DEST" actionlint
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+          echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz -C "$DEST" --strip-components=1 \
+            "shellcheck-v${SC_VERSION}/shellcheck"
+          echo "$DEST" >> "$GITHUB_PATH"
+      - name: Check every workflow file is valid
+        run: bash scripts/check-workflows-are-valid.sh
+
+  shell-scripts-are-clean:
+    # HORO-1473: every job above runs its guard as a single line,
+    # `bash scripts/check-something.sh`, which is all the shellcheck inside
+    # workflows-are-valid ever saw. The several hundred lines inside each script
+    # were checked by nothing, so the guards protecting everything else were the
+    # least checked shell in the repository.
+    #
+    # The bug class that matters here is the one that makes a guard pass while
+    # proving nothing: an expansion that word-splits, a variable read before
+    # assignment, a pipeline whose status comes from the wrong stage. Two guards
+    # here have already been found reporting PASS over something they were meant
+    # to catch, for other reasons, so this is demonstrated rather than
+    # hypothetical.
+    #
+    # A separate job from workflows-are-valid, for the reason the drift jobs are
+    # separate from macos-app: steps in one job run in sequence and stop at the
+    # first failure, so sharing a job would mean a broken workflow file prevents
+    # the script lint from running at all — and those two are exactly the
+    # failures that must not be able to hide each other.
+    #
+    # That costs a second copy of the install step. Accepted because the two
+    # copies cannot disagree about anything that matters: both read the version
+    # and the hash out of .github/.actionlint-version, and the guard itself
+    # refuses to run if the binary on PATH is not that version.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned shellcheck
+        # Into RUNNER_TEMP rather than the checkout, so the extracted binary
+        # cannot show up as an untracked file in the repository being linted —
+        # which this guard would then discover and lint.
+        run: |
+          set -euo pipefail
+          VERSION_FILE=.github/.actionlint-version
+          # Named failure rather than a silent one. `grep` exits 1 on no match,
+          # which under `pipefail` is the function's status, which under
+          # `set -e` ends the step at the caller's assignment — with nothing
+          # printed. A renamed pin key used to show up as a red step and an
+          # empty log. `exit 1` here leaves only the subshell, so the caller's
+          # assignment still fails; the difference is that stderr says which
+          # key is missing.
+          pin() {
+            local value
+            value="$(grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true)"
+            if [[ -z "$value" ]]; then
+              echo "FAIL: no '$1=' line in ${VERSION_FILE} — the pin was renamed or removed." >&2
+              exit 1
+            fi
+            printf '%s\n' "$value"
+          }
+          SC_VERSION="$(pin shellcheck_version)"
+          SC_SHA256="$(pin shellcheck_linux_x86_64_sha256)"
+          DEST="$RUNNER_TEMP/pinned-linters"
+          mkdir -p "$DEST"
+          cd "$RUNNER_TEMP"
+          curl -fsSL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SC_VERSION}/shellcheck-v${SC_VERSION}.linux.x86_64.tar.xz"
+          echo "${SC_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz -C "$DEST" --strip-components=1 \
+            "shellcheck-v${SC_VERSION}/shellcheck"
+          echo "$DEST" >> "$GITHUB_PATH"
+      - name: Check every shell script is clean
+        run: bash scripts/check-shell-scripts-are-clean.sh
