@@ -130,8 +130,27 @@ jobs:
         run: |
           set -euo pipefail
           VERSION_FILE=macos/GlomerisMenuBar/.xcodegen-version
-          VERSION="$(grep -E '^version=' "$VERSION_FILE" | head -1 | cut -d= -f2)"
-          SHA256="$(grep -E '^sha256=' "$VERSION_FILE" | head -1 | cut -d= -f2)"
+          # HORO-1479: the same `pin` helper the actionlint job below already
+          # uses, for the same defect and the same reason. Before this, a `grep`
+          # matching nothing made the assignment non-zero under `pipefail`,
+          # `set -e` ended the step on that line, and the next thing in the log
+          # was a `curl` that never ran. There was no diagnostic here at all to
+          # be unreachable — the step simply died.
+          #
+          # `exit 1` leaves only the substitution's subshell, so the caller's
+          # assignment still fails and the step still stops. What changes is
+          # that stderr names the key that was missing.
+          pin() {
+            local value
+            value="$(grep -E "^$1=" "$VERSION_FILE" | head -1 | cut -d= -f2 || true)"
+            if [[ -z "$value" ]]; then
+              echo "FAIL: no '$1=' line in ${VERSION_FILE} — the pin was renamed or removed." >&2
+              exit 1
+            fi
+            printf '%s\n' "$value"
+          }
+          VERSION="$(pin version)"
+          SHA256="$(pin sha256)"
           cd "$RUNNER_TEMP"
           curl -fsSL -o xcodegen.zip \
             "https://github.com/yonaskolb/XcodeGen/releases/download/${VERSION}/xcodegen.zip"
