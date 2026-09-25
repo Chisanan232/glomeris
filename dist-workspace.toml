@@ -10,11 +10,35 @@ ci = "github"
 # The installers to generate for each app
 installers = ["homebrew"]
 # The GitHub repository to publish the Homebrew formula to (HORO-1069).
-# The tap now exists and carries a hand-written bootstrap formula pinned to
-# v0.2.0. What is still missing is the HOMEBREW_TAP_TOKEN secret the publish
-# job below authenticates with, so no release has regenerated the formula yet
-# — see HORO-1320. Until that secret exists, tagging a release still reddens
-# the release run at `publish-homebrew-formula`.
+# The tap exists and carries a hand-written bootstrap formula pinned to v0.2.0.
+# What is still missing is the HOMEBREW_TAP_TOKEN secret the publish job below
+# authenticates with, so no release has regenerated the formula — see HORO-1320.
+#
+# Everything from here down is a PREDICTION, and is labelled as one because the
+# wording this replaces read as though it had been measured. `publish-jobs` was
+# added after v0.2.0 was tagged, so `publish-homebrew-formula` has never been in
+# a real release run's job graph at all: the v0.2.0 run had six jobs, none of
+# them this one, and it was green. Nothing here has been observed.
+#
+# Predicted from release.yml as generated. With the secret absent, the token
+# handed to the tap checkout is an empty string, so the job fails either at that
+# checkout or at its final `git push`. Which of the two is not knowable without
+# running it — the tap is a public repo, so an anonymous clone succeeding and
+# the failure landing on the push is entirely possible. It does not matter much
+# either way: `persist-credentials: true` reuses that same empty credential, so
+# the formula cannot reach the tap by either route.
+#
+# What this does NOT do is prevent a release. `host` creates the GitHub Release
+# with `gh release create`, and `publish-homebrew-formula` only `needs` plan and
+# host — so the release and all of dist's assets are already published when the
+# failure happens. `announce` is then skipped, because it requires this job to
+# have succeeded or been skipped. The predicted symptom is therefore a red
+# release run with a complete release attached to it and a tap formula still
+# pinned to the previous version, not a release that failed to appear.
+#
+# macos-app-release.yml is unaffected for the same reason: it triggers on
+# `release: published`, which fires when `host` creates the release, upstream of
+# this job.
 tap = "Chisanan232/homebrew-tap"
 # Actually run the Homebrew publish job (pushes the generated formula to the
 # tap repo above) as part of releases, not just generate the formula file.
