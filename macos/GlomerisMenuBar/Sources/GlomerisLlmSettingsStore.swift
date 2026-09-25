@@ -367,10 +367,17 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// (the launching environment, injectable for tests).
     ///
     /// Touches the keychain, so it must not be called on the main thread — use
-    /// [`resolvedStatus(environment:)`]. The read is non-blocking (availability,
-    /// not the value), but "non-blocking" is a property of today's
-    /// implementation and the main thread is the app's only entry point; see
-    /// this file's callers.
+    /// [`resolvedStatus(environment:)`].
+    ///
+    /// The read asks for availability and not for the value, so it cannot raise
+    /// an authorisation prompt and cannot wait on a person. This used to be
+    /// written down as the read being "non-blocking", which is a different and
+    /// false claim, and HORO-1471 is what it cost: it is a synchronous call into
+    /// `securityd`, it has no bound of its own, and on a Mac where that daemon
+    /// stops replying it never returns. That is why the async wrapper, and not
+    /// this function, is the one the app calls — only the wrapper has a
+    /// deadline. This one is kept for tests and for callers that are already off
+    /// the main thread and want the raw answer.
     func status(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> GlomerisLlmSettingsStatus {
@@ -401,17 +408,21 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
         )
     }
 
-    /// [`status(environment:)`] performed off the main thread.
+    /// What [`status(environment:)`] answers, obtained off the main thread and,
+    /// for the one field that needs the keychain, under a deadline.
     ///
     /// The point of the hop is not speed. A keychain operation can wait on a
     /// person — `SecurityAgent` puts up an authorisation prompt and returns
     /// nothing until it is answered — and a main thread that is waiting on a
     /// person cannot service the status item, so AppKit removes it and the app
     /// disappears from the menu bar with no way back in (HORO-1368).
-    /// And under a deadline, since HORO-1471. The endpoint and model are
-    /// resolved here rather than inside the hop because they reach UserDefaults
-    /// only — putting them behind the keychain query is what made a stalled
-    /// keychain able to leave the whole pane unresolved.
+    ///
+    /// The point of the deadline is different, and is HORO-1471: waiting off the
+    /// main thread is only bounded if the thing being waited on answers. The
+    /// endpoint and the model are resolved out here rather than inside the hop
+    /// because they reach UserDefaults and nothing else — putting them behind
+    /// the keychain query is what let a silent keychain leave the whole pane
+    /// unresolved instead of just the one row it actually concerns.
     func resolvedStatus(
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async -> GlomerisLlmSettingsStatus {
