@@ -446,3 +446,32 @@ jobs:
           echo "$DEST" >> "$GITHUB_PATH"
       - name: Check every shell script is clean
         run: bash scripts/check-shell-scripts-are-clean.sh
+
+  failure-diagnostics-are-reachable:
+    # HORO-1479: shell-scripts-are-clean above runs shellcheck over every guard,
+    # and workflows-are-valid runs it over every `run:` block. Both pass, and
+    # both passed over this:
+    #
+    #   version="$(grep -E '^version=' "$FILE" | head -1 | cut -d= -f2)"
+    #   if [[ -z "$version" ]]; then echo "FAIL: no pin"; exit 1; fi
+    #
+    # Under `set -euo pipefail` the `grep` that matched nothing makes the
+    # assignment non-zero, the body ends on that line, and the message written to
+    # report exactly that condition is dead code. What reaches a reader is a red
+    # step and an empty log — less information than no check at all, because the
+    # check reads like the case is handled.
+    #
+    # Measured before writing this job: on the pre-fix form of one such site,
+    # shellcheck at default severity reports nothing, and with every optional
+    # check enabled — `check-extra-masked-returns` included — reports only
+    # SC2250, a style note about braces. There is no shellcheck rule for this
+    # class, so linting harder would not have found it.
+    #
+    # Its own job rather than a step in either linting job above, for the reason
+    # those two are separate from each other: steps stop at the first failure,
+    # and a guard being unreadable must not hide a guard being unreachable.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check every failure diagnostic can actually run
+        run: bash scripts/check-failure-diagnostics-are-reachable.sh
