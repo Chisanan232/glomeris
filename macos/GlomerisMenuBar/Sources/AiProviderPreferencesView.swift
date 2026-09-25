@@ -351,6 +351,10 @@ enum GlomerisLlmSettingSourceWording {
         case .environment: return "From the environment this app was launched with"
         case .absent: return "Not set"
         case .unreadable: return "Stored here, but this app could not read it"
+        // HORO-1471. Worded as the keychain's silence and not as the key's
+        // absence, because the two are different facts and only one of them is
+        // known. "Not set" here would be this screen inventing an answer.
+        case .unresponsive: return "Your keychain did not answer, so this is unknown"
         }
     }
 
@@ -361,6 +365,7 @@ enum GlomerisLlmSettingSourceWording {
         case .environment: return "terminal"
         case .absent: return "circle.dashed"
         case .unreadable: return "exclamationmark.triangle"
+        case .unresponsive: return "clock.badge.exclamationmark"
         }
     }
 

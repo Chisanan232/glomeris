@@ -40,9 +40,27 @@ enum GlomerisLlmSettingSource: Equatable, CaseIterable {
     /// value they did, to a build that cannot get at the one they stored.
     case unreadable
 
-    /// Whether a value will actually reach the CLI. `unreadable` will not:
-    /// nothing was inherited, and the stored item cannot be read, so a spawned
-    /// `glomeris` would see no variable and refuse with `NotConfigured`.
+    /// The keychain did not answer within the deadline, so whether a key is
+    /// stored here is simply unknown (HORO-1471). Like `unreadable`, only the
+    /// API key can reach this state.
+    ///
+    /// Distinct from `unreadable`, which is a *refusal*: an answer arrived and
+    /// it was "no". This is the absence of any answer, and the remedies are
+    /// opposite. A refusal is fixed by saving the key again under the running
+    /// build's identity; a silence means the system's keychain service has
+    /// stopped responding, and saving again would wait in the same place.
+    ///
+    /// Emphatically distinct from `absent`. "Not set" is a claim about the
+    /// user's data, and making that claim because a system daemon went quiet is
+    /// how a user gets told they have no key while their key sits in the
+    /// keychain — and invited to paste it again into a store that cannot
+    /// receive it.
+    case unresponsive
+
+    /// Whether a value will actually reach the CLI. Neither `unreadable` nor
+    /// `unresponsive` will: nothing was inherited, and the stored item was
+    /// either refused or never spoken about, so a spawned `glomeris` would see
+    /// no variable and refuse with `NotConfigured`.
     var isAvailable: Bool {
         self == .settings || self == .environment
     }
