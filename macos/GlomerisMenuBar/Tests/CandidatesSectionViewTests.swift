@@ -8,6 +8,39 @@
 
 import XCTest
 
+/// Collects the events a `@Sendable` progress callback reports, so the live
+/// progress test can assert on them afterwards without mutating a captured
+/// `var` from inside the callback.
+///
+/// The callback parameter on `GlomerisClient.run` is `@Sendable`, which is the
+/// client's statement that it may invoke the closure from a context other than
+/// the caller's — and `spawnAndDrain` does. Appending straight into a local
+/// `var` therefore had no declared ordering against the test thread that reads
+/// the array once the `await` returns; it passed, which is what an
+/// unsynchronised access usually does. Swift 6 rejects it outright
+/// (HORO-1478), and this was the only site in the target that had it.
+///
+/// `@unchecked Sendable` with an explicit lock rather than an `actor`, for the
+/// same reason `InvocationLog` in `GlomerisClientTests` is one: the assertions
+/// run synchronously after the `await` and must not themselves need an
+/// `await`.
+private final class ProgressEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [ProgressEventDto] = []
+
+    func record(_ event: ProgressEventDto) {
+        lock.lock()
+        recorded.append(event)
+        lock.unlock()
+    }
+
+    var events: [ProgressEventDto] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+}
+
 final class CandidatesSectionViewTests: XCTestCase {
     // MARK: - "Never a timer" invariant
 
@@ -118,7 +151,7 @@ final class CandidatesSectionViewTests: XCTestCase {
         }
 
         let client = GlomerisClient(executableURL: binaryURL)
-        var seenEvents: [ProgressEventDto] = []
+        let seen = ProgressEventLog()
         let result = try await client.run(
             [
                 "0",
@@ -129,10 +162,11 @@ final class CandidatesSectionViewTests: XCTestCase {
             outputType: ValueOutput.self,
             progressType: ProgressEventDto.self,
             onProgress: { event in
-                seenEvents.append(event)
+                seen.record(event)
             }
         )
 
+        let seenEvents = seen.events
         XCTAssertEqual(result.output.value, 1)
         XCTAssertEqual(seenEvents, [
             .detectorStarted(detector: "cargo"),
