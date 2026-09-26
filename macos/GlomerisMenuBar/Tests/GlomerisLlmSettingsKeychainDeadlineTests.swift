@@ -69,6 +69,8 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
         private var exited = 0
         private var accessEntered = 0
         private var accessExited = 0
+        private var writes = 0
+        private var deletes = 0
 
         /// What the query answers once it is finally allowed to. `.present` on
         /// purpose: a test that released the gate and still saw "no key here"
@@ -138,11 +140,47 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
 
         func secret(forKey key: String) -> String? { nil }
 
-        @discardableResult
-        func setSecret(_ secret: String, forKey key: String) -> Bool { true }
+        /// HORO-1476: the two writes, counted, and answering `true` when they do
+        /// run.
+        ///
+        /// They do not block. The subject of the write tests is not a write that
+        /// stalls — it is a write that is never issued because the *availability*
+        /// query stalled first and is still holding the one serial queue every
+        /// keychain touch shares. A blocking write here would prove the queue is
+        /// serial, which a sibling test already establishes, and would hide the
+        /// thing being asserted.
+        ///
+        /// `true` rather than `false` so that a test seeing `.notAttempted` cannot
+        /// be reading a double that refuses everything. The distinction between
+        /// "refused" and "not attempted" is the whole point, and a double that can
+        /// only refuse could not show it.
+        var writeCalls: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return writes
+        }
+
+        var deleteCalls: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return deletes
+        }
 
         @discardableResult
-        func deleteSecret(forKey key: String) -> Bool { true }
+        func setSecret(_ secret: String, forKey key: String) -> Bool {
+            lock.lock()
+            writes += 1
+            lock.unlock()
+            return true
+        }
+
+        @discardableResult
+        func deleteSecret(forKey key: String) -> Bool {
+            lock.lock()
+            deletes += 1
+            lock.unlock()
+            return true
+        }
     }
 
     /// Carries a result out of a `Task` without capturing a `var` across
@@ -310,6 +348,262 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
             guard let stored else { return nil }
             return (stored, seconds)
         }
+    }
+
+    /// `StatusBox` for a write outcome (HORO-1476).
+    private final class WriteBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: GlomerisCredentialWriteOutcome?
+        private var seconds: TimeInterval = 0
+
+        func store(_ outcome: GlomerisCredentialWriteOutcome, after seconds: TimeInterval) {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = outcome
+            self.seconds = seconds
+        }
+
+        var value: (outcome: GlomerisCredentialWriteOutcome, elapsed: TimeInterval)? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let stored else { return nil }
+            return (stored, seconds)
+        }
+    }
+
+    /// Whether a `Task` has got to the end, for the one wait here that is meant
+    /// to expire (HORO-1476).
+    private final class CompletionFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        func markFinished() {
+            lock.lock()
+            defer { lock.unlock() }
+            finished = true
+        }
+
+        var isFinished: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return finished
+        }
+    }
+
+    /// Runs one of the two write wrappers under a wall-clock bound (HORO-1476).
+    ///
+    /// The same shape as `resolveStatus(of:)` and for a stronger reason. These two
+    /// have no deadline and are not getting one — what stops them is declining to
+    /// dispatch at all — so removing that check does not make them slow, it makes
+    /// them never return. `XCTWaiter` turns that into this named failure instead
+    /// of an XCTest-level timeout with no explanation attached.
+    private func performWrite(
+        _ what: String,
+        _ operation: @escaping @Sendable () async -> GlomerisCredentialWriteOutcome,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> (outcome: GlomerisCredentialWriteOutcome, elapsed: TimeInterval)? {
+        let box = WriteBox()
+        let returned = expectation(description: "\(what) returned")
+        Task {
+            let start = DispatchTime.now().uptimeNanoseconds
+            let outcome = await operation()
+            let seconds =
+                Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+            box.store(outcome, after: seconds)
+            returned.fulfill()
+        }
+        let outcome = XCTWaiter.wait(for: [returned], timeout: Self.waitSeconds)
+        guard outcome == .completed, let value = box.value else {
+            XCTFail(
+                """
+                \(what) did not return within \(Self.waitSeconds)s. It has no \
+                deadline and is not meant to have one: what makes it return when \
+                the keychain has gone quiet is that it refuses to dispatch onto a \
+                queue the stalled query is still holding.
+                """,
+                file: file, line: line)
+            return nil
+        }
+        return value
+    }
+
+    // MARK: - HORO-1476: a write is not queued behind a stall
+
+    /// The defect this ticket is about, on the save path. The availability query
+    /// has already run out of time, so the work item it left behind holds the
+    /// store's one serial keychain queue for the life of the process. A save
+    /// dispatched onto that queue never runs — so it is not dispatched.
+    ///
+    /// Note what is asserted about the keychain: `writeCalls == 0`. Returning
+    /// quickly would not be enough on its own, because a write that *did* reach a
+    /// keychain and came back immediately looks the same from the outside.
+    func testASaveIsNotIssuedOnceTheKeychainHasAlreadyGoneQuiet() {
+        let (store, credentials, deadline) = makeStalledStore()
+
+        guard let first = resolveStatus(of: store) else { return }
+        XCTAssertEqual(first.status.apiKey, .unresponsive)
+        XCTAssertTrue(deadline.hasBeenMissed)
+
+        guard let (outcome, elapsed) = performWrite(
+            "resolvedSetApiKey", { await store.resolvedSetApiKey(Self.key) }
+        ) else { return }
+
+        XCTAssertEqual(outcome, .notAttempted)
+        XCTAssertNotEqual(
+            outcome, .refused,
+            """
+            A save that was never sent was reported as a refusal. That tells the \
+            user macOS rejected their key and sends them to fix a permission that \
+            is not broken, when what actually happened is that the keychain \
+            service stopped answering.
+            """)
+        XCTAssertFalse(outcome.succeeded, "nothing was written, so this must not read as saved")
+        XCTAssertEqual(
+            credentials.writeCalls, 0,
+            "the key was sent to a keychain that had already stopped answering")
+        XCTAssertLessThan(
+            elapsed, Self.deadlineSeconds / 3,
+            "it waited, which means it was dispatched onto the held queue after all")
+    }
+
+    /// The same on the removal path, which matters for a different reason: a user
+    /// pressing **Remove key** is usually revoking access, and needs to know the
+    /// key is still there.
+    func testARemovalIsNotIssuedOnceTheKeychainHasAlreadyGoneQuiet() {
+        let (store, credentials, deadline) = makeStalledStore()
+
+        guard let first = resolveStatus(of: store) else { return }
+        XCTAssertEqual(first.status.apiKey, .unresponsive)
+        XCTAssertTrue(deadline.hasBeenMissed)
+
+        guard let (outcome, elapsed) = performWrite(
+            "resolvedDeleteApiKey", { await store.resolvedDeleteApiKey() }
+        ) else { return }
+
+        XCTAssertEqual(outcome, .notAttempted)
+        XCTAssertFalse(
+            outcome.succeeded,
+            """
+            A removal that was never sent was reported as done. The key is still \
+            readable by everything that could read it before, and a user revoking \
+            access would have been told the opposite.
+            """)
+        XCTAssertEqual(credentials.deleteCalls, 0)
+        XCTAssertLessThan(elapsed, Self.deadlineSeconds / 3)
+    }
+
+    /// One record, not one per operation — the other direction of the pair above.
+    /// A miss recorded by the ACL query stops the writes too, because what is
+    /// wedged is the queue and not any one query.
+    func testAMissRecordedByTheAccessListQueryAlsoStopsTheWrites() {
+        let (store, credentials, _) = makeStalledStore()
+
+        guard let first = resolveAccessList(of: store) else { return }
+        XCTAssertEqual(first.access, .unresponsive)
+
+        guard let save = performWrite(
+            "resolvedSetApiKey", { await store.resolvedSetApiKey(Self.key) }
+        ) else { return }
+        guard let removal = performWrite(
+            "resolvedDeleteApiKey", { await store.resolvedDeleteApiKey() }
+        ) else { return }
+
+        XCTAssertEqual(save.outcome, .notAttempted)
+        XCTAssertEqual(removal.outcome, .notAttempted)
+        XCTAssertEqual(credentials.writeCalls, 0)
+        XCTAssertEqual(credentials.deleteCalls, 0)
+    }
+
+    // MARK: - HORO-1476 anti-vacuity: the writes still happen normally
+
+    /// The control for the two tests above, and the one that makes
+    /// `.notAttempted` mean something. The same double, allowed to answer, takes
+    /// the save and reports it done — so `.notAttempted` came from the stall and
+    /// not from a store that has stopped saving anything.
+    ///
+    /// Also the assertion that no deadline was added here by accident: a save
+    /// against a working keychain must reach it, once.
+    func testASaveStillReachesAKeychainThatIsAnswering() {
+        let (store, credentials, deadline) = makeStalledStore()
+        credentials.release()
+
+        guard let (outcome, _) = performWrite(
+            "resolvedSetApiKey", { await store.resolvedSetApiKey(Self.key) }
+        ) else { return }
+
+        XCTAssertEqual(outcome, .done)
+        XCTAssertTrue(outcome.succeeded)
+        XCTAssertEqual(credentials.writeCalls, 1, "the save must actually reach the keychain")
+        XCTAssertFalse(
+            deadline.hasBeenMissed,
+            "a write must not record a miss: it has no deadline to miss")
+    }
+
+    func testARemovalStillReachesAKeychainThatIsAnswering() {
+        let (store, credentials, deadline) = makeStalledStore()
+        credentials.release()
+
+        guard let (outcome, _) = performWrite(
+            "resolvedDeleteApiKey", { await store.resolvedDeleteApiKey() }
+        ) else { return }
+
+        XCTAssertEqual(outcome, .done)
+        XCTAssertEqual(credentials.deleteCalls, 1)
+        XCTAssertFalse(deadline.hasBeenMissed)
+    }
+
+    // MARK: - HORO-1476: the boundary of this fix, pinned
+
+    /// `resolvedChildEnvironment` still does not return when the keychain has gone
+    /// quiet, and that is the scope boundary of this change rather than an
+    /// oversight.
+    ///
+    /// It cannot be given the treatment above. Its return type is the child
+    /// process's environment, so the only thing it could say in place of waiting
+    /// is "no key" — and launching the CLI without a key the user has stored is
+    /// the silently-wrong behaviour HORO-1471 argued against. Teaching it to
+    /// report the wedge means changing what both of its callers do with the
+    /// answer, which is the part of HORO-1476 that is a product decision.
+    ///
+    /// So this test asserts the current behaviour, on purpose, and it is meant to
+    /// fail when that decision is taken. A failure here is the reminder to read
+    /// HORO-1476 and update this file deliberately — not a regression.
+    ///
+    /// The parked work item is released by the teardown `makeStalledStore`
+    /// registers: once the availability query is let through, the queued
+    /// environment read runs immediately, because reading the secret from this
+    /// double does not block.
+    func testTheChildEnvironmentReadIsStillUnboundedAndThatIsDeliberate() {
+        let (store, _, deadline) = makeStalledStore()
+
+        guard let first = resolveStatus(of: store) else { return }
+        XCTAssertEqual(first.status.apiKey, .unresponsive)
+        XCTAssertTrue(deadline.hasBeenMissed)
+
+        // A flag and a poll rather than an XCTestExpectation, because this is the
+        // one wait in this file that is *supposed* to time out. The read returns
+        // once the teardown releases the gate, which is after this test has
+        // finished, and fulfilling an expectation then is an XCTest API violation.
+        let finished = CompletionFlag()
+        Task {
+            _ = await store.resolvedChildEnvironment(basedOn: [:])
+            finished.markFinished()
+        }
+
+        let limit = Date().addingTimeInterval(Self.deadlineSeconds * 3)
+        while !finished.isFinished && Date() < limit {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        XCTAssertFalse(
+            finished.isFinished,
+            """
+            resolvedChildEnvironment returned while the keychain queue was held. \
+            If that is because HORO-1476's remaining decision has been taken, this \
+            test is the thing to change — deliberately, with the new behaviour \
+            asserted in its place.
+            """)
     }
 
     // MARK: - HORO-1474 AC 5: the ACL query is bounded too

@@ -608,7 +608,7 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     /// wrong about the product.
     func testRemovingTheKeyWhileOneIsInheritedSaysSoAndNamesTheVariable() {
         let message = GlomerisLlmKeyRemovalWording.message(
-            removed: true, remainingSource: .environment)
+            removed: .done, remainingSource: .environment)
 
         XCTAssertEqual(message.kind, .success, "the removal did happen")
         XCTAssertTrue(
@@ -621,7 +621,7 @@ final class AiProviderPreferencesViewTests: XCTestCase {
 
     func testRemovingTheOnlyKeyIsReportedWithoutACaveat() {
         let message = GlomerisLlmKeyRemovalWording.message(
-            removed: true, remainingSource: .absent)
+            removed: .done, remainingSource: .absent)
 
         XCTAssertEqual(message.kind, .success)
         XCTAssertFalse(
@@ -634,7 +634,7 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     /// being used.
     func testAKeychainRefusalIsAFailureNotASuccess() {
         let message = GlomerisLlmKeyRemovalWording.message(
-            removed: false, remainingSource: .settings)
+            removed: .refused, remainingSource: .settings)
 
         XCTAssertEqual(message.kind, .failure)
         XCTAssertFalse(
@@ -642,17 +642,88 @@ final class AiProviderPreferencesViewTests: XCTestCase {
             "nothing was removed")
     }
 
-    /// All three outcomes are materially different situations, so all three must
+    /// HORO-1476. A removal that was never sent is a failure like a refusal, but
+    /// not the same failure: the user has to be told the key is still there, and
+    /// told why pressing the button again now will not help either.
+    func testARemovalThatWasNeverAttemptedSaysTheKeyIsStillStored() {
+        let message = GlomerisLlmKeyRemovalWording.message(
+            removed: .notAttempted, remainingSource: .settings)
+
+        XCTAssertEqual(message.kind, .failure)
+        XCTAssertTrue(
+            message.title.lowercased().contains("still in your keychain"),
+            """
+            someone revoking access needs to be told the key survived, in those \
+            words: \(message.title)
+            """)
+        XCTAssertFalse(
+            message.title.lowercased().contains("refused"),
+            "macOS refused nothing — it was never asked: \(message.title)")
+    }
+
+    /// All four outcomes are materially different situations, so all four must
     /// read differently — including the two successes, which differ only in
-    /// whether access was actually revoked.
-    func testTheThreeRemovalOutcomesAreDistinguishable() {
+    /// whether access was actually revoked, and the two failures, which differ in
+    /// whether the keychain was ever asked.
+    func testTheFourRemovalOutcomesAreDistinguishable() {
         let titles = [
-            GlomerisLlmKeyRemovalWording.message(removed: true, remainingSource: .environment),
-            GlomerisLlmKeyRemovalWording.message(removed: true, remainingSource: .absent),
-            GlomerisLlmKeyRemovalWording.message(removed: false, remainingSource: .settings),
+            GlomerisLlmKeyRemovalWording.message(removed: .done, remainingSource: .environment),
+            GlomerisLlmKeyRemovalWording.message(removed: .done, remainingSource: .absent),
+            GlomerisLlmKeyRemovalWording.message(removed: .refused, remainingSource: .settings),
+            GlomerisLlmKeyRemovalWording.message(
+                removed: .notAttempted, remainingSource: .settings),
         ].map(\.title)
 
         XCTAssertEqual(Set(titles).count, titles.count, "shared wording: \(titles)")
+    }
+
+    // MARK: - GlomerisLlmKeySaveWording (HORO-1476)
+
+    func testASavedKeyIsReportedAsSaved() {
+        let message = GlomerisLlmKeySaveWording.message(.done)
+
+        XCTAssertEqual(message.kind, .success)
+        XCTAssertTrue(message.title.lowercased().contains("saved"))
+    }
+
+    /// The distinction this type was introduced for. Both are failures, and the
+    /// user's next move is different: a refusal is about the item's permissions,
+    /// silence is about the machine's keychain service, and only one of them is
+    /// worth pressing **Save key** again for.
+    func testARefusalAndAWriteThatWasNeverSentReadDifferently() {
+        let refused = GlomerisLlmKeySaveWording.message(.refused)
+        let notAttempted = GlomerisLlmKeySaveWording.message(.notAttempted)
+
+        XCTAssertEqual(refused.kind, .failure)
+        XCTAssertEqual(notAttempted.kind, .failure)
+        XCTAssertNotEqual(refused.title, notAttempted.title)
+        XCTAssertTrue(
+            refused.title.lowercased().contains("refused"),
+            "a refusal is a decision macOS made, and saying so is what makes it actionable")
+        XCTAssertFalse(
+            notAttempted.title.lowercased().contains("refused"),
+            """
+            macOS refused nothing — it stopped answering, and calling that a \
+            refusal sends the user to fix a permission that is not broken: \
+            \(notAttempted.title)
+            """)
+    }
+
+    /// Both failure sentences have to settle the question the user actually has
+    /// after pasting a provider key into a field that then emptied itself.
+    func testNeitherSaveFailureLeavesTheKeyUnaccountedFor() {
+        for outcome in [GlomerisCredentialWriteOutcome.refused, .notAttempted] {
+            let title = GlomerisLlmKeySaveWording.message(outcome).title.lowercased()
+            XCTAssertTrue(
+                title.contains("nothing was saved"),
+                "\(outcome) does not say the key was not saved: \(title)")
+            XCTAssertTrue(
+                title.contains("nothing was written anywhere else"),
+                """
+                \(outcome) leaves open whether a copy of the key landed somewhere \
+                that is not the keychain: \(title)
+                """)
+        }
     }
 
     // MARK: - Source-level guards
