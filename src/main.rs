@@ -272,6 +272,18 @@ fn discover_and_classify_now_with_progress(
     glomeris::evidence::Evidence,
     glomeris::policy::PolicyDecision,
 )> {
+    discover_pass_now(project_roots, progress_json).candidates
+}
+
+/// Same single discovery pass as [`discover_and_classify_now_with_progress`]
+/// — the same detectors, run the same once — but keeps what each detector
+/// reported alongside the candidates it produced (HORO-1487), for the one
+/// caller that needs both: `detect`'s human output, which prints a line per
+/// detector above the report.
+fn discover_pass_now(
+    project_roots: Vec<PathBuf>,
+    progress_json: bool,
+) -> glomeris::cli::DiscoveryPass {
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::policy::PolicyConfig;
@@ -283,23 +295,16 @@ fn discover_and_classify_now_with_progress(
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
 
-    glomeris::cli::discover_and_classify_with_progress(
-        &registry,
-        &ctx,
-        &collector,
-        &cfg,
-        now,
-        |event| {
-            if progress_json {
-                match serde_json::to_string(&event) {
-                    Ok(line) => eprintln!("{line}"),
-                    Err(e) => {
-                        eprintln!("glomeris: failed to render progress event: {e}");
-                    }
+    glomeris::cli::discover_and_classify_pass(&registry, &ctx, &collector, &cfg, now, |event| {
+        if progress_json {
+            match serde_json::to_string(&event) {
+                Ok(line) => eprintln!("{line}"),
+                Err(e) => {
+                    eprintln!("glomeris: failed to render progress event: {e}");
                 }
             }
-        },
-    )
+        }
+    })
 }
 
 /// `glomeris status` — current disk pressure state (HORO-955).
@@ -488,7 +493,7 @@ fn run_emergency_command(_args: &[String]) {
 /// per-candidate report line showing reclaimable bytes and policy
 /// classification.
 fn run_detect_command(args: &[String]) {
-    use glomeris::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
+    use glomeris::cli::DetectorOutcome;
 
     let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
         Ok(v) => v,
@@ -501,26 +506,30 @@ fn run_detect_command(args: &[String]) {
     let flags = flags_only("detect", &remaining, &["--json", "--progress-json"]);
     let progress_json = flags.contains(&"--progress-json");
 
-    let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots.clone());
-    let registry = DetectorRegistry::builtin();
+    // One discovery pass, both halves of the output (HORO-1487). The
+    // per-detector lines and the report below them describe the same probe
+    // of the same filesystem, because they come out of the same pass —
+    // they used to come from two independent ones, which both doubled every
+    // detector's cost and let the two halves disagree.
+    let pass = discover_pass_now(project_roots, progress_json);
 
     if !flags.contains(&"--json") {
-        for (id, status) in registry.discover_all(&ctx) {
-            match status {
-                DetectorStatus::Found(evidence) => {
-                    println!("{:<24} found ({} evidence)", id.0, evidence.len());
+        for (id, outcome) in &pass.detectors {
+            match outcome {
+                DetectorOutcome::Found { candidates } => {
+                    println!("{:<24} found ({} evidence)", id.0, candidates);
                 }
-                DetectorStatus::ToolAbsent => {
+                DetectorOutcome::ToolAbsent => {
                     println!("{:<24} tool_absent", id.0);
                 }
-                DetectorStatus::Failed(reason) => {
+                DetectorOutcome::Failed(reason) => {
                     println!("{:<24} failed: {reason}", id.0);
                 }
             }
         }
     }
 
-    let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
+    let candidates = pass.candidates;
     let actions = glomeris::actions::ActionRegistry::builtin();
     let report = glomeris::cli::build_detect_report(&candidates, &actions, impact_context());
 
