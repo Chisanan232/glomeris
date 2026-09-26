@@ -1423,6 +1423,8 @@ pub fn print_execute_report(report: &ExecuteReport) {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc;
 
     use super::*;
     use crate::actions::llm::LlmError;
@@ -1662,6 +1664,169 @@ mod tests {
         assert!(results.is_empty());
     }
 
+    /// A detector that records how many times it was probed, so that the
+    /// tests below can assert the number of discovery passes by counting
+    /// invocations rather than by timing them (HORO-1487).
+    struct CountingDetector {
+        id: &'static str,
+        result: DetectorStatus,
+        probes: Arc<AtomicUsize>,
+    }
+
+    impl CountingDetector {
+        fn new(id: &'static str, result: DetectorStatus) -> (Self, Arc<AtomicUsize>) {
+            let probes = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    id,
+                    result,
+                    probes: Arc::clone(&probes),
+                },
+                probes,
+            )
+        }
+    }
+
+    impl Detector for CountingDetector {
+        fn id(&self) -> DetectorId {
+            DetectorId(self.id)
+        }
+
+        fn resource_kinds(&self) -> &'static [ResourceKind] {
+            &[]
+        }
+
+        fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+            self.probes.fetch_add(1, AtomicOrdering::SeqCst);
+            match &self.result {
+                DetectorStatus::Found(evidences) => DetectorStatus::Found(evidences.clone()),
+                DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
+                DetectorStatus::Failed(reason) => DetectorStatus::Failed(reason.clone()),
+            }
+        }
+    }
+
+    /// One pass probes each detector exactly once, whatever that detector
+    /// reports — including the ones that contribute no candidates, which a
+    /// change that only rearranged the evidence could get wrong.
+    #[test]
+    fn discovery_pass_probes_every_detector_exactly_once() {
+        let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1024));
+        let (found, found_probes) = CountingDetector::new("found", DetectorStatus::Found(vec![ev]));
+        let (absent, absent_probes) = CountingDetector::new("absent", DetectorStatus::ToolAbsent);
+        let (failed, failed_probes) =
+            CountingDetector::new("failed", DetectorStatus::Failed("boom".to_string()));
+        let registry = DetectorRegistry::from_detectors(vec![
+            Box::new(found),
+            Box::new(absent),
+            Box::new(failed),
+        ]);
+
+        let pass = discover_and_classify_pass(
+            &registry,
+            &ctx(),
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+            |_| {},
+        );
+
+        assert_eq!(found_probes.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(absent_probes.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(failed_probes.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(pass.detectors.len(), 3);
+    }
+
+    /// The two halves of the pass agree by construction: every `Found`
+    /// outcome's count adds up to exactly the candidates that came out, so
+    /// `detect`'s status lines and its report cannot describe different
+    /// probes.
+    #[test]
+    fn discovery_pass_outcomes_account_for_exactly_the_candidates() {
+        let ev1 = evidence("/tmp/a/target", ResourceKind::CargoTargetDir, Some(1024));
+        let ev2 = evidence("/tmp/b/node_modules", ResourceKind::NodeModules, Some(2048));
+        let (found, _) = CountingDetector::new("found", DetectorStatus::Found(vec![ev1, ev2]));
+        let (absent, _) = CountingDetector::new("absent", DetectorStatus::ToolAbsent);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(found), Box::new(absent)]);
+
+        let pass = discover_and_classify_pass(
+            &registry,
+            &ctx(),
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+            |_| {},
+        );
+
+        let claimed: usize = pass
+            .detectors
+            .iter()
+            .map(|(_, outcome)| match outcome {
+                DetectorOutcome::Found { candidates } => *candidates,
+                DetectorOutcome::ToolAbsent | DetectorOutcome::Failed(_) => 0,
+            })
+            .sum();
+        assert_eq!(claimed, pass.candidates.len());
+        assert_eq!(pass.candidates.len(), 2);
+    }
+
+    /// A failed probe keeps its reason, and stays distinguishable from an
+    /// absent tool, in the outcome the pass hands back — which is what
+    /// `detect`'s `failed: <reason>` line has always printed and could only
+    /// print before by probing everything a second time.
+    #[test]
+    fn discovery_pass_keeps_a_failed_probes_reason_apart_from_tool_absent() {
+        let (absent, _) = CountingDetector::new("absent", DetectorStatus::ToolAbsent);
+        let (failed, _) = CountingDetector::new(
+            "failed",
+            DetectorStatus::Failed("brew --cache exited with status 1".to_string()),
+        );
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(absent), Box::new(failed)]);
+
+        let pass = discover_and_classify_pass(
+            &registry,
+            &ctx(),
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+            |_| {},
+        );
+
+        assert_eq!(
+            pass.detectors,
+            vec![
+                (DetectorId("absent"), DetectorOutcome::ToolAbsent),
+                (
+                    DetectorId("failed"),
+                    DetectorOutcome::Failed("brew --cache exited with status 1".to_string())
+                ),
+            ]
+        );
+        assert!(pass.candidates.is_empty());
+    }
+
+    /// The candidates-only wrappers are the same pipeline, not a second
+    /// one: `discover_and_classify` returns exactly the pass's candidates,
+    /// and probes each detector once doing it.
+    #[test]
+    fn discover_and_classify_is_one_pass_of_the_same_pipeline() {
+        let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1024));
+        let (found, probes) = CountingDetector::new("found", DetectorStatus::Found(vec![ev]));
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(found)]);
+
+        let results = discover_and_classify(
+            &registry,
+            &ctx(),
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+        );
+
+        assert_eq!(probes.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
     fn find_candidate_matches_by_resource_id_string() {
         let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1024));
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
