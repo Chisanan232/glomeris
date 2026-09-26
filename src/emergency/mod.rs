@@ -118,6 +118,25 @@ pub struct EmergencyReport {
     /// write failure) — reported, never fatal. Bounded internally so an
     /// adversarial run can't grow this field unboundedly.
     pub errors: Vec<String>,
+    /// Detectors that FAILED during discovery, as `"<detector id>: <reason>"`.
+    ///
+    /// Separate from `errors` on purpose (HORO-1484). `errors` is advisory
+    /// context that [`EmergencyReport::push_error`] is free to drop once it
+    /// reaches [`MAX_ERRORS`]; a failed detector is not advisory — it is the
+    /// reason the rest of this report cannot be read as a complete account of
+    /// what was available to reclaim. Non-empty means discovery was
+    /// incomplete, so `actions_attempted: 0` does not mean "there was nothing
+    /// to do", only "nothing was found by the detectors that answered".
+    ///
+    /// Deliberately not truncated. `discover_all` walks the registry once and
+    /// yields at most one status per detector, so this is already bounded by
+    /// the registry's size; bounding it a second time would mean a run could
+    /// silently drop the very fact that it searched incompletely, which is
+    /// the defect this field exists to fix.
+    ///
+    /// `ToolAbsent` is deliberately excluded: a tool that is not installed is
+    /// normal, expected state, and the detector answered correctly.
+    pub detector_failures: Vec<String>,
 }
 
 impl EmergencyReport {
@@ -139,6 +158,21 @@ impl std::fmt::Display for EmergencyReport {
         writeln!(f, "  actions succeeded: {}", self.actions_succeeded)?;
         writeln!(f, "  bytes freed:       {}", self.total_bytes_freed)?;
         writeln!(f, "  candidates denied: {}", self.denied_candidates)?;
+        // Printed before `errors`, and unconditionally when non-empty: the
+        // numbers above are a count of what was found, and without this line
+        // a partial search reads exactly like a complete one that found
+        // nothing (HORO-1484).
+        if !self.detector_failures.is_empty() {
+            writeln!(
+                f,
+                "  discovery incomplete: {} detector(s) failed, so the counts above \
+                 are not a complete account of what could be reclaimed",
+                self.detector_failures.len()
+            )?;
+            for failure in &self.detector_failures {
+                writeln!(f, "    - {failure}")?;
+            }
+        }
         if self.errors.is_empty() {
             writeln!(f, "  errors:            none")
         } else {
@@ -333,14 +367,20 @@ pub fn run_emergency(
     // Step 2: bounded, cheap candidate discovery — detectors only, never
     // the scanner's full filesystem walk (see module docs).
     let mut candidates: Vec<Evidence> = Vec::new();
-    for (_detector_id, status) in registry.discover_all(discovery_ctx) {
+    for (detector_id, status) in registry.discover_all(discovery_ctx) {
         match status {
             DetectorStatus::Found(evidences) => candidates.extend(evidences),
             // A detector's tool being absent is normal, expected state,
             // never an error (see `crate::detectors` module docs).
             DetectorStatus::ToolAbsent => {}
+            // A failure goes to its own field, not to the bounded advisory
+            // `errors` list: it names which detector did not answer, and it
+            // must not be droppable by a run that also had eight unrelated
+            // non-fatal errors (HORO-1484).
             DetectorStatus::Failed(message) => {
-                report.push_error(format!("detector failed: {message}"));
+                report
+                    .detector_failures
+                    .push(format!("{}: {message}", detector_id.0));
             }
         }
     }

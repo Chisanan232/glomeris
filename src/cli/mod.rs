@@ -147,11 +147,24 @@ pub fn build_action_history_report(records: &[AuditRecord]) -> ActionHistoryRepo
 /// discover-refresh-classify shape
 /// `executor::recovery_loop::select_candidate` uses internally,
 /// reimplemented at this thin CLI layer only because that function (and
-/// its module-private timeout constant) is not `pub`. Detector-level
-/// `ToolAbsent`/`Failed` statuses are silently dropped here exactly as
-/// they are in the recovery loop and emergency mode — a tool being absent
-/// is normal, expected state, never an error a CLI report needs to
-/// surface per-candidate.
+/// its module-private timeout constant) is not `pub`.
+///
+/// Returns candidates only, so detector-level `ToolAbsent` and `Failed`
+/// statuses do not reach this function's caller. That is a property of
+/// this convenience wrapper's return type, not a claim that the two are
+/// equivalent, and this doc comment used to assert the latter — that they
+/// are "silently dropped here exactly as they are in the recovery loop and
+/// emergency mode" because "a tool being absent is normal, expected state,
+/// never an error a CLI report needs to surface". The first half is
+/// correct about `ToolAbsent` and wrong about `Failed`: a detector that
+/// failed did not answer, so whatever it would have found is unknown, and
+/// a report that omits that presents a partial search as a complete one
+/// (HORO-1484). The recovery loop and emergency mode both surface a
+/// failure now, and so does `detect --json`.
+///
+/// Any caller that reports on what was searched — as opposed to merely
+/// acting on what was found — must call [`discover_and_classify_pass`] and
+/// read its `detectors` field instead of this wrapper.
 pub fn discover_and_classify(
     registry: &DetectorRegistry,
     ctx: &DiscoveryContext,
