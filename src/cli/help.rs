@@ -953,17 +953,22 @@ pub const COMMANDS: &[CommandSpec] = &[
                   set an LLM plan or an `execute` call can select from, and nothing else. \
                   `actions history` shows a bounded tail of the audit log of real executions: \
                   what ran, against what, and how it ended.",
-        subcommands: &[],
-        options: &[
-            OptionSpec {
-                syntax: "list",
+        subcommands: &[
+            SubcommandSpec {
+                name: "list",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
                 description: "Show the registered actions and which resource kind each \
                               applies to.",
             },
-            OptionSpec {
-                syntax: "history",
+            SubcommandSpec {
+                name: "history",
+                args: "[--json] [--limit <N>]",
+                safety: Safety::ReadOnly,
                 description: "Show a bounded tail of the real-execution audit log.",
             },
+        ],
+        options: &[
             OptionSpec {
                 syntax: "--limit <N>",
                 description: "For `history`: how many of the most recent records to show.",
