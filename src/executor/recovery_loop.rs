@@ -142,6 +142,17 @@ pub struct RecoveryReport {
     pub total_bytes_freed: u64,
     pub started_free_bytes: u64,
     pub final_free_bytes: u64,
+    /// Detectors whose probe failed during this run, as
+    /// `<detector_id>: <reason>`, deduplicated and in first-seen order
+    /// across every iteration (HORO-1484).
+    ///
+    /// Non-empty means discovery was incomplete, so
+    /// [`StopReason::SafeExhausted`] does not carry its usual meaning:
+    /// "no safe candidate remains" was concluded without having looked
+    /// everywhere. A detector whose *tool is absent* is not in here —
+    /// that is normal state, and its absence of candidates is a real
+    /// answer rather than a missing one.
+    pub detector_failures: Vec<String>,
 }
 
 /// Is `usage` already at or past `target`? Shared by the loop's own
@@ -190,27 +201,38 @@ fn resolve_action_id(ev: &Evidence, registry: &ActionRegistry) -> Option<ActionI
 
 /// Flattens every detector's [`DetectorStatus::Found`] evidence into one
 /// list, pairing each candidate with its resolved [`ActionId`] and
-/// dropping any candidate with no resolvable action at all. `ToolAbsent`
-/// (normal — the tool isn't installed) and `Failed` (a detector-level
-/// probe failure, not a per-resource evidence gap) are silently dropped
-/// here: this loop only ever acts on resources evidence was actually
-/// found for.
+/// dropping any candidate with no resolvable action at all — plus, as the
+/// second half of the pair, every detector whose probe *failed*.
+///
+/// Both non-`Found` statuses contribute no candidate, and that is where
+/// the similarity ends (HORO-1484). `ToolAbsent` is normal, expected state
+/// — the tool isn't installed, there was never anything of that kind to
+/// reclaim — and needs no report. `Failed` means the probe did not answer,
+/// so whatever that detector would have found is unknown; this loop still
+/// cannot act on it, but a run that stops at `SafeExhausted` having never
+/// successfully looked in one place must not report that as "nothing safe
+/// is left". The failures ride along so [`RecoveryReport`] can say so.
 fn candidates_with_actions(
     statuses: Vec<(crate::detectors::DetectorId, DetectorStatus)>,
     registry: &ActionRegistry,
-) -> Vec<(Evidence, ActionId)> {
-    statuses
+) -> (Vec<(Evidence, ActionId)>, Vec<String>) {
+    let mut evidences = Vec::new();
+    let mut failures = Vec::new();
+    for (id, status) in statuses {
+        match status {
+            DetectorStatus::Found(found) => evidences.extend(found),
+            DetectorStatus::ToolAbsent => {}
+            DetectorStatus::Failed(reason) => failures.push(format!("{}: {reason}", id.0)),
+        }
+    }
+    let candidates = evidences
         .into_iter()
-        .filter_map(|(_, status)| match status {
-            DetectorStatus::Found(evidence) => Some(evidence),
-            DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => None,
-        })
-        .flatten()
         .filter_map(|ev| {
             let action_id = resolve_action_id(&ev, registry)?;
             Some((ev, action_id))
         })
-        .collect()
+        .collect();
+    (candidates, failures)
 }
 
 /// One classified, sized candidate ready for approval.
@@ -709,6 +731,7 @@ fn append_recovery_audit_record(
     let _ = append_audit_record(audit_log_path, &record);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     stop_reason: StopReason,
     iterations_run: u32,
@@ -717,6 +740,7 @@ fn build_report(
     total_bytes_freed: u64,
     started_free_bytes: u64,
     final_free_bytes: u64,
+    detector_failures: &[String],
 ) -> RecoveryReport {
     RecoveryReport {
         stop_reason,
@@ -726,6 +750,7 @@ fn build_report(
         total_bytes_freed,
         started_free_bytes,
         final_free_bytes,
+        detector_failures: detector_failures.to_vec(),
     }
 }
 
@@ -775,6 +800,9 @@ pub fn run(
                 0,
                 0,
                 0,
+                // Nothing has been discovered yet, so there is nothing to
+                // report as incomplete.
+                &[],
             );
         }
     };
@@ -787,6 +815,10 @@ pub fn run(
     let mut no_retry: HashSet<ResourceId> = HashSet::new();
     let mut no_progress_streak: u32 = 0;
     let mut last_free_bytes = started_free_bytes;
+    // First-seen order, deduplicated: a detector that fails the same way on
+    // every iteration should be reported once, not once per iteration
+    // (HORO-1484).
+    let mut detector_failures: Vec<String> = Vec::new();
 
     loop {
         // 1. Measure.
@@ -801,6 +833,7 @@ pub fn run(
                     total_bytes_freed,
                     started_free_bytes,
                     last_free_bytes,
+                    &detector_failures,
                 );
             }
         };
@@ -816,6 +849,7 @@ pub fn run(
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
+                &detector_failures,
             );
         }
 
@@ -833,12 +867,18 @@ pub fn run(
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
+                &detector_failures,
             );
         }
 
         // 4. Discover.
         let statuses = detector_registry.discover_all(discovery_ctx);
-        let candidates = candidates_with_actions(statuses, action_registry);
+        let (candidates, failures) = candidates_with_actions(statuses, action_registry);
+        for failure in failures {
+            if !detector_failures.contains(&failure) {
+                detector_failures.push(failure);
+            }
+        }
 
         // 5-6. Refresh evidence, classify, select one candidate.
         let now = wall_clock.now();
@@ -862,6 +902,7 @@ pub fn run(
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
+                &detector_failures,
             );
         };
 
@@ -953,6 +994,7 @@ pub fn run(
                             total_bytes_freed,
                             started_free_bytes,
                             final_free_bytes,
+                            &detector_failures,
                         );
                     }
                 }
