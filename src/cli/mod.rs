@@ -39,9 +39,9 @@ use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserCon
 use crate::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, ActionListItem, ActionListReport,
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmCheckReport,
-    LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, ProgressEvent,
-    StatusReport,
+    DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport,
+    LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
+    ProgressEvent, StatusReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
@@ -431,8 +431,15 @@ pub fn find_candidate<'a>(
 /// and `--json` cannot present different orders. Before HORO-1307 this
 /// returned detector-registration order, which meant a 40 GB build directory
 /// could sit below a 2 MB cache.
+/// `detectors` is the other half of the same [`DiscoveryPass`] that
+/// produced `candidates` (HORO-1484), projected into the report so a JSON
+/// consumer can tell "nothing found" from "a probe failed". Pass
+/// [`DiscoveryPass::detectors`] — an empty slice yields
+/// `discovery_complete: true`, which is only honest for a caller that
+/// genuinely ran no detectors.
 pub fn build_detect_report(
     candidates: &[(Evidence, PolicyDecision)],
+    detectors: &[(DetectorId, DetectorOutcome)],
     actions: &ActionRegistry,
     impact: ImpactContext,
 ) -> DetectReport {
@@ -448,7 +455,24 @@ pub fn build_detect_report(
         })
         .collect();
     ranking::sort_detect_candidates(&mut candidates);
-    DetectReport { candidates }
+    // Derived from the same slice the array below is projected from, so the
+    // summary cannot disagree with what it summarizes.
+    let discovery_complete = !detectors
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, DetectorOutcome::Failed(_)));
+    DetectReport {
+        candidates,
+        detectors: detectors
+            .iter()
+            .map(|(id, outcome)| DetectorHealthReport {
+                detector: id.0.to_string(),
+                status: outcome.tag(),
+                candidates_found: outcome.candidates_found(),
+                reason: outcome.failure_reason().map(str::to_string),
+            })
+            .collect(),
+        discovery_complete,
+    }
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
@@ -1076,7 +1100,22 @@ fn format_size_field(human: Option<&str>, is_lower_bound: bool) -> String {
 /// Prints a [`DetectReport`] as concise, human-readable text.
 pub fn print_detect_report(report: &DetectReport) {
     if report.candidates.is_empty() {
-        println!("no candidates discovered");
+        // "no candidates discovered" is a claim, and it is only true when
+        // every detector actually looked (HORO-1484). With a failed probe
+        // in the pass the honest sentence is a different one.
+        if report.discovery_complete {
+            println!("no candidates discovered");
+        } else {
+            println!(
+                "no candidates discovered by the detectors that succeeded — \
+                 {} failed, so this is not a clean bill of health",
+                report
+                    .detectors
+                    .iter()
+                    .filter(|d| d.reason.is_some())
+                    .count()
+            );
+        }
         return;
     }
     for c in &report.candidates {
@@ -1928,7 +1967,7 @@ mod tests {
         ];
 
         let actions = ActionRegistry::builtin();
-        let report = build_detect_report(&candidates, &actions, ImpactContext::default());
+        let report = build_detect_report(&candidates, &[], &actions, ImpactContext::default());
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -2013,6 +2052,7 @@ mod tests {
         let actions = ActionRegistry::builtin();
         let detect_report = build_detect_report(
             &[(ev.clone(), decision.clone())],
+            &[],
             &actions,
             ImpactContext::default(),
         );
@@ -2066,6 +2106,7 @@ mod tests {
         let actions = ActionRegistry::builtin();
         let detect_report = build_detect_report(
             &[(ev.clone(), decision.clone())],
+            &[],
             &actions,
             ImpactContext::default(),
         );

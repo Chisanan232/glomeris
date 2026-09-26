@@ -529,9 +529,17 @@ fn run_detect_command(args: &[String]) {
         }
     }
 
-    let candidates = pass.candidates;
     let actions = glomeris::actions::ActionRegistry::builtin();
-    let report = glomeris::cli::build_detect_report(&candidates, &actions, impact_context());
+    // Both halves of the one pass (HORO-1484): the candidates, and the
+    // health of every detector that produced them. `--json` used to carry
+    // the first only, so a consumer could not tell a detector that found
+    // nothing from one whose probe errored.
+    let report = glomeris::cli::build_detect_report(
+        &pass.candidates,
+        &pass.detectors,
+        &actions,
+        impact_context(),
+    );
 
     if flags.contains(&"--json") {
         print_json_or_exit(&report);

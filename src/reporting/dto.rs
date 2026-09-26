@@ -405,10 +405,55 @@ impl DetectCandidateReport {
     }
 }
 
-/// `glomeris detect` report: one candidate line per discovered resource.
+/// One detector's health in a [`DetectReport`] (HORO-1484): what its probe
+/// *did*, which is a different question from what it found.
+///
+/// `src/detectors/mod.rs` states the rule this exists to make keepable —
+/// "`Failed` must never be silently converted to an empty/safe result by an
+/// upstream caller: a failed probe is not evidence of 'nothing to clean
+/// up', it is evidence of 'we don't know'". A JSON consumer had no way to
+/// keep it: `detect --json` emitted `candidates` and nothing else, so the
+/// menu-bar app rendered a candidate list assembled from a partly-failed
+/// discovery as a complete picture.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DetectorHealthReport {
+    /// The detector's registered id, e.g. `cargo_target_dir`.
+    pub detector: String,
+    /// `"found"`, `"tool_absent"` or `"failed"` — produced by
+    /// [`crate::cli::DetectorOutcome::tag`], the same one producer the
+    /// `--progress-json` stream uses.
+    pub status: &'static str,
+    /// Evidences this detector contributed to `candidates`. `0` for
+    /// `tool_absent` and for `failed` alike, which is precisely why
+    /// `status` is a separate field rather than something a consumer could
+    /// infer from this number.
+    pub candidates_found: usize,
+    /// The probe's own failure message, for `"failed"` only. Omitted from
+    /// the JSON rather than serialized as `null` when there is none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// `glomeris detect` report: one candidate line per discovered resource,
+/// plus the health of every detector that ran.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
 pub struct DetectReport {
     pub candidates: Vec<DetectCandidateReport>,
+    /// Every detector the registry ran, in registration order — including
+    /// the ones that contributed no candidates (HORO-1484).
+    pub detectors: Vec<DetectorHealthReport>,
+    /// Whether `candidates` is the whole picture: `false` as soon as any
+    /// detector's `status` is `"failed"`.
+    ///
+    /// Derived, not independently tracked — see
+    /// [`crate::cli::build_detect_report`]. A consumer that only wants to
+    /// know "can I present this list as complete?" reads this; one that
+    /// wants to say which probe failed reads `detectors`.
+    ///
+    /// `Default` gives `false`, which is the safe direction for a report
+    /// nobody has filled in: an empty candidate list that has not been
+    /// asserted complete should not read as "nothing to clean up".
+    pub discovery_complete: bool,
 }
 
 /// `glomeris explain <resource>` report: the full evidence-and-policy
