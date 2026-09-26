@@ -67,6 +67,8 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
         private let lock = NSLock()
         private var entered = 0
         private var exited = 0
+        private var accessEntered = 0
+        private var accessExited = 0
 
         /// What the query answers once it is finally allowed to. `.present` on
         /// purpose: a test that released the gate and still saw "no key here"
@@ -79,10 +81,20 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
             return entered
         }
 
+        /// HORO-1474: the ACL query, counted separately from the availability
+        /// one. Sharing a counter would make "the second query was never issued"
+        /// unprovable — the interesting claim is that a miss recorded by *either*
+        /// query stops the *other*.
+        var accessListCalls: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return accessEntered
+        }
+
         var isStillBlocked: Bool {
             lock.lock()
             defer { lock.unlock() }
-            return exited < entered
+            return exited < entered || accessExited < accessEntered
         }
 
         /// Lets every blocked query through, and every later one straight
@@ -101,6 +113,27 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
             exited += 1
             lock.unlock()
             return eventualAnswer
+        }
+
+        /// Stalls exactly as the availability query does, because it is the same
+        /// hazard: a synchronous call into `securityd` with no bound of its own.
+        ///
+        /// Its eventual answer is a non-empty list for the same reason
+        /// `eventualAnswer` is `.present` — a test that released the gate and saw
+        /// an empty list could be reading the double's emptiness rather than the
+        /// stall.
+        func accessList(forKey key: String) -> CredentialAccessListReading {
+            lock.lock()
+            accessEntered += 1
+            lock.unlock()
+            _ = gate.wait(timeout: .now() + 10)
+            lock.lock()
+            accessExited += 1
+            lock.unlock()
+            return .applications([
+                CredentialTrustedApplication(
+                    reference: .resolves(path: "/Applications/Glomeris.app"), index: 0)
+            ])
         }
 
         func secret(forKey key: String) -> String? { nil }
@@ -220,6 +253,148 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
             return nil
         }
         return value
+    }
+
+    /// The same shape for the ACL query (HORO-1474 AC 5).
+    ///
+    /// A separate helper rather than a generic one, so that removing the deadline
+    /// from `resolvedAccessList()` alone fails here by name instead of somewhere
+    /// shared. Without it that edit hangs: `XCTWaiter` converts the hang into a
+    /// named failure and the caller's remaining assertions are skipped.
+    private func resolveAccessList(
+        of store: GlomerisLlmSettingsStore,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> (access: GlomerisCredentialAccess, elapsed: TimeInterval)? {
+        let box = AccessBox()
+        let returned = expectation(description: "resolvedAccessList returned")
+        Task {
+            let start = DispatchTime.now().uptimeNanoseconds
+            let access = await store.resolvedAccessList()
+            let seconds =
+                Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+            box.store(access, after: seconds)
+            returned.fulfill()
+        }
+        let outcome = XCTWaiter.wait(for: [returned], timeout: Self.waitSeconds)
+        guard outcome == .completed, let value = box.value else {
+            XCTFail(
+                """
+                resolvedAccessList did not return within \(Self.waitSeconds)s. The \
+                ACL read is a synchronous call into securityd with no bound of its \
+                own, so the shared keychain deadline is what makes it return at \
+                all when the keychain does not answer.
+                """,
+                file: file, line: line)
+            return nil
+        }
+        return value
+    }
+
+    /// `StatusBox` for the ACL answer.
+    private final class AccessBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: GlomerisCredentialAccess?
+        private var seconds: TimeInterval = 0
+
+        func store(_ access: GlomerisCredentialAccess, after seconds: TimeInterval) {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = access
+            self.seconds = seconds
+        }
+
+        var value: (access: GlomerisCredentialAccess, elapsed: TimeInterval)? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let stored else { return nil }
+            return (stored, seconds)
+        }
+    }
+
+    // MARK: - HORO-1474 AC 5: the ACL query is bounded too
+
+    /// The ACL read gets the same treatment as the availability read, and for the
+    /// same measured reason. Without the deadline this test does not fail, it
+    /// hangs — which is exactly the state the AI Provider pane would be in.
+    func testTheAccessListQueryIsBoundedByTheSameDeadline() {
+        let (store, credentials, deadline) = makeStalledStore()
+
+        guard let (access, elapsed) = resolveAccessList(of: store) else { return }
+
+        XCTAssertEqual(access, .unresponsive)
+        XCTAssertNotEqual(
+            access, .applications([]),
+            """
+            Silence was reported as an empty trusted list. An empty list is the \
+            strictest state an item can be in — nothing is pre-approved — so this \
+            would tell the user their key is maximally protected at the moment the \
+            app lost the ability to tell.
+            """)
+        XCTAssertGreaterThanOrEqual(
+            elapsed, Self.deadlineSeconds * 0.8,
+            "it answered without waiting, so the query never ran and this proves nothing")
+        XCTAssertTrue(deadline.hasBeenMissed)
+        XCTAssertEqual(credentials.accessListCalls, 1)
+    }
+
+    /// One record, not one per query. A miss recorded by the availability query
+    /// means the ACL query is never issued at all — the stall is a single
+    /// process-wide `dispatch_once` token, so there is nothing for a second query
+    /// to find out, and issuing one would park a second thread on the pane the
+    /// user opened to diagnose the first.
+    func testAMissedAvailabilityDeadlineStopsTheAccessListQueryBeingIssued() {
+        let (store, credentials, _) = makeStalledStore()
+
+        guard let first = resolveStatus(of: store) else { return }
+        XCTAssertEqual(first.status.apiKey, .unresponsive)
+
+        guard let (access, elapsed) = resolveAccessList(of: store) else { return }
+
+        XCTAssertEqual(access, .unresponsive)
+        XCTAssertLessThan(
+            elapsed, Self.deadlineSeconds / 3,
+            "the ACL query waited out a deadline of its own instead of reading the record")
+        XCTAssertEqual(
+            credentials.accessListCalls, 0,
+            "the keychain was asked for the ACL after it had already gone quiet")
+    }
+
+    /// And the other direction, because a deadline wired up in only one of the
+    /// two places would pass the test above by accident.
+    func testAMissedAccessListDeadlineStopsTheAvailabilityQueryBeingIssued() {
+        let (store, credentials, _) = makeStalledStore()
+
+        guard let first = resolveAccessList(of: store) else { return }
+        XCTAssertEqual(first.access, .unresponsive)
+
+        guard let (status, elapsed) = resolveStatus(of: store) else { return }
+
+        XCTAssertEqual(status.apiKey, .unresponsive)
+        XCTAssertLessThan(elapsed, Self.deadlineSeconds / 3)
+        XCTAssertEqual(
+            credentials.availabilityCalls, 0,
+            "the availability query was issued after the ACL query had already gone quiet")
+    }
+
+    /// The control for the three above: the same double, allowed to answer,
+    /// returns its list immediately. So `.unresponsive` came from the silence and
+    /// not from a double that cannot report a list at all.
+    func testTheSameDoubleReturnsItsAccessListOnceItIsAllowedTo() {
+        let (store, credentials, deadline) = makeStalledStore()
+        credentials.release()
+
+        guard let (access, elapsed) = resolveAccessList(of: store) else { return }
+
+        XCTAssertEqual(
+            access,
+            .applications([
+                CredentialTrustedApplication(
+                    reference: .resolves(path: "/Applications/Glomeris.app"), index: 0)
+            ]))
+        XCTAssertLessThan(elapsed, Self.deadlineSeconds / 3)
+        XCTAssertFalse(deadline.hasBeenMissed)
+        XCTAssertEqual(credentials.accessListCalls, 1)
     }
 
     // MARK: - AC 1: silence is not absence

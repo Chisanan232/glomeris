@@ -78,6 +78,7 @@
 		D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */; };
 		D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */; };
 		DB5D8383B59675585CAAAB8A /* AiPlanSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */; };
+		DD869D2E04323DCF4BD5FB50 /* CredentialAccessListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4F457D173A23C0AD61CBDF /* CredentialAccessListTests.swift */; };
 		E67F00D16D2CAFE9E74443CB /* CandidatesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */; };
 		E88B4CFA5ACC97B1DB28CC07 /* GlomerisExecutableLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */; };
 		EAA07A11FEF627787AF615A7 /* AiProviderPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */; };
@@ -99,6 +100,7 @@
 
 /* Begin PBXFileReference section */
 		017031320C8922881F4739BC /* ProjectRootsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsStore.swift; sourceTree = "<group>"; };
+		0A4F457D173A23C0AD61CBDF /* CredentialAccessListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialAccessListTests.swift; sourceTree = "<group>"; };
 		10A827F907A91AEA5B790A11 /* GlomerisLlmSettingsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisLlmSettingsStoreTests.swift; sourceTree = "<group>"; };
 		1A38DA67075A1D20749AA40B /* OverviewState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewState.swift; sourceTree = "<group>"; };
 		21EAA0AF0BF260EF2309C429 /* GlomerisMenuBarTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = GlomerisMenuBarTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -232,6 +234,7 @@
 				3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */,
 				AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */,
 				7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */,
+				0A4F457D173A23C0AD61CBDF /* CredentialAccessListTests.swift */,
 				77AAAEBAAAE62AE8B7FD1118 /* CredentialStoreAccessTests.swift */,
 				8DD38E68A0373439B59F1F98 /* DtoGoldenFixturesTests.swift */,
 				5F7646F95623F0FC1FF170C4 /* GlomerisByteFormatTests.swift */,
@@ -367,6 +370,7 @@
 				E67F00D16D2CAFE9E74443CB /* CandidatesSectionView.swift in Sources */,
 				BE11AF504111C29A277E925E /* CandidatesSectionViewTests.swift in Sources */,
 				7F89092A2FEA202C9405C241 /* CredentialAccessList.swift in Sources */,
+				DD869D2E04323DCF4BD5FB50 /* CredentialAccessListTests.swift in Sources */,
 				3F2B44719B74A21F10643721 /* CredentialStore.swift in Sources */,
 				5393C26940014C01F01AFAF3 /* CredentialStoreAccessTests.swift in Sources */,
 				EAF02170CFE44E89AEC4F1C4 /* DtoGoldenFixturesTests.swift in Sources */,
