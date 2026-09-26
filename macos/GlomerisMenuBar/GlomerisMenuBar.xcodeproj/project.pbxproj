@@ -72,6 +72,7 @@
 		BB985CDBDBE0F9250002A518 /* GlomerisByteFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F7646F95623F0FC1FF170C4 /* GlomerisByteFormatTests.swift */; };
 		BC822B8BD45C6AB26F4F7806 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		BE11AF504111C29A277E925E /* CandidatesSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */; };
+		BF001D547BEE2CD0220063CD /* TestUserDefaultsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA61784D28A6235DDA429D45 /* TestUserDefaultsTests.swift */; };
 		C49D0E67DB2391025B3E7064 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */; };
 		C79301D61905D743C5B5B52C /* GlomerisPopoverViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2538D1D665F56D4E896B4CE2 /* GlomerisPopoverViewTests.swift */; };
@@ -163,6 +164,7 @@
 		DADBD41F34721D97EB1E2605 /* PlanApplicationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlanApplicationTests.swift; sourceTree = "<group>"; };
 		E6C31AEE5EEA87EE3D3B5617 /* GlomerisMarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisMarkTests.swift; sourceTree = "<group>"; };
 		E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisClient.swift; sourceTree = "<group>"; };
+		EA61784D28A6235DDA429D45 /* TestUserDefaultsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestUserDefaultsTests.swift; sourceTree = "<group>"; };
 		F0D343988045ECE0F0B72093 /* GlomerisDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisDesignSystem.swift; sourceTree = "<group>"; };
 		FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewStateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -259,6 +261,7 @@
 				8AA164A09246B00F00F33DAB /* SpokenLabelTests.swift */,
 				298ADFCC189E89897778A649 /* StatusHealthSectionViewTests.swift */,
 				8E5B2CB785BF50188F2E792A /* TestUserDefaults.swift */,
+				EA61784D28A6235DDA429D45 /* TestUserDefaultsTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -415,6 +418,7 @@
 				56F73C2BCC1F258A41649D5E /* StatusHealthSectionView.swift in Sources */,
 				EBB34681F1C98CE6EAA54A59 /* StatusHealthSectionViewTests.swift in Sources */,
 				A9ABA737E2A4AC531B8640A0 /* TestUserDefaults.swift in Sources */,
+				BF001D547BEE2CD0220063CD /* TestUserDefaultsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
