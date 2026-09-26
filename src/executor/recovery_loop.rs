@@ -155,6 +155,37 @@ pub struct RecoveryReport {
     pub detector_failures: Vec<String>,
 }
 
+impl RecoveryReport {
+    /// The lines a human-facing renderer must print alongside the counts
+    /// when discovery was incomplete — empty when every detector answered.
+    ///
+    /// This lives here rather than in `main.rs`'s printer so that the
+    /// wording which withdraws a [`StopReason::SafeExhausted`] claim has one
+    /// producer and can be asserted by a test (HORO-1484). A renderer that
+    /// prints the counts without these lines presents a partial search as a
+    /// complete one.
+    pub fn discovery_caveat_lines(&self) -> Vec<String> {
+        if self.detector_failures.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![format!(
+            "discovery incomplete:   {} detector(s) failed",
+            self.detector_failures.len()
+        )];
+        for failure in &self.detector_failures {
+            lines.push(format!("  - {failure}"));
+        }
+        if self.stop_reason == StopReason::SafeExhausted {
+            lines.push(
+                "note: this run stopped because no safe candidate remained among the \
+                 detectors that answered; it is not a finding that nothing safe is left"
+                    .to_string(),
+            );
+        }
+        lines
+    }
+}
+
 /// Is `usage` already at or past `target`? Shared by the loop's own
 /// target check and available to callers (e.g. the CLI) that want to
 /// report progress without duplicating the arithmetic.
@@ -1090,6 +1121,27 @@ mod run_tests {
         }
     }
 
+    /// A detector whose probe FAILED — the state this test module had no
+    /// coverage for before HORO-1484, which is exactly why the loop could
+    /// discard it silently. Reports no candidates, like
+    /// `FakeDetector::none()`, so the only difference between the two is the
+    /// one this ticket is about: whether the run knows it looked everywhere.
+    struct FailingDetector;
+
+    impl Detector for FailingDetector {
+        fn id(&self) -> DetectorId {
+            DetectorId("failing_test_detector")
+        }
+
+        fn resource_kinds(&self) -> &'static [ResourceKind] {
+            &[]
+        }
+
+        fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+            DetectorStatus::Failed("probe did not answer".to_string())
+        }
+    }
+
     fn fake_registry(evidence: Vec<Evidence>) -> DetectorRegistry {
         let detector: Box<dyn Detector> = if evidence.is_empty() {
             Box::new(FakeDetector::none())
@@ -1286,6 +1338,125 @@ mod run_tests {
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
         assert_eq!(report.iterations_run, 0);
         assert_eq!(report.actions_executed, 0);
+        // The anti-vacuity half of the HORO-1484 test below: a run in which
+        // every detector answered must report no caveat at all, so the
+        // assertions there cannot be satisfied by a renderer that always
+        // qualifies itself.
+        assert!(
+            report.detector_failures.is_empty(),
+            "no detector failed in this run; got {:?}",
+            report.detector_failures
+        );
+        assert!(report.discovery_caveat_lines().is_empty());
+    }
+
+    /// HORO-1484: `SafeExhausted` reached without having looked everywhere is
+    /// not the finding "nothing safe is left", and the report must say so.
+    ///
+    /// The registry here holds one detector that fails and one that reports
+    /// nothing, so the run reaches the same `SafeExhausted` stop reason as
+    /// `stops_with_safe_exhausted_when_no_candidates_exist` above by a
+    /// materially different route. Before the fix the two runs produced
+    /// byte-identical reports: the failure was matched into the same
+    /// do-nothing arm as `ToolAbsent` and never reached `RecoveryReport`.
+    #[test]
+    fn safe_exhausted_after_a_failed_detector_withdraws_its_own_claim() {
+        let usage = FsUsage::new(1_000_000_000, 100); // far from any target
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let detector_registry = DetectorRegistry::from_detectors(vec![
+            Box::new(FailingDetector),
+            Box::new(FakeDetector::none()),
+        ]);
+        let report = run(
+            &config,
+            &FixedFsStat(usage),
+            &CleanCollector,
+            &detector_registry,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+        );
+
+        assert_eq!(report.stop_reason, StopReason::SafeExhausted);
+        assert_eq!(
+            report.detector_failures,
+            vec!["failing_test_detector: probe did not answer".to_string()],
+            "the failed detector must be named in the report; the detector that \
+             merely found nothing must not be"
+        );
+
+        let caveat = report.discovery_caveat_lines().join("\n");
+        assert!(
+            caveat.contains("discovery incomplete"),
+            "the rendered report must state that discovery was incomplete; got:\n{caveat}"
+        );
+        assert!(
+            caveat.contains("failing_test_detector: probe did not answer"),
+            "the rendered report must name the detector and its reason; got:\n{caveat}"
+        );
+        assert!(
+            caveat.contains("not a finding that nothing safe is left"),
+            "reaching SafeExhausted without having looked everywhere must be \
+             explicitly withdrawn as a finding; got:\n{caveat}"
+        );
+    }
+
+    /// A detector that fails on every iteration is reported once, not once
+    /// per iteration: `detector_failures` is deduplicated in first-seen
+    /// order. Uses a budget of three iterations with a candidate that really
+    /// exists, so discovery genuinely runs more than once.
+    #[test]
+    fn a_detector_that_keeps_failing_is_reported_once() {
+        let dir = make_temp_dir("repeated-failure");
+        let evidence = empty_node_modules_evidence(&dir);
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let detector_registry = DetectorRegistry::from_detectors(vec![
+            Box::new(FailingDetector),
+            Box::new(FakeDetector::found(vec![evidence])),
+        ]);
+        let report = run(
+            &config,
+            &FixedFsStat(usage),
+            &CleanCollector,
+            &detector_registry,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+            &dir.join("actions.jsonl"),
+        );
+
+        assert!(
+            report.iterations_run >= 1,
+            "discovery must have run at least once for this test to mean anything"
+        );
+        assert_eq!(
+            report.detector_failures.len(),
+            1,
+            "one failing detector across {} iteration(s) is one line, not {}: {:?}",
+            report.iterations_run,
+            report.detector_failures.len(),
+            report.detector_failures
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

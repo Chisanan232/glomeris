@@ -1800,21 +1800,10 @@ fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryRep
     // is unknown. Reporting the run without saying so lets a partial search
     // read as a complete one — and when the run stopped at `SafeExhausted`
     // that is an actively wrong claim, because "no safe candidate remains"
-    // was concluded without having looked everywhere (HORO-1484).
-    if !report.detector_failures.is_empty() {
-        println!(
-            "discovery incomplete:   {} detector(s) failed",
-            report.detector_failures.len()
-        );
-        for failure in &report.detector_failures {
-            println!("  - {failure}");
-        }
-        if report.stop_reason == glomeris::executor::recovery_loop::StopReason::SafeExhausted {
-            println!(
-                "note: this run stopped because no safe candidate remained among the \
-                 detectors that answered; it is not a finding that nothing safe is left"
-            );
-        }
+    // was concluded without having looked everywhere (HORO-1484). The wording
+    // lives on the report so it has one producer and is testable.
+    for line in report.discovery_caveat_lines() {
+        println!("{line}");
     }
 }
 
