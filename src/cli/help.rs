@@ -41,12 +41,23 @@
 
 /// Whether running a command can change the filesystem.
 ///
-/// Deliberately three states rather than a `bool`, because the middle one is
+/// Deliberately more states than a `bool`, because the ones in the middle are
 /// the product's whole thesis: `llm-plan` contacts a model and produces a
-/// proposal, and a proposal is not a mutation. A user who cannot tell
-/// "suggests" from "does" either fears the safe commands or trusts the
-/// dangerous ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// proposal, and a proposal is not a mutation; `daemon install` writes a
+/// launch agent and deletes nothing of yours. A user who cannot tell
+/// "suggests" from "does", or "sets itself up" from "deletes your files",
+/// either fears the safe commands or trusts the dangerous ones.
+///
+/// # The variant order is load-bearing (HORO-1485)
+///
+/// `Ord` is derived, and the variants are declared weakest-first, so
+/// `a.max(b)` is "the stronger claim of the two". A command that dispatches
+/// subcommands declares the strongest safety reachable through it, and
+/// `tests::command_safety_covers_every_reachable_subcommand` compares the two
+/// with exactly that ordering. Reordering these variants would silently
+/// change what that test asserts, which is why the order is documented here
+/// rather than left to look alphabetical-by-accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Safety {
     /// Reads and reports. Changes nothing, sends nothing.
     ReadOnly,
@@ -54,17 +65,38 @@ pub enum Safety {
     /// provider (`llm-plan`, `llm-check`) — which is network access, not
     /// filesystem mutation, and is called out separately where it applies.
     Advisory,
+    /// Writes files Glomeris itself owns, and nothing else: the launch agent
+    /// plist (`daemon install`, removed again by `daemon uninstall`), the
+    /// monitor's own history and heartbeat records (`daemon run`), the
+    /// Autopilot envelope (`autopilot enable`, `autopilot revoke`).
+    ///
+    /// Its own state, not your data — which is why it is neither `ReadOnly`
+    /// nor `Destructive` (HORO-1485). Calling `daemon install` read-only was a
+    /// false reassurance: it writes a plist and loads a background agent.
+    /// Calling it destructive would be a false warning, and a reader who has
+    /// been warned once for nothing discounts the next warning too.
+    WritesOwnState,
     /// Can delete data, under policy control and never unconditionally.
     Destructive,
 }
 
 impl Safety {
+    /// Every state, weakest first. Iterated by tests so that adding a variant
+    /// cannot quietly leave it uncovered by the ones that check every label.
+    pub const ALL: &'static [Safety] = &[
+        Safety::ReadOnly,
+        Safety::Advisory,
+        Safety::WritesOwnState,
+        Safety::Destructive,
+    ];
+
     /// The word used in per-command help, on its own line above the
     /// description.
     pub fn label(self) -> &'static str {
         match self {
             Safety::ReadOnly => "Read-only — changes nothing.",
             Safety::Advisory => "Advisory — proposes, never executes.",
+            Safety::WritesOwnState => "Writes only Glomeris's own state — never your files.",
             Safety::Destructive => "Can delete data — every deletion is policy-gated.",
         }
     }
