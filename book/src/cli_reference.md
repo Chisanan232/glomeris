@@ -239,9 +239,36 @@ glomeris detect --project-root ~/dev/myproject --json
       "offered_actions": [],
       "refusal_reason": "no registered cleanup action for this resource kind"
     }
-  ]
+  ],
+  "detectors": [
+    {"detector": "cargo_target_dir", "status": "found", "candidates_found": 1},
+    {"detector": "docker_build_cache", "status": "found", "candidates_found": 1},
+    {"detector": "node_modules", "status": "tool_absent", "candidates_found": 0},
+    {
+      "detector": "homebrew_cache",
+      "status": "failed",
+      "candidates_found": 0,
+      "reason": "brew --cache exited with status exit status: 1"
+    }
+  ],
+  "discovery_complete": false
 }
 ```
+
+`detectors` reports one entry per detector that ran, in registry order, and
+`status` is `found`, `tool_absent` or `failed` — the same three tokens
+`--progress-json` uses below. `reason` is present only on `failed`, and is the
+detector's own account of what went wrong.
+
+`discovery_complete` (HORO-1484) is `false` when at least one detector failed,
+and it is derived from `detectors` rather than tracked separately, so the
+summary cannot disagree with the array it summarises. When it is `false`,
+`candidates` is **not** a complete account of what could be reclaimed, and no
+consumer may present it as one — "nothing worth reclaiming" is a claim about
+the machine, and a search that did not finish has not established it. A
+`tool_absent` detector does **not** make discovery incomplete: a tool that is
+not installed has nothing to report, which is a different fact from a tool that
+was asked and could not answer.
 
 `--progress-json` (HORO-1052) emits one NDJSON-encoded `ProgressEvent` line
 to **stderr** per detector start/finish while discovery runs — a way for a
@@ -257,10 +284,20 @@ glomeris detect --progress-json 2>&1 1>/dev/null
 
 ```
 {"phase":"detector_started","detector":"cargo_target_dir"}
-{"phase":"detector_finished","detector":"cargo_target_dir","candidates_found":1}
-{"phase":"detector_started","detector":"node_modules"}
-{"phase":"detector_finished","detector":"node_modules","candidates_found":0}
+{"phase":"detector_finished","detector":"cargo_target_dir","candidates_found":1,"outcome":"found"}
+{"phase":"detector_started","detector":"docker_images"}
+{"phase":"detector_finished","detector":"docker_images","candidates_found":0,"outcome":"tool_absent"}
+{"phase":"detector_started","detector":"homebrew_cache"}
+{"phase":"detector_finished","detector":"homebrew_cache","candidates_found":0,"outcome":"failed","reason":"brew --cache exited with status exit status: 1"}
 ```
+
+`outcome` (HORO-1484) is `found`, `tool_absent` or `failed`, and `reason` is
+present only on `failed`. The last two lines above are why it exists: a
+detector whose probe failed reports `candidates_found: 0`, exactly like one
+that looked and found nothing, so a consumer reading only the count shows
+"0 found" for a check that never ran. `docker_images` being absent is normal
+and expected; `homebrew_cache` failing is not, and the two must not be
+presented alike.
 
 `detect`, `explain`, `llm-plan`, and `execute` all share this same
 discovery phase and all support `--progress-json` identically.
