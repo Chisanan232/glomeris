@@ -158,9 +158,12 @@ followed by one line per candidate: size, depth, path.
 
 ## `glomeris detect [--project-root <path>]... [--json] [--progress-json]`
 
-Not macOS-gated. Runs `DetectorRegistry::builtin()`'s `discover_all` once and
-prints, per detector: `found (<N> evidence)`, `tool_absent`, or
-`failed: <reason>`.
+Not macOS-gated. Runs every detector in `DetectorRegistry::builtin()` exactly
+once per invocation and prints, per detector: `found (<N> evidence)`,
+`tool_absent`, or `failed: <reason>`. The candidate report printed below those
+lines comes out of that same single pass, so the two halves of the output
+cannot describe different probes of a filesystem that changes between them
+(HORO-1487).
 
 `--project-root <path>` is optional and repeatable — pass it once per
 project directory you want the cargo/node detectors to check for a
