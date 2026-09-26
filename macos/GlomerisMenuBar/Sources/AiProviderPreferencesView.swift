@@ -397,13 +397,17 @@ enum GlomerisLlmSettingSourceWording {
     ///
     /// Out: any suggestion to paste the key again. That is the remedy for
     /// `unreadable` and it is actively wrong here. The write path goes to the
-    /// same service that is not answering, so a save would wait exactly where
-    /// the read did, and the user would be left believing their key is the
-    /// problem.
+    /// same service that is not answering, so a save cannot get through either,
+    /// and the user would be left believing their key is the problem.
+    ///
+    /// This used to end "Saving a key now would wait in the same place", which
+    /// was true and is not any more: as of HORO-1476 a save in this state returns
+    /// at once and says it did not try. The reason not to paste the key again is
+    /// unchanged, so only the description of what would happen has moved.
     static let unresponsiveExplanation =
         "Your Mac's keychain service did not answer, so Glomeris could not find out whether a "
         + "key is stored. This is not the same as there being none, and nothing has been "
-        + "changed or removed. Saving a key now would wait in the same place. Log out and back "
+        + "changed or removed. Saving a key now would not get through either. Log out and back "
         + "in, or restart, and open this screen again."
 }
 
@@ -433,6 +437,44 @@ enum GlomerisLlmAddressWording {
         + "posts to the host root, which most providers refuse."
 }
 
+// MARK: - Storing the key
+
+/// What to say after a **Save key** press.
+///
+/// A pure function for the same reason the removal wording below is one: the
+/// sentence is the deliverable. It exists as of HORO-1476, when the failure case
+/// stopped being a single thing. The message used to be "macOS refused to store
+/// the key in the keychain", which is a statement about a decision — and a
+/// keychain service that has gone quiet has not made one, so the user was being
+/// told to fix a permission that was never the problem.
+///
+/// Both failure sentences end by saying the key was not written anywhere else.
+/// That is not filler: the field has just been cleared, and someone who has
+/// pasted a live provider key wants to know whether a copy is now sitting in
+/// UserDefaults or a log. It is not.
+enum GlomerisLlmKeySaveWording {
+    static func message(_ outcome: GlomerisCredentialWriteOutcome) -> GlomerisStateMessage {
+        switch outcome {
+        case .done:
+            return .success("Key saved to your keychain.")
+        case .refused:
+            return .failure(
+                "macOS refused to store the key in the keychain. Nothing was saved, and "
+                    + "nothing was written anywhere else.")
+        // No "it may have been saved" hedge, because nothing was sent. The
+        // keychain service stopped answering earlier in this session and every
+        // keychain operation shares one queue, so this save could only have
+        // waited behind the stall — see `GlomerisCredentialWriteOutcome`.
+        case .notAttempted:
+            return .failure(
+                "Your Mac's keychain service stopped answering earlier in this session, so "
+                    + "Glomeris did not try to save the key — it would have waited with no end. "
+                    + "Nothing was saved, and nothing was written anywhere else. Log out and "
+                    + "back in, or restart, and then save it again.")
+        }
+    }
+}
+
 // MARK: - Revoking the key
 
 /// What to say after a **Remove key** press (AC 8).
@@ -450,11 +492,25 @@ enum GlomerisLlmAddressWording {
 /// changing state is corroboration, not notification.
 enum GlomerisLlmKeyRemovalWording {
     static func message(
-        removed: Bool,
+        removed: GlomerisCredentialWriteOutcome,
         remainingSource: GlomerisLlmSettingSource?
     ) -> GlomerisStateMessage {
-        guard removed else {
+        switch removed {
+        case .done:
+            break
+        case .refused:
             return .failure("macOS refused to remove the key from the keychain.")
+        // HORO-1476. Worth distinguishing here even more than on the save: a
+        // user pressing **Remove key** is usually revoking access, so "it
+        // refused" and "it was not attempted" leave them in opposite positions,
+        // and only one of them means the key is still readable by anything that
+        // could read it before.
+        case .notAttempted:
+            return .failure(
+                "Your Mac's keychain service stopped answering earlier in this session, so "
+                    + "Glomeris did not try to remove the key — it would have waited with no "
+                    + "end. The key is still in your keychain. Log out and back in, or "
+                    + "restart, and then remove it again.")
         }
         if remainingSource == .environment {
             return .success(
@@ -1035,12 +1091,7 @@ struct AiProviderPreferencesView: View {
         // one app — so a list left over from before the save would show the
         // accretion the save just cleared.
         await loadAccessList()
-        keyActionMessage =
-            saved
-            ? .success("Key saved to your keychain.")
-            : .failure(
-                "macOS refused to store the key in the keychain. Nothing was saved, and "
-                    + "nothing was written anywhere else.")
+        keyActionMessage = GlomerisLlmKeySaveWording.message(saved)
         isWritingKey = false
     }
 
