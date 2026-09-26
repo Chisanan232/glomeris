@@ -98,6 +98,45 @@ enum GlomerisCredentialAccess: Equatable {
     case unresponsive
 }
 
+/// What an attempt to save or remove the stored key actually did (HORO-1476).
+///
+/// Three cases and not a `Bool`, because a write that was never issued is not
+/// the same event as a write the keychain refused, and the sentence the user
+/// needs is different in each case. Before this type the save path reported
+/// both as "macOS refused to store the key in the keychain", which is a claim
+/// about a decision macOS made — and when the keychain service has gone quiet,
+/// macOS made no decision at all.
+///
+/// Note what is *not* here: a case for "started, and the outcome is unknown".
+/// Giving these writes a deadline would create exactly that state, since a
+/// `SecItemUpdate` that is abandoned mid-flight may or may not have replaced
+/// the item, and the app would have to claim one or the other. That is the
+/// product decision HORO-1476 leaves open. This type covers only the case where
+/// the decision is not needed: the keychain queue is already known to be
+/// wedged, so the write is not begun, so nothing happened.
+enum GlomerisCredentialWriteOutcome: Equatable {
+    /// The keychain performed it.
+    case done
+
+    /// The keychain was asked and said no.
+    case refused
+
+    /// Not attempted. A keychain query has already missed its deadline in this
+    /// process (see `KeychainDeadline`), and every keychain touch is serialised
+    /// through one queue that the abandoned query still holds, so dispatching
+    /// this write would park it there for the life of the process rather than
+    /// perform it.
+    ///
+    /// Distinct from `refused` in the same way `GlomerisLlmSettingSource`
+    /// separates `unresponsive` from `unreadable`, and it matters more here:
+    /// `refused` says the user's keychain rejected their key, which invites them
+    /// to go and fix a permission that is not broken.
+    case notAttempted
+
+    /// Whether the keychain is now in the state the user asked for.
+    var succeeded: Bool { self == .done }
+}
+
 /// One field's resolved state, without its value.
 ///
 /// Deliberately value-free: this type is what the UI renders and what tests
