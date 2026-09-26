@@ -43,11 +43,22 @@ for relative in "$HELP_FILE" "$DOC_FILE"; do
   fi
 done
 
-# The `name:` field of every CommandSpec. `COMMANDS` is the only place in
-# this file where `name:` appears at that indentation, and OptionSpec /
-# ExampleSpec use different field names entirely.
+# The `name:` field of every CommandSpec, matched at exactly the indentation a
+# CommandSpec field sits at. Indentation is load-bearing here: HORO-1485 gave
+# each command a `subcommands:` list whose SubcommandSpecs have a `name:` field
+# too, four levels in, so `[[:space:]]+` began reading `install`, `uninstall`,
+# `show` and the rest as top-level commands and demanding a book section for
+# each. OptionSpec and ExampleSpec use different field names entirely and were
+# never a problem.
+#
+#     pub const COMMANDS: &[CommandSpec] = &[
+#         CommandSpec {
+#             name: "daemon",              <- 8 spaces, a command
+#             subcommands: &[
+#                 SubcommandSpec {
+#                     name: "install",     <- 16 spaces, a verb
 commands="$(
-  grep -oE '^[[:space:]]+name: "[a-z-]+",' "${REPO_ROOT}/${HELP_FILE}" \
+  grep -oE '^ {8}name: "[a-z-]+",' "${REPO_ROOT}/${HELP_FILE}" \
     | sed -E 's/.*name: "([a-z-]+)",/\1/' \
     | sort -u \
     || true
