@@ -118,6 +118,25 @@ pub struct EmergencyReport {
     /// write failure) — reported, never fatal. Bounded internally so an
     /// adversarial run can't grow this field unboundedly.
     pub errors: Vec<String>,
+    /// Detectors that FAILED during discovery, as `"<detector id>: <reason>"`.
+    ///
+    /// Separate from `errors` on purpose (HORO-1484). `errors` is advisory
+    /// context that [`EmergencyReport::push_error`] is free to drop once it
+    /// reaches [`MAX_ERRORS`]; a failed detector is not advisory — it is the
+    /// reason the rest of this report cannot be read as a complete account of
+    /// what was available to reclaim. Non-empty means discovery was
+    /// incomplete, so `actions_attempted: 0` does not mean "there was nothing
+    /// to do", only "nothing was found by the detectors that answered".
+    ///
+    /// Deliberately not truncated. `discover_all` walks the registry once and
+    /// yields at most one status per detector, so this is already bounded by
+    /// the registry's size; bounding it a second time would mean a run could
+    /// silently drop the very fact that it searched incompletely, which is
+    /// the defect this field exists to fix.
+    ///
+    /// `ToolAbsent` is deliberately excluded: a tool that is not installed is
+    /// normal, expected state, and the detector answered correctly.
+    pub detector_failures: Vec<String>,
 }
 
 impl EmergencyReport {
@@ -139,6 +158,21 @@ impl std::fmt::Display for EmergencyReport {
         writeln!(f, "  actions succeeded: {}", self.actions_succeeded)?;
         writeln!(f, "  bytes freed:       {}", self.total_bytes_freed)?;
         writeln!(f, "  candidates denied: {}", self.denied_candidates)?;
+        // Printed before `errors`, and unconditionally when non-empty: the
+        // numbers above are a count of what was found, and without this line
+        // a partial search reads exactly like a complete one that found
+        // nothing (HORO-1484).
+        if !self.detector_failures.is_empty() {
+            writeln!(
+                f,
+                "  discovery incomplete: {} detector(s) failed, so the counts above \
+                 are not a complete account of what could be reclaimed",
+                self.detector_failures.len()
+            )?;
+            for failure in &self.detector_failures {
+                writeln!(f, "    - {failure}")?;
+            }
+        }
         if self.errors.is_empty() {
             writeln!(f, "  errors:            none")
         } else {
@@ -333,14 +367,20 @@ pub fn run_emergency(
     // Step 2: bounded, cheap candidate discovery — detectors only, never
     // the scanner's full filesystem walk (see module docs).
     let mut candidates: Vec<Evidence> = Vec::new();
-    for (_detector_id, status) in registry.discover_all(discovery_ctx) {
+    for (detector_id, status) in registry.discover_all(discovery_ctx) {
         match status {
             DetectorStatus::Found(evidences) => candidates.extend(evidences),
             // A detector's tool being absent is normal, expected state,
             // never an error (see `crate::detectors` module docs).
             DetectorStatus::ToolAbsent => {}
+            // A failure goes to its own field, not to the bounded advisory
+            // `errors` list: it names which detector did not answer, and it
+            // must not be droppable by a run that also had eight unrelated
+            // non-fatal errors (HORO-1484).
             DetectorStatus::Failed(message) => {
-                report.push_error(format!("detector failed: {message}"));
+                report
+                    .detector_failures
+                    .push(format!("{}: {message}", detector_id.0));
             }
         }
     }
@@ -1386,6 +1426,142 @@ mod tests {
         assert!(
             !self_state.exists(),
             "step 1 removes the self-state fixture and nothing recreates it"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A detector whose probe FAILED. Reports no candidates, so the only
+    /// difference between this and an empty registry is the one HORO-1484 is
+    /// about: whether the run knows it searched incompletely.
+    struct FailingDetector;
+
+    impl crate::detectors::Detector for FailingDetector {
+        fn id(&self) -> crate::detectors::DetectorId {
+            crate::detectors::DetectorId("failing_test_detector")
+        }
+
+        fn resource_kinds(&self) -> &'static [crate::evidence::ResourceKind] {
+            &[]
+        }
+
+        fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+            DetectorStatus::Failed("probe did not answer".to_string())
+        }
+    }
+
+    /// HORO-1484: a failed detector is named, attributed, and printed — not
+    /// folded into the bounded advisory `errors` list where a run with eight
+    /// unrelated non-fatal errors could drop it.
+    ///
+    /// The fixture is identical to
+    /// `run_emergency_frees_self_state_and_writes_no_history_record` above
+    /// except for the one failing detector, and that test asserts
+    /// `errors.is_empty()`, so the two together pin both directions.
+    #[test]
+    fn run_emergency_names_a_failed_detector_in_its_own_field() {
+        let dir = make_temp_dir("run-failed-detector");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 32]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+
+        let ctx = DiscoveryContext::new(home_dir);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(FailingDetector)]);
+        let actions = ActionRegistry::builtin();
+
+        let report = run_emergency(
+            &CleanCollector,
+            &registry,
+            &actions,
+            &ctx,
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
+        );
+
+        assert_eq!(
+            report.detector_failures,
+            vec!["failing_test_detector: probe did not answer".to_string()],
+            "the failure must carry the detector's id, not just its message"
+        );
+        assert!(
+            report.errors.is_empty(),
+            "a failed detector belongs in `detector_failures`, not in the bounded \
+             advisory `errors` list; got {:?}",
+            report.errors
+        );
+
+        // The run found no candidates, so every count below the header is
+        // zero apart from step 1's own self-state deletion. Without the
+        // caveat line that is indistinguishable from "there was nothing to
+        // reclaim", which is the defect.
+        let rendered = report.to_string();
+        assert!(
+            rendered.contains("discovery incomplete: 1 detector(s) failed"),
+            "the printed report must state that discovery was incomplete; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("not a complete account of what could be reclaimed"),
+            "the printed report must withdraw the completeness of its own counts; \
+             got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("failing_test_detector: probe did not answer"),
+            "the printed report must name the detector and its reason; got:\n{rendered}"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The `ToolAbsent` half: a tool that is not installed is normal,
+    /// expected state, and must not make a complete run look incomplete.
+    #[test]
+    fn run_emergency_does_not_call_an_absent_tool_a_failure() {
+        struct AbsentToolDetector;
+
+        impl crate::detectors::Detector for AbsentToolDetector {
+            fn id(&self) -> crate::detectors::DetectorId {
+                crate::detectors::DetectorId("absent_tool_test_detector")
+            }
+
+            fn resource_kinds(&self) -> &'static [crate::evidence::ResourceKind] {
+                &[]
+            }
+
+            fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+                DetectorStatus::ToolAbsent
+            }
+        }
+
+        let dir = make_temp_dir("run-absent-tool");
+        let self_state = dir.join("history.tsv");
+        fs::write(&self_state, vec![0u8; 32]).unwrap();
+        let home_dir = dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+
+        let report = run_emergency(
+            &CleanCollector,
+            &DetectorRegistry::from_detectors(vec![Box::new(AbsentToolDetector)]),
+            &ActionRegistry::builtin(),
+            &DiscoveryContext::new(home_dir),
+            &self_state,
+            10,
+            Duration::from_secs(10),
+            &dir.join("actions.jsonl"),
+        );
+
+        assert!(
+            report.detector_failures.is_empty(),
+            "an absent tool is not a failed probe; got {:?}",
+            report.detector_failures
+        );
+        let rendered = report.to_string();
+        assert!(
+            !rendered.contains("discovery incomplete"),
+            "a run in which every detector answered must not qualify itself; \
+             got:\n{rendered}"
         );
 
         fs::remove_dir_all(&dir).ok();

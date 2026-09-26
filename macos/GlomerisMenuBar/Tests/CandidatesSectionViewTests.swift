@@ -100,10 +100,52 @@ final class CandidatesSectionViewTests: XCTestCase {
         XCTAssertEqual(event, .detectorStarted(detector: "cargo"))
     }
 
+    /// A line with no `outcome` still decodes, with the field absent rather
+    /// than guessed. The CLI has emitted `outcome` since HORO-1484, so this is
+    /// forward/backward tolerance rather than the live shape — the live shape is
+    /// the next two tests.
     func testDecodesDetectorFinishedLine() throws {
         let json = #"{"phase":"detector_finished","detector":"cargo","candidates_found":3}"#
         let event = try JSONDecoder().decode(ProgressEventDto.self, from: Data(json.utf8))
-        XCTAssertEqual(event, .detectorFinished(detector: "cargo", candidatesFound: 3))
+        XCTAssertEqual(
+            event,
+            .detectorFinished(detector: "cargo", candidatesFound: 3, outcome: nil, reason: nil)
+        )
+    }
+
+    /// HORO-1484. The two lines that matter are byte-identical in their count —
+    /// a detector whose probe failed reports zero candidates, exactly like one
+    /// that looked and found nothing — so `outcome` is the only thing that
+    /// separates them and it has to survive decoding.
+    func testDecodesAFailedDetectorsOutcomeAndReason() throws {
+        let json = #"{"phase":"detector_finished","detector":"homebrew_cache","candidates_found":0,"outcome":"failed","reason":"brew --cache exited with status exit status: 1"}"#
+        let event = try JSONDecoder().decode(ProgressEventDto.self, from: Data(json.utf8))
+        XCTAssertEqual(
+            event,
+            .detectorFinished(
+                detector: "homebrew_cache",
+                candidatesFound: 0,
+                outcome: "failed",
+                reason: "brew --cache exited with status exit status: 1"
+            )
+        )
+    }
+
+    /// The other half of the pair, and the anti-vacuity partner to the test
+    /// above: a detector whose tool is simply not installed also reports zero,
+    /// and must NOT decode as a failure.
+    func testDecodesAnAbsentToolsOutcomeWithoutAReason() throws {
+        let json = #"{"phase":"detector_finished","detector":"docker_images","candidates_found":0,"outcome":"tool_absent"}"#
+        let event = try JSONDecoder().decode(ProgressEventDto.self, from: Data(json.utf8))
+        XCTAssertEqual(
+            event,
+            .detectorFinished(
+                detector: "docker_images",
+                candidatesFound: 0,
+                outcome: "tool_absent",
+                reason: nil
+            )
+        )
     }
 
     func testUnknownPhaseFailsToDecodeRatherThanSilentlyDropping() {
@@ -117,8 +159,47 @@ final class CandidatesSectionViewTests: XCTestCase {
             "Scanning: npm…"
         )
         XCTAssertEqual(
-            ProgressStatusText.text(for: .detectorFinished(detector: "npm", candidatesFound: 2)),
+            ProgressStatusText.text(
+                for: .detectorFinished(
+                    detector: "npm", candidatesFound: 2, outcome: "found", reason: nil)),
             "Finished npm (2 found)"
+        )
+    }
+
+    /// HORO-1484. "Finished homebrew_cache (0 found)" is a false sentence about
+    /// a probe that never ran, and it was what the panel showed, because the
+    /// line was formatted from the count alone.
+    func testProgressLineDoesNotReportAFailedProbeAsHavingFoundNothing() {
+        let text = ProgressStatusText.text(
+            for: .detectorFinished(
+                detector: "homebrew_cache",
+                candidatesFound: 0,
+                outcome: "failed",
+                reason: "brew --cache exited with status exit status: 1"
+            )
+        )
+        XCTAssertFalse(
+            text.contains("0 found"),
+            "a detector that failed reports zero candidates; saying it 'found' that is a claim it did not earn"
+        )
+        XCTAssertTrue(text.contains("homebrew_cache"), "the line must still name which detector: \(text)")
+        XCTAssertTrue(text.contains("did not complete"), "unexpected wording: \(text)")
+    }
+
+    /// The anti-vacuity partner: a detector that really did look and found
+    /// nothing keeps the honest count, so the assertion above is about the
+    /// outcome and not a blanket ban on the digit.
+    func testProgressLineStillReportsAnHonestZeroFromACompletedProbe() {
+        XCTAssertEqual(
+            ProgressStatusText.text(
+                for: .detectorFinished(
+                    detector: "cargo_target",
+                    candidatesFound: 0,
+                    outcome: "found",
+                    reason: nil
+                )
+            ),
+            "Finished cargo_target (0 found)"
         )
     }
 
@@ -157,7 +238,8 @@ final class CandidatesSectionViewTests: XCTestCase {
                 "0",
                 #"{"value": 1}"#,
                 "{\"phase\":\"detector_started\",\"detector\":\"cargo\"}\n"
-                    + "{\"phase\":\"detector_finished\",\"detector\":\"cargo\",\"candidates_found\":1}\n",
+                    + "{\"phase\":\"detector_finished\",\"detector\":\"cargo\","
+                    + "\"candidates_found\":1,\"outcome\":\"found\"}\n",
             ],
             outputType: ValueOutput.self,
             progressType: ProgressEventDto.self,
@@ -170,13 +252,127 @@ final class CandidatesSectionViewTests: XCTestCase {
         XCTAssertEqual(result.output.value, 1)
         XCTAssertEqual(seenEvents, [
             .detectorStarted(detector: "cargo"),
-            .detectorFinished(detector: "cargo", candidatesFound: 1),
+            .detectorFinished(detector: "cargo", candidatesFound: 1, outcome: "found", reason: nil),
         ])
         // The callback-observed events and the final collected
         // `progressLines` must agree — a caller that only inspects the
         // final result (like every pre-HORO-1063 call site) still sees
         // everything.
         XCTAssertEqual(result.progressLines, seenEvents)
+    }
+
+    // MARK: - Incomplete discovery (HORO-1484)
+
+    private func failedDetector(
+        _ id: String,
+        reason: String? = "brew --cache exited with status exit status: 1"
+    ) -> DetectorHealthReportDto {
+        DetectorHealthReportDto(
+            detector: id, status: "failed", candidatesFound: 0, reason: reason)
+    }
+
+    /// The defect: an empty candidates list plus a failed detector rendered
+    /// "Nothing worth reclaiming" under a checkmark — a clean bill of health for
+    /// a search that did not finish.
+    func testAnEmptyListAfterAFailedDetectorDoesNotClaimNothingIsWorthReclaiming() throws {
+        let message = try XCTUnwrap(
+            IncompleteDiscoveryWording.emptyListMessage(for: [failedDetector("homebrew_cache")])
+        )
+
+        XCTAssertNotEqual(
+            message.title, "Nothing worth reclaiming",
+            "this scan did not earn a claim about the machine"
+        )
+        XCTAssertNotEqual(
+            message.symbolName, "checkmark.circle",
+            "the checkmark is the all-clear glyph and is exactly what must not appear here"
+        )
+        XCTAssertEqual(message.kind, .empty, "the list really is empty; this is not a failure")
+        XCTAssertEqual(
+            message.tone, .neutral,
+            "detect itself succeeded — dressing the section as broken would overstate it"
+        )
+        let detail = try XCTUnwrap(message.detail)
+        XCTAssertTrue(
+            detail.contains("homebrew_cache"),
+            "must name what did not answer, so the user knows which tool to look at: \(detail)"
+        )
+        XCTAssertTrue(detail.contains("not a complete picture"), "unexpected wording: \(detail)")
+    }
+
+    /// Anti-vacuity, and the one that would catch a mirror hardwired to "always
+    /// incomplete": with nothing failed there is no message at all, which is
+    /// what lets `stateMessage` fall through to the honest all-clear.
+    func testNoIncompleteDiscoveryMessageWhenEveryDetectorAnswered() {
+        XCTAssertNil(IncompleteDiscoveryWording.detail(for: []))
+        XCTAssertNil(IncompleteDiscoveryWording.emptyListMessage(for: []))
+        XCTAssertNil(IncompleteDiscoveryWording.advisoryMessage(for: []))
+    }
+
+    /// The advisory that sits under a non-empty list is a different sentence
+    /// from the one that replaces an empty list — otherwise `body`'s
+    /// suppression check would hide the advisory in both cases — but it carries
+    /// the identical detail, so the panel cannot describe one failure two ways.
+    func testTheAdvisoryUnderAListAndTheEmptyStateShareOneAccountOfTheFailure() throws {
+        let failures = [failedDetector("homebrew_cache"), failedDetector("docker_images")]
+        let advisory = try XCTUnwrap(IncompleteDiscoveryWording.advisoryMessage(for: failures))
+        let emptyState = try XCTUnwrap(IncompleteDiscoveryWording.emptyListMessage(for: failures))
+
+        XCTAssertNotEqual(advisory.title, emptyState.title)
+        XCTAssertEqual(advisory.detail, emptyState.detail)
+        XCTAssertEqual(advisory.kind, .empty)
+        XCTAssertTrue(
+            advisory.title.contains("incomplete"),
+            "the advisory's whole job is to say the rows above are not the whole story: \(advisory.title)"
+        )
+    }
+
+    /// A failed detector with no reason string still gets named. The CLI always
+    /// sends one today, but a message that degrades to "1 check did not finish"
+    /// with no subject is worse than useless — it is unactionable.
+    func testAFailedDetectorWithNoReasonIsStillNamed() throws {
+        let detail = try XCTUnwrap(
+            IncompleteDiscoveryWording.detail(for: [failedDetector("xcode_derived_data", reason: nil)])
+        )
+        XCTAssertTrue(detail.contains("xcode_derived_data"), detail)
+        XCTAssertFalse(detail.contains("()"), "an absent reason must not leave empty brackets: \(detail)")
+    }
+
+    func testTheCountAgreesWithHowManyDetectorsAreNamed() throws {
+        let one = try XCTUnwrap(IncompleteDiscoveryWording.detail(for: [failedDetector("a")]))
+        XCTAssertTrue(one.contains("1 check did not finish"), one)
+
+        let two = try XCTUnwrap(
+            IncompleteDiscoveryWording.detail(for: [failedDetector("a"), failedDetector("b")])
+        )
+        XCTAssertTrue(two.contains("2 checks did not finish"), two)
+        XCTAssertTrue(two.contains("a"), two)
+        XCTAssertTrue(two.contains("b"), two)
+    }
+
+    /// The additive rule, asserted mechanically because it is a property of
+    /// `body`'s structure rather than of a value: the advisory is rendered
+    /// *beside* the rows, never in place of them, so a scan that found real
+    /// candidates alongside a failed detector still shows them.
+    func testTheIncompleteDiscoveryAdvisoryIsAdditiveAndNeverReplacesTheRows() throws {
+        let source = try Self.strippedOfComments(Self.readSource("CandidatesSectionView.swift"))
+
+        // The rows/state-message either-or is one `if let stateMessage` block,
+        // and the advisory is outside it — the same shape the pre-existing
+        // failure message uses. If the advisory were moved inside the `else`,
+        // or made part of `stateMessage`, this count changes.
+        XCTAssertEqual(
+            source.components(separatedBy: "IncompleteDiscoveryWording.advisoryMessage").count - 1,
+            1,
+            "the advisory has exactly one render site"
+        )
+        let advisoryIndex = try XCTUnwrap(source.range(of: "IncompleteDiscoveryWording.advisoryMessage"))
+        let eitherOrIndex = try XCTUnwrap(
+            source.range(of: "GlomerisStateMessageView(message: stateMessage)"))
+        XCTAssertLessThan(
+            eitherOrIndex.upperBound, advisoryIndex.lowerBound,
+            "the advisory must come after the rows/state-message branch, not inside it"
+        )
     }
 
     // MARK: - Lower-bound marker rendering

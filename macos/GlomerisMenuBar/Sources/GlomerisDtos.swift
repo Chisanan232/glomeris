@@ -165,9 +165,100 @@ struct DetectCandidateReportDto: Decodable, Equatable, Identifiable {
     var id: String { resourceId }
 }
 
+/// Mirrors `reporting::dto::DetectorHealthReport` (HORO-1484) — one
+/// detector's outcome from the discovery pass that produced this report.
+///
+/// `status` is one of `"found"`, `"tool_absent"`, `"failed"`, produced by
+/// `cli::DetectorOutcome::tag()`. The three are NOT interchangeable and the
+/// app must not collapse them: `tool_absent` means the tool that would
+/// produce candidates is not installed, which is normal state and a real
+/// answer; `failed` means the probe did not answer, so whatever that
+/// detector would have found is unknown. `reason` is present only for
+/// `failed`.
+struct DetectorHealthReportDto: Decodable, Equatable, Identifiable {
+    let detector: String
+    let status: String
+    let candidatesFound: UInt64
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case detector
+        case status
+        case candidatesFound = "candidates_found"
+        case reason
+    }
+
+    var id: String { detector }
+
+    /// Did this detector's probe fail? The one branch the UI is allowed to
+    /// make on `status`, kept here so no view re-spells the tag.
+    var didFail: Bool { status == "failed" }
+}
+
 /// Mirrors `reporting::dto::DetectReport`.
 struct DetectReportDto: Decodable, Equatable {
     let candidates: [DetectCandidateReportDto]
+
+    /// Per-detector health for the pass that produced `candidates`
+    /// (HORO-1484).
+    ///
+    /// Defaults to empty when absent, because the app resolves whichever
+    /// `glomeris` is on `PATH` and that binary may predate the field — the
+    /// same forward/backward tolerance `impactTier` documents above. An
+    /// empty array is correctly indistinguishable from "this binary does not
+    /// report detector health", and `discoveryComplete` below defaults to
+    /// `true` for exactly that case: an older CLI is not evidence that
+    /// something failed.
+    let detectors: [DetectorHealthReportDto]
+
+    /// Did every detector answer? `false` means at least one probe failed,
+    /// so `candidates` is NOT a complete account of what could be reclaimed
+    /// and no surface may present it as one.
+    ///
+    /// Derived on the Rust side from `detectors`, never tracked separately,
+    /// so it cannot disagree with the array it summarizes.
+    let discoveryComplete: Bool
+
+    /// Detectors whose probe failed — the subset a surface must show rather
+    /// than rendering the candidate list as the whole picture.
+    ///
+    /// This, and not `discoveryComplete`, is what the panel reads, which is
+    /// worth stating because the opposite looks tidier: a surface that says
+    /// "part of this search did not finish" has to name what did not finish, or
+    /// the sentence is unactionable, and only this array carries the names. The
+    /// two cannot disagree — Rust derives the flag from the very slice this
+    /// filters, and `DtoGoldenFixturesTests` pins that agreement in both
+    /// directions — so reading the flag as well would add a second source of
+    /// truth for a question that has one answer.
+    var failedDetectors: [DetectorHealthReportDto] {
+        detectors.filter(\.didFail)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case candidates
+        case detectors
+        case discoveryComplete = "discovery_complete"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        candidates = try container.decode([DetectCandidateReportDto].self, forKey: .candidates)
+        detectors =
+            try container.decodeIfPresent([DetectorHealthReportDto].self, forKey: .detectors) ?? []
+        discoveryComplete =
+            try container.decodeIfPresent(Bool.self, forKey: .discoveryComplete) ?? true
+    }
+
+    /// Non-decoding initializer for tests and previews.
+    init(
+        candidates: [DetectCandidateReportDto],
+        detectors: [DetectorHealthReportDto] = [],
+        discoveryComplete: Bool = true
+    ) {
+        self.candidates = candidates
+        self.detectors = detectors
+        self.discoveryComplete = discoveryComplete
+    }
 }
 
 /// Mirrors `reporting::dto::LlmPlanItemReport` (HORO-1308) — one row of the
@@ -273,12 +364,25 @@ struct LlmPlanReportDto: Decodable, Equatable {
 /// simple per-field `CodingKeys` used elsewhere in this file.
 enum ProgressEventDto: Decodable, Equatable {
     case detectorStarted(detector: String)
-    case detectorFinished(detector: String, candidatesFound: Int)
+    /// HORO-1484: `outcome` and `reason` were added because
+    /// `candidatesFound: 0` is what a detector that found nothing and a
+    /// detector that never answered had in common, and it was all this event
+    /// said about either. `outcome` is `"found"`/`"tool_absent"`/`"failed"`;
+    /// `reason` is present only for `"failed"`.
+    ///
+    /// `outcome` is optional for the same forward/backward reason as
+    /// `DetectReportDto.detectors`: the resolved CLI may predate the field.
+    /// `nil` means "this binary does not report outcomes", which is not the
+    /// same as `"failed"` and must never be shown as one.
+    case detectorFinished(
+        detector: String, candidatesFound: Int, outcome: String?, reason: String?)
 
     private enum CodingKeys: String, CodingKey {
         case phase
         case detector
         case candidatesFound = "candidates_found"
+        case outcome
+        case reason
     }
 
     init(from decoder: Decoder) throws {
@@ -291,7 +395,14 @@ enum ProgressEventDto: Decodable, Equatable {
         case "detector_finished":
             let detector = try container.decode(String.self, forKey: .detector)
             let candidatesFound = try container.decode(Int.self, forKey: .candidatesFound)
-            self = .detectorFinished(detector: detector, candidatesFound: candidatesFound)
+            let outcome = try container.decodeIfPresent(String.self, forKey: .outcome)
+            let reason = try container.decodeIfPresent(String.self, forKey: .reason)
+            self = .detectorFinished(
+                detector: detector,
+                candidatesFound: candidatesFound,
+                outcome: outcome,
+                reason: reason
+            )
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .phase,

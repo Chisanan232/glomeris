@@ -78,15 +78,24 @@ loop for candidates — `detect` runs only when you explicitly tap Refresh,
 streaming live per-detector progress via `--progress-json` while it works
 (button label switches to "Scanning…").
 
-Four states that are easy to conflate are kept distinct, because each is
+Five states that are easy to conflate are kept distinct, because each is
 a different claim about your disk:
 
 | State | What it says |
 |---|---|
 | "No scan yet" | Nothing has been looked at. **Not** a clean bill of health. |
 | "Nothing worth reclaiming" | Scanned, and there is genuinely nothing — good news. |
+| "Nothing found where Glomeris could look" | Scanned, found nothing, but part of the search never answered — so whatever is there is unknown rather than absent. Names which checks did not finish. |
 | "No candidates match this filter" | Things were found; you are just not looking at them. |
 | A scan failure | Says what failed. An empty list is never shown in its place. |
+
+The third state also has a non-empty counterpart (HORO-1484): when a detector
+fails but others still found candidates, the rows are shown as normal with
+"This list may be incomplete" added **below** them. The rows are real and stay
+on screen; what they may not do is look like the whole account. A detector
+whose tool is simply not installed is not a failure and produces neither
+message — `docker` being absent is normal, `brew` being asked and failing is
+not.
 
 Each row shows the candidate's kind, what cleaning it would free, and its
 safety verdict in words. Tapping a row opens its detail view — there is no
