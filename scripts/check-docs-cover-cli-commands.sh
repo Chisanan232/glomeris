@@ -137,7 +137,7 @@ while IFS=$'\t' read -r command verb; do
       $0 ~ "^## `glomeris " cmd "( |`)" { inside = 1; next }
       inside && /^## / { exit }
       inside { print }
-    ' "${REPO_ROOT}/${DOC_FILE}"
+    ' "${REPO_ROOT}/${DOC_FILE}" || true
   )"
   if [[ -z "$section" ]]; then
     echo "FAIL: ${DOC_FILE} has no section body for 'glomeris ${command}', so its subcommands cannot be documented in it."
