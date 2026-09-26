@@ -981,33 +981,43 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "daemon",
         group: Group::Service,
-        safety: Safety::ReadOnly,
+        safety: Safety::WritesOwnState,
         summary: "Install, remove, inspect or run the background monitor.",
         usage: &["daemon <install [--force]|uninstall|status [--json]|run>"],
         details: "Manages the launch agent that watches disk pressure and notifies you. The \
                   monitor observes and notifies; it does not delete anything on its own, so \
                   installing it cannot cost you data. `daemon run` is the foreground entry \
                   point launchd itself calls — you rarely need it by hand.",
-        subcommands: &[],
-        options: &[
-            OptionSpec {
-                syntax: "install [--force]",
+        subcommands: &[
+            SubcommandSpec {
+                name: "install",
+                args: "[--force]",
+                safety: Safety::WritesOwnState,
                 description: "Write and load the launch agent. --force overwrites an existing \
                               plist.",
             },
-            OptionSpec {
-                syntax: "uninstall",
+            SubcommandSpec {
+                name: "uninstall",
+                args: "",
+                safety: Safety::WritesOwnState,
                 description: "Unload and remove the launch agent.",
             },
-            OptionSpec {
-                syntax: "status [--json]",
+            SubcommandSpec {
+                name: "status",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
                 description: "Whether the agent is installed, loaded and recently alive.",
             },
-            OptionSpec {
-                syntax: "run",
-                description: "Run the monitor in the foreground. Normally launchd's job.",
+            SubcommandSpec {
+                name: "run",
+                args: "",
+                safety: Safety::WritesOwnState,
+                description: "Run the monitor in the foreground, recording pressure history and \
+                              a heartbeat under Library/Application Support/Glomeris. Normally \
+                              launchd's job.",
             },
         ],
+        options: &[],
         examples: &[
             ExampleSpec {
                 command: "glomeris daemon install",

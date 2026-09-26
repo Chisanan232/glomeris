@@ -2,23 +2,30 @@ glomeris daemon — Install, remove, inspect or run the background monitor.
 
 usage: glomeris daemon <install [--force]|uninstall|status [--json]|run>
 
-Read-only — changes nothing.
+Safety depends on the subcommand; each is labelled below. The strongest of
+them: Writes only Glomeris's own state — never your files.
 
 Manages the launch agent that watches disk pressure and notifies you. The
 monitor observes and notifies; it does not delete anything on its own, so
 installing it cannot cost you data. `daemon run` is the foreground entry point
 launchd itself calls — you rarely need it by hand.
 
-Options
+Subcommands
   install [--force]
+      Writes only Glomeris's own state — never your files.
       Write and load the launch agent. --force overwrites an existing
       plist.
   uninstall
+      Writes only Glomeris's own state — never your files.
       Unload and remove the launch agent.
   status [--json]
+      Read-only — changes nothing.
       Whether the agent is installed, loaded and recently alive.
   run
-      Run the monitor in the foreground. Normally launchd's job.
+      Writes only Glomeris's own state — never your files.
+      Run the monitor in the foreground, recording pressure history and a
+      heartbeat under Library/Application Support/Glomeris. Normally
+      launchd's job.
 
 Examples
   glomeris daemon install
