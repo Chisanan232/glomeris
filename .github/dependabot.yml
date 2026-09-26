@@ -1,0 +1,47 @@
+# HORO-1497: this file is the only thing in the repository that watches the
+# GitHub Actions CI runs. Before it existed, eight third-party actions were
+# referenced from four workflows and nothing compared any of them against
+# upstream, so a withdrawn or abandoned action would have been found when a job
+# started failing.
+#
+# Deliberately NOT here:
+#
+#   target-branch:  It silently disables security updates for the default
+#                   branch, does not appear in the settings UI, and leaves a
+#                   configuration that reads exactly like a working one.
+#                   `scripts/check-dependency-updates-are-watched.sh` fails if
+#                   this key ever appears.
+#
+#   a cargo entry:  The `deny` job runs cargo-deny with an `[advisories]`
+#                   section on every pull request, so a known advisory in the
+#                   98-package lock file fails the build rather than waiting for
+#                   a pull request. Version updates for crates would be a
+#                   cadence preference, not a gap. The reason is repeated in the
+#                   guard's DELIBERATELY_UNWATCHED list, which fails if
+#                   Cargo.toml ever goes away and leaves the exclusion stale.
+#
+# One reference stays unwatched even so: `dtolnay/rust-toolchain@stable` names a
+# branch, not a version, so there is nothing for Dependabot to compare. That
+# action is meant to be used that way and pinning it to a tag would change which
+# toolchain CI installs, so it is left alone. Coverage here is seven of eight.
+
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One grouped pull request rather than one per action. The alternative is
+    # seven simultaneous pull requests that all touch the workflow files and so
+    # all conflict with each other, which is how this kind of maintenance stops
+    # getting done.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    # Enough for the single grouped pull request above, and no more. Security
+    # updates are not subject to this limit, so a low number does not delay one.
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: "⬆️ deps(actions):"
