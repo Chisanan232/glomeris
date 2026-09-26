@@ -145,12 +145,13 @@ final class BundleIdentityTests: XCTestCase {
     ///
     /// `.standard` costs nothing because it is where those values already are.
     func testASuiteBeneathTheIdentityWouldBeASeparateDomain() {
-        let suiteName = "\(BundleIdentity.current).h1456-separate-domain-\(UUID().uuidString)"
-        guard let suite = UserDefaults(suiteName: suiteName) else {
+        // The one real, file-backed suite this target opens. An in-memory
+        // double would separate the two domains by construction and pass
+        // however `CFPreferences` behaved, which is the opposite of what this
+        // asserts. Its name is fixed rather than unique per run, so it
+        // occupies one file rather than one more on every run (HORO-1486).
+        guard let suite = TestUserDefaults.realSuiteForDomainSeparation(self) else {
             return XCTFail("a suite name below the bundle identifier must be usable")
-        }
-        addTeardownBlock {
-            suite.removePersistentDomain(forName: suiteName)
         }
 
         let key = "h1456ProbeKey"

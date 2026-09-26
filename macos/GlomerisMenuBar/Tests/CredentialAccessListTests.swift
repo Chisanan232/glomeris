@@ -258,10 +258,7 @@ final class CredentialAccessResolutionTests: XCTestCase {
     private static let notACredential = "h1474-not-a-credential"
 
     private func makeDefaults() -> UserDefaults {
-        let suiteName = "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
-        return defaults
+        TestUserDefaults.inMemory()
     }
 
     private func makeStore(credentials: CredentialStore) -> GlomerisLlmSettingsStore {

@@ -282,6 +282,26 @@ jobs:
       - name: Check stored state is namespaced by the running bundle
         run: bash scripts/check-state-namespaced-by-bundle-id.sh
 
+  tests-do-not-open-user-defaults-suites:
+    # HORO-1486: eight sites in the Swift test target opened a uniquely-named
+    # UserDefaults suite each, and 1,892 preference files had accumulated on one
+    # developer's machine. Five of the eight already tore the suite down, which
+    # is why this is a guard and not a review note: emptying the domain does not
+    # remove the file, and unlinking it from inside the test process does not
+    # stick either, because cfprefsd rewrites it once the process disconnects.
+    # Measured over 40 suites, 40 of 40 came back. There is no teardown to
+    # remember, so the rule is that the target opens no named suite at all.
+    #
+    # A separate job from state-namespaced-by-bundle-id, which is about the
+    # shipped app filing its state under its own identifier. That property was
+    # satisfied the whole time these files were piling up: a correctly
+    # namespaced suite still leaves a plist per name, and the names were unique.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check no test opens a UserDefaults suite outside the helper
+        run: bash scripts/check-tests-do-not-open-user-defaults-suites.sh
+
   cli-identity-is-reported:
     # HORO-1466: the app hands all policy and execution authority to a
     # `glomeris` it resolves at runtime, and used to surface which one only in

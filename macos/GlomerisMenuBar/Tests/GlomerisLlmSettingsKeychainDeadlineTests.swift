@@ -170,12 +170,7 @@ final class GlomerisLlmSettingsKeychainDeadlineTests: XCTestCase {
     // MARK: - Fixtures
 
     private func makeDefaults() -> UserDefaults {
-        let suiteName = "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
-        return defaults
+        TestUserDefaults.inMemory()
     }
 
     /// A store whose keychain will not answer, wired to its own deadline

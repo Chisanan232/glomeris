@@ -13,17 +13,13 @@ import XCTest
 // `LSUIElement` app target with no importable framework product.
 
 final class ProjectRootsStoreTests: XCTestCase {
-    /// A fresh, uniquely-named `UserDefaults` suite per test, so tests
-    /// never see each other's persisted state and never touch the domain
-    /// the app itself writes to — `UserDefaults.standard`, which for a
-    /// bundled app is the domain named by its bundle identifier (HORO-1456).
+    /// Fresh storage per test, so tests never see each other's persisted
+    /// state and never touch the domain the app itself writes to —
+    /// `UserDefaults.standard`, which for a bundled app is the domain named
+    /// by its bundle identifier (HORO-1456). In memory rather than a named
+    /// suite: see `TestUserDefaults` (HORO-1486).
     private func makeDefaults() -> UserDefaults {
-        let suiteName = "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
-        return defaults
+        TestUserDefaults.inMemory()
     }
 
     func testAddedRootPersistsAcrossFreshStoreInstance() {

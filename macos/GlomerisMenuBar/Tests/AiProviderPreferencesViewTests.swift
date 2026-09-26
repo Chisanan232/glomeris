@@ -1011,21 +1011,19 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     private static func makeStore(credentials: RecordingCredentialStore)
         -> GlomerisLlmSettingsStore {
         GlomerisLlmSettingsStore(
-            defaults: UserDefaults(
-                suiteName: "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)")!,
+            defaults: TestUserDefaults.inMemory(),
             credentials: credentials
         )
     }
 
-    /// Built with throwaway `UserDefaults` suites so nothing here reads or writes
-    /// the running app's own preferences.
+    /// Built with throwaway in-memory `UserDefaults` so nothing here reads or
+    /// writes the running app's own preferences — and, since HORO-1486, so
+    /// nothing here leaves a preference file behind either.
     private static func makeView(credentials: RecordingCredentialStore)
         -> AiProviderPreferencesView {
         AiProviderPreferencesView(
             store: makeStore(credentials: credentials),
-            projectRootsStore: ProjectRootsStore(
-                defaults: UserDefaults(
-                    suiteName: "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)")!)
+            projectRootsStore: ProjectRootsStore(defaults: TestUserDefaults.inMemory())
         )
     }
 
