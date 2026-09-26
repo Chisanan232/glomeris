@@ -42,6 +42,26 @@ succeeding but reporting a path this process can't `canonicalize`. This is
 deliberately never coerced into a safe default; treat it the same as "we
 don't know," not "nothing to clean up."
 
+## "Part of the scan failed — where do I see which detector?"
+
+A failed detector and one whose tool is absent both contribute zero
+candidates, so a count alone cannot tell them apart while they mean opposite
+things: "we don't know what is there" versus "there is nothing there." Every
+surface therefore reports the outcome and not just the count.
+
+| Surface | Where a failure appears |
+|---|---|
+| `glomeris detect` | With no candidates at all, the line reads `no candidates discovered by the detectors that succeeded — N failed, so this is not a clean bill of health` rather than the bare `no candidates discovered` |
+| `glomeris detect --json` | A `detectors` array — one entry per detector, in registration order, with `status` (`found`/`tool_absent`/`failed`), `candidates_found`, and a `reason` present only on `failed` — plus a derived `discovery_complete` |
+| `glomeris detect --progress-json` | Each `detector_finished` event carries `outcome`, and `reason` when it failed |
+| `glomeris free`, `glomeris emergency` | A `discovery incomplete: N detector(s) failed` block naming each one; if the run stopped at `SafeExhausted`, it also says in so many words that this is not a finding that nothing safe is left |
+| Menu-bar app | "Nothing found where Glomeris could look" in place of the all-clear, or "This list may be incomplete" below a non-empty list — either way naming the checks that did not finish |
+
+An absent tool appears as `tool_absent` and does **not** make
+`discovery_complete` false. That is a real answer, not a missing one, and
+flagging it would make the caveat permanent on any machine without Docker —
+which is the fastest way to teach people to ignore it.
+
 ## "The menu-bar app says the `glomeris` CLI was not found, but I installed it"
 
 The app lists the locations it searched in the same message. If your binary

@@ -120,6 +120,85 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertGreaterThan(refused.reclaimableBytes ?? 0, executable.reclaimableBytes ?? 0)
     }
 
+    /// HORO-1484: per-detector health crosses the language boundary, and the
+    /// two zero-candidate detectors in the fixture are deliberately one
+    /// `tool_absent` and one `failed` — a mirror that collapses them (the
+    /// defect this ticket fixes, which lived on the Rust side) still decodes
+    /// both without throwing, so the assertion has to be on the distinction
+    /// rather than on decoding succeeding.
+    func testDecodesPerDetectorHealthAndSeparatesAFailureFromAnAbsentTool() throws {
+        let dto = try decodeFixture("detect_report.json", as: DetectReportDto.self)
+
+        XCTAssertEqual(dto.detectors.count, 4)
+        XCTAssertEqual(
+            dto.detectors.map(\.detector),
+            ["cargo_target_dir", "docker_build_cache", "node_modules", "project_roots"],
+            "order is the registry's and is the only stable identity a row has"
+        )
+
+        let absent = try XCTUnwrap(dto.detectors.first { $0.detector == "node_modules" })
+        let failed = try XCTUnwrap(dto.detectors.first { $0.detector == "project_roots" })
+
+        // Identical counts. Everything below has to come from `status`.
+        XCTAssertEqual(absent.candidatesFound, 0)
+        XCTAssertEqual(failed.candidatesFound, 0)
+
+        XCTAssertEqual(absent.status, "tool_absent")
+        XCTAssertFalse(absent.didFail)
+        XCTAssertNil(absent.reason, "an absent tool has nothing to explain")
+
+        XCTAssertEqual(failed.status, "failed")
+        XCTAssertTrue(failed.didFail)
+        XCTAssertEqual(failed.reason, "permission denied reading /Users/dev/private")
+
+        XCTAssertEqual(dto.failedDetectors.map(\.detector), ["project_roots"])
+        XCTAssertFalse(
+            dto.discoveryComplete,
+            "one detector failed, so this report is not a complete account of the disk"
+        )
+    }
+
+    /// The anti-vacuity partner to the test above: with every detector
+    /// answering, `discovery_complete` is `true` and `failedDetectors` is empty
+    /// — so a mirror that hardwired either one would fail here rather than
+    /// quietly passing both tests.
+    func testDetectReportReportsCompleteDiscoveryWhenNoDetectorFailed() throws {
+        let json = """
+        {"candidates":[],"discovery_complete":true,
+        "detectors":[{"detector":"cargo_target_dir","status":"found","candidates_found":2},
+        {"detector":"docker_images","status":"tool_absent","candidates_found":0}]}
+        """
+        let dto = try JSONDecoder().decode(DetectReportDto.self, from: Data(json.utf8))
+
+        XCTAssertTrue(dto.discoveryComplete)
+        XCTAssertTrue(dto.failedDetectors.isEmpty)
+        XCTAssertEqual(dto.detectors.count, 2)
+        XCTAssertEqual(dto.detectors[0].candidatesFound, 2)
+    }
+
+    /// An older `glomeris` on `PATH` predates `detectors`/`discovery_complete`.
+    /// The absent-key default is `true` — "assume complete" — and that is the
+    /// less safe of the two defaults, so it is chosen deliberately rather than
+    /// by accident: a binary that never had the concept also never had a way to
+    /// report a failed detector, so defaulting to `false` would put a permanent
+    /// "this list may be incomplete" caveat on every scan from an older CLI,
+    /// where it would say nothing and be ignored. The honest mitigation is the
+    /// CLI-identity surface (HORO-1466), not a caveat that is always on.
+    func testDetectReportStillDecodesWithoutTheDetectorHealthKeys() throws {
+        let json = """
+        {"candidates":[{"resource_id":"a","kind":"cargo_target","reclaimable_bytes":1,
+        "reclaimable_human":"1 B","reclaimable_bytes_is_lower_bound":false,
+        "policy_label":"AUTO_SAFE","reasons":[],"executable":true,
+        "offered_actions":[],"refusal_reason":null}]}
+        """
+        let dto = try JSONDecoder().decode(DetectReportDto.self, from: Data(json.utf8))
+
+        XCTAssertEqual(dto.candidates.count, 1)
+        XCTAssertTrue(dto.detectors.isEmpty)
+        XCTAssertTrue(dto.discoveryComplete)
+        XCTAssertTrue(dto.failedDetectors.isEmpty)
+    }
+
     /// An older `glomeris` on `PATH` predates `impact_tier`. Losing an
     /// emphasis hint is acceptable; losing the whole candidates list because
     /// one optional key is absent is not.

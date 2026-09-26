@@ -39,9 +39,9 @@ use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserCon
 use crate::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, ActionListItem, ActionListReport,
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
-    ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport, LlmCheckReport,
-    LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, ProgressEvent,
-    StatusReport,
+    DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport,
+    LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
+    ProgressEvent, StatusReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
@@ -147,11 +147,24 @@ pub fn build_action_history_report(records: &[AuditRecord]) -> ActionHistoryRepo
 /// discover-refresh-classify shape
 /// `executor::recovery_loop::select_candidate` uses internally,
 /// reimplemented at this thin CLI layer only because that function (and
-/// its module-private timeout constant) is not `pub`. Detector-level
-/// `ToolAbsent`/`Failed` statuses are silently dropped here exactly as
-/// they are in the recovery loop and emergency mode — a tool being absent
-/// is normal, expected state, never an error a CLI report needs to
-/// surface per-candidate.
+/// its module-private timeout constant) is not `pub`.
+///
+/// Returns candidates only, so detector-level `ToolAbsent` and `Failed`
+/// statuses do not reach this function's caller. That is a property of
+/// this convenience wrapper's return type, not a claim that the two are
+/// equivalent, and this doc comment used to assert the latter — that they
+/// are "silently dropped here exactly as they are in the recovery loop and
+/// emergency mode" because "a tool being absent is normal, expected state,
+/// never an error a CLI report needs to surface". The first half is
+/// correct about `ToolAbsent` and wrong about `Failed`: a detector that
+/// failed did not answer, so whatever it would have found is unknown, and
+/// a report that omits that presents a partial search as a complete one
+/// (HORO-1484). The recovery loop and emergency mode both surface a
+/// failure now, and so does `detect --json`.
+///
+/// Any caller that reports on what was searched — as opposed to merely
+/// acting on what was found — must call [`discover_and_classify_pass`] and
+/// read its `detectors` field instead of this wrapper.
 pub fn discover_and_classify(
     registry: &DetectorRegistry,
     ctx: &DiscoveryContext,
@@ -200,9 +213,11 @@ pub fn discover_and_classify_with_progress(
 /// count them afterwards.
 ///
 /// `Failed`'s reason is carried through verbatim rather than flattened
-/// into `ToolAbsent`. This type only makes the distinction *available* to
-/// a caller that has already consumed the evidence; whether each caller
-/// then acts on it is HORO-1484, tracked separately.
+/// into `ToolAbsent`, and since HORO-1484 every serialized surface that
+/// reports discovery reports this distinction: `detect --json`'s
+/// `detectors` array, the `--progress-json` stream, `free`'s report and
+/// `emergency`'s. Before that, this type made the distinction available
+/// and nothing consumed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetectorOutcome {
     /// The probe succeeded and produced `candidates` evidences, all of
@@ -213,6 +228,62 @@ pub enum DetectorOutcome {
     ToolAbsent,
     /// The probe itself failed. Not evidence of "nothing to clean up".
     Failed(String),
+}
+
+impl DetectorOutcome {
+    /// The tag every serialized surface uses for this outcome.
+    ///
+    /// One producer for all three strings (HORO-1484), so `detect --json`,
+    /// the `--progress-json` stream and the book cannot drift into
+    /// describing the same probe with different words.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            DetectorOutcome::Found { .. } => "found",
+            DetectorOutcome::ToolAbsent => "tool_absent",
+            DetectorOutcome::Failed(_) => "failed",
+        }
+    }
+
+    /// How many evidences this detector contributed.
+    ///
+    /// `0` for `ToolAbsent` and for `Failed` — which is the whole reason
+    /// [`DetectorOutcome::tag`] exists. A count alone cannot tell a probe
+    /// that looked and found nothing from one that never looked.
+    pub fn candidates_found(&self) -> usize {
+        match self {
+            DetectorOutcome::Found { candidates } => *candidates,
+            DetectorOutcome::ToolAbsent | DetectorOutcome::Failed(_) => 0,
+        }
+    }
+
+    /// The probe's own failure message, for `Failed` only.
+    pub fn failure_reason(&self) -> Option<&str> {
+        match self {
+            DetectorOutcome::Failed(reason) => Some(reason),
+            DetectorOutcome::Found { .. } | DetectorOutcome::ToolAbsent => None,
+        }
+    }
+}
+
+/// Projects a [`DetectorStatus`] without consuming it — the evidences a
+/// `Found` status owns are counted, not cloned.
+///
+/// The single mapping from status to outcome. Both places a discovery pass
+/// needs one go through it: the progress callback, which only borrows the
+/// status, and the pass loop below, which then consumes the evidences it
+/// just counted. A second hand-written match in either place is how the
+/// two halves of one pass would come to disagree about what a detector
+/// reported.
+impl From<&DetectorStatus> for DetectorOutcome {
+    fn from(status: &DetectorStatus) -> Self {
+        match status {
+            DetectorStatus::Found(evidences) => DetectorOutcome::Found {
+                candidates: evidences.len(),
+            },
+            DetectorStatus::ToolAbsent => DetectorOutcome::ToolAbsent,
+            DetectorStatus::Failed(reason) => DetectorOutcome::Failed(reason.clone()),
+        }
+    }
 }
 
 /// One discovery pass's complete result: what every detector reported, and
@@ -251,13 +322,18 @@ pub fn discover_and_classify_pass(
             on_event(ProgressEvent::DetectorStarted { detector: id.0 });
         }
         DetectorProgress::Finished(status) => {
-            let candidates_found = match status {
-                DetectorStatus::Found(evidences) => evidences.len(),
-                DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => 0,
-            };
+            // A count alone is the collapse this ticket is about
+            // (HORO-1484): a probe that errored used to stream the same
+            // `candidates_found: 0` as one that looked and found nothing,
+            // and the doc comment sent a consumer that needed to tell them
+            // apart to "the final report", which did not carry it either.
+            // The outcome tag and a failure's reason travel with the count.
+            let outcome = DetectorOutcome::from(status);
             on_event(ProgressEvent::DetectorFinished {
                 detector: id.0,
-                candidates_found,
+                candidates_found: outcome.candidates_found(),
+                outcome: outcome.tag(),
+                reason: outcome.failure_reason().map(str::to_string),
             });
         }
     });
@@ -266,14 +342,13 @@ pub fn discover_and_classify_pass(
     let mut candidates = Vec::new();
 
     for (id, status) in discovered {
+        // Counted before the evidences are consumed, through the same
+        // `From` impl the progress callback above used, so the two halves
+        // of one pass cannot describe a detector differently.
+        let outcome = DetectorOutcome::from(&status);
+        detectors.push((id, outcome));
         match status {
             DetectorStatus::Found(evidences) => {
-                detectors.push((
-                    id,
-                    DetectorOutcome::Found {
-                        candidates: evidences.len(),
-                    },
-                ));
                 for mut ev in evidences {
                     let correlation = collector.collect(
                         &ev.resource,
@@ -287,10 +362,9 @@ pub fn discover_and_classify_pass(
                     candidates.push((ev, decision));
                 }
             }
-            DetectorStatus::ToolAbsent => detectors.push((id, DetectorOutcome::ToolAbsent)),
-            DetectorStatus::Failed(reason) => {
-                detectors.push((id, DetectorOutcome::Failed(reason)));
-            }
+            // Nothing further to do for either: the outcome recorded above
+            // already carries which one it was, and a failure's reason.
+            DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => {}
         }
     }
 
@@ -370,8 +444,15 @@ pub fn find_candidate<'a>(
 /// and `--json` cannot present different orders. Before HORO-1307 this
 /// returned detector-registration order, which meant a 40 GB build directory
 /// could sit below a 2 MB cache.
+/// `detectors` is the other half of the same [`DiscoveryPass`] that
+/// produced `candidates` (HORO-1484), projected into the report so a JSON
+/// consumer can tell "nothing found" from "a probe failed". Pass
+/// [`DiscoveryPass::detectors`] — an empty slice yields
+/// `discovery_complete: true`, which is only honest for a caller that
+/// genuinely ran no detectors.
 pub fn build_detect_report(
     candidates: &[(Evidence, PolicyDecision)],
+    detectors: &[(DetectorId, DetectorOutcome)],
     actions: &ActionRegistry,
     impact: ImpactContext,
 ) -> DetectReport {
@@ -387,7 +468,24 @@ pub fn build_detect_report(
         })
         .collect();
     ranking::sort_detect_candidates(&mut candidates);
-    DetectReport { candidates }
+    // Derived from the same slice the array below is projected from, so the
+    // summary cannot disagree with what it summarizes.
+    let discovery_complete = !detectors
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, DetectorOutcome::Failed(_)));
+    DetectReport {
+        candidates,
+        detectors: detectors
+            .iter()
+            .map(|(id, outcome)| DetectorHealthReport {
+                detector: id.0.to_string(),
+                status: outcome.tag(),
+                candidates_found: outcome.candidates_found(),
+                reason: outcome.failure_reason().map(str::to_string),
+            })
+            .collect(),
+        discovery_complete,
+    }
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
@@ -1015,7 +1113,22 @@ fn format_size_field(human: Option<&str>, is_lower_bound: bool) -> String {
 /// Prints a [`DetectReport`] as concise, human-readable text.
 pub fn print_detect_report(report: &DetectReport) {
     if report.candidates.is_empty() {
-        println!("no candidates discovered");
+        // "no candidates discovered" is a claim, and it is only true when
+        // every detector actually looked (HORO-1484). With a failed probe
+        // in the pass the honest sentence is a different one.
+        if report.discovery_complete {
+            println!("no candidates discovered");
+        } else {
+            println!(
+                "no candidates discovered by the detectors that succeeded — \
+                 {} failed, so this is not a clean bill of health",
+                report
+                    .detectors
+                    .iter()
+                    .filter(|d| d.reason.is_some())
+                    .count()
+            );
+        }
         return;
     }
     for c in &report.candidates {
@@ -1867,7 +1980,7 @@ mod tests {
         ];
 
         let actions = ActionRegistry::builtin();
-        let report = build_detect_report(&candidates, &actions, ImpactContext::default());
+        let report = build_detect_report(&candidates, &[], &actions, ImpactContext::default());
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -1952,6 +2065,7 @@ mod tests {
         let actions = ActionRegistry::builtin();
         let detect_report = build_detect_report(
             &[(ev.clone(), decision.clone())],
+            &[],
             &actions,
             ImpactContext::default(),
         );
@@ -2005,6 +2119,7 @@ mod tests {
         let actions = ActionRegistry::builtin();
         let detect_report = build_detect_report(
             &[(ev.clone(), decision.clone())],
+            &[],
             &actions,
             ImpactContext::default(),
         );

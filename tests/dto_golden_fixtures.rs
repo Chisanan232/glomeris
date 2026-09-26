@@ -42,9 +42,9 @@ use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLET
 use glomeris::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, AutopilotAskPreauthorizationReport,
     AutopilotCeilingsReport, AutopilotEnvelopeReport, DaemonStatusReport, DetectCandidateReport,
-    DetectReport, ExecuteReport, HistoryEventReport, HistoryReport, LlmCheckReport,
-    LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport, OfferedAction,
-    StatusReport,
+    DetectReport, DetectorHealthReport, ExecuteReport, HistoryEventReport, HistoryReport,
+    LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
+    OfferedAction, StatusReport,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -180,6 +180,41 @@ fn detect_report_matches_golden_fixture() {
                 ),
             },
         ],
+        // All three outcomes in one fixture (HORO-1484), because the shape
+        // that matters is the one a consumer has to tell apart: a detector
+        // that found nothing and a detector that failed differ only in
+        // `status`, and `reason` is the field that says why. Pinning them
+        // together is what stops `failed` from quietly serializing as
+        // something a caller would read as a clean result.
+        detectors: vec![
+            DetectorHealthReport {
+                detector: "cargo_target_dir".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "docker_build_cache".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "node_modules".to_string(),
+                status: "tool_absent",
+                candidates_found: 0,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "project_roots".to_string(),
+                status: "failed",
+                candidates_found: 0,
+                reason: Some("permission denied reading /Users/dev/private".to_string()),
+            },
+        ],
+        // False because of `project_roots` above: two candidates were
+        // found, and the list they are in is still not the whole picture.
+        discovery_complete: false,
     };
     assert_matches_fixture(&report, "detect_report.json");
 }

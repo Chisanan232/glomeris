@@ -94,6 +94,21 @@ final class ScanState: ObservableObject {
     @Published var progressStatusText: String?
     @Published var lastErrorMessage: String?
 
+    /// Detectors whose probe failed during the last scan (HORO-1484).
+    ///
+    /// Held next to `candidates` and written in the same assignment, because
+    /// the two are halves of one answer: the list is only a complete account
+    /// of what can be reclaimed if this is empty. Non-empty means `detect`
+    /// itself succeeded but part of the search never answered, so no surface
+    /// may present `candidates` — including an empty `candidates` — as the
+    /// whole picture.
+    ///
+    /// Deliberately not folded into `lastErrorMessage`: that field means the
+    /// scan failed and its list is stale, which is a different situation with
+    /// a different presentation. Here the list is current and real as far as
+    /// it goes.
+    @Published var failedDetectors: [DetectorHealthReportDto] = []
+
     /// HORO-1307 view controls. Both default to "show me everything, in the
     /// order Glomeris recommends", so the panel a user opens for the first
     /// time is never silently filtered.

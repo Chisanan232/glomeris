@@ -352,9 +352,80 @@ enum ProgressStatusText {
         switch event {
         case .detectorStarted(let detector):
             return "Scanning: \(detector)…"
-        case .detectorFinished(let detector, let candidatesFound):
+        case .detectorFinished(let detector, let candidatesFound, let outcome, _):
+            // HORO-1484: a detector that failed also reports zero candidates,
+            // so the count alone renders "Finished homebrew_cache (0 found)" —
+            // a sentence that says a probe which never ran found nothing. The
+            // outcome is what distinguishes them, and the line quotes it rather
+            // than re-deriving a verdict from the count.
+            //
+            // `reason` is deliberately dropped here and not in the state
+            // message: this is a transient one-liner overwritten by the next
+            // detector, and a detector's own error text is long enough to push
+            // the rest of the line out of a 340pt panel. It survives in
+            // `ScanState.failedDetectors`, which is what the panel still shows
+            // after the scan ends.
+            if outcome == "failed" {
+                return "Finished \(detector) (did not complete)"
+            }
             return "Finished \(detector) (\(candidatesFound) found)"
         }
+    }
+}
+
+/// How the panel says "part of the search never answered" (HORO-1484).
+///
+/// A pure type rather than three computed properties on the view, for the same
+/// reason `ProgressStatusText` above is one: the view's own state is `private`
+/// and not reachable from a test, so wording that lives there can only be
+/// checked by grepping the source — and a guard that reads source text cannot
+/// tell whether the sentence it found is the one a user would actually see.
+/// Here the decision is a function of the failed-detector list alone, and the
+/// tests call it.
+///
+/// Both messages return `nil` for an empty list, so "only say this when the
+/// search really was incomplete" is one rule in one place rather than an `if`
+/// repeated at each call site.
+enum IncompleteDiscoveryWording {
+    /// One sentence naming what did not answer. Shared by both messages below,
+    /// so the empty-list state and the additive advisory cannot describe the
+    /// same failure differently.
+    ///
+    /// Names the detectors rather than only counting them: "1 check did not
+    /// finish" gives a user nothing to act on, whereas `homebrew_cache` tells
+    /// them which tool to look at. The reason string comes from the CLI verbatim
+    /// and is the detector's own account of what went wrong — this adds no
+    /// interpretation of its own.
+    static func detail(for failedDetectors: [DetectorHealthReportDto]) -> String? {
+        if failedDetectors.isEmpty { return nil }
+        let described = failedDetectors.map { detector -> String in
+            guard let reason = detector.reason, !reason.isEmpty else { return detector.detector }
+            return "\(detector.detector) (\(reason))"
+        }
+        let subject = failedDetectors.count == 1 ? "check" : "checks"
+        return "\(failedDetectors.count) \(subject) did not finish, "
+            + "so this is not a complete picture: \(described.joined(separator: ", "))."
+    }
+
+    /// Replaces the "Nothing worth reclaiming" all-clear when the list is empty
+    /// AND something failed.
+    ///
+    /// The title deliberately claims less than the all-clear it stands in for:
+    /// it describes where Glomeris managed to look, not what is on the disk.
+    static func emptyListMessage(
+        for failedDetectors: [DetectorHealthReportDto]
+    ) -> GlomerisStateMessage? {
+        guard let detail = detail(for: failedDetectors) else { return nil }
+        return .partialSearch("Nothing found where Glomeris could look", detail: detail)
+    }
+
+    /// Sits *below* a non-empty list, never in place of it. The rows found are
+    /// real; what they may not do is look like the whole account.
+    static func advisoryMessage(
+        for failedDetectors: [DetectorHealthReportDto]
+    ) -> GlomerisStateMessage? {
+        guard let detail = detail(for: failedDetectors) else { return nil }
+        return .partialSearch("This list may be incomplete", detail: detail)
     }
 }
 
@@ -418,6 +489,24 @@ struct CandidatesSectionView: View {
                 GlomerisStateMessageView(message: stateMessage)
             } else {
                 rows
+            }
+
+            // HORO-1484, and additive for the same reason the failure below is:
+            // the rows above are real as far as they go, so they stay on screen.
+            // What they may not do is stand there looking like the whole account
+            // of what could be reclaimed when one of the places Glomeris looks
+            // never answered.
+            //
+            // Suppressed when the state message above is already carrying the
+            // same sentence — an empty list after an incomplete search says it
+            // once. Compared against the shared producer rather than a re-check
+            // of the same conditions, so the two cannot disagree about when they
+            // apply.
+            if let advisory = IncompleteDiscoveryWording.advisoryMessage(
+                for: scan.failedDetectors),
+                stateMessage
+                    != IncompleteDiscoveryWording.emptyListMessage(for: scan.failedDetectors) {
+                GlomerisStateMessageView(message: advisory)
             }
 
             // Additive, never a replacement — the same rule the status card
@@ -570,6 +659,13 @@ struct CandidatesSectionView: View {
                 detail: "Refresh to look for space you can reclaim."
             )
         }
+        // HORO-1484: checked before the all-clear below, because "nothing worth
+        // reclaiming" is a claim about the machine and this scan did not earn
+        // it — one of the places Glomeris looks never answered, so whatever is
+        // there is unknown rather than absent.
+        if let partial = IncompleteDiscoveryWording.emptyListMessage(for: scan.failedDetectors) {
+            return partial
+        }
         return .empty(
             "Nothing worth reclaiming",
             detail: "Everything Glomeris can see is either in use or already small."
@@ -712,6 +808,10 @@ struct CandidatesSectionView: View {
                 }
             )
             scan.candidates = result.output.candidates
+            // Written in the same turn as `candidates`, from the same report
+            // (HORO-1484): the list and whether the search that produced it
+            // completed must never be one scan out of step.
+            scan.failedDetectors = result.output.failedDetectors
             scan.lastScannedAt = Date()
         } catch {
             scan.lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")

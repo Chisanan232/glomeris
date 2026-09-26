@@ -31,5 +31,29 @@
       "offered_actions": [],
       "refusal_reason": "no registered cleanup action for this resource kind"
     }
-  ]
+  ],
+  "detectors": [
+    {
+      "detector": "cargo_target_dir",
+      "status": "found",
+      "candidates_found": 1
+    },
+    {
+      "detector": "docker_build_cache",
+      "status": "found",
+      "candidates_found": 1
+    },
+    {
+      "detector": "node_modules",
+      "status": "tool_absent",
+      "candidates_found": 0
+    },
+    {
+      "detector": "project_roots",
+      "status": "failed",
+      "candidates_found": 0,
+      "reason": "permission denied reading /Users/dev/private"
+    }
+  ],
+  "discovery_complete": false
 }

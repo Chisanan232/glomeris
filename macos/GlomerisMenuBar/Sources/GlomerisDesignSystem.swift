@@ -468,6 +468,24 @@ struct GlomerisStateMessage: Equatable {
         empty(title, detail: detail, symbolName: "line.3.horizontal.decrease.circle")
     }
 
+    /// Nothing to show because part of the search never answered (HORO-1484)
+    /// — an emptiness that is not a fact about the machine either, because
+    /// nobody finished looking.
+    ///
+    /// The fourth in the family above, for the same reason the first three
+    /// exist. `empty`'s checkmark would claim the clean bill of health this
+    /// one specifically has not earned: a detector whose probe failed means
+    /// whatever it would have found is unknown, so "nothing worth
+    /// reclaiming" is a claim about a search that did not complete.
+    /// `notLookedYet` is wrong too — a scan did run. `failure` would be an
+    /// overstatement in the other direction: `detect` itself succeeded, the
+    /// list is real as far as it goes, and dressing the whole section as
+    /// broken would bury the candidates that were found. So: neutral tone,
+    /// and a glyph that says the answer is incomplete rather than good.
+    static func partialSearch(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
+        empty(title, detail: detail, symbolName: "questionmark.circle")
+    }
+
     /// Something the user asked for happened. `message` is expected to be
     /// the text the CLI's own report produced (see
     /// `describeExecuteOutcome`), so this reports a result rather than
