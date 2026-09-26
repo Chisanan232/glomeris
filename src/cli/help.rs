@@ -41,12 +41,23 @@
 
 /// Whether running a command can change the filesystem.
 ///
-/// Deliberately three states rather than a `bool`, because the middle one is
+/// Deliberately more states than a `bool`, because the ones in the middle are
 /// the product's whole thesis: `llm-plan` contacts a model and produces a
-/// proposal, and a proposal is not a mutation. A user who cannot tell
-/// "suggests" from "does" either fears the safe commands or trusts the
-/// dangerous ones.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// proposal, and a proposal is not a mutation; `daemon install` writes a
+/// launch agent and deletes nothing of yours. A user who cannot tell
+/// "suggests" from "does", or "sets itself up" from "deletes your files",
+/// either fears the safe commands or trusts the dangerous ones.
+///
+/// # The variant order is load-bearing (HORO-1485)
+///
+/// `Ord` is derived, and the variants are declared weakest-first, so
+/// `a.max(b)` is "the stronger claim of the two". A command that dispatches
+/// subcommands declares the strongest safety reachable through it, and
+/// `tests::command_safety_covers_every_reachable_subcommand` compares the two
+/// with exactly that ordering. Reordering these variants would silently
+/// change what that test asserts, which is why the order is documented here
+/// rather than left to look alphabetical-by-accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Safety {
     /// Reads and reports. Changes nothing, sends nothing.
     ReadOnly,
@@ -54,17 +65,38 @@ pub enum Safety {
     /// provider (`llm-plan`, `llm-check`) — which is network access, not
     /// filesystem mutation, and is called out separately where it applies.
     Advisory,
+    /// Writes files Glomeris itself owns, and nothing else: the launch agent
+    /// plist (`daemon install`, removed again by `daemon uninstall`), the
+    /// monitor's own history and heartbeat records (`daemon run`), the
+    /// Autopilot envelope (`autopilot enable`, `autopilot revoke`).
+    ///
+    /// Its own state, not your data — which is why it is neither `ReadOnly`
+    /// nor `Destructive` (HORO-1485). Calling `daemon install` read-only was a
+    /// false reassurance: it writes a plist and loads a background agent.
+    /// Calling it destructive would be a false warning, and a reader who has
+    /// been warned once for nothing discounts the next warning too.
+    WritesOwnState,
     /// Can delete data, under policy control and never unconditionally.
     Destructive,
 }
 
 impl Safety {
+    /// Every state, weakest first. Iterated by tests so that adding a variant
+    /// cannot quietly leave it uncovered by the ones that check every label.
+    pub const ALL: &'static [Safety] = &[
+        Safety::ReadOnly,
+        Safety::Advisory,
+        Safety::WritesOwnState,
+        Safety::Destructive,
+    ];
+
     /// The word used in per-command help, on its own line above the
     /// description.
     pub fn label(self) -> &'static str {
         match self {
             Safety::ReadOnly => "Read-only — changes nothing.",
             Safety::Advisory => "Advisory — proposes, never executes.",
+            Safety::WritesOwnState => "Writes only Glomeris's own state — never your files.",
             Safety::Destructive => "Can delete data — every deletion is policy-gated.",
         }
     }
@@ -119,6 +151,51 @@ impl Group {
     }
 }
 
+/// One verb a command dispatches on, with the safety of *that verb* (HORO-1485).
+///
+/// # Why a subcommand needs its own safety and not just a description
+///
+/// `glomeris daemon --help` printed "Read-only — changes nothing." above a
+/// list containing `install` and `uninstall`. The description of each verb was
+/// accurate — "Write and load the launch agent" — and the banner over them
+/// was false, which is the worse of the two to get wrong: a reader who
+/// believes the banner does not read the descriptions looking for a
+/// contradiction.
+///
+/// The verbs used to be [`OptionSpec`] entries, which is where the false
+/// banner came from: an option cannot carry a consequence, so a command whose
+/// consequences differ per verb had nowhere to say so and had to pick one
+/// claim for all of them. A subcommand is not an option, so it gets its own
+/// type and its own [`Safety`].
+pub struct SubcommandSpec {
+    /// The literal verb, e.g. `"install"`. Matched against `main.rs`'s
+    /// dispatch by `tests/subcommand_safety_is_honest.rs`, so a verb the
+    /// binary accepts cannot go undeclared here — and therefore cannot be
+    /// reachable without a stated consequence.
+    pub name: &'static str,
+    /// What may follow the verb, rendered after it, e.g. `"[--force]"`. Empty
+    /// when the verb takes nothing.
+    pub args: &'static str,
+    /// What *this verb* can do. The command's own [`CommandSpec::safety`] is
+    /// the strongest of these; see
+    /// `tests::command_safety_covers_every_reachable_subcommand`.
+    pub safety: Safety,
+    pub description: &'static str,
+}
+
+impl SubcommandSpec {
+    /// The verb as it appears in help: the name, plus its arguments when it
+    /// has any. One function so the rendered form cannot drift from the name
+    /// the dispatch grounding test matches.
+    pub fn syntax(&self) -> String {
+        if self.args.is_empty() {
+            self.name.to_string()
+        } else {
+            format!("{} {}", self.name, self.args)
+        }
+    }
+}
+
 /// One named option and what it does, for a command's `Options` block.
 pub struct OptionSpec {
     /// Rendered verbatim in the left column, e.g. `"--project-root <path>"`.
@@ -147,6 +224,13 @@ pub struct CommandSpec {
     /// The literal first positional argument, e.g. `"llm-plan"`.
     pub name: &'static str,
     pub group: Group,
+    /// The strongest thing typing this command's name can lead to.
+    ///
+    /// For a command that dispatches verbs, that is the strongest safety in
+    /// [`CommandSpec::subcommands`] — asserted, not assumed, by
+    /// `tests::command_safety_covers_every_reachable_subcommand` (HORO-1485).
+    /// A command must never under-state here: this is the claim a reader sees
+    /// before they know which verb they will type.
     pub safety: Safety,
     /// One line for the top-level list. Kept short enough to sit in a column
     /// beside the name without wrapping on an 80-column terminal.
@@ -166,6 +250,9 @@ pub struct CommandSpec {
     /// where a command says what it will and will not do — the sentences AC 3,
     /// 4 and 5 are about.
     pub details: &'static str,
+    /// The verbs this command dispatches on, each with its own consequence.
+    /// Empty for a command that takes only flags.
+    pub subcommands: &'static [SubcommandSpec],
     pub options: &'static [OptionSpec],
     pub examples: &'static [ExampleSpec],
     /// This command's own exit codes. Only the ones that differ from, or
@@ -195,6 +282,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         details: "Reads the filesystem's free space and reports which pressure state that \
                   falls into, together with the thresholds used to decide. Runs no detectors, \
                   so it is fast and says nothing about individual resources.",
+        subcommands: &[],
         options: &[OptionSpec {
             syntax: "--json",
             description: "Print a StatusReport as JSON on stdout instead of prose.",
@@ -216,6 +304,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   size picture: no evidence correlation, no policy classification, and no \
                   notion of whether anything found is reclaimable — for that, use `detect`. \
                   Note the default path is the current directory, not your whole machine.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "[path]",
@@ -257,6 +346,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   nothing and sends nothing anywhere. A candidate's size is not a safety \
                   judgement: a large AUTO_SAFE cache is an opportunity, and a small PROTECTED \
                   resource is still protected.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "--project-root <path>",
@@ -303,6 +393,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   is the command to reach for when a classification looks wrong — it shows \
                   the reasoning, not just the verdict. With --json it also emits the \
                   fingerprint_token that `execute` requires for an ASK-classified resource.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "<resource_id_or_path>",
@@ -351,6 +442,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   it without running it. --dry-run is required and there is no flag that \
                   removes it: this command has no executing mode to fall into by typo. To \
                   actually act, use `execute` for one resource or `free` for a target.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "--dry-run",
@@ -397,6 +489,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   this process collected itself. A model cannot override policy, supply a \
                   path, or run a command. Requires a BYOK provider you configure; no \
                   provider is built into Glomeris.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "--schema",
@@ -462,6 +555,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   consults no policy, so it describes nothing about this machine to the \
                   provider. It never prints your credential. Use it to tell a wrong address \
                   apart from a wrong key apart from a wrong model name.",
+        subcommands: &[],
         options: &[OptionSpec {
             syntax: "--json",
             description: "Print an LlmCheckReport as JSON on stdout.",
@@ -514,6 +608,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   refuses unconditionally: no combination of flags that exists can authorize \
                   it. Even after authorization, a revalidation immediately before deletion \
                   aborts the plan if the resource changed in between.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "--action-id <id>",
@@ -609,6 +704,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   the target is unreachable that way, it reports that rather than reaching \
                   further. Holds the execution lock for the whole run, so it exits 75 if \
                   another invocation already holds it.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "--target <N%|NB>",
@@ -639,6 +735,7 @@ pub const COMMANDS: &[CommandSpec] = &[
                   without any of the machinery that could itself need space. Holds the \
                   execution lock for the whole run, so it exits 75 if another invocation \
                   already holds it.",
+        subcommands: &[],
         options: &[],
         examples: &[ExampleSpec {
             command: "glomeris emergency",
@@ -681,31 +778,41 @@ pub const COMMANDS: &[CommandSpec] = &[
                   an action, supply a path, or raise a limit. There is no live-provider mode: \
                   asking a model is `llm-plan`'s job, so no deletion here waits on a network \
                   call.",
-        options: &[
-            OptionSpec {
-                syntax: "show",
+        subcommands: &[
+            SubcommandSpec {
+                name: "show",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
                 description: "Print the stored envelope and where it lives. The default, so a \
                               bare `glomeris autopilot` reads rather than acts.",
             },
-            OptionSpec {
-                syntax: "enable",
+            SubcommandSpec {
+                name: "enable",
+                args: "",
+                safety: Safety::WritesOwnState,
                 description: "Write a new envelope from the flags on this command line and \
                               turn Autopilot on. Requires --kinds. Replaces the previous \
                               envelope rather than adding to it, so one line states the whole \
                               grant.",
             },
-            OptionSpec {
-                syntax: "revoke",
+            SubcommandSpec {
+                name: "revoke",
+                args: "",
+                safety: Safety::WritesOwnState,
                 description: "Turn Autopilot off. Takes effect on the next run — every run \
                               re-reads the file, so there is nothing to restart. Limits are \
                               kept so a later enable cannot return with limits you never read.",
             },
-            OptionSpec {
-                syntax: "run",
+            SubcommandSpec {
+                name: "run",
+                args: "",
+                safety: Safety::Destructive,
                 description: "Consider the discovered candidates within the envelope. Without \
                               --dry-run this deletes. Holds the execution lock, so it exits 75 \
                               if another invocation already holds it.",
             },
+        ],
+        options: &[
             OptionSpec {
                 syntax: "--kinds <tag,...>",
                 description: "For `enable`: the resource kinds the grant covers, by the tags \
@@ -818,6 +925,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         details: "A bounded tail of the pressure-state changes the monitor recorded. This is \
                   the machine's disk history, not a record of actions taken — for what was \
                   actually executed, use `actions history`.",
+        subcommands: &[],
         options: &[
             OptionSpec {
                 syntax: "--limit <N>",
@@ -845,16 +953,22 @@ pub const COMMANDS: &[CommandSpec] = &[
                   set an LLM plan or an `execute` call can select from, and nothing else. \
                   `actions history` shows a bounded tail of the audit log of real executions: \
                   what ran, against what, and how it ended.",
-        options: &[
-            OptionSpec {
-                syntax: "list",
+        subcommands: &[
+            SubcommandSpec {
+                name: "list",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
                 description: "Show the registered actions and which resource kind each \
                               applies to.",
             },
-            OptionSpec {
-                syntax: "history",
+            SubcommandSpec {
+                name: "history",
+                args: "[--json] [--limit <N>]",
+                safety: Safety::ReadOnly,
                 description: "Show a bounded tail of the real-execution audit log.",
             },
+        ],
+        options: &[
             OptionSpec {
                 syntax: "--limit <N>",
                 description: "For `history`: how many of the most recent records to show.",
@@ -881,32 +995,43 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "daemon",
         group: Group::Service,
-        safety: Safety::ReadOnly,
+        safety: Safety::WritesOwnState,
         summary: "Install, remove, inspect or run the background monitor.",
         usage: &["daemon <install [--force]|uninstall|status [--json]|run>"],
         details: "Manages the launch agent that watches disk pressure and notifies you. The \
                   monitor observes and notifies; it does not delete anything on its own, so \
                   installing it cannot cost you data. `daemon run` is the foreground entry \
                   point launchd itself calls — you rarely need it by hand.",
-        options: &[
-            OptionSpec {
-                syntax: "install [--force]",
+        subcommands: &[
+            SubcommandSpec {
+                name: "install",
+                args: "[--force]",
+                safety: Safety::WritesOwnState,
                 description: "Write and load the launch agent. --force overwrites an existing \
                               plist.",
             },
-            OptionSpec {
-                syntax: "uninstall",
+            SubcommandSpec {
+                name: "uninstall",
+                args: "",
+                safety: Safety::WritesOwnState,
                 description: "Unload and remove the launch agent.",
             },
-            OptionSpec {
-                syntax: "status [--json]",
+            SubcommandSpec {
+                name: "status",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
                 description: "Whether the agent is installed, loaded and recently alive.",
             },
-            OptionSpec {
-                syntax: "run",
-                description: "Run the monitor in the foreground. Normally launchd's job.",
+            SubcommandSpec {
+                name: "run",
+                args: "",
+                safety: Safety::WritesOwnState,
+                description: "Run the monitor in the foreground, recording pressure history and \
+                              a heartbeat under Library/Application Support/Glomeris. Normally \
+                              launchd's job.",
             },
         ],
+        options: &[],
         examples: &[
             ExampleSpec {
                 command: "glomeris daemon install",
@@ -1094,6 +1219,46 @@ const FIRST_STEPS: &[ExampleSpec] = &[
     },
 ];
 
+/// The safety line under a command's usage block (HORO-1485).
+///
+/// One label when every way into the command has the same consequence — which
+/// is every flags-only command, and `actions`, whose two verbs both only read.
+/// When the verbs differ, a single label would have to be either the weakest
+/// (a false reassurance: `daemon`'s "changes nothing" over `install`) or the
+/// strongest (a false warning: "can delete data" over `autopilot show`), so
+/// instead the line says the safety is per verb, states the strongest, and
+/// sends the reader to the block that labels each one. Nothing here claims
+/// anything about a verb that is not true of it.
+fn render_safety_statement(command: &CommandSpec) -> String {
+    let strongest = command
+        .subcommands
+        .iter()
+        .map(|s| s.safety)
+        .fold(command.safety, Safety::max);
+
+    let uniform = command
+        .subcommands
+        .iter()
+        .all(|s| s.safety == command.safety);
+
+    if uniform {
+        format!("{}\n", strongest.label())
+    } else {
+        format!(
+            "{}\n",
+            wrap(
+                &format!(
+                    "Safety depends on the subcommand; each is labelled below. The strongest \
+                     of them: {}",
+                    strongest.label()
+                ),
+                78,
+                "",
+            )
+        )
+    }
+}
+
 /// Per-command `glomeris <command> --help`.
 pub fn render_command_help(command: &CommandSpec) -> String {
     let mut out = String::new();
@@ -1104,8 +1269,18 @@ pub fn render_command_help(command: &CommandSpec) -> String {
     ));
     out.push_str(&render_command_usage(command));
     out.push('\n');
-    out.push_str(&format!("{}\n\n", command.safety.label()));
+    out.push_str(&render_safety_statement(command));
+    out.push('\n');
     out.push_str(&format!("{}\n", wrap(command.details, 78, "")));
+
+    if !command.subcommands.is_empty() {
+        out.push_str("\nSubcommands\n");
+        for sub in command.subcommands {
+            out.push_str(&format!("  {}\n", sub.syntax()));
+            out.push_str(&format!("{}\n", wrap(sub.safety.label(), 74, "      ")));
+            out.push_str(&format!("{}\n", wrap(sub.description, 74, "      ")));
+        }
+    }
 
     if !command.options.is_empty() {
         out.push_str("\nOptions\n");
@@ -1387,6 +1562,122 @@ mod tests {
         );
     }
 
+    /// HORO-1485 AC 4, as a property of the table rather than of any
+    /// particular sentence: whatever claim a command makes about itself has to
+    /// be true of every verb reachable through it.
+    ///
+    /// `==` and not `>=` deliberately, because both directions are the same
+    /// defect wearing different clothes. Under-stating is a false
+    /// reassurance — `daemon` printed "Read-only — changes nothing." over
+    /// `install`, which writes a launch agent plist and loads it. Over-stating
+    /// is a false warning, and a reader warned once for nothing discounts the
+    /// next warning too, so a command whose verbs all only read must not be
+    /// labelled as if one of them could delete. Equality is what rules out
+    /// both without a second assertion.
+    #[test]
+    fn command_safety_covers_every_reachable_subcommand() {
+        for command in COMMANDS {
+            let Some(strongest) = command.subcommands.iter().map(|s| s.safety).max() else {
+                continue;
+            };
+
+            let verbs: Vec<String> = command
+                .subcommands
+                .iter()
+                .map(|s| format!("{} ({:?})", s.name, s.safety))
+                .collect();
+
+            assert_eq!(
+                command.safety,
+                strongest,
+                "`glomeris {} --help` declares {:?}, but the strongest thing reachable through \
+                 it is {:?}: {}",
+                command.name,
+                command.safety,
+                strongest,
+                verbs.join(", ")
+            );
+        }
+    }
+
+    /// The same property one layer out, at the text a user actually reads: if
+    /// the banner under the usage block is a single safety label, that label is
+    /// true of every verb under it. Otherwise it must be the per-verb form.
+    ///
+    /// Separate from the test above because a correct table rendered through a
+    /// banner that ignores it would still print the false claim, and the claim
+    /// is the thing this ticket is about.
+    #[test]
+    fn a_single_label_banner_is_true_of_every_verb_under_it() {
+        for command in COMMANDS {
+            let banner = render_safety_statement(command).trim().to_string();
+
+            match Safety::ALL.iter().find(|s| s.label() == banner) {
+                Some(claim) => {
+                    for sub in command.subcommands {
+                        assert_eq!(
+                            sub.safety, *claim,
+                            "`glomeris {} --help` prints {banner:?} above `{}`, which is {:?}",
+                            command.name, sub.name, sub.safety
+                        );
+                    }
+                }
+                None => {
+                    assert!(
+                        !command.subcommands.is_empty(),
+                        "{} has no subcommands, so its banner should be one safety label, not \
+                         {banner:?}",
+                        command.name
+                    );
+                    assert!(
+                        banner.contains("depends on the subcommand"),
+                        "{}'s banner is neither a safety label nor the per-verb form: {banner:?}",
+                        command.name
+                    );
+                    assert!(
+                        banner.contains(command.safety.label()),
+                        "{}'s per-verb banner should still name the strongest claim, {:?}",
+                        command.name,
+                        command.safety
+                    );
+                }
+            }
+        }
+    }
+
+    /// `SubcommandSpec::name` is matched against `main.rs`'s dispatch literals
+    /// by `tests/subcommand_safety_is_honest.rs`, so the name has to be the
+    /// bare verb. Anything else belongs in `args`, where it is rendered but
+    /// never matched.
+    #[test]
+    fn a_subcommand_name_is_a_bare_verb() {
+        for command in COMMANDS {
+            for sub in command.subcommands {
+                assert!(
+                    !sub.name.contains(' ') && !sub.name.starts_with('-'),
+                    "{} declares a verb that is not a bare word: {:?}",
+                    command.name,
+                    sub.name
+                );
+                assert!(
+                    sub.args.is_empty() || sub.args.starts_with('[') || sub.args.starts_with('<'),
+                    "{} {}'s argument hint should be bracketed or empty: {:?}",
+                    command.name,
+                    sub.name,
+                    sub.args
+                );
+                assert_eq!(
+                    sub.syntax(),
+                    if sub.args.is_empty() {
+                        sub.name.to_string()
+                    } else {
+                        format!("{} {}", sub.name, sub.args)
+                    }
+                );
+            }
+        }
+    }
+
     /// AC 4, stated as a property rather than as a substring of one sentence:
     /// the planner is in the advisory group, is marked advisory, and its help
     /// says so in words a user reads before running it.
@@ -1431,7 +1722,7 @@ mod tests {
     /// one-line label.
     #[test]
     fn safety_labels_never_borrow_policy_vocabulary() {
-        for safety in [Safety::ReadOnly, Safety::Advisory, Safety::Destructive] {
+        for safety in Safety::ALL {
             let label = safety.label();
             for policy_token in ["AUTO_SAFE", "ASK", "PROTECTED"] {
                 assert!(

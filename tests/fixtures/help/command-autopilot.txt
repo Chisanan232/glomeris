@@ -6,7 +6,8 @@ usage: glomeris autopilot <show|enable|revoke|run> [--kinds <tag,...>]
                 [--preauthorize-ask <kind>:<reason>] [--json] [--dry-run]
                 [--plan-file <path>] [--project-root <path>]...
 
-Can delete data — every deletion is policy-gated.
+Safety depends on the subcommand; each is labelled below. The strongest of
+them: Can delete data — every deletion is policy-gated.
 
 A standing grant with limits, written down where you can read it. Only `run`
 can delete anything, and only what the grant already allowed: an envelope
@@ -24,22 +25,28 @@ this machine already found. It cannot add a candidate, choose an action,
 supply a path, or raise a limit. There is no live-provider mode: asking a
 model is `llm-plan`'s job, so no deletion here waits on a network call.
 
-Options
-  show
+Subcommands
+  show [--json]
+      Read-only — changes nothing.
       Print the stored envelope and where it lives. The default, so a bare
       `glomeris autopilot` reads rather than acts.
   enable
+      Writes only Glomeris's own state — never your files.
       Write a new envelope from the flags on this command line and turn
       Autopilot on. Requires --kinds. Replaces the previous envelope
       rather than adding to it, so one line states the whole grant.
   revoke
+      Writes only Glomeris's own state — never your files.
       Turn Autopilot off. Takes effect on the next run — every run
       re-reads the file, so there is nothing to restart. Limits are kept
       so a later enable cannot return with limits you never read.
   run
+      Can delete data — every deletion is policy-gated.
       Consider the discovered candidates within the envelope. Without
       --dry-run this deletes. Holds the execution lock, so it exits 75 if
       another invocation already holds it.
+
+Options
   --kinds <tag,...>
       For `enable`: the resource kinds the grant covers, by the tags
       `actions list` prints, comma-separated. `unknown` is refused.
