@@ -778,32 +778,41 @@ pub const COMMANDS: &[CommandSpec] = &[
                   an action, supply a path, or raise a limit. There is no live-provider mode: \
                   asking a model is `llm-plan`'s job, so no deletion here waits on a network \
                   call.",
-        subcommands: &[],
-        options: &[
-            OptionSpec {
-                syntax: "show",
+        subcommands: &[
+            SubcommandSpec {
+                name: "show",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
                 description: "Print the stored envelope and where it lives. The default, so a \
                               bare `glomeris autopilot` reads rather than acts.",
             },
-            OptionSpec {
-                syntax: "enable",
+            SubcommandSpec {
+                name: "enable",
+                args: "",
+                safety: Safety::WritesOwnState,
                 description: "Write a new envelope from the flags on this command line and \
                               turn Autopilot on. Requires --kinds. Replaces the previous \
                               envelope rather than adding to it, so one line states the whole \
                               grant.",
             },
-            OptionSpec {
-                syntax: "revoke",
+            SubcommandSpec {
+                name: "revoke",
+                args: "",
+                safety: Safety::WritesOwnState,
                 description: "Turn Autopilot off. Takes effect on the next run — every run \
                               re-reads the file, so there is nothing to restart. Limits are \
                               kept so a later enable cannot return with limits you never read.",
             },
-            OptionSpec {
-                syntax: "run",
+            SubcommandSpec {
+                name: "run",
+                args: "",
+                safety: Safety::Destructive,
                 description: "Consider the discovered candidates within the envelope. Without \
                               --dry-run this deletes. Holds the execution lock, so it exits 75 \
                               if another invocation already holds it.",
             },
+        ],
+        options: &[
             OptionSpec {
                 syntax: "--kinds <tag,...>",
                 description: "For `enable`: the resource kinds the grant covers, by the tags \
