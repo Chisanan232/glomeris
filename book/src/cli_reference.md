@@ -30,7 +30,7 @@ the binary and its tests.
 | Invocation | What it prints |
 |---|---|
 | `glomeris --help` / `-h` / `help` | Every command, grouped by what it does to your machine, with a one-line summary each. |
-| `glomeris <command> --help` / `-h` | That command's usage, safety statement, flags, examples, exit codes and related commands. |
+| `glomeris <command> --help` / `-h` | That command's usage, safety statement, its subcommands (each with its own safety label), flags, examples, exit codes and related commands. |
 | `glomeris help <command>` | Identical to `glomeris <command> --help`. |
 | `glomeris help exit-codes` | The exit-status reference (see [Exit codes](#exit-codes)). |
 | `glomeris help <unknown-topic>` | The list of topics that exist, to stderr, exit 2. |
@@ -43,11 +43,57 @@ delete. A group heading describes consequence, not category: `INSPECT` says
 "nothing is changed", and `ACT` says its commands delete data and that every
 deletion is policy-gated.
 
-Note that a command's group and its per-command safety line describe only
-whether *the command itself* writes to the filesystem. They are not policy
+Note that a command's group and its safety line describe only whether
+*Glomeris itself* writes to the filesystem when you run it. They are not policy
 classifications: `AUTO_SAFE`, `ASK` and `PROTECTED` classify *resources*, are
 decided by the policy engine, and never appear in a help safety label. See
 [Safety Model](safety_model.md).
+
+### Safety is declared per verb, not only per command
+
+Four labels exist, in ascending order of consequence:
+
+| Label | Means |
+|---|---|
+| `Read-only — changes nothing.` | Nothing is written. |
+| `Advisory — proposes, never executes.` | Produces a plan; executes none of it. |
+| `Writes only Glomeris's own state — never your files.` | Writes the launch agent plist, the monitor's history and heartbeat, or the Autopilot envelope. Nothing you own. |
+| `Can delete data — every deletion is policy-gated.` | Deletes. |
+
+For a command that takes subcommands, the consequence is a property of the
+*verb*, not of the command name: `daemon install` writes a launch agent while
+`daemon status` reads, and `autopilot run` deletes while `autopilot show`
+prints a config file. Until HORO-1485 one label was declared per command, so
+`glomeris daemon --help` printed "Read-only — changes nothing." above
+`install`, `uninstall` and `run`, and `glomeris autopilot --help` printed "Can
+delete data" above `show`. No wording could have fixed either: the weakest
+label is a false reassurance and the strongest a false warning, which is why
+relabelling `daemon` as destructive was not an acceptable fix.
+
+Each verb now carries its own label, printed beside it in the `Subcommands`
+block. The command's own safety line is the strongest claim reachable through
+it, and when its verbs disagree it says so explicitly rather than picking one
+of them:
+
+```text
+Safety depends on the subcommand; each is labelled below. The strongest of
+them: Writes only Glomeris's own state — never your files.
+```
+
+Two tests keep this honest, and they are deliberately not tests about strings.
+`src/cli/help.rs`'s `command_safety_covers_every_reachable_subcommand` asserts
+the command's label *equals* the strongest of its verbs' — equality in both
+directions, because under-stating and over-stating are both false — and
+`a_single_label_banner_is_true_of_every_verb_under_it` asserts the same of the
+rendered banner, since a correct table printed through a banner that ignored it
+would still print a false claim. Neither could have caught the original defect
+on its own: with no subcommands declared, both pass vacuously.
+`tests/subcommand_safety_is_honest.rs` closes that gap from outside the table —
+it reads `src/main.rs`'s dispatch arms, so a verb the binary accepts cannot go
+undeclared, and it runs every surface labelled read-only against a disposable
+`HOME` and requires the tree to be byte-for-byte unchanged, with
+`autopilot enable` as the positive control that proves the observation would
+notice a write.
 
 Two surfaces are narrower on purpose. An unrecognized top-level command gets a
 pointer rather than the manual — it previously reprinted the aggregate usage of
