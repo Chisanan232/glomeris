@@ -1562,6 +1562,122 @@ mod tests {
         );
     }
 
+    /// HORO-1485 AC 4, as a property of the table rather than of any
+    /// particular sentence: whatever claim a command makes about itself has to
+    /// be true of every verb reachable through it.
+    ///
+    /// `==` and not `>=` deliberately, because both directions are the same
+    /// defect wearing different clothes. Under-stating is a false
+    /// reassurance — `daemon` printed "Read-only — changes nothing." over
+    /// `install`, which writes a launch agent plist and loads it. Over-stating
+    /// is a false warning, and a reader warned once for nothing discounts the
+    /// next warning too, so a command whose verbs all only read must not be
+    /// labelled as if one of them could delete. Equality is what rules out
+    /// both without a second assertion.
+    #[test]
+    fn command_safety_covers_every_reachable_subcommand() {
+        for command in COMMANDS {
+            let Some(strongest) = command.subcommands.iter().map(|s| s.safety).max() else {
+                continue;
+            };
+
+            let verbs: Vec<String> = command
+                .subcommands
+                .iter()
+                .map(|s| format!("{} ({:?})", s.name, s.safety))
+                .collect();
+
+            assert_eq!(
+                command.safety,
+                strongest,
+                "`glomeris {} --help` declares {:?}, but the strongest thing reachable through \
+                 it is {:?}: {}",
+                command.name,
+                command.safety,
+                strongest,
+                verbs.join(", ")
+            );
+        }
+    }
+
+    /// The same property one layer out, at the text a user actually reads: if
+    /// the banner under the usage block is a single safety label, that label is
+    /// true of every verb under it. Otherwise it must be the per-verb form.
+    ///
+    /// Separate from the test above because a correct table rendered through a
+    /// banner that ignores it would still print the false claim, and the claim
+    /// is the thing this ticket is about.
+    #[test]
+    fn a_single_label_banner_is_true_of_every_verb_under_it() {
+        for command in COMMANDS {
+            let banner = render_safety_statement(command).trim().to_string();
+
+            match Safety::ALL.iter().find(|s| s.label() == banner) {
+                Some(claim) => {
+                    for sub in command.subcommands {
+                        assert_eq!(
+                            sub.safety, *claim,
+                            "`glomeris {} --help` prints {banner:?} above `{}`, which is {:?}",
+                            command.name, sub.name, sub.safety
+                        );
+                    }
+                }
+                None => {
+                    assert!(
+                        !command.subcommands.is_empty(),
+                        "{} has no subcommands, so its banner should be one safety label, not \
+                         {banner:?}",
+                        command.name
+                    );
+                    assert!(
+                        banner.contains("depends on the subcommand"),
+                        "{}'s banner is neither a safety label nor the per-verb form: {banner:?}",
+                        command.name
+                    );
+                    assert!(
+                        banner.contains(command.safety.label()),
+                        "{}'s per-verb banner should still name the strongest claim, {:?}",
+                        command.name,
+                        command.safety
+                    );
+                }
+            }
+        }
+    }
+
+    /// `SubcommandSpec::name` is matched against `main.rs`'s dispatch literals
+    /// by `tests/subcommand_safety_is_honest.rs`, so the name has to be the
+    /// bare verb. Anything else belongs in `args`, where it is rendered but
+    /// never matched.
+    #[test]
+    fn a_subcommand_name_is_a_bare_verb() {
+        for command in COMMANDS {
+            for sub in command.subcommands {
+                assert!(
+                    !sub.name.contains(' ') && !sub.name.starts_with('-'),
+                    "{} declares a verb that is not a bare word: {:?}",
+                    command.name,
+                    sub.name
+                );
+                assert!(
+                    sub.args.is_empty() || sub.args.starts_with('[') || sub.args.starts_with('<'),
+                    "{} {}'s argument hint should be bracketed or empty: {:?}",
+                    command.name,
+                    sub.name,
+                    sub.args
+                );
+                assert_eq!(
+                    sub.syntax(),
+                    if sub.args.is_empty() {
+                        sub.name.to_string()
+                    } else {
+                        format!("{} {}", sub.name, sub.args)
+                    }
+                );
+            }
+        }
+    }
+
     /// AC 4, stated as a property rather than as a substring of one sentence:
     /// the planner is in the advisory group, is marked advisory, and its help
     /// says so in words a user reads before running it.
@@ -1606,7 +1722,7 @@ mod tests {
     /// one-line label.
     #[test]
     fn safety_labels_never_borrow_policy_vocabulary() {
-        for safety in [Safety::ReadOnly, Safety::Advisory, Safety::Destructive] {
+        for safety in Safety::ALL {
             let label = safety.label();
             for policy_token in ["AUTO_SAFE", "ASK", "PROTECTED"] {
                 assert!(
