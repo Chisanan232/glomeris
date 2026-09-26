@@ -9,11 +9,15 @@ set an LLM plan or an `execute` call can select from, and nothing else.
 `actions history` shows a bounded tail of the audit log of real executions:
 what ran, against what, and how it ended.
 
-Options
-  list
+Subcommands
+  list [--json]
+      Read-only — changes nothing.
       Show the registered actions and which resource kind each applies to.
-  history
+  history [--json] [--limit <N>]
+      Read-only — changes nothing.
       Show a bounded tail of the real-execution audit log.
+
+Options
   --limit <N>
       For `history`: how many of the most recent records to show.
   --json
