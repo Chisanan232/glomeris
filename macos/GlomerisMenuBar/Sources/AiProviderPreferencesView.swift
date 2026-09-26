@@ -467,6 +467,153 @@ enum GlomerisLlmKeyRemovalWording {
     }
 }
 
+// MARK: - Who may read the key
+
+/// Wording for the stored key's trusted-application list (HORO-1474).
+///
+/// Pure functions of `GlomerisCredentialAccess`, separate from the view, because
+/// the sentences are the deliverable here. The list itself is a row of paths; what
+/// makes it useful is knowing that an empty list is the *strictest* state and a
+/// long one is the loose one, which is the opposite of how a list of approvals
+/// usually reads.
+///
+/// Nothing here interprets a path. It does not guess which build a path belonged
+/// to, does not rank entries, and does not tell the user which ones are safe —
+/// the same restraint `CandidateActionability` imposes on refusal text.
+enum GlomerisCredentialAccessWording {
+    static let title = "Apps allowed to read this key"
+
+    /// What the section says while the answer is still being fetched, matching
+    /// the key row's own pending wording.
+    static let pendingSummary = GlomerisLlmSettingSourceWording.pendingTitle
+
+    /// The one sentence above the list.
+    static func summary(_ access: GlomerisCredentialAccess) -> String {
+        switch access {
+        case .applications(let applications):
+            return applicationsSummary(applications)
+        case .noItem:
+            return "No key is stored in your keychain by this app, so there is no list."
+        // The ACL read asks for a reference and never for data, so this is not
+        // the same refusal as an unreadable *key* — it is macOS declining to
+        // describe the item at all.
+        case .unreadable:
+            return "macOS would not say which apps may read this key."
+        case .unresponsive:
+            return
+                "Your Mac's keychain service did not answer, so Glomeris could not find out "
+                + "which apps may read this key. Nothing has been changed."
+        }
+    }
+
+    /// The count sentence, and the reason an empty list is worded as a
+    /// protection rather than as an absence.
+    ///
+    /// An empty list means no binary is pre-approved, so every read needs the
+    /// user to authorise it. Worded as "none" it would read as something
+    /// missing, and a user could reasonably try to fix it.
+    private static func applicationsSummary(
+        _ applications: [CredentialTrustedApplication]
+    ) -> String {
+        guard !applications.isEmpty else {
+            return
+                "No app is pre-approved. macOS asks you each time Glomeris reads this key, "
+                + "which is the strictest setting there is."
+        }
+
+        let count = applications.count
+        let apps = count == 1 ? "1 app" : "\(count) apps"
+        let opening =
+            "\(apps) may read this key without asking you"
+            + (count == 1 ? "." : ", in the order macOS stores them.")
+
+        let dangling = applications.filter(\.isDangling).count
+        guard dangling > 0 else { return opening }
+        let stale =
+            dangling == 1
+            ? "1 of them is no longer on this Mac"
+            : "\(dangling) of them are no longer on this Mac"
+        return
+            opening + " \(stale) — the usual result of replacing the app after the key was "
+            + "saved, since the approval is kept and the build it named is gone."
+    }
+
+    static func symbolName(_ application: CredentialTrustedApplication) -> String {
+        application.isDangling ? "questionmark.app.dashed" : "checkmark.seal"
+    }
+
+    /// What a row shows: the path, verbatim.
+    ///
+    /// Not shortened to a bundle name. The path is the whole content of the
+    /// entry — measured, a trusted application stores a POSIX path and nothing
+    /// else — and two entries can differ only in their directory.
+    static func rowTitle(_ application: CredentialTrustedApplication) -> String {
+        application.path ?? "An app this screen could not identify"
+    }
+
+    /// The qualifier under a row, or `nil` when there is nothing to qualify.
+    ///
+    /// Deliberately confined to what was measured. It says the path holds no app
+    /// now. It does not say what macOS would do if a different app were
+    /// installed at the same path: the stored entry carries a path with no
+    /// signature in it, so that is a live question, and it is not one this
+    /// screen has an answer to.
+    static func rowNote(_ application: CredentialTrustedApplication) -> String? {
+        switch application.reference {
+        case .resolves: return nil
+        case .dangling: return "No app is installed at this path now."
+        case .unnamed: return "macOS did not give this screen a path for this entry."
+        }
+    }
+
+    /// The row as one string, for the single accessibility element it is
+    /// (HORO-1451's composer, so the path and its qualifier are not run
+    /// together).
+    static func spokenLabel(_ application: CredentialTrustedApplication) -> String {
+        SpokenLabel.compose([
+            SpokenLabel.clause("Approved app", rowTitle(application)),
+            rowNote(application),
+        ])
+    }
+
+    /// AC 3, and it is the statement branch rather than the control branch.
+    ///
+    /// There is no reset button because there is no reset to put behind one.
+    /// Measured on scratch keychains, both in-place routes are dead:
+    /// `SecKeychainItemSetAccess` never returns, even with user interaction
+    /// disabled and even when the calling binary is itself in the trusted list;
+    /// and `SecACLSetContents` returns `errSecSuccess` while persisting nothing,
+    /// so a button built on it would report success over an untouched list. The
+    /// second is the worse of the two, and it is why this is a sentence: a
+    /// control that lies is worse than no control.
+    ///
+    /// What does work is already on this screen. Saving a key deletes the item
+    /// and adds it again (HORO-1455 AC 3), and a freshly added item has one
+    /// trusted application. So Save *is* the reset, and the honest thing is to
+    /// say so — including the part the user has to supply, which is the key
+    /// itself, because this app has no getter for a stored one.
+    ///
+    /// `nil` when there is nothing to shorten: an empty list is already the
+    /// strictest state, and a single live entry is the state a reset produces.
+    /// Offering the instructions there would invite a user to re-paste a key to
+    /// reach the state they are already in.
+    static func resetExplanation(
+        _ applications: [CredentialTrustedApplication]
+    ) -> String? {
+        let worthResetting = applications.count > 1 || applications.contains(where: \.isDangling)
+        guard worthResetting else { return nil }
+        return
+            "macOS has no way to shorten this list in place, and Glomeris will not pretend "
+            + "otherwise: of the two calls that would do it, one never returns and the other "
+            + "reports success without changing anything. Replacing the key is the reset. "
+            + "Paste your key above and press Save — Glomeris removes the stored item and adds "
+            + "it again, and a new item approves one app, the build running now. You need the "
+            + "key itself for that, because Glomeris deliberately cannot read a stored key back "
+            + "out of your keychain. You can also delete the item in Keychain Access, under "
+            + "this app's name."
+    }
+}
+
 // MARK: - Opening this screen from elsewhere
 
 /// A button that opens the Settings scene.
@@ -510,6 +657,14 @@ struct AiProviderPreferencesView: View {
     /// Seeded without touching the keychain, so `status.apiKey` starts `nil`
     /// and is filled in by `loadCredentialStatus()` (HORO-1368 AC 2 and AC 4).
     @State private var status: GlomerisLlmSettingsStatus
+
+    /// Which apps may read the stored key (HORO-1474).
+    ///
+    /// `nil` for two distinct situations that share one rendering: not looked at
+    /// yet, and nothing to look at. Both mean "show no list", so they do not need
+    /// telling apart here — and a case for each would put a spinner on a screen
+    /// where no key is stored.
+    @State private var keyAccess: GlomerisCredentialAccess?
 
     @State private var keyActionMessage: GlomerisStateMessage?
     /// Save and Remove both write to the keychain, which can block behind an
@@ -574,6 +729,32 @@ struct AiProviderPreferencesView: View {
     /// reachable only from their buttons.
     private func loadCredentialStatus() async {
         status = await store.resolvedStatus()
+        await loadAccessList()
+    }
+
+    /// Fills in the trusted-application list, when there is one to fill in
+    /// (HORO-1474).
+    ///
+    /// Asked only when an item plausibly exists. `absent` has no ACL to read, and
+    /// `environment` means the key in use is inherited and this list would be
+    /// about a stored item nothing reads — a second keychain query for a section
+    /// that answers a question the user is not in.
+    ///
+    /// `unreadable` is in, and is the case that pays for this. The key cannot be
+    /// decrypted by the running build, which is very often because the build is
+    /// not on this list; the list is the explanation. It can be read even then,
+    /// because the ACL read never decrypts.
+    ///
+    /// `unresponsive` is out. The deadline has already been missed, so
+    /// `resolvedAccessList()` would answer `.unresponsive` from the record
+    /// without asking — a second copy of a sentence the key row is already
+    /// showing.
+    private func loadAccessList() async {
+        guard status.apiKey == .settings || status.apiKey == .unreadable else {
+            keyAccess = nil
+            return
+        }
+        keyAccess = await store.resolvedAccessList()
     }
 
     // MARK: Provider
@@ -753,10 +934,82 @@ struct AiProviderPreferencesView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // HORO-1474. Below both explanations on purpose: when the key is
+            // unreadable, the sentence above says what to do and this list is the
+            // evidence for why it is needed.
+            if let keyAccess {
+                accessListSection(keyAccess)
+            }
+
             if let keyActionMessage {
                 GlomerisStateMessageView(message: keyActionMessage)
             }
         }
+    }
+
+    /// The trusted-application list, read-only (AC 1, AC 2, AC 3).
+    ///
+    /// Read-only is the whole design, not a limitation left for later — see
+    /// `GlomerisCredentialAccessWording.resetExplanation` for what was measured
+    /// and why a button would have to lie to exist.
+    @ViewBuilder
+    private func accessListSection(_ access: GlomerisCredentialAccess) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Divider()
+
+            Text(GlomerisCredentialAccessWording.title)
+                .font(GlomerisDesign.captionFont)
+                .fontWeight(.semibold)
+
+            Text(GlomerisCredentialAccessWording.summary(access))
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if case .applications(let applications) = access {
+                ForEach(applications) { application in
+                    accessListRow(application)
+                }
+
+                if let explanation = GlomerisCredentialAccessWording.resetExplanation(applications) {
+                    Text(explanation)
+                        .font(GlomerisDesign.captionFont)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// One approved app.
+    ///
+    /// Selectable rather than only readable: the path is the one thing on this
+    /// screen a user may need to paste somewhere else — into a Finder **Go to
+    /// Folder**, or into a note about which build to remove.
+    private func accessListRow(_ application: CredentialTrustedApplication) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Image(systemName: GlomerisCredentialAccessWording.symbolName(application))
+                .imageScale(.small)
+                .foregroundStyle(application.isDangling ? .secondary : .primary)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text(GlomerisCredentialAccessWording.rowTitle(application))
+                    .font(GlomerisDesign.monospacedFont)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let note = GlomerisCredentialAccessWording.rowNote(application) {
+                    Text(note)
+                        .font(GlomerisDesign.captionFont)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        // One element with one composed label, so the path and its qualifier are
+        // not read as one run-on clause (HORO-1451).
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(GlomerisCredentialAccessWording.spokenLabel(application))
     }
 
     /// Stores the typed key, off the main thread.
@@ -777,6 +1030,11 @@ struct AiProviderPreferencesView: View {
 
         let saved = await store.resolvedSetApiKey(typed)
         status = await store.resolvedStatus()
+        // HORO-1474. A save is the one action on this screen that changes the
+        // list — it deletes the item and adds it again, and a new item approves
+        // one app — so a list left over from before the save would show the
+        // accretion the save just cleared.
+        await loadAccessList()
         keyActionMessage =
             saved
             ? .success("Key saved to your keychain.")
@@ -792,6 +1050,9 @@ struct AiProviderPreferencesView: View {
 
         let removed = await store.resolvedDeleteApiKey()
         status = await store.resolvedStatus()
+        // There is no item left to have a list, and the guard in here is what
+        // makes that a cleared section rather than a stale one.
+        await loadAccessList()
         keyActionMessage = GlomerisLlmKeyRemovalWording.message(
             removed: removed,
             remainingSource: status.apiKey

@@ -66,6 +66,38 @@ enum GlomerisLlmSettingSource: Equatable, CaseIterable {
     }
 }
 
+/// Which binaries may read the stored key, as the settings screen sees it
+/// (HORO-1474).
+///
+/// The store-level `CredentialAccessListReading` plus the one case a store
+/// cannot produce, exactly as `GlomerisLlmSettingSource` extends
+/// `CredentialAvailability` with `unresponsive`. A store has no deadline — it
+/// issues a synchronous keychain call and either gets an answer or does not
+/// return — so "the keychain did not say in time" can only be observed by the
+/// layer that imposes the deadline, which is this one.
+enum GlomerisCredentialAccess: Equatable {
+    /// The applications trusted to read the key, in ACL order. An empty array
+    /// means none is, which is the most restrictive state and not a failure.
+    case applications([CredentialTrustedApplication])
+
+    /// Nothing is stored under this app's identity, so there is no list.
+    case noItem
+
+    /// An item may exist, but the keychain would not say what may read it.
+    case unreadable
+
+    /// The keychain did not answer within the deadline (HORO-1471's rule,
+    /// applied to this query too — AC 5).
+    ///
+    /// Distinct from `unreadable` for the same reason as on
+    /// `GlomerisLlmSettingSource`: a refusal is an answer, this is silence. And
+    /// emphatically distinct from `applications([])`, which is a claim that
+    /// nothing is pre-trusted. Reporting silence as an empty list would tell a
+    /// user their key is maximally protected at the moment the app stopped
+    /// being able to tell.
+    case unresponsive
+}
+
 /// One field's resolved state, without its value.
 ///
 /// Deliberately value-free: this type is what the UI renders and what tests
@@ -457,6 +489,44 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
         }
         if availability == nil { keychainDeadline.recordMiss() }
         return Self.source(availability: availability, inherited: inherited)
+    }
+
+    /// Which binaries may read the stored key, without reading it (HORO-1474).
+    ///
+    /// Touches the keychain, so it must not be called on the main thread — use
+    /// [`resolvedAccessList()`]. Same hazard as [`apiKeyAvailability`], for a
+    /// narrower reason: this one asks for a reference and never for data, so it
+    /// cannot raise an authorisation prompt at all, but it is still a synchronous
+    /// call into `securityd` with no bound of its own.
+    var apiKeyAccessList: CredentialAccessListReading {
+        credentials.accessList(forKey: Self.apiKeyAccount)
+    }
+
+    /// [`apiKeyAccessList`] off the main thread and under the deadline (AC 5).
+    ///
+    /// The same deadline object as the availability query, not a second one of
+    /// its own, and that is the whole point. The stall is one process-wide
+    /// `dispatch_once` token inside the Security framework — see
+    /// `KeychainDeadline` — so a query that has already timed out anywhere has
+    /// established that *this* query will too. A private deadline here would
+    /// park a second thread to rediscover it, and would do so on the pane the
+    /// user opened to find out what went wrong.
+    func resolvedAccessList() async -> GlomerisCredentialAccess {
+        if keychainDeadline.hasBeenMissed { return .unresponsive }
+
+        let reading = await Self.offMainThread(within: keychainDeadline.seconds) {
+            self.apiKeyAccessList
+        }
+        guard let reading else {
+            keychainDeadline.recordMiss()
+            return .unresponsive
+        }
+
+        switch reading {
+        case .applications(let applications): return .applications(applications)
+        case .noItem: return .noItem
+        case .unreadable: return .unreadable
+        }
     }
 
     /// [`childEnvironment(basedOn:)`] performed off the main thread.

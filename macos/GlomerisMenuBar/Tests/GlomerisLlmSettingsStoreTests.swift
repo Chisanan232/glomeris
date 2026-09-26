@@ -544,6 +544,10 @@ final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {
         case secret
         case set
         case delete
+        /// HORO-1474. Recorded separately from `availability` so "reading the
+        /// list did not read the value" is a claim about which calls were made,
+        /// which is the only way to state it without a keychain.
+        case accessList
     }
 
     struct Touch: Equatable, CustomStringConvertible {
@@ -636,6 +640,18 @@ final class RecordingCredentialStore: CredentialStore, @unchecked Sendable {
             defer { lock.unlock() }
             secrets.removeValue(forKey: key)
             return true
+        }
+    }
+
+    func accessList(forKey key: String) -> CredentialAccessListReading {
+        record(.accessList) {
+            lock.lock()
+            defer { lock.unlock() }
+            guard secrets[key]?.isEmpty == false else { return .noItem }
+            return .applications([
+                CredentialTrustedApplication(
+                    reference: .resolves(path: "/Applications/Glomeris.app"), index: 0)
+            ])
         }
     }
 }
