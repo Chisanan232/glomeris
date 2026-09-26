@@ -298,7 +298,7 @@ jobs:
     # namespaced suite still leaves a plist per name, and the names were unique.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Check no test opens a UserDefaults suite outside the helper
         run: bash scripts/check-tests-do-not-open-user-defaults-suites.sh
 
