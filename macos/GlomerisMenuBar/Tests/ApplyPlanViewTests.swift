@@ -1172,9 +1172,10 @@ final class ApplyPlanViewTests: XCTestCase {
     }
 
     /// Throwaway defaults, so no test reads or writes the app's own suite —
-    /// which on this machine belongs to a running app.
+    /// which on this machine belongs to a running app. In memory, so no test
+    /// leaves a preference file behind either (HORO-1486).
     private static func throwawayDefaults() -> UserDefaults {
-        UserDefaults(suiteName: "dev.glomeris.tests.applyplan.\(UUID().uuidString)")!
+        TestUserDefaults.inMemory()
     }
 }
 

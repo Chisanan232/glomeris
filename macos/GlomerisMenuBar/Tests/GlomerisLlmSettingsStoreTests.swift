@@ -32,26 +32,22 @@ import XCTest
 final class GlomerisLlmSettingsStoreTests: XCTestCase {
     private static let key = "sk-test-only-never-a-real-credential"
 
-    /// A fresh, uniquely-named suite per test, so no test sees another's
-    /// state and none touches the domain the app itself writes to —
-    /// `UserDefaults.standard`, which for a bundled app is the domain named
-    /// by its bundle identifier (HORO-1456).
-    private func makeDefaults() -> (UserDefaults, String) {
-        let suiteName = "dev.glomeris.GlomerisMenuBarTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suiteName)
-        }
-        return (defaults, suiteName)
+    /// Fresh storage per test, so no test sees another's state and none
+    /// touches the domain the app itself writes to — `UserDefaults.standard`,
+    /// which for a bundled app is the domain named by its bundle identifier
+    /// (HORO-1456). In memory rather than a named suite: see
+    /// `TestUserDefaults` (HORO-1486).
+    private func makeDefaults() -> InMemoryUserDefaults {
+        TestUserDefaults.inMemory()
     }
 
     private func makeStore(
         credentials: CredentialStore = InMemoryCredentialStore()
-    ) -> (GlomerisLlmSettingsStore, UserDefaults, String) {
-        let (defaults, suiteName) = makeDefaults()
+    ) -> (GlomerisLlmSettingsStore, InMemoryUserDefaults) {
+        let defaults = makeDefaults()
         return (
             GlomerisLlmSettingsStore(defaults: defaults, credentials: credentials),
-            defaults, suiteName
+            defaults
         )
     }
 
@@ -63,18 +59,21 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// well-meaning "cache it so the UI can show the last four characters"
     /// would add a different key and pass a narrower test.
     func testTheApiKeyAppearsNowhereInUserDefaults() {
-        let (store, defaults, suiteName) = makeStore()
+        let (store, defaults) = makeStore()
         store.endpoint = "https://api.example.test/v1"
         store.model = "a-model"
         store.setApiKey(Self.key)
 
         XCTAssertTrue(store.hasStoredApiKey, "the key must actually have been stored somewhere")
 
-        let domain = defaults.persistentDomain(forName: suiteName) ?? [:]
+        // Everything the store wrote through this `UserDefaults`, whatever key
+        // names it chose. On a real suite this is the plist the app would have
+        // left on disk; nothing here narrows what counts as "persisted".
+        let domain = defaults.everythingStored
         let dumped = domain.map { "\($0.key)=\(String(describing: $0.value))" }.joined(separator: "\n")
         XCTAssertFalse(
             dumped.contains(Self.key),
-            "the API key is in UserDefaults, which is a plain plist on disk:\n\(dumped)"
+            "the API key was written to UserDefaults, which on a real suite is a plain plist on disk:\n\(dumped)"
         )
         // The endpoint and model *should* be there — otherwise this test
         // could pass against a store that persists nothing at all.
@@ -83,7 +82,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     }
 
     func testTheStoreExposesNoWayToReadTheKeyBackForDisplay() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.setApiKey(Self.key)
 
         // `hasStoredApiKey` is a Bool by design: the type has no property
@@ -96,7 +95,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     // MARK: - Precedence (AC 3)
 
     func testStoredSettingsWinOverTheInheritedEnvironment() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.endpoint = "https://configured.example.test/v1"
         store.model = "configured-model"
         store.setApiKey("configured-key")
@@ -124,7 +123,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     }
 
     func testAnEmptyFieldFallsBackToTheInheritedVariableRatherThanClearingIt() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.model = "configured-model"
 
         let environment = [
@@ -154,7 +153,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// reverse must hold too — this is the mixed case the two tests above
     /// each cover only half of.
     func testPrecedenceIsDecidedFieldByField() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.endpoint = "https://configured.example.test/v1"
 
         let environment = [
@@ -182,7 +181,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// screen claiming "inherited from your shell" for it would send the
     /// user looking for a value that is not there.
     func testAnEmptyInheritedVariableReadsAsAbsentJustAsTheCliSeesIt() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
 
         let status = store.status(environment: [
             GlomerisLlmSettingsStore.endpointEnvironmentVariable: "",
@@ -203,7 +202,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// `glomeris` lookup (HORO-1295) and dropping HOME breaks every
     /// HOME-bounded detector — silently, as a scan finding nothing.
     func testTheChildEnvironmentKeepsEverythingItWasGiven() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.endpoint = "https://configured.example.test/v1"
 
         let environment = [
@@ -225,7 +224,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// keystroke in a settings window disable a setup the user configured
     /// in their shell, with no indication of what happened.
     func testNoInheritedVariableIsEverUnset() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.endpoint = nil
         store.model = nil
         store.deleteApiKey()
@@ -243,7 +242,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
 
     func testAPastedKeyIsTrimmedBecauseATrailingNewlineIsAnUnexplainableFailure() {
         let credentials = InMemoryCredentialStore()
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
 
         store.setApiKey("  \(Self.key)\n")
 
@@ -256,7 +255,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     }
 
     func testDeletingTheKeyRemovesItAndReportsTheFieldAsAbsent() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.setApiKey(Self.key)
         XCTAssertTrue(store.hasStoredApiKey)
 
@@ -276,7 +275,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// key and presses delete does not end up with an empty credential
     /// stored and a 401 they cannot explain.
     func testStoringAnEmptyKeyDeletesRatherThanStoringNothing() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
         store.setApiKey(Self.key)
 
         store.setApiKey("   ")
@@ -285,7 +284,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     }
 
     func testDeletingAKeyThatWasNeverStoredSucceeds() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
 
         XCTAssertTrue(
             store.deleteApiKey(),
@@ -295,7 +294,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
 
     func testSettingsSurviveAFreshStoreOverTheSameDefaults() {
         let credentials = InMemoryCredentialStore()
-        let (defaults, _) = makeDefaults()
+        let defaults = makeDefaults()
         let store = GlomerisLlmSettingsStore(defaults: defaults, credentials: credentials)
         store.endpoint = " https://api.example.test/v1 "
         store.model = "a-model"
@@ -314,7 +313,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// verdict reaches the user — a second, drifting copy of those rules in
     /// Swift is exactly what the standing project rule forbids.
     func testAnUnusableEndpointIsStoredAsTypedRatherThanSilentlyCorrected() {
-        let (store, _, _) = makeStore()
+        let (store, _) = makeStore()
 
         store.endpoint = "api.example.test/v1/chat/completions"
 
@@ -334,7 +333,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// implementation rather than merely describing the new one.
     func testAskingWhereTheKeyCameFromNeverRetrievesIt() {
         let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
 
         let status = store.status(environment: [:])
 
@@ -348,7 +347,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// so "the key is read at spawn time and nowhere else" is a measured claim.
     func testOnlyBuildingAChildEnvironmentRetrievesTheKey() {
         let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
 
         _ = store.status(environment: [:])
         _ = store.hasStoredApiKey
@@ -375,7 +374,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     func testAKeyTheKeychainRefusesIsReportedAsUnreadableRatherThanAbsent() {
         let credentials = InMemoryCredentialStore(
             secrets: ["llmApiKey": Self.key], unreadableKeys: ["llmApiKey"])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
 
         let status = store.status(environment: [:])
 
@@ -402,7 +401,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     func testAnInheritedKeyOutranksAnUnreadableStoredOneWithoutComplaining() {
         let credentials = InMemoryCredentialStore(
             secrets: ["llmApiKey": Self.key], unreadableKeys: ["llmApiKey"])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
         store.endpoint = "https://configured.example.test/v1"
         store.model = "a-model"
 
@@ -439,7 +438,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
         for (availability, inherited, expected) in cases {
             let unreadable: Set<String> = availability == .unreadable ? ["llmApiKey"] : []
             let secrets = availability == .absent ? [:] : ["llmApiKey": Self.key]
-            let (store, _, _) = makeStore(
+            let (store, _) = makeStore(
                 credentials: InMemoryCredentialStore(
                     secrets: secrets, unreadableKeys: unreadable))
             let environment =
@@ -473,7 +472,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     @MainActor
     func testEveryResolvedKeychainTouchHappensOffTheMainThread() async {
         let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
         XCTAssertTrue(Thread.isMainThread, "the premise of this test")
 
         _ = await store.resolvedStatus(environment: [:])
@@ -500,7 +499,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     @MainActor
     func testTheThreadRecorderActuallyDetectsTheMainThread() {
         let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
 
         _ = store.status(environment: [:])
 
@@ -516,7 +515,7 @@ final class GlomerisLlmSettingsStoreTests: XCTestCase {
     /// so no two touches may overlap however many callers there are.
     func testConcurrentResolutionIsSerialisedSoOnlyOnePromptCanEverBeOutstanding() async {
         let credentials = RecordingCredentialStore(secrets: ["llmApiKey": Self.key])
-        let (store, _, _) = makeStore(credentials: credentials)
+        let (store, _) = makeStore(credentials: credentials)
 
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<8 {

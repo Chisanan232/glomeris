@@ -557,11 +557,12 @@ final class OverviewStateTests: XCTestCase {
     /// credential store at spawn time, and an `InMemoryCredentialStore` keeps
     /// that off the real keychain — no `SecItemCopyMatching`, so no
     /// authorisation prompt can appear in the middle of a test run. The
-    /// throwaway suite keeps the endpoint and model out of the app's own
-    /// `UserDefaults`, which on this machine belongs to a running app.
+    /// throwaway storage keeps the endpoint and model out of the app's own
+    /// `UserDefaults`, which on this machine belongs to a running app — and,
+    /// being in memory, out of any preference file (HORO-1486).
     private static func settingsStoreThatTouchesNoKeychain() -> GlomerisLlmSettingsStore {
         GlomerisLlmSettingsStore(
-            defaults: UserDefaults(suiteName: "dev.glomeris.GlomerisMenuBarTests.HORO-1365"),
+            defaults: TestUserDefaults.inMemory(),
             credentials: InMemoryCredentialStore()
         )
     }
