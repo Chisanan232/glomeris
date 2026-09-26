@@ -221,6 +221,15 @@ struct DetectReportDto: Decodable, Equatable {
 
     /// Detectors whose probe failed — the subset a surface must show rather
     /// than rendering the candidate list as the whole picture.
+    ///
+    /// This, and not `discoveryComplete`, is what the panel reads, which is
+    /// worth stating because the opposite looks tidier: a surface that says
+    /// "part of this search did not finish" has to name what did not finish, or
+    /// the sentence is unactionable, and only this array carries the names. The
+    /// two cannot disagree — Rust derives the flag from the very slice this
+    /// filters, and `DtoGoldenFixturesTests` pins that agreement in both
+    /// directions — so reading the flag as well would add a second source of
+    /// truth for a question that has one answer.
     var failedDetectors: [DetectorHealthReportDto] {
         detectors.filter(\.didFail)
     }
