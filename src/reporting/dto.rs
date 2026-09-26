@@ -72,12 +72,29 @@ pub enum ProgressEvent {
     DetectorStarted { detector: &'static str },
     /// The same detector's probe has returned. `candidates_found` is `0`
     /// for `DetectorStatus::ToolAbsent`/`Failed` as well as a genuine
-    /// empty `Found(vec![])` — this event reports "how many candidates
-    /// came out", not detector health; a caller that needs to tell those
-    /// apart uses the final report, not this stream.
+    /// empty `Found(vec![])`, so `outcome` says which of the three
+    /// happened and `reason` carries a failure's own message.
+    ///
+    /// `outcome`/`reason` were added by HORO-1484. Until then this event
+    /// was the count alone, and its doc comment sent a consumer that
+    /// needed detector health to "the final report, not this stream" —
+    /// but `DetectReport` carried only `candidates`, so there was nowhere
+    /// to go: a probe that errored streamed, and reported, exactly what a
+    /// probe that looked and found nothing did.
+    ///
+    /// Both values come from [`crate::cli::DetectorOutcome`], which is the
+    /// one producer of the three tags this stream and `detect --json`
+    /// share.
     DetectorFinished {
         detector: &'static str,
         candidates_found: usize,
+        /// `"found"`, `"tool_absent"` or `"failed"`.
+        outcome: &'static str,
+        /// The probe's failure message. Present only for
+        /// `outcome: "failed"`, and omitted from the JSON otherwise
+        /// rather than serialized as `null`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 

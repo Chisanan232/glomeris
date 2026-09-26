@@ -200,9 +200,11 @@ pub fn discover_and_classify_with_progress(
 /// count them afterwards.
 ///
 /// `Failed`'s reason is carried through verbatim rather than flattened
-/// into `ToolAbsent`. This type only makes the distinction *available* to
-/// a caller that has already consumed the evidence; whether each caller
-/// then acts on it is HORO-1484, tracked separately.
+/// into `ToolAbsent`, and since HORO-1484 every serialized surface that
+/// reports discovery reports this distinction: `detect --json`'s
+/// `detectors` array, the `--progress-json` stream, `free`'s report and
+/// `emergency`'s. Before that, this type made the distinction available
+/// and nothing consumed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DetectorOutcome {
     /// The probe succeeded and produced `candidates` evidences, all of
@@ -213,6 +215,62 @@ pub enum DetectorOutcome {
     ToolAbsent,
     /// The probe itself failed. Not evidence of "nothing to clean up".
     Failed(String),
+}
+
+impl DetectorOutcome {
+    /// The tag every serialized surface uses for this outcome.
+    ///
+    /// One producer for all three strings (HORO-1484), so `detect --json`,
+    /// the `--progress-json` stream and the book cannot drift into
+    /// describing the same probe with different words.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            DetectorOutcome::Found { .. } => "found",
+            DetectorOutcome::ToolAbsent => "tool_absent",
+            DetectorOutcome::Failed(_) => "failed",
+        }
+    }
+
+    /// How many evidences this detector contributed.
+    ///
+    /// `0` for `ToolAbsent` and for `Failed` — which is the whole reason
+    /// [`DetectorOutcome::tag`] exists. A count alone cannot tell a probe
+    /// that looked and found nothing from one that never looked.
+    pub fn candidates_found(&self) -> usize {
+        match self {
+            DetectorOutcome::Found { candidates } => *candidates,
+            DetectorOutcome::ToolAbsent | DetectorOutcome::Failed(_) => 0,
+        }
+    }
+
+    /// The probe's own failure message, for `Failed` only.
+    pub fn failure_reason(&self) -> Option<&str> {
+        match self {
+            DetectorOutcome::Failed(reason) => Some(reason),
+            DetectorOutcome::Found { .. } | DetectorOutcome::ToolAbsent => None,
+        }
+    }
+}
+
+/// Projects a [`DetectorStatus`] without consuming it — the evidences a
+/// `Found` status owns are counted, not cloned.
+///
+/// The single mapping from status to outcome. Both places a discovery pass
+/// needs one go through it: the progress callback, which only borrows the
+/// status, and the pass loop below, which then consumes the evidences it
+/// just counted. A second hand-written match in either place is how the
+/// two halves of one pass would come to disagree about what a detector
+/// reported.
+impl From<&DetectorStatus> for DetectorOutcome {
+    fn from(status: &DetectorStatus) -> Self {
+        match status {
+            DetectorStatus::Found(evidences) => DetectorOutcome::Found {
+                candidates: evidences.len(),
+            },
+            DetectorStatus::ToolAbsent => DetectorOutcome::ToolAbsent,
+            DetectorStatus::Failed(reason) => DetectorOutcome::Failed(reason.clone()),
+        }
+    }
 }
 
 /// One discovery pass's complete result: what every detector reported, and
@@ -251,13 +309,18 @@ pub fn discover_and_classify_pass(
             on_event(ProgressEvent::DetectorStarted { detector: id.0 });
         }
         DetectorProgress::Finished(status) => {
-            let candidates_found = match status {
-                DetectorStatus::Found(evidences) => evidences.len(),
-                DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => 0,
-            };
+            // A count alone is the collapse this ticket is about
+            // (HORO-1484): a probe that errored used to stream the same
+            // `candidates_found: 0` as one that looked and found nothing,
+            // and the doc comment sent a consumer that needed to tell them
+            // apart to "the final report", which did not carry it either.
+            // The outcome tag and a failure's reason travel with the count.
+            let outcome = DetectorOutcome::from(status);
             on_event(ProgressEvent::DetectorFinished {
                 detector: id.0,
-                candidates_found,
+                candidates_found: outcome.candidates_found(),
+                outcome: outcome.tag(),
+                reason: outcome.failure_reason().map(str::to_string),
             });
         }
     });
@@ -266,14 +329,13 @@ pub fn discover_and_classify_pass(
     let mut candidates = Vec::new();
 
     for (id, status) in discovered {
+        // Counted before the evidences are consumed, through the same
+        // `From` impl the progress callback above used, so the two halves
+        // of one pass cannot describe a detector differently.
+        let outcome = DetectorOutcome::from(&status);
+        detectors.push((id, outcome));
         match status {
             DetectorStatus::Found(evidences) => {
-                detectors.push((
-                    id,
-                    DetectorOutcome::Found {
-                        candidates: evidences.len(),
-                    },
-                ));
                 for mut ev in evidences {
                     let correlation = collector.collect(
                         &ev.resource,
@@ -287,10 +349,9 @@ pub fn discover_and_classify_pass(
                     candidates.push((ev, decision));
                 }
             }
-            DetectorStatus::ToolAbsent => detectors.push((id, DetectorOutcome::ToolAbsent)),
-            DetectorStatus::Failed(reason) => {
-                detectors.push((id, DetectorOutcome::Failed(reason)));
-            }
+            // Nothing further to do for either: the outcome recorded above
+            // already carries which one it was, and a failure's reason.
+            DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => {}
         }
     }
 
