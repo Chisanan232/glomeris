@@ -48,7 +48,8 @@ enum GlomerisLlmSettingSource: Equatable, CaseIterable {
     /// it was "no". This is the absence of any answer, and the remedies are
     /// opposite. A refusal is fixed by saving the key again under the running
     /// build's identity; a silence means the system's keychain service has
-    /// stopped responding, and saving again would wait in the same place.
+    /// stopped responding, and saving again cannot get through — as of
+    /// HORO-1476 the app declines to try rather than waiting with no end.
     ///
     /// Emphatically distinct from `absent`. "Not set" is a claim about the
     /// user's data, and making that claim because a system daemon went quiet is
@@ -421,15 +422,61 @@ struct GlomerisLlmSettingsStore: @unchecked Sendable {
     /// existing item's data, and the item's ACL guards that too, so saving over
     /// a key stored by a different build can wait on an authorisation prompt
     /// (HORO-1368 AC 1).
+    ///
+    /// No deadline, and that is deliberate — see `notAttemptedIfTheQueueIsWedged`
+    /// for what this does instead and why it is not the same thing. A write can
+    /// legitimately wait on a person, so a bound on one would have to abandon an
+    /// authorisation prompt the user is in the middle of answering.
     @discardableResult
-    func resolvedSetApiKey(_ key: String) async -> Bool {
-        await Self.offMainThread { self.setApiKey(key) }
+    func resolvedSetApiKey(_ key: String) async -> GlomerisCredentialWriteOutcome {
+        if let refusedWithoutAsking = notAttemptedIfTheQueueIsWedged {
+            return refusedWithoutAsking
+        }
+        let stored = await Self.offMainThread { self.setApiKey(key) }
+        return stored ? .done : .refused
     }
 
     /// [`deleteApiKey()`] off the main thread, for the same reason.
     @discardableResult
-    func resolvedDeleteApiKey() async -> Bool {
-        await Self.offMainThread { self.deleteApiKey() }
+    func resolvedDeleteApiKey() async -> GlomerisCredentialWriteOutcome {
+        if let refusedWithoutAsking = notAttemptedIfTheQueueIsWedged {
+            return refusedWithoutAsking
+        }
+        let removed = await Self.offMainThread { self.deleteApiKey() }
+        return removed ? .done : .refused
+    }
+
+    /// `.notAttempted` once a keychain query has missed its deadline in this
+    /// process, `nil` while there is still a working queue to dispatch onto
+    /// (HORO-1476).
+    ///
+    /// This is not a deadline and it is worth being exact about the difference,
+    /// because "add the same deadline HORO-1471 added" is the obvious reading of
+    /// this defect and it is the wrong one. A deadline abandons a write that is
+    /// already in flight, and the app then has to describe an outcome it does not
+    /// know: `SecItemUpdate` may have replaced the item before the wait expired.
+    /// Whether to accept that is a product decision, and it is still open.
+    ///
+    /// This check needs none of it. The condition it tests — that a query has
+    /// already run out of time — is the condition under which the write cannot
+    /// begin at all: every keychain touch is serialised through one queue, by
+    /// design, so that two authorisation prompts can never be outstanding at
+    /// once, and the query that ran out of time is still holding it and cannot be
+    /// cancelled. So the choice here is not between "abandon it" and "wait for
+    /// it". It is between parking the work item behind a stall that will not
+    /// clear for the life of the process, and saying so. Nothing is in flight to
+    /// have an unknown outcome, which is exactly why this part did not have to
+    /// wait for the decision.
+    ///
+    /// Not applied to `resolvedChildEnvironment`, which has the same hazard and
+    /// must keep it for now: its return type is the child's environment, so the
+    /// only thing it could say instead of waiting is "no key" — and launching the
+    /// CLI without a key the user has stored is the silently-wrong behaviour
+    /// HORO-1471 argued against. Giving it a way to report the wedge means
+    /// changing what both of its callers do with the answer, and that is part of
+    /// the decision that is still open.
+    private var notAttemptedIfTheQueueIsWedged: GlomerisCredentialWriteOutcome? {
+        keychainDeadline.hasBeenMissed ? .notAttempted : nil
     }
 
     // MARK: - Resolution
