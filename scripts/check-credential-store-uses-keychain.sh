@@ -127,6 +127,66 @@ while IFS= read -r match; do
 done < <(grep -E '\bUserDefaults\b' <<<"$store_body" || true)
 
 # ---------------------------------------------------------------------------
+# 1c. Exactly one place in the app decrypts the key.
+# ---------------------------------------------------------------------------
+# HORO-1474. The screen that lists which apps may read the key must not read
+# the key to do it. `kSecReturnData` is what makes a keychain lookup decrypt,
+# and decryption is what consults the ACL — so a lookup that asks for data
+# either succeeds silently, having spent one of the user's approvals to render
+# a list, or raises a SecurityAgent prompt the user did not ask for by opening
+# a settings pane. Asking for `kSecReturnRef` instead avoids both, and it is a
+# one-word edit away from not doing so.
+#
+# Stated as a count rather than as a per-file rule, because the property is
+# "one decrypting read in the whole app" and a new file is exactly how that
+# would stop being true.
+data_reads="$(
+  grep -rn --include='*.swift' -E '\bkSecReturnData\b' "$abs_sources" \
+    | grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' \
+    || true
+)"
+data_read_count=0
+if [[ -n "$data_reads" ]]; then
+  data_read_count="$(printf '%s\n' "$data_reads" | wc -l | tr -d ' ')"
+fi
+
+# Zero is not a pass. It would mean either that the key is never read — and
+# something else is supplying it — or that this check has stopped matching the
+# code it is about.
+if [[ "$data_read_count" -eq 0 ]]; then
+  echo "FAIL: no kSecReturnData anywhere under ${SOURCES_DIR}."
+  echo "Reading the stored key is how the CLI is given it, so this finding means the credential path"
+  echo "moved and this check is now scanning nothing. Update it — do not delete it."
+  exit 1
+fi
+
+if [[ "$data_read_count" -ne 1 ]]; then
+  fail "${data_read_count} places ask the keychain for kSecReturnData; exactly one may. Each is a decrypting read, so each consults the item's ACL and can raise a SecurityAgent prompt. Only fetching the key to hand to the CLI has a reason to."
+  printf '%s\n' "$data_reads" | sed "s|^${abs_sources}/|    ${SOURCES_DIR}/|"
+fi
+
+if ! grep -qF "$abs_store" <<<"$data_reads"; then
+  fail "the one decrypting read is not in ${STORE_FILE}. The keychain-backed store is the only type that should hold the secret even briefly."
+fi
+
+# And the ACL reader specifically, since it is the file whose whole job is to
+# describe the item without opening it.
+ACCESS_FILE="${SOURCES_DIR}/CredentialAccessList.swift"
+abs_access="${REPO_ROOT}/${ACCESS_FILE}"
+if [[ ! -f "$abs_access" ]]; then
+  echo "FAIL: ${ACCESS_FILE} is missing, so the non-decrypting ACL read cannot be verified."
+  echo "If it moved, update this script — do not delete the check."
+  exit 1
+fi
+access_body="$(without_comments "$abs_access")"
+if ! grep -qF 'kSecReturnRef' <<<"$access_body"; then
+  fail "${ACCESS_FILE}: does not ask for kSecReturnRef. Omitting every kSecReturn* key defaults a generic-password lookup to returning data, so the list would decrypt the key as a side effect of being drawn."
+fi
+while IFS= read -r match; do
+  fail "${ACCESS_FILE}:${match%%:*}: asks for kSecReturnData. Listing who may read the key must not read it: ${match#*:}"
+done < <(grep -E '\bkSecReturnData\b' <<<"$access_body" || true)
+
+# ---------------------------------------------------------------------------
 # 2. Production is wired to the keychain, and the test double is not used.
 # ---------------------------------------------------------------------------
 settings_body="$(without_comments "$abs_settings")"
