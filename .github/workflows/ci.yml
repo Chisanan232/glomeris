@@ -468,6 +468,29 @@ jobs:
       - name: Check every shell script is clean
         run: bash scripts/check-shell-scripts-are-clean.sh
 
+  dependency-updates-are-watched:
+    # HORO-1497: the two guards above check the workflow files and the shell
+    # inside them. Neither looks at what those workflows depend on. Eight
+    # third-party actions run in this repository and nothing watched any of
+    # them: Dependabot alerts are off, there was no `.github/dependabot.yml`,
+    # and every reference was a floating tag — so a withdrawn or abandoned
+    # action would have been discovered when a job started failing.
+    #
+    # The gap had already produced a symptom nobody had looked for.
+    # `actions/checkout` was `@v4` in the three hand-written workflows and `@v6`
+    # in the generated `release.yml`: two majors of one action, in one
+    # repository, decided by which workflow fired.
+    #
+    # The `target-branch:` half of this guard is the part worth a job of its
+    # own. That key silently turns off security updates for the default branch,
+    # it is invisible in the settings UI, and a configuration carrying it reads
+    # exactly like a working one.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check every dependency this repository runs is watched
+        run: bash scripts/check-dependency-updates-are-watched.sh
+
   failure-diagnostics-are-reachable:
     # HORO-1479: shell-scripts-are-clean above runs shellcheck over every guard,
     # and workflows-are-valid runs it over every `run:` block. Both pass, and
