@@ -3,6 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    # HORO-1483: also on a release tag, so the release-mode half of
+    # release-version-is-taggable below runs against the tag that was actually
+    # pushed. Nothing else in this file behaves differently on a tag — no job
+    # reads github.event or branches on the ref — so the cost is one extra full
+    # run per release, on a public repository where Actions minutes are free.
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -490,3 +496,48 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check every failure diagnostic can actually run
         run: bash scripts/check-failure-diagnostics-are-reachable.sh
+
+  release-version-is-taggable:
+    # HORO-1483: nothing here compared the declared workspace version against
+    # the tags that already exist, so HORO-1328 — Cargo.toml at 0.2.0 with
+    # v0.2.0 already tagged, and therefore no releasable number at all — was
+    # invisible to sixteen jobs for 611 commits and was found by a human
+    # attempting the release.
+    #
+    # app-version-drift above is the closest existing job and does not overlap:
+    # it asks whether the app bundle and the crate agree on a number, not
+    # whether that number can still be turned into a release. Both were green
+    # throughout.
+    #
+    # The equality case is deliberately NOT a failure — see the script's header.
+    # Bumping inside the release change makes "version == newest tag" the normal
+    # state between releases, so failing on it would be red on main from every
+    # release until someone picked the next number, and the quickest way to
+    # clear a red build is to invent one. The number is HORO-1328's product
+    # decision. This job reports it with the commit distance instead, which is
+    # the part that was missing.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole check is a comparison against the existing tags, and
+          # actions/checkout fetches none of them by default. The script treats
+          # a tagless checkout as a failure rather than a pass, so dropping this
+          # turns the job red instead of quietly vacuous — but the intent here
+          # is to give it the tags, not to lean on that.
+          fetch-depth: 0
+      - name: Check the release-mode rules still fire
+        # First, because the report below is only worth reading if the rules it
+        # applies are known to work. The release-mode branches otherwise run
+        # only on a tag push, which for this repository has meant twice.
+        run: bash scripts/check-release-version-is-taggable.sh --self-test
+      - name: Report whether the declared version can still be released
+        run: bash scripts/check-release-version-is-taggable.sh
+      - name: Check the pushed tag names a releasable version
+        # Only on a tag push, where the strict rules apply: the tag must name
+        # the version the manifest declares, since cargo-dist plans the release
+        # from the manifest rather than from the ref.
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          PUSHED_TAG: ${{ github.ref_name }}
+        run: bash scripts/check-release-version-is-taggable.sh --tag "$PUSHED_TAG"
