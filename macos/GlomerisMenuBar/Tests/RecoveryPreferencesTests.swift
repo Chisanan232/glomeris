@@ -455,6 +455,28 @@ final class RecoveryPreferencesTests: XCTestCase {
         XCTAssertTrue(text.contains("nothing is deleted"), text.lowercased())
     }
 
+    /// HORO-1508: the pane says what crossing the threshold does, and says it
+    /// without contradicting the sentence above.
+    ///
+    /// This pane shipped with a caveat that nothing notified from this number yet,
+    /// which was true and is now false. A stale caveat is the worse failure of the
+    /// two — a user told notifications do not happen has been given a reason not to
+    /// set the number at all — so the claim is pinned rather than left to a reader
+    /// noticing.
+    func testThePaneSaysWhatCrossingTheThresholdDoes() {
+        let text = RecoveryPreferencesWording.thresholdNotification
+        XCTAssertTrue(text.contains("notification"), text)
+        XCTAssertTrue(text.contains("review and recover"), text)
+        // The same reassurance the notification's own body carries. A user meets
+        // this sentence while choosing the number and that one while answering; the
+        // two must not disagree about whether anything has happened yet.
+        XCTAssertTrue(text.contains("Nothing is deleted"), text)
+        XCTAssertFalse(
+            text.lowercased().contains("does not raise"),
+            "the caveat that nothing notifies from this number is no longer true"
+        )
+    }
+
     /// The pane states that the goal has to be below the threshold — as an
     /// explanation, not as a control limit. The two are different: one teaches
     /// the rule, the other would reimplement it.

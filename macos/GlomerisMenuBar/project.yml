@@ -181,6 +181,65 @@ targets:
       # percentages from ever being sent as each other, which is the failure this
       # whole pane is shaped to prevent.
       - path: Sources/RecoveryPreferencesView.swift
+      # HORO-1508: the app's half of the daemon/app seam. Compiled in because the
+      # claim that matters is an exit code's *meaning*: `pressure` exits 3 to say
+      # "understood, and there was nothing to record", which is not a failure and
+      # must not be retried at poll speed — and it prints the only account of why
+      # on stdout, where `GlomerisClient.run` would discard it. Only a test can
+      # show that exit 3 with a body, exit 2 with a version-skew marker and exit 2
+      # with prose are read as three different things.
+      - path: Sources/PressureEpisodeClient.swift
+      # HORO-1508: the background reader, compiled in because every acceptance
+      # scenario AC 7 lists is a sequence of its calls. `PressureBannerPlan.decide`
+      # is a pure function of a report and what this session already raised, so
+      # crossing, recovery below the hysteresis margin, re-crossing, snooze and
+      # ignore are assertions about values — no disk has to fill up and no banner
+      # has to appear. The two that could not be checked any other way: the
+      # post-snooze re-raise is a *different* banner for the *same* episode (keyed
+      # on the id alone, "remind me later" would silently mean "never again"), and
+      # a raise that failed must not consume the episode's one chance to be shown.
+      - path: Sources/PressureEpisodeMonitor.swift
+      # HORO-1508: the deep link. Compiled in for one test above all others —
+      # `RecoveryDeepLink.reviewToken` is the single literal in this app that names
+      # an answer in order to *act* on it rather than to word it, and
+      # RecoveryDeepLinkTests asserts the CLI still publishes it. Without that, a
+      # rename in `EpisodeResponse::as_str` would turn "Review & recover" into a
+      # button that opens nothing and reports nothing, which no other check in the
+      # repo would notice. `RecoveryDeepLinkContext` is here for the neighbouring
+      # claim: it seeds the Recovery card's control through that card's own
+      # conversion rather than a second rule of its own.
+      - path: Sources/RecoveryDeepLink.swift
+      # HORO-1508: what the notification says and which button press becomes which
+      # answer. Compiled in because the two rules that matter cannot be seen
+      # failing on screen. Re-posting a request whose identifier was already
+      # delivered updates the old banner *in place with no new banner*, so the
+      # post-snooze reminder must carry the raised count in its identifier or a
+      # working snooze and a broken one look identical — silent. And *dismissing* a
+      # banner must not become an answer: recording it as "ignore this alert" would
+      # close an episode the user never answered. The delivery class in the same
+      # file is compiled but never constructed here: `UNUserNotificationCenter
+      # .current()` traps without an app bundle, which is why its centre is
+      # injected with no default.
+      - path: Sources/PressureNotification.swift
+      # HORO-1508: the in-app alert card's wording. Compiled in because the two
+      # claims worth pinning are invisible on screen. Whether the card appears for
+      # someone who already answered "Remind me later" turns on the *episode*
+      # rather than on `notification_due`, and keying it on the banner's field
+      # would hide the only remaining route to the three answers from exactly the
+      # person who asked to be reminded. And what VoiceOver says is not a
+      # rendering: `spokenState` has to name the threshold and the goal as separate
+      # figures, which is the one accessibility claim a sighted reviewer cannot
+      # check by looking at the card.
+      - path: Sources/PressureAlertSectionView.swift
+      # HORO-1508: what the Recovery window holds once the deep link has opened it.
+      # `RecoveryDeepLinkWindowModel` is split out from the AppKit presenter in the
+      # same file precisely so it can be driven here — a test may not put an
+      # NSWindow on screen — and the case it exists for is silent: the daemon polls
+      # every thirty seconds, so a second alert can arrive while the user is
+      # deciding, and it must not replace a goal they set by hand on the screen
+      # where that number is about to be acted on. The presenter itself is compiled
+      # but never constructed; everything it does is NSWindow and NSApp.
+      - path: Sources/RecoveryDeepLinkWindow.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests

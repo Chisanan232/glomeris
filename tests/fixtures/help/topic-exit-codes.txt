@@ -14,6 +14,7 @@ Commands that give these codes more specific meanings:
   llm-check   0, 1, 2               `glomeris llm-check --help`
   execute     0, 1, 2, 3, 4, 5, 75  `glomeris execute --help`
   autopilot   0, 1, 2, 3, 75        `glomeris autopilot --help`
+  pressure    0, 1, 2, 3            `glomeris pressure --help`
   settings    0, 1, 2               `glomeris settings --help`
 
 `execute` is the one worth reading in full before scripting against it: its

@@ -851,4 +851,166 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.notifyAtUsedPercent, 85.0)
         XCTAssertEqual(dto.goalUsedPercent, 90.0)
     }
+
+    // MARK: - Pressure episodes (HORO-1508)
+
+    /// The state the notifier acts on: threshold crossed, banner owed, nothing
+    /// answered yet.
+    ///
+    /// The four optionals are all absent here, and that is the half of the
+    /// contract a mis-mapped `CodingKey` passes silently — a key that never
+    /// matches decodes an optional as `nil` without complaint, so a fixture
+    /// where everything is `nil` anyway cannot catch it. The sibling test below
+    /// populates all four for that reason.
+    func testDecodesPressureStatusReport() throws {
+        let dto = try decodeFixture(
+            "pressure_status_report.json",
+            as: PressureStatusReportDto.self
+        )
+
+        // Four percentages, four names. Swapping any two in the mirror shows a
+        // user the wrong number for the right label.
+        XCTAssertEqual(dto.notifyAtUsedPercent, 85.0)
+        XCTAssertEqual(dto.notifyAtDescription, "85% used")
+        XCTAssertEqual(dto.clearAtUsedPercent, 82.0)
+        XCTAssertEqual(dto.current.usedPercent, 91.0)
+        XCTAssertEqual(dto.defaultGoal.usedPercent, 60.0)
+        XCTAssertEqual(dto.defaultGoal.description, "60% used (40% free)")
+
+        XCTAssertEqual(dto.snoozeSecs, 7200)
+        XCTAssertTrue(dto.thresholdCrossed)
+        XCTAssertTrue(dto.notificationDue)
+        XCTAssertEqual(
+            dto.statePath,
+            "/Users/dev/Library/Application Support/Glomeris/pressure-episode.json"
+        )
+
+        let episode = try XCTUnwrap(dto.episode)
+        XCTAssertEqual(episode.episodeId, 1)
+        XCTAssertEqual(episode.id, episode.episodeId)
+        XCTAssertEqual(episode.openedUsedPercent, 91.0)
+        XCTAssertEqual(episode.peakUsedPercent, 91.0)
+        XCTAssertEqual(episode.latestUsedPercent, 91.0)
+        XCTAssertEqual(episode.latestFreeBytes, 45_000_000_000)
+        XCTAssertEqual(episode.latestFreeHuman, "41.9 GB")
+        XCTAssertEqual(episode.latestUnixSecs, 1_700_000_000)
+        XCTAssertTrue(episode.notificationDue)
+        XCTAssertEqual(episode.notificationsRaised, 0)
+
+        // Absent, not zero and not "none": the user has not answered, which is
+        // a different thing from having chosen to do nothing.
+        XCTAssertNil(episode.lastNotifiedUnixSecs)
+        XCTAssertNil(episode.response)
+        XCTAssertNil(episode.respondedUnixSecs)
+        XCTAssertNil(episode.snoozedUntilUnixSecs)
+        XCTAssertFalse(episode.isSnoozed)
+    }
+
+    /// The same episode raised, snoozed, and measured again on a disk that had
+    /// recovered somewhat.
+    ///
+    /// Two things are asserted that the test above cannot assert. All four
+    /// optionals carry values, so each `CodingKey` is proven to match a real
+    /// key. And `current.usedPercent` (88) is deliberately not
+    /// `episode.peakUsedPercent` (94): a surface reading one for the other would
+    /// tell the user their disk is fuller than the one they are deciding about.
+    func testDecodesPressureStatusReportForASnoozedEpisode() throws {
+        let dto = try decodeFixture(
+            "pressure_status_report_snoozed.json",
+            as: PressureStatusReportDto.self
+        )
+
+        XCTAssertEqual(dto.current.usedPercent, 88.0)
+        XCTAssertEqual(dto.current.pressureState, "PRESSURED")
+        XCTAssertTrue(dto.thresholdCrossed, "88% is still above the 85% threshold")
+        XCTAssertFalse(dto.notificationDue, "but a snooze is running, so nothing is owed")
+
+        let episode = try XCTUnwrap(dto.episode)
+        XCTAssertEqual(episode.peakUsedPercent, 94.0)
+        XCTAssertEqual(episode.latestUsedPercent, 88.0)
+        XCTAssertEqual(episode.latestFreeHuman, "55.9 GB")
+        XCTAssertEqual(episode.notificationsRaised, 1)
+        XCTAssertEqual(episode.lastNotifiedUnixSecs, 1_700_000_060)
+        XCTAssertEqual(episode.response, "remind_later")
+        XCTAssertEqual(episode.respondedUnixSecs, 1_700_000_120)
+        XCTAssertEqual(episode.snoozedUntilUnixSecs, 1_700_007_320)
+        XCTAssertTrue(episode.isSnoozed)
+        XCTAssertFalse(episode.notificationDue)
+
+        // The app renders the answer through the vocabulary rather than
+        // switching on the tag, so the token it decoded must be one the
+        // vocabulary knows. An unrecognised one here would reach the user as a
+        // question mark on a pressure banner.
+        XCTAssertEqual(
+            GlomerisVocabulary.episodeResponse(try XCTUnwrap(episode.response)).title,
+            "Remind me later"
+        )
+    }
+
+    /// A quiet disk.
+    ///
+    /// Both absences are asserted, because both could be misread. No episode
+    /// means there is nothing to show, not that nothing is being watched — the
+    /// threshold and the answer set are still reported. And a missing state path
+    /// means `$HOME` could not be resolved, not that monitoring is off.
+    func testDecodesPressureStatusReportWithNoEpisode() throws {
+        let dto = try decodeFixture(
+            "pressure_status_report_no_episode.json",
+            as: PressureStatusReportDto.self
+        )
+
+        XCTAssertNil(dto.episode)
+        XCTAssertNil(dto.statePath)
+        XCTAssertFalse(dto.thresholdCrossed)
+        XCTAssertFalse(dto.notificationDue)
+        XCTAssertEqual(dto.current.usedPercent, 60.0)
+        XCTAssertEqual(dto.current.pressureState, "HEALTHY")
+
+        // Still reported with no episode in sight, which is how a pane says
+        // what it is watching for before anything has happened.
+        XCTAssertEqual(dto.notifyAtUsedPercent, 85.0)
+        XCTAssertEqual(dto.responses, ["review_and_recover", "remind_later", "ignore_episode"])
+    }
+
+    /// The answer set is read from the CLI, not known locally — so every token
+    /// it publishes must already have wording, or a banner ships with a button
+    /// labelled with a question mark.
+    func testEveryPublishedAnswerHasWording() throws {
+        let dto = try decodeFixture(
+            "pressure_status_report.json",
+            as: PressureStatusReportDto.self
+        )
+
+        XCTAssertFalse(dto.responses.isEmpty)
+        for token in dto.responses {
+            let term = GlomerisVocabulary.episodeResponse(token)
+            XCTAssertEqual(term.token, token)
+            XCTAssertFalse(
+                term.title.contains("Unrecognised"),
+                "no wording for published answer \(token)"
+            )
+        }
+    }
+
+    /// A refused acknowledgement — the one an app reaches by doing the right
+    /// thing twice, when two polls race to raise the same banner.
+    func testDecodesPressureRejectionReport() throws {
+        let dto = try decodeFixture(
+            "pressure_rejection_report.json",
+            as: PressureRejectionReportDto.self
+        )
+
+        XCTAssertEqual(dto.reason, "no_notification_due")
+        XCTAssertEqual(
+            dto.message,
+            "no pressure notification is owed "
+                + "(there is no open episode, or its notification was already raised)"
+        )
+
+        // Worded as news rather than as a failure: nothing went wrong, the disk
+        // simply recovered before the button was pressed.
+        let term = GlomerisVocabulary.episodeRejection(dto.reason)
+        XCTAssertEqual(term.title, "Nothing was owed")
+        XCTAssertEqual(term.tone, .neutral)
+    }
 }

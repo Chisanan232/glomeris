@@ -1,0 +1,22 @@
+{
+  "notify_at_used_percent": 85.0,
+  "notify_at_description": "85% used",
+  "clear_at_used_percent": 82.0,
+  "snooze_secs": 7200,
+  "current": {
+    "total_bytes": 500000000000,
+    "free_bytes": 200000000000,
+    "used_percent": 60.0,
+    "free_human": "186.3 GB",
+    "total_human": "465.7 GB",
+    "pressure_state": "HEALTHY"
+  },
+  "threshold_crossed": false,
+  "notification_due": false,
+  "default_goal": {
+    "used_percent": 60.0,
+    "free_percent": 40.0,
+    "description": "60% used (40% free)"
+  },
+  "responses": ["review_and_recover", "remind_later", "ignore_episode"]
+}

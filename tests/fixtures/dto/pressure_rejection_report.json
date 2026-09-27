@@ -1,0 +1,4 @@
+{
+  "reason": "no_notification_due",
+  "message": "no pressure notification is owed (there is no open episode, or its notification was already raised)"
+}

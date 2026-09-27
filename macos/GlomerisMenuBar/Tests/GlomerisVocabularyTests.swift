@@ -116,6 +116,20 @@ final class GlomerisVocabularyTests: XCTestCase {
         "not_finite", "out_of_range", "not_an_improvement",
     ]
 
+    /// `src/monitor/episode.rs` — `EpisodeResponse::as_str`, all three.
+    /// HORO-1508. These are the buttons on the pressure notification, and the
+    /// set the app offers is read from `PressureStatusReport.responses` rather
+    /// than from this list — which is here so the wording is swept like every
+    /// other vocabulary.
+    private static let episodeResponseTokens = [
+        "review_and_recover", "remind_later", "ignore_episode",
+    ]
+
+    /// `src/monitor/episode.rs` — `EpisodeRejection::as_str`, both. HORO-1508.
+    private static let episodeRejectionTokens = [
+        "no_open_episode", "no_notification_due",
+    ]
+
     /// Every axis, as (name, tokens, lookup) so the shared invariants
     /// below can be asserted once rather than ten times.
     private static var allAxes: [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)] {
@@ -133,6 +147,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("llmCheck", llmCheckTokens, GlomerisVocabulary.llmCheckOutcome),
             ("stopReason", stopReasonTokens, GlomerisVocabulary.stopReason),
             ("goalRejection", goalRejectionTokens, GlomerisVocabulary.goalRejection),
+            ("episodeResponse", episodeResponseTokens, GlomerisVocabulary.episodeResponse),
+            ("episodeRejection", episodeRejectionTokens, GlomerisVocabulary.episodeRejection),
         ]
     }
 
@@ -311,6 +327,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             GlomerisVocabulary.llmCheckAxis,
             GlomerisVocabulary.stopReasonAxis,
             GlomerisVocabulary.goalRejectionAxis,
+            GlomerisVocabulary.episodeResponseAxis,
+            GlomerisVocabulary.episodeRejectionAxis,
         ]
         XCTAssertEqual(
             Set(axisNames).count,
@@ -334,6 +352,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             "llmCheck": GlomerisVocabulary.llmCheckAxis,
             "stopReason": GlomerisVocabulary.stopReasonAxis,
             "goalRejection": GlomerisVocabulary.goalRejectionAxis,
+            "episodeResponse": GlomerisVocabulary.episodeResponseAxis,
+            "episodeRejection": GlomerisVocabulary.episodeRejectionAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -977,5 +997,109 @@ final class GlomerisVocabularyTests: XCTestCase {
             "a goal this disk already meets is not the same as one off the scale"
         )
         XCTAssertNotEqual(alreadyMet.symbolName, outOfRange.symbolName)
+    }
+
+    // MARK: - Answers to a pressure alert (HORO-1508)
+
+    /// HORO-1508 forbids an ambiguous "Skip", and this is what makes that
+    /// mechanical. Two of the three answers stop the alert, for different
+    /// lengths of time, so a word that could label either of them labels
+    /// neither: a user who pressed it could not know afterwards which they had
+    /// chosen.
+    func testNoAnswerIsLabelledWithAWordThatCouldMeanEither() {
+        for token in Self.episodeResponseTokens {
+            let title = GlomerisVocabulary.episodeResponse(token).title.lowercased()
+            for vague in ["skip", "dismiss", "cancel", "ok"] {
+                XCTAssertFalse(
+                    title.split(whereSeparator: { !$0.isLetter }).contains(Substring(vague)),
+                    "\(token)'s title is the ambiguous word \"\(vague)\": \(title)"
+                )
+            }
+        }
+    }
+
+    /// The campaign's rule at the one place it is easiest to break: crossing a
+    /// threshold must not start deleting anything. The button that leads to
+    /// recovery has to say that it only opens the screen, because a
+    /// notification is read in a hurry or not at all.
+    func testReviewAndRecoverPromisesToOpenRatherThanToDelete() {
+        let term = GlomerisVocabulary.episodeResponse("review_and_recover")
+        let explanation = term.explanation.lowercased()
+
+        XCTAssertTrue(
+            explanation.contains("opens"),
+            "must say it opens a screen: \(term.explanation)"
+        )
+        XCTAssertTrue(
+            explanation.contains("nothing is deleted"),
+            "must say nothing is deleted yet: \(term.explanation)"
+        )
+        XCTAssertTrue(
+            explanation.contains("until you"),
+            "must name the user as the one who starts a run: \(term.explanation)"
+        )
+    }
+
+    /// AC4 in wording. "Ignore" scoped to one episode is a reasonable answer;
+    /// "ignore" read as "stop watching my disk" is a product that silently
+    /// stops working. The user cannot tell which they got from the button, so
+    /// the explanation has to.
+    func testIgnoringOneAlertSaysAnotherWillStillArrive() {
+        let ignore = GlomerisVocabulary.episodeResponse("ignore_episode")
+        let explanation = ignore.explanation.lowercased()
+
+        XCTAssertTrue(
+            ignore.title.lowercased().contains("this"),
+            "the title must scope itself to one alert: \(ignore.title)"
+        )
+        XCTAssertTrue(
+            explanation.contains("new episode"),
+            "must say a later crossing is a new episode: \(ignore.explanation)"
+        )
+        XCTAssertTrue(
+            explanation.contains("will alert"),
+            "must say the new episode still alerts: \(ignore.explanation)"
+        )
+        XCTAssertFalse(
+            explanation.contains("stop monitoring") || explanation.contains("turn off"),
+            "must not read as disabling monitoring: \(ignore.explanation)"
+        )
+
+        // The snooze is the other answer that stops the alert, and it must not
+        // read as the permanent one either.
+        XCTAssertTrue(
+            GlomerisVocabulary.episodeResponse("remind_later")
+                .explanation.lowercased().contains("again"),
+            "remind me later must say the alert comes back"
+        )
+    }
+
+    /// Neither refusal is a malfunction: the ordinary cause of both is that the
+    /// disk recovered between the banner appearing and the button being
+    /// pressed. Worded as a warning, a user would go looking for a way to make
+    /// their choice stick, for a condition that had already resolved itself.
+    func testARefusedAnswerReadsAsNewsAboutTheDiskNotAsAnError() {
+        for token in Self.episodeRejectionTokens {
+            let term = GlomerisVocabulary.episodeRejection(token)
+            XCTAssertEqual(
+                term.tone, .neutral,
+                "\(token) is a benign race and must not be toned as a problem"
+            )
+            XCTAssertTrue(
+                term.explanation.lowercased().contains("nothing was recorded"),
+                "\(token) must say the answer was not stored: \(term.explanation)"
+            )
+            for alarming in ["error", "failed", "invalid"] {
+                XCTAssertFalse(
+                    term.title.lowercased().contains(alarming),
+                    "\(token)'s title reads as a malfunction: \(term.title)"
+                )
+            }
+        }
+        XCTAssertTrue(
+            GlomerisVocabulary.episodeRejection("a_reason_from_a_newer_cli")
+                .explanation.lowercased().contains("monitoring is unaffected"),
+            "even an unrecognised refusal must say the monitor is still watching"
+        )
     }
 }

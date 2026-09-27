@@ -1108,6 +1108,103 @@ A refused *stored* file is `1`, not `2`: it is not this command line's mistake,
 and a script must be able to tell "you typed 120" from "the file on disk
 disagrees with itself".
 
+## `glomeris pressure <show|notified|respond> [<answer>] [--json]`
+
+The seam between the background monitor and the menu-bar app. You are unlikely
+to type it; the app runs it every poll.
+
+It exists because of a constraint neither side can work around alone: only an
+**app bundle** can put buttons on a macOS notification, and the monitor
+(`glomeris daemon`) is a bare `launchd` process, not a bundle. So the monitor
+records that a notification is *owed* and the app raises it. This command is
+how the app asks what is owed and reports which button was pressed.
+
+The subcommand is optional and defaults to `show`, so a bare
+`glomeris pressure` reads rather than writes.
+
+| Verb | What it does | Can it delete? |
+|---|---|---|
+| `show` | Prints the current episode, whether a notification is owed, your alert threshold, your recovery goal, and the answers that can be given. | No |
+| `notified` | Records that the notification was put on screen, so it is not raised again for the same episode. | No |
+| `respond` | Records which button was pressed. Takes one of the three answers below. | No |
+
+### What an episode is
+
+One continuous stretch of disk usage being at or above
+`settings --notify-at-used-percent`. It opens the first time an observation
+reaches that threshold and closes only once usage has fallen **three percentage
+points below** it. That gap is the hysteresis, and it is the whole reason one
+spell of a full disk produces **one** notification rather than one per poll: a
+volume hovering exactly on the threshold stays inside one episode, and it takes
+a real recovery rather than a rounding wobble to end it.
+
+Episode ids are monotonic and never reused, because the app uses the id as the
+notification's identifier — two notifications about one episode coalesce, and
+two episodes never do.
+
+### The three answers
+
+| Answer | What it means |
+|---|---|
+| `review_and_recover` | Open the recovery screen for this episode. **Opens** it — it does not start recovery, and deletes nothing. |
+| `remind_later` | Say nothing for two hours, then notify again if usage is still above the threshold. The episode stays open, so this is a delay, not a dismissal. |
+| `ignore_episode` | Say nothing more about **this** spell of disk pressure. Monitoring continues and the next episode notifies again. |
+
+Hyphens are accepted too (`respond review-and-recover`), because that is what a
+command line looks like. Nothing else is: an unrecognized answer is refused
+rather than mapped onto the nearest match, since the nearest match to a
+misspelled `ignore_episode` is the one that opens recovery.
+
+`ignore_episode` **cannot switch notifications off.** It is stored on the
+episode, so it expires with it — there is no answer here, and no flag anywhere,
+that silences monitoring indefinitely. That is the point of storing the answer
+on the episode rather than in settings.
+
+### What this command does not do
+
+- **It does not observe.** `show` never opens or closes an episode and never
+  decides that a notification is owed; only the monitor's own poll does. On a
+  machine where the monitor is not installed there is therefore no episode at
+  all, and `show` says so while still reporting whether usage is above your
+  threshold.
+- **It does not delete anything, and it cannot widen what may be deleted.** An
+  episode decides when you are spoken to, never what is permitted. Answering
+  `review_and_recover` opens a screen. Every gate between a candidate and its
+  deletion is elsewhere and unchanged.
+- **It does not start recovery**, automatically or otherwise. Crossing a
+  threshold raises a question; a human answers it.
+
+### `--json`
+
+Belongs to all three verbs and prints one shape from all three, always
+describing the state **after** the command ran. This is what the menu-bar app
+reads.
+
+`current` carries the disk reading with both percentages under separate names
+and the byte figures; `notify_at_used_percent`/`notify_at_description` the
+threshold; a `default_goal` object the recovery goal, in the same shape
+`settings --json` prints it; `threshold_crossed` and `notification_due` the two
+facts the app acts on; `episode` the episode's identity, its opened/peak/latest
+readings, how many notifications have been raised, the answer if one was given,
+and the snooze deadline if one is pending; `responses` the answers that can be
+given, so the app offers buttons it did not invent.
+
+A refusal prints a **rejection object on stdout** instead — `reason` as a stable
+token (`no_open_episode`, `no_notification_due`) and `message` — rather than
+writing to stderr, because a refusal here is an ordinary outcome that the app
+has to read and display.
+
+Exit codes: `0` the episode was printed, or the answer was recorded; `1` the
+episode state or your settings could not be read or written, or filesystem usage
+could not be measured; `2` usage error, including an answer that is not one of
+the three; `3` there was **nothing to record**.
+
+`3` rather than `1` for that last case, and this is the load-bearing part of the
+contract: no episode is open, or no notification was owed. It is **not a
+failure**. The usual cause is that the disk recovered while the notification was
+on screen, and the app polls this command every thirty seconds — a client that
+treated it as an error would retry at poll speed forever.
+
 ## Exit codes
 
 Also available as `glomeris help exit-codes`, which is the copy to trust — it

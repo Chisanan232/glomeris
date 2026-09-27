@@ -62,6 +62,7 @@ fn main() {
         Some("free") => run_free_command(&args[1..]),
         Some("autopilot") => run_autopilot_command(&args[1..]),
         Some("settings") => run_settings_command(&args[1..]),
+        Some("pressure") => run_pressure_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             eprintln!("{}", help::render_unknown_command_hint());
@@ -1922,6 +1923,286 @@ fn print_recovery_report(
     }
 }
 
+/// `glomeris pressure [show|notified|respond <answer>]` (HORO-1508).
+///
+/// The seam between the daemon and the menu-bar app. `UNUserNotificationCenter`
+/// is the only macOS API that can put buttons on a notification and it refuses
+/// to run outside an app bundle, while the process that notices pressure is a
+/// bare launchd job. So the daemon records that a notification is *owed* and the
+/// app raises it — which needs a way to ask what is owed, and a way to say what
+/// the user pressed.
+///
+/// Every rule stays here. The app learns whether a banner is due by reading
+/// `notification_due`, not by comparing a percentage against a threshold, and it
+/// reports the user's answer as one of exactly three tokens this command
+/// publishes. There is deliberately no way to express a fourth.
+///
+/// `show` is the default and is read-only. It does not call
+/// [`glomeris::monitor::EpisodeTracker::observe`], and that is the distinction
+/// this command rests on: the daemon is the only observer. If `show` opened
+/// episodes, a machine whose daemon was never installed would still notify from
+/// whatever process happened to run the GUI, and "the daemon owns pressure
+/// policy" would stop being true. The honest consequence — no daemon means no
+/// episode — is visible rather than hidden: `threshold_crossed` still reports
+/// that the disk is above the user's threshold, and `daemon status` already says
+/// whether anything is watching.
+///
+/// Nothing here deletes anything. An episode decides when the user is spoken to,
+/// never what may be removed.
+#[cfg(target_os = "macos")]
+fn run_pressure_command(args: &[String]) {
+    let sub = args.first().map(String::as_str).unwrap_or("show");
+    let rest: &[String] = if args.is_empty() { &[] } else { &args[1..] };
+
+    match sub {
+        "show" => pressure_show(rest),
+        "notified" => pressure_notified(rest),
+        "respond" => pressure_respond(rest),
+        other => {
+            eprintln!("glomeris pressure: unknown subcommand '{other}'");
+            print_command_usage("pressure");
+            std::process::exit(2);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_pressure_command(_args: &[String]) {
+    eprintln!("glomeris pressure: only supported on macOS");
+    std::process::exit(1);
+}
+
+/// Exit code for an answer or acknowledgement there was nothing to record.
+///
+/// Not 1, because nothing failed, and not 2, because the command line was
+/// well-formed. `execute` established 3 as "refused, not broken" and this is the
+/// same meaning: the ordinary cause is benign — the disk recovered between the
+/// banner appearing and the button being pressed — and a caller that treated it
+/// as a malfunction would report a fault to the user for a race that resolved
+/// itself correctly.
+#[cfg(target_os = "macos")]
+const EXIT_PRESSURE_NOTHING_TO_RECORD: i32 = 3;
+
+#[cfg(target_os = "macos")]
+fn pressure_usage_exit(message: &str) -> ! {
+    eprintln!("glomeris pressure: {message}");
+    print_command_usage("pressure");
+    std::process::exit(2);
+}
+
+/// Resolves the episode state file, exiting 1 if there is no `HOME` to resolve
+/// it against.
+///
+/// Unlike a *missing* file — which [`glomeris::monitor::load_tracker_at`]
+/// deliberately answers with a fresh tracker, because that is what a first run
+/// looks like — an unresolvable path means this process cannot find the state at
+/// all, and reporting "no episode" would be a guess dressed as an answer.
+#[cfg(target_os = "macos")]
+fn pressure_state_path() -> PathBuf {
+    match glomeris::monitor::default_episode_state_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("glomeris pressure: failed to locate the episode state file: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Loads the user's settings, or exits 1.
+///
+/// The threshold comes from [`glomeris::settings`] rather than from the stored
+/// episode for the reason [`glomeris::monitor::episode_store`] documents: a
+/// threshold the user changed while the daemon was down must govern now.
+#[cfg(target_os = "macos")]
+fn pressure_settings() -> glomeris::settings::RecoverySettings {
+    match glomeris::settings::load_settings() {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("glomeris pressure: failed to read your settings: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Builds and prints the current pressure status.
+///
+/// One function for all three verbs, so the app cannot be reading one shape
+/// after `show` and another after `respond` — the same arrangement, for the same
+/// reason, as [`settings_print_json`].
+#[cfg(target_os = "macos")]
+fn pressure_print_status(
+    json: bool,
+    tracker: &glomeris::monitor::EpisodeTracker,
+    settings: &glomeris::settings::RecoverySettings,
+    state_path: &std::path::Path,
+) {
+    use glomeris::monitor::{FsStat, ThresholdConfig};
+    use glomeris::platform::macos::MacosFsStat;
+
+    let usage = match MacosFsStat.stat(std::path::Path::new("/")) {
+        Ok(usage) => usage,
+        Err(e) => {
+            eprintln!("glomeris pressure: failed to read filesystem usage: {e}");
+            std::process::exit(1);
+        }
+    };
+    let report = glomeris::cli::pressure::build_pressure_status_report(
+        tracker,
+        settings,
+        &usage,
+        &ThresholdConfig::default(),
+        glomeris::monitor::persistence::unix_now_secs(),
+        Some(state_path.display().to_string()),
+    );
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        for line in glomeris::cli::pressure::describe_pressure_status(&report) {
+            println!("{line}");
+        }
+    }
+}
+
+/// Reports a refusal and exits 3.
+///
+/// The refusal is printed as the same `reason`/`message` pair in both modes, so
+/// a script branching on the token and a human reading the line are told the
+/// same thing by the same producer.
+#[cfg(target_os = "macos")]
+fn pressure_rejection_exit(json: bool, rejection: glomeris::monitor::EpisodeRejection) -> ! {
+    let report = glomeris::cli::pressure::build_pressure_rejection_report(&rejection);
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        eprintln!("glomeris pressure: {}", report.message);
+    }
+    std::process::exit(EXIT_PRESSURE_NOTHING_TO_RECORD);
+}
+
+/// Loads the tracker under the current settings' threshold.
+#[cfg(target_os = "macos")]
+fn pressure_load_tracker(
+    settings: &glomeris::settings::RecoverySettings,
+    state_path: &std::path::Path,
+) -> glomeris::monitor::EpisodeTracker {
+    let config = glomeris::monitor::EpisodeConfig::new(settings.notify_at_used_percent());
+    glomeris::monitor::load_tracker_at(state_path, config)
+}
+
+/// Persists the tracker, or exits 1.
+///
+/// A write failure is reported rather than swallowed, because the whole point of
+/// both writing verbs is that the record survives: an acknowledgement that
+/// silently failed to persist would have the app raise the same banner again on
+/// the next poll, which is precisely the storm AC 5 forbids.
+#[cfg(target_os = "macos")]
+fn pressure_save_tracker(
+    state_path: &std::path::Path,
+    tracker: &glomeris::monitor::EpisodeTracker,
+) {
+    if let Err(e) = glomeris::monitor::save_tracker_at(state_path, tracker) {
+        eprintln!("glomeris pressure: failed to record the episode state: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// `glomeris pressure show [--json]` — what the app reads to decide whether to
+/// raise a banner.
+#[cfg(target_os = "macos")]
+fn pressure_show(args: &[String]) {
+    let (json, rest) = take_json_flag(args);
+    if let Some(unexpected) = rest.first() {
+        pressure_usage_exit(&format!("show takes no arguments (got '{unexpected}')"));
+    }
+
+    let settings = pressure_settings();
+    let state_path = pressure_state_path();
+    let tracker = pressure_load_tracker(&settings, &state_path);
+    pressure_print_status(json, &tracker, &settings, &state_path);
+}
+
+/// `glomeris pressure notified [--json]` — the app reporting that it put the
+/// banner on screen.
+///
+/// Separate from `respond` because they answer different questions and only one
+/// of them ever happens: a user who ignores a banner entirely never responds,
+/// and without this verb the episode would look un-notified forever and be
+/// re-raised at every poll. It is also what makes `notifications_raised` mean
+/// "banners the user could have seen" rather than "banners we intended", which
+/// is the figure AC 5 is checked against.
+#[cfg(target_os = "macos")]
+fn pressure_notified(args: &[String]) {
+    let (json, rest) = take_json_flag(args);
+    if let Some(unexpected) = rest.first() {
+        pressure_usage_exit(&format!("notified takes no arguments (got '{unexpected}')"));
+    }
+
+    let settings = pressure_settings();
+    let state_path = pressure_state_path();
+    let mut tracker = pressure_load_tracker(&settings, &state_path);
+    if let Err(rejection) = tracker.mark_notified(glomeris::monitor::persistence::unix_now_secs()) {
+        pressure_rejection_exit(json, rejection);
+    }
+    pressure_save_tracker(&state_path, &tracker);
+    pressure_print_status(json, &tracker, &settings, &state_path);
+}
+
+/// `glomeris pressure respond <answer> [--json]` — the app reporting which
+/// button the user pressed.
+///
+/// The answer is parsed through [`glomeris::monitor::EpisodeResponse::parse`],
+/// so the accepted set is the domain type's and an unknown token is a usage
+/// error listing what exists rather than a silently discarded answer. The three
+/// tokens are also published in `pressure show`'s `responses` field, so a client
+/// never has to know them independently — which is what stops it from offering a
+/// fourth button and discovering the refusal only after the user pressed it.
+#[cfg(target_os = "macos")]
+fn pressure_respond(args: &[String]) {
+    use glomeris::monitor::EpisodeResponse;
+
+    let (json, rest) = take_json_flag(args);
+    let raw = match rest.first() {
+        Some(answer) => answer.as_str(),
+        None => pressure_usage_exit(&format!(
+            "respond needs an answer ({})",
+            pressure_answer_list()
+        )),
+    };
+    if let Some(unexpected) = rest.get(1) {
+        pressure_usage_exit(&format!("respond takes one answer (got '{unexpected}')"));
+    }
+    let response = match EpisodeResponse::parse(raw) {
+        Some(response) => response,
+        None => pressure_usage_exit(&format!(
+            "unknown answer '{raw}' ({})",
+            pressure_answer_list()
+        )),
+    };
+
+    let settings = pressure_settings();
+    let state_path = pressure_state_path();
+    let mut tracker = pressure_load_tracker(&settings, &state_path);
+    if let Err(rejection) =
+        tracker.respond(response, glomeris::monitor::persistence::unix_now_secs())
+    {
+        pressure_rejection_exit(json, rejection);
+    }
+    pressure_save_tracker(&state_path, &tracker);
+    pressure_print_status(json, &tracker, &settings, &state_path);
+}
+
+/// The accepted answers, rendered from the enum rather than written out, so a
+/// fourth response cannot be added without this message learning about it.
+#[cfg(target_os = "macos")]
+fn pressure_answer_list() -> String {
+    let answers: Vec<&str> = glomeris::monitor::EpisodeResponse::ALL
+        .iter()
+        .map(|response| response.as_str())
+        .collect();
+    format!("one of: {}", answers.join(", "))
+}
+
 /// `glomeris settings [show|set]` (HORO-1507).
 ///
 /// `show` is the default, so a bare `glomeris settings` reads rather than
@@ -2376,6 +2657,34 @@ fn daemon_run() {
     let notifier = MacosNotifier;
     let persistence = FilePersistence::new(history_path);
 
+    // HORO-1508. Where the loop stops being only about the four built-in
+    // pressure states and starts being about the user's own threshold.
+    //
+    // Deliberately *outside* `monitor::run`. The loop's four states are
+    // Glomeris's, fixed and not configurable; an episode is the user's, and it
+    // exists to decide when they are spoken to. Threading a settings file and
+    // an episode store through `poll_once` would put a preference inside the
+    // thing that classifies disk pressure, and a pressure state must mean the
+    // same thing on every machine. The per-iteration hook is the right seam:
+    // the loop reports what it measured, and this decides what to say about it.
+    let episode_state_path = monitor::default_episode_state_path().ok();
+    if episode_state_path.is_none() {
+        // Said once, at startup, rather than every poll. The monitor still runs
+        // — the four pressure states and the history it records do not depend
+        // on this — so what is lost is the threshold notification and nothing
+        // else, and that is worth exactly one line.
+        eprintln!(
+            "glomeris monitor: HOME is not set, so pressure episodes cannot be recorded and \
+             threshold notifications will not be raised; disk-pressure monitoring continues"
+        );
+    }
+    // The last settings that loaded cleanly. Kept so that saving a malformed
+    // settings file cannot stop the daemon noticing a full disk: a parse error
+    // means the *new* preference is unusable, not that the old one stopped
+    // being what the user asked for.
+    let mut settings = glomeris::settings::RecoverySettings::default();
+    let mut reported_settings_error = false;
+
     monitor::run(
         &config,
         &thresholds,
@@ -2386,11 +2695,102 @@ fn daemon_run() {
         &heartbeat_path,
         None,
         |outcome| {
-            if let Err(e) = outcome {
-                eprintln!("glomeris monitor: poll failed: {e}");
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    eprintln!("glomeris monitor: poll failed: {e}");
+                    return;
+                }
+            };
+            let Some(state_path) = episode_state_path.as_deref() else {
+                return;
+            };
+
+            // Re-read every poll, not once at startup, so a threshold the user
+            // changes while the daemon is running takes effect at the next poll
+            // instead of at the next reboot. It is one small file read per
+            // interval.
+            match glomeris::settings::load_settings() {
+                Ok(loaded) => {
+                    settings = loaded;
+                    reported_settings_error = false;
+                }
+                Err(e) => {
+                    if !reported_settings_error {
+                        eprintln!(
+                            "glomeris monitor: could not read your settings ({e}); continuing \
+                             with the last good alert threshold of {}",
+                            settings.describe_notify_at()
+                        );
+                        reported_settings_error = true;
+                    }
+                }
             }
+
+            episode_step(state_path, &settings, &outcome);
         },
     );
+}
+
+/// One poll's worth of episode bookkeeping (HORO-1508).
+///
+/// Re-read from disk every poll rather than held in memory across the loop, and
+/// that is the whole reason this is a file at all: between two polls the
+/// menu-bar app may have written the user's answer through `glomeris pressure
+/// respond`. A daemon holding its own copy would overwrite that answer on the
+/// next save and re-raise a notification the user had already dismissed —
+/// which is precisely the storm this ticket exists to prevent.
+///
+/// The threshold is applied from `settings` at load, so an episode opened under
+/// a threshold the user has since raised is judged against the new one from
+/// here on.
+///
+/// Every failure is reported and survived. Nothing in this function can widen
+/// what may be deleted — an episode decides when the user is spoken to, never
+/// what may be removed — so there is no fail-closed obligation here, and
+/// stopping the monitor over an unwritable notification record would trade a
+/// missed banner for a blind machine.
+#[cfg(target_os = "macos")]
+fn episode_step(
+    state_path: &std::path::Path,
+    settings: &glomeris::settings::RecoverySettings,
+    outcome: &monitor::PollOutcome,
+) {
+    let config = monitor::EpisodeConfig::new(settings.notify_at_used_percent());
+    let mut tracker = monitor::load_tracker_at(state_path, config);
+    let episode = tracker.observe(
+        outcome.used_percent,
+        outcome.free_bytes,
+        monitor::persistence::unix_now_secs(),
+    );
+
+    // Logged to launchd's stderr, because an episode's life is otherwise
+    // invisible: a user asking "why was I not told?" or "why was I told twice?"
+    // needs these four moments and the numbers behind them.
+    if let Some(id) = episode.opened {
+        eprintln!(
+            "glomeris monitor: pressure episode #{id} opened at {:.1}% used (your alert \
+             threshold is {})",
+            outcome.used_percent,
+            settings.describe_notify_at()
+        );
+    }
+    if let Some(id) = episode.closed {
+        eprintln!(
+            "glomeris monitor: pressure episode #{id} closed at {:.1}% used",
+            outcome.used_percent
+        );
+    }
+    if episode.notification_became_due {
+        eprintln!("glomeris monitor: a pressure notification is owed and awaits the app");
+    }
+    if episode.snooze_elapsed {
+        eprintln!("glomeris monitor: a snoozed pressure notification is owed again");
+    }
+
+    if let Err(e) = monitor::save_tracker_at(state_path, &tracker) {
+        eprintln!("glomeris monitor: could not record the pressure episode: {e}");
+    }
 }
 
 /// The mount the recovery loop and its preview both measure. One constant so

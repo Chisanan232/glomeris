@@ -38,10 +38,15 @@
 //! The recovery reports were added in HORO-1506 and the settings reports in
 //! HORO-1507, when `RecoverySectionView.swift` and
 //! `RecoveryPreferencesView.swift` started decoding them.
+//! The pressure reports were added in HORO-1508, when the app became the
+//! process that raises the pressure notification the daemon can only record.
+//! Three status fixtures rather than one: the shape a client acts on is mostly
+//! made of optionals, and "absent" is a meaning of its own on this surface.
 
 use std::path::PathBuf;
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
+use glomeris::cli::pressure::{build_pressure_rejection_report, build_pressure_status_report};
 use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
 };
@@ -49,6 +54,7 @@ use glomeris::cli::settings::{build_settings_rejection_report, build_settings_re
 use glomeris::executor::goal::RecoveryGoal;
 use glomeris::executor::recovery_loop::{FreeTarget, RecoveryReport, StopReason};
 use glomeris::monitor::config::ThresholdConfig;
+use glomeris::monitor::episode::{EpisodeConfig, EpisodeResponse, EpisodeTracker};
 use glomeris::monitor::fs_stat::FsUsage;
 use glomeris::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, AutopilotAskPreauthorizationReport,
@@ -929,4 +935,125 @@ fn settings_rejection_report_matches_golden_fixture() {
         .expect_err("a goal above the alert threshold is refused");
     let report = build_settings_rejection_report(&rejection);
     assert_matches_fixture(&report, "settings_rejection_report.json");
+}
+
+// ---------------------------------------------------------------------------
+// Pressure-episode reports (HORO-1508)
+// ---------------------------------------------------------------------------
+//
+// Driven through `EpisodeTracker` rather than written as struct literals, for
+// the reason the settings fixtures give and one more of their own: these fields
+// are a *state machine's* observable state. A literal could pin
+// `notification_due: true` next to `notifications_raised: 1`, a combination the
+// tracker will not produce, and the notifier would then be tested against a
+// state that cannot occur — while the storm AC5 forbids would be tested against
+// nothing at all.
+
+/// The state the menu-bar app acts on: pressure crossed, banner owed, nobody
+/// has answered anything yet.
+///
+/// Every optional is absent rather than null. That is the half of the contract a
+/// mis-mapped `CodingKey` on the Swift side would pass silently, so the sibling
+/// fixture below populates all four.
+#[test]
+fn pressure_status_report_matches_golden_fixture() {
+    let settings = RecoverySettings::default()
+        .with_changes(Some(85.0), Some(60.0))
+        .expect("85% threshold with a 60% goal is a valid pair");
+    let mut tracker = EpisodeTracker::new(EpisodeConfig::new(settings.notify_at_used_percent()));
+    tracker.observe(91.0, 45_000_000_000, 1_700_000_000);
+
+    let report = build_pressure_status_report(
+        &tracker,
+        &settings,
+        &FsUsage::new(500_000_000_000, 45_000_000_000),
+        &ThresholdConfig::default(),
+        1_700_000_000,
+        Some("/Users/dev/Library/Application Support/Glomeris/pressure-episode.json".to_string()),
+    );
+    assert_matches_fixture(&report, "pressure_status_report.json");
+}
+
+/// The same episode after it was raised, snoozed, and then measured again on a
+/// disk that had recovered somewhat.
+///
+/// Three things are pinned here that the fixture above cannot pin. All four
+/// optionals are populated. `is_snoozed` is a *derived* flag rather than stored
+/// state, so a client must not compute it from a stale reading. And
+/// `current.used_percent` (88) differs from `episode.peak_used_percent` (94):
+/// a surface conflating the two would tell the user their disk is fuller than
+/// it now is, which is the number they would be deciding on.
+#[test]
+fn pressure_status_report_for_a_snoozed_episode_matches_golden_fixture() {
+    let settings = RecoverySettings::default()
+        .with_changes(Some(85.0), Some(60.0))
+        .expect("85% threshold with a 60% goal is a valid pair");
+    let mut tracker = EpisodeTracker::new(EpisodeConfig::new(settings.notify_at_used_percent()));
+    tracker.observe(94.0, 30_000_000_000, 1_700_000_000);
+    tracker
+        .mark_notified(1_700_000_060)
+        .expect("a notification was owed");
+    tracker
+        .respond(EpisodeResponse::RemindLater, 1_700_000_120)
+        .expect("an open episode can be answered");
+    // Still above the clear boundary, so the episode does not close — and still
+    // inside the snooze, so nothing is owed.
+    tracker.observe(88.0, 60_000_000_000, 1_700_002_000);
+
+    let report = build_pressure_status_report(
+        &tracker,
+        &settings,
+        &FsUsage::new(500_000_000_000, 60_000_000_000),
+        &ThresholdConfig::default(),
+        1_700_003_000,
+        Some("/Users/dev/Library/Application Support/Glomeris/pressure-episode.json".to_string()),
+    );
+    assert_matches_fixture(&report, "pressure_status_report_snoozed.json");
+}
+
+/// A quiet disk.
+///
+/// `episode` is omitted, not null — and so is `state_path`, for the case where
+/// `$HOME` could not be resolved. Both absences say "there is nothing here",
+/// and neither may be read as "monitoring is off": `notify_at_used_percent` and
+/// `responses` are still reported, which is how a pane says what it is watching
+/// for before anything has happened.
+#[test]
+fn pressure_status_report_with_no_episode_matches_golden_fixture() {
+    let settings = RecoverySettings::default()
+        .with_changes(Some(85.0), Some(60.0))
+        .expect("85% threshold with a 60% goal is a valid pair");
+    let tracker = EpisodeTracker::new(EpisodeConfig::new(settings.notify_at_used_percent()));
+
+    let report = build_pressure_status_report(
+        &tracker,
+        &settings,
+        &FsUsage::new(500_000_000_000, 200_000_000_000),
+        &ThresholdConfig::default(),
+        1_700_000_000,
+        None,
+    );
+    assert_matches_fixture(&report, "pressure_status_report_no_episode.json");
+}
+
+/// A refused acknowledgement (HORO-1508).
+///
+/// `no_notification_due` rather than `no_open_episode` because it is the one an
+/// app reaches by doing the right thing twice — two polls racing to raise the
+/// same banner. Obtained from the tracker, so the message is the one the CLI
+/// really prints, and the app cannot be built against a friendlier wording than
+/// the user will see.
+#[test]
+fn pressure_rejection_report_matches_golden_fixture() {
+    let mut tracker = EpisodeTracker::new(EpisodeConfig::new(85.0));
+    tracker.observe(91.0, 45_000_000_000, 1_700_000_000);
+    tracker
+        .mark_notified(1_700_000_060)
+        .expect("the first acknowledgement is owed");
+    let rejection = tracker
+        .mark_notified(1_700_000_070)
+        .expect_err("the second acknowledgement is not");
+
+    let report = build_pressure_rejection_report(&rejection);
+    assert_matches_fixture(&report, "pressure_rejection_report.json");
 }

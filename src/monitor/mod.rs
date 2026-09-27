@@ -5,6 +5,8 @@
 
 pub mod clock;
 pub mod config;
+pub mod episode;
+pub mod episode_store;
 pub mod fs_stat;
 pub mod notifier;
 pub mod persistence;
@@ -14,6 +16,13 @@ pub mod state_machine;
 
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use config::ThresholdConfig;
+pub use episode::{
+    EpisodeConfig, EpisodeOutcome, EpisodeRejection, EpisodeResponse, EpisodeTracker,
+    PressureEpisode,
+};
+pub use episode_store::{
+    default_episode_state_path, load_tracker_at, read_episode_state, save_tracker_at, EpisodeState,
+};
 pub use fs_stat::{FsStat, FsUsage};
 pub use notifier::Notifier;
 pub use persistence::{

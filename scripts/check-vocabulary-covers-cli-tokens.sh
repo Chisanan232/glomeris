@@ -25,7 +25,7 @@
 #
 # COVERAGE — deliberately partial, and it says so in the PASS line
 # ----------------------------------------------------------------
-# Eleven of the twelve vocabularies are checked. The last one cannot be,
+# All but one of the vocabularies are checked. That one cannot be,
 # honestly, because it has no single canonical producer to diff against:
 # `ExecuteReport::outcome` is built from string literals at its call sites
 # in src/cli/mod.rs rather than from one `as_str`-style match. Grepping
@@ -33,8 +33,12 @@
 # strings, so a set-equality check built on it would produce false
 # failures and, worse, invite someone to loosen it until it passed. It
 # stays covered by the transcribed Swift tests only, and this script
-# reports 11/12 rather than printing a bare PASS that reads as "all twelve
-# verified".
+# reports "N of N+1" rather than printing a bare PASS that reads as "all of
+# them verified". `TOTAL_VOCABULARIES` below is a written-down number rather
+# than a count of the array, and the two are cross-checked at the end: that
+# is what stops the PASS line drifting into a claim nobody updated. It had
+# drifted once already — the line read "of 14" while fourteen were checked
+# and a fifteenth was not, which reads as complete coverage.
 #
 # Two vocabularies have been moved OUT of that list by giving them a
 # producer, which is the fix whenever this list is uncomfortable — not
@@ -80,6 +84,9 @@ fi
 # The Rust function named here must be the only place those strings are
 # produced; if that stops being true the check becomes misleading rather
 # than merely incomplete.
+#
+# `<rust fn>` may be written `Type::name` when one file holds more than one
+# function of that name — see `function_body`.
 VOCABULARIES=(
   'pressure;;src/monitor/pressure.rs;;as_str;;PressureState'
   'safety;;src/reporting/policy_label.rs;;as_str;;PolicyLabel'
@@ -125,12 +132,44 @@ VOCABULARIES=(
   # its own arms, so it is a token Rust can emit and therefore a token the app
   # must have wording for.
   'settingsRejection;;src/settings/mod.rs;;as_str;;SettingsRejection'
+  # HORO-1508. The two halves of the pressure-notification surface: the three
+  # answers a banner's buttons send back, and the two refusals an answer can
+  # meet. Both are the sole producers of their tokens —
+  # `PressureEpisodeReport::response` and `PressureStatusReport::responses` go
+  # through `EpisodeResponse::as_str`, and `PressureRejectionReport::reason`
+  # through `EpisodeRejection::as_str`.
+  #
+  # Scoped to their impl blocks, and they are why the scoping exists: both live
+  # in src/monitor/episode.rs, so a bare `as_str` anchor would have extracted
+  # the first one twice and reported the second as verified while never looking
+  # at it.
+  #
+  # The answers matter here more than most. An unrecognised token in this set
+  # is not a question mark on a card — it is a button on a notification whose
+  # label the app had to invent, at the moment the user is being asked what to
+  # do about a disk that is nearly full.
+  'episodeResponse;;src/monitor/episode.rs;;EpisodeResponse::as_str;;EpisodeResponse'
+  'episodeRejection;;src/monitor/episode.rs;;EpisodeRejection::as_str;;EpisodeRejection'
 )
+
+# One more than the number of rows above: `outcome` has no producer to diff
+# against (see this script's header). Cross-checked against the rows actually
+# walked, at the end.
+TOTAL_VOCABULARIES=17
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent
 # heuristic, because `as_str` appears in several impl blocks and a later
 # one must not be picked up by accident.
+#
+# A Rust function may be named `Type::name`, which restricts the search to
+# that type's inherent `impl` block. Needed because the anchor takes the
+# FIRST match in the file, and src/monitor/episode.rs defines two `as_str` —
+# one on `EpisodeResponse` and one on `EpisodeRejection`. Unscoped, the
+# second row would have silently re-extracted the first function's tokens
+# and then reported a mismatch against wording that was perfectly correct,
+# which is worse than not checking it: the obvious way to make that red go
+# away is to edit the Swift table.
 function_body() {
   local file="$1" fn_name="$2" lang="$3"
   # A literal substring, matched with index() rather than a regex. The
@@ -142,9 +181,17 @@ function_body() {
   # The trailing `(` is load-bearing: it keeps `fn as_str(` from matching
   # the test function `fn as_str_is_distinct_and_non_empty_...()` that
   # sits further down src/policy/class.rs.
-  local anchor
+  local anchor impl_anchor=""
   if [[ "$lang" == "rust" ]]; then
-    anchor="fn ${fn_name}("
+    if [[ "$fn_name" == *"::"* ]]; then
+      # `impl Type {` — with the brace, so `impl Display for Type {` cannot
+      # match, and with the type name, so a trait impl on some other type
+      # cannot either.
+      impl_anchor="impl ${fn_name%%::*} {"
+      anchor="fn ${fn_name##*::}("
+    else
+      anchor="fn ${fn_name}("
+    fi
   else
     # Stops at the parameter NAME, not its type: `impactTier` takes a
     # `String?`, so an anchor ending in `String)` silently matched nothing
@@ -153,13 +200,37 @@ function_body() {
     anchor="static func ${fn_name}(_ token:"
   fi
 
-  awk -v anchor="$anchor" '
-    BEGIN { started = 0; depth = 0 }
-    !started && index($0, anchor) > 0 { started = 1 }
-    started {
+  awk -v anchor="$anchor" -v impl_anchor="$impl_anchor" '
+    function braces(line,   opened, closed) {
+      opened = gsub(/\{/, "{", line)
+      closed = gsub(/\}/, "}", line)
+      return opened - closed
+    }
+    # "impl" only when a scope was asked for; otherwise start looking for the
+    # function immediately, exactly as before.
+    BEGIN { phase = (impl_anchor == "" ? "fn" : "impl"); impl_depth = 0; depth = 0 }
+    phase == "impl" {
+      if (index($0, impl_anchor) > 0) {
+        phase = "fn"
+        impl_depth = braces($0)
+      }
+      next
+    }
+    phase == "fn" {
+      if (index($0, anchor) > 0) {
+        phase = "body"
+      } else {
+        # Leaving the impl block without having found the function prints
+        # nothing, which this script reports as a failed extraction rather
+        # than as agreement.
+        impl_depth += braces($0)
+        if (impl_anchor != "" && impl_depth <= 0) exit
+        next
+      }
+    }
+    phase == "body" {
       print
-      n = gsub(/\{/, "{"); depth += n
-      n = gsub(/\}/, "}"); depth -= n
+      depth += braces($0)
       if (depth <= 0 && index($0, "}") > 0) exit
     }
   ' "$file"
@@ -258,8 +329,17 @@ if [[ "$failures" -gt 0 ]]; then
   exit 1
 fi
 
+if [[ "$((checked + 1))" -ne "$TOTAL_VOCABULARIES" ]]; then
+  echo ""
+  echo "FAIL: ${checked} vocabularies were checked, but TOTAL_VOCABULARIES says"
+  echo "      ${TOTAL_VOCABULARIES} exist and exactly one of them (outcome) is unverifiable."
+  echo "      A row was added or removed without updating that number, so the PASS"
+  echo "      line below would overstate or understate the coverage."
+  exit 1
+fi
+
 echo ""
-echo "PASS: ${checked} of 14 vocabularies verified against their Rust producer."
+echo "PASS: ${checked} of ${TOTAL_VOCABULARIES} vocabularies verified against their Rust producer."
 echo "Not verified here (no single canonical producer to diff — see this script's header):"
 echo "  outcome — covered by the transcribed Swift tests only."
 exit 0

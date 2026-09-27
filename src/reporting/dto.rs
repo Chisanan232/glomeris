@@ -1311,6 +1311,149 @@ pub struct SettingsRejectionReport {
     pub goal_used_percent: Option<f64>,
 }
 
+/// The current pressure episode, machine-readable (HORO-1508).
+///
+/// A projection of [`crate::monitor::PressureEpisode`], which already derives
+/// `Serialize` for its own state file. Projected anyway, for the reason this
+/// module's doc comment gives: the state file is this build's private format
+/// and may change shape, whereas this is a contract the menu-bar app parses.
+/// Serializing the domain type directly would make every future field rename
+/// a breaking change to the app.
+///
+/// Nothing here is authority to delete anything. An episode decides when the
+/// user is *spoken to*; what may run is decided by policy against each actual
+/// candidate, every time.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PressureEpisodeReport {
+    /// Identifies this episode, and with it the notification: the app uses it
+    /// as the notification's identifier so a second episode cannot coalesce
+    /// into the first one's banner.
+    pub episode_id: u64,
+    pub opened_unix_secs: u64,
+    /// Usage when the episode opened, the worst seen since, and the latest
+    /// reading — three separate numbers because a user who is told "92%" by a
+    /// notification and shown "78%" by the app has been told two things and
+    /// believes neither.
+    pub opened_used_percent: f64,
+    pub peak_used_percent: f64,
+    pub latest_used_percent: f64,
+    pub latest_free_bytes: u64,
+    pub latest_free_human: String,
+    pub latest_unix_secs: u64,
+    /// `true` when a notification is owed and has not been raised. The
+    /// daemon sets this; the app raises the notification and clears it by
+    /// calling `glomeris pressure notified`.
+    pub notification_due: bool,
+    /// How many notifications this episode has produced. One per episode
+    /// normally, plus one per elapsed snooze — never one per poll.
+    pub notifications_raised: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_notified_unix_secs: Option<u64>,
+    /// The user's answer, from
+    /// [`crate::monitor::EpisodeResponse::as_str`], or `null` if they have
+    /// not answered yet. A closed set of three tags — see
+    /// [`PressureStatusReport::responses`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub responded_unix_secs: Option<u64>,
+    /// When a "remind me later" answer expires. Reported as an absolute
+    /// instant rather than a countdown so a client that renders it late
+    /// cannot show a duration that has quietly gone stale.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snoozed_until_unix_secs: Option<u64>,
+    /// Whether the snooze above is still in force *as of the reading this
+    /// report was built from*. Derived, and reported separately from the
+    /// deadline because a client must not have to do clock arithmetic to
+    /// decide whether it is allowed to show a banner.
+    pub is_snoozed: bool,
+}
+
+/// Everything the menu-bar app needs to decide whether to raise a pressure
+/// notification, and what to say in it (HORO-1508).
+///
+/// Printed by `glomeris pressure show --json`. The division of labour this
+/// shape encodes is the whole design: Rust decides *whether* a notification is
+/// owed (`episode.notification_due`), because an actionable notification
+/// requires `UNUserNotificationCenter` and therefore an app bundle, which the
+/// launchd daemon is not. Swift decides only how it looks. No part of the
+/// hysteresis, snooze or dedupe rules is re-expressible by a client.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PressureStatusReport {
+    /// The user's alert threshold, percent **used** — the same number
+    /// [`RecoverySettingsReport::notify_at_used_percent`] reports, read from
+    /// the same settings file.
+    pub notify_at_used_percent: f64,
+    /// e.g. `"75% used"`.
+    pub notify_at_description: String,
+    /// Usage at or below which an open episode ends: the threshold less the
+    /// hysteresis margin. Published because AC1 requires the hysteresis to be
+    /// documented, and a client that showed the threshold alone could not
+    /// explain why a 74%-used disk is still in an episode.
+    pub clear_at_used_percent: f64,
+    /// How long "remind me later" defers a notification, in seconds. Fixed,
+    /// not a preference, and reported so the app's button can say how long
+    /// without hard-coding a number Rust could later change.
+    pub snooze_secs: u64,
+    /// The volume right now, the same shape `status --json` prints.
+    pub current: StatusReport,
+    /// Whether the latest reading is at or above the threshold. Note this is
+    /// *not* the same as "an episode is open": hysteresis keeps an episode
+    /// open between the clear boundary and the threshold, and that gap is
+    /// exactly what stops a disk hovering at the boundary from notifying
+    /// repeatedly.
+    pub threshold_crossed: bool,
+    /// `null` when no episode is open, which is the ordinary state of a
+    /// healthy disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode: Option<PressureEpisodeReport>,
+    /// The one field a client acts on: raise a notification if and only if
+    /// this is `true`. `false` whenever there is no episode, the episode has
+    /// been answered, a snooze is running, or the notification was already
+    /// raised.
+    ///
+    /// Hoisted out of `episode` deliberately. Buried one level down it would
+    /// invite `episode != null && used >= threshold` — a client
+    /// re-deriving the rule, and getting the snooze and the already-raised
+    /// cases wrong.
+    pub notification_due: bool,
+    /// The goal a "Review & recover" press should arrive at, so the deep link
+    /// carries the user's configured destination rather than one the app
+    /// invented (HORO-1508 AC2).
+    pub default_goal: RecoveryGoalReport,
+    /// The complete set of answers `glomeris pressure respond` accepts, from
+    /// [`crate::monitor::EpisodeResponse::ALL`].
+    ///
+    /// Published as data for the reason [`RecoverySettingsBoundsReport`] is:
+    /// a client that knew these strings independently could offer a fourth
+    /// button, and the refusal would arrive after the user pressed it. There
+    /// is deliberately no "skip" — see HORO-1508's acceptance criteria, which
+    /// require each action to say what it does.
+    pub responses: Vec<&'static str>,
+    /// Absolute path of the episode state file, or `null` when `$HOME` could
+    /// not be resolved. Local, and never part of any provider request — same
+    /// rule as [`RecoverySettingsReport::stored_at`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_path: Option<String>,
+}
+
+/// A refused answer or acknowledgement, machine-readable (HORO-1508).
+///
+/// Emitted instead of [`PressureStatusReport`] when `pressure respond` or
+/// `pressure notified` cannot be applied — the same contract as
+/// [`SettingsRejectionReport`]. The common case is benign and must still be
+/// reported honestly: the disk recovered between the banner appearing and the
+/// button being pressed, so there is no longer an episode the answer belongs
+/// to.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PressureRejectionReport {
+    /// Stable snake_case tag, from
+    /// [`crate::monitor::EpisodeRejection::as_str`].
+    pub reason: &'static str,
+    /// The rejection's own `Display` text, shown verbatim to a user.
+    pub message: String,
+}
+
 /// Stable snake_case tag per [`crate::executor::recovery_loop::StopReason`],
 /// following this module's convention of projecting a domain enum to a
 /// `&'static str` rather than deriving `Serialize` on it.
