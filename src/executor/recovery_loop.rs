@@ -1227,6 +1227,40 @@ mod run_tests {
         }
     }
 
+    /// A scripted sequence of disk-usage readings, one per [`FsStat::stat`]
+    /// call, with the last reading repeated once the script runs out.
+    ///
+    /// [`FixedFsStat`] cannot distinguish "measures once and does arithmetic
+    /// afterwards" from "re-measures every iteration", because with an
+    /// unchanging reading both behave identically. A changing reading is the
+    /// only way to tell them apart, and `calls` is exposed so a test can also
+    /// state how many times the loop actually looked.
+    struct ScriptedFsStat {
+        readings: Vec<FsUsage>,
+        calls: AtomicU64,
+    }
+
+    impl ScriptedFsStat {
+        fn new(readings: Vec<FsUsage>) -> Self {
+            assert!(!readings.is_empty(), "a script needs at least one reading");
+            Self {
+                readings,
+                calls: AtomicU64::new(0),
+            }
+        }
+
+        fn call_count(&self) -> u64 {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    impl FsStat for ScriptedFsStat {
+        fn stat(&self, _path: &Path) -> std::io::Result<FsUsage> {
+            let n = self.calls.fetch_add(1, Ordering::Relaxed) as usize;
+            Ok(self.readings[n.min(self.readings.len() - 1)])
+        }
+    }
+
     /// Always errors — used to prove the `StopReason::Error` path.
     struct FailingFsStat;
 
@@ -1588,6 +1622,93 @@ mod run_tests {
 
         fs::remove_dir_all(&root_a).ok();
         fs::remove_dir_all(&root_b).ok();
+    }
+
+    /// The target is decided by a reading taken after the mutation, not by the
+    /// loop's own arithmetic (HORO-1506 AC 6, the campaign's §9).
+    ///
+    /// The script makes the two answers disagree on purpose. The deleted
+    /// directory is empty, so the executor measures `Observed(0)` reclaimed and
+    /// `total_bytes_freed` stays at zero; started free space was 100 bytes;
+    /// `started + freed` is therefore 100, which does not come close to the
+    /// 900 MB target. Only the third reading does. A loop that tracked free
+    /// space by adding up what it believed it had reclaimed — or that trusted
+    /// candidate estimates — would run until some other stop reason ended it
+    /// and could never report `TargetReached` here.
+    ///
+    /// It is deliberately the *first* two readings that are low: one is
+    /// consumed by the initial measurement before the loop starts, and the
+    /// second by iteration 1's own step 1. The third is the post-mutation
+    /// re-measure at the top of iteration 2.
+    #[test]
+    fn target_reached_comes_from_the_reading_taken_after_the_mutation() {
+        let root = make_temp_dir("remeasure-after-mutation");
+        let ev = empty_node_modules_evidence(&root);
+        let node_modules = root.join("node_modules");
+
+        let fs_stat = ScriptedFsStat::new(vec![
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 950_000_000),
+        ]);
+        let config = RecoveryConfig {
+            target: FreeTarget::AbsoluteBytes(900_000_000),
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root.join("actions.jsonl");
+
+        let report = run(
+            &config,
+            &fs_stat,
+            &CleanCollector,
+            &detector_registry,
+            &action_registry,
+            &clock,
+            &wall_clock,
+            &PolicyConfig::default(),
+            Path::new("/"),
+            &ctx,
+            &audit_log_path,
+        );
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+        assert_eq!(report.iterations_run, 1);
+        assert_eq!(report.actions_executed, 1);
+        assert!(!node_modules.exists(), "the mutation really happened");
+
+        // The two figures the verdict could have come from, and which of them
+        // it did come from.
+        assert_eq!(
+            report.total_bytes_freed, 0,
+            "nothing measurable was reclaimed, so no accumulator could have met the target"
+        );
+        assert_eq!(report.started_free_bytes, 100);
+        assert_eq!(report.final_free_bytes, 950_000_000);
+        assert!(
+            !target_met(
+                &FsUsage::new(
+                    1_000_000_000,
+                    report.started_free_bytes + report.total_bytes_freed
+                ),
+                &config.target
+            ),
+            "the arithmetic route to a free-space figure does not meet this target; \
+             only a fresh reading does"
+        );
+        assert!(
+            fs_stat.call_count() >= 3,
+            "the loop must measure again after mutating, not once at the start \
+             (measured {} time(s))",
+            fs_stat.call_count()
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 }
 

@@ -108,6 +108,15 @@ VOCABULARIES=(
   # `ExecuteResolution`'s non-`Executed` variants, plus `busy` from the
   # execution lock (see this script's header).
   'refusal;;src/reporting/dto.rs;;as_str;;RefusalReason'
+  # HORO-1506. Both of these are the wording a recovery run's outcome is
+  # reported in, and both have one producer each by construction:
+  # `RecoveryRunReport::stop_reason` is only ever written through
+  # `stop_reason_tag`, and `RecoveryGoalRejectionReport::reason` only through
+  # `GoalRejection::as_str`. The Swift side keeps the field as a `String` so an
+  # older binary's token cannot fail the decode — which is exactly why the sets
+  # need diffing here rather than by the type checker.
+  'stopReason;;src/reporting/dto.rs;;stop_reason_tag;;StopReason'
+  'goalRejection;;src/executor/goal.rs;;as_str;;GoalRejection'
 )
 
 # Print the body of a function, from its `fn <name>` line to the line
@@ -242,7 +251,7 @@ if [[ "$failures" -gt 0 ]]; then
 fi
 
 echo ""
-echo "PASS: ${checked} of 12 vocabularies verified against their Rust producer."
+echo "PASS: ${checked} of 14 vocabularies verified against their Rust producer."
 echo "Not verified here (no single canonical producer to diff — see this script's header):"
 echo "  outcome — covered by the transcribed Swift tests only."
 exit 0

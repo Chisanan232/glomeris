@@ -104,6 +104,18 @@ struct GlomerisPopoverView: View {
     @StateObject private var scan = ScanState()
     @StateObject private var plan = PlanState()
 
+    /// HORO-1506: the recovery goal, its pre-flight and its result, owned here
+    /// for the same two reasons and with more at stake than either sibling.
+    ///
+    /// A finished recovery run is the only result in this panel that describes
+    /// bytes which are already gone. Losing a scan costs a scan; losing a run
+    /// report costs the only account anywhere in the UI of what was deleted and
+    /// how much came back. So it sits above every drill-down, like the others.
+    ///
+    /// It decides nothing either. The goal is a number the user chose; everything
+    /// else in it is a report the CLI produced.
+    @StateObject private var recovery = RecoveryState()
+
     /// The panel is one level deep: the overview, or one candidate's detail.
     ///
     /// This one IS `@State`, and correctly so: which candidate the user is
@@ -211,8 +223,19 @@ struct GlomerisPopoverView: View {
 
     // MARK: - Body
 
-    /// Status → candidates → AI plan → history. Also the VoiceOver reading
-    /// order.
+    /// Status → recovery goal → candidates → AI plan → history. Also the
+    /// VoiceOver reading order.
+    ///
+    /// HORO-1506 puts the recovery goal second, directly under the disk reading
+    /// it works from. The order is the product's own claim about itself: the disk
+    /// is this full, here is the goal, here is the material, here is optional
+    /// help with prioritising it. Recovery above the candidates list because
+    /// setting a goal is the capability and the list is what it draws on — a user
+    /// who never opens the list should still be able to say "get me down to 70%
+    /// used" and have Glomeris work toward it. AI Plan stays last of the three
+    /// for HORO-1308's reason, which this change strengthens rather than
+    /// disturbs: Glomeris's own ranking is the default answer, and a provider's
+    /// advice is a second opinion on it.
     ///
     /// HORO-1308 puts the AI Plan card *after* the candidates list rather
     /// than above it, on purpose and not for lack of prominence: Glomeris's
@@ -227,6 +250,11 @@ struct GlomerisPopoverView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
                 StatusHealthSectionView()
+                RecoverySectionView(
+                    recovery: recovery,
+                    client: client,
+                    projectRootsStore: projectRootsStore
+                )
                 CandidatesSectionView(
                     scan: scan,
                     client: client,

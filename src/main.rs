@@ -379,16 +379,21 @@ const EXIT_EXECUTION_LOCK_BUSY: i32 = 75;
 /// in the error message. Shared by `run_emergency_command`, `free_run`,
 /// and `run_execute_command` — the three real-execution entry points.
 ///
-/// `json`: HORO-1056 gap fix. `emergency`/`free` have no `--json` mode at
-/// all, so they always pass `false` here and this behaves exactly as
-/// before. `execute` DOES have `--json` (HORO-1055) and parses it before
-/// ever reaching this call site (see `run_execute_command`) — passing it
-/// through here means a `--json` caller gets a structured `"busy"` report
-/// on stdout instead of silence plus a bare exit code, matching every
-/// other refusal path `render_execute_resolution` already renders. This
-/// is the one refusal/abort path in `execute` that happens BEFORE
+/// `json`: HORO-1056 gap fix. `emergency` has no `--json` mode at all, so it
+/// always passes `false` here and behaves exactly as before. `execute`
+/// (HORO-1055) and `free` (HORO-1506) DO, and both parse it before ever
+/// reaching this call site — passing it through here means a `--json` caller
+/// gets a structured `"busy"` report on stdout instead of silence plus a bare
+/// exit code, matching every other refusal path
+/// `render_execute_resolution` already renders. This is the one
+/// refusal/abort path in `execute` that happens BEFORE
 /// `glomeris::cli::ExecuteResolution` exists at all, which is why it is
 /// not one of that enum's variants and is rendered here instead.
+///
+/// The shape a `--json` caller gets here is `ExecuteRefusalReport`, not that
+/// command's own report — a busy lock means the run never started, so there
+/// is no run to report on. `execute --json` has always behaved this way and
+/// `free --json` follows it rather than inventing a second convention.
 #[cfg(target_os = "macos")]
 fn acquire_execution_lock_or_exit(
     command_name: &str,
@@ -1234,7 +1239,25 @@ fn run_history_command(args: &[String]) {
     }
 }
 
+/// `glomeris free` — the closed recovery loop, reachable on either axis
+/// (HORO-1506).
+///
+/// Two goal flags, deliberately not aliases of each other:
+///
+/// - `--goal-used-percent <N>` is the product-facing form. It is target disk
+///   *usage*, it is what the GUI sends, and it is validated against the
+///   current reading so a goal that would reclaim nothing is refused rather
+///   than run and reported as a success.
+/// - `--target <N%|NB>` is the original raw *free-space floor*, unchanged in
+///   both meaning and tolerance: a floor you already exceed stays a legitimate
+///   no-op probe, which is exactly how `tests/execution_lock_wiring.rs` uses
+///   it.
+///
+/// Exactly one is required. Accepting both would mean choosing a precedence
+/// between two numbers that disagree about how much of a disk to delete.
 fn run_free_command(args: &[String]) {
+    use glomeris::executor::goal::RecoveryGoal;
+
     let (project_roots, remaining) = match glomeris::cli::extract_project_roots(args) {
         Ok(v) => v,
         Err(e) => {
@@ -1245,36 +1268,105 @@ fn run_free_command(args: &[String]) {
     };
 
     let mut target_arg: Option<&str> = None;
+    let mut goal_arg: Option<&str> = None;
+    let mut dry_run = false;
+    let mut json = false;
+    let mut progress_json = false;
     let mut i = 0;
     while i < remaining.len() {
-        if remaining[i] == "--target" {
-            target_arg = remaining.get(i + 1).map(String::as_str);
-            i += 2;
-        } else {
-            eprintln!("glomeris free: unrecognized argument '{}'", remaining[i]);
-            print_command_usage("free");
-            std::process::exit(2);
+        match remaining[i].as_str() {
+            "--target" => {
+                target_arg = remaining.get(i + 1).map(String::as_str);
+                i += 2;
+            }
+            "--goal-used-percent" => {
+                goal_arg = remaining.get(i + 1).map(String::as_str);
+                i += 2;
+            }
+            "--dry-run" => {
+                dry_run = true;
+                i += 1;
+            }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--progress-json" => {
+                progress_json = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("glomeris free: unrecognized argument '{other}'");
+                print_command_usage("free");
+                std::process::exit(2);
+            }
         }
     }
 
-    let target_arg = match target_arg {
-        Some(t) => t,
-        None => {
-            eprintln!("glomeris free: --target is required");
+    let (goal, target) = match (goal_arg, target_arg) {
+        (Some(_), Some(_)) => {
+            eprintln!(
+                "glomeris free: --goal-used-percent and --target are two different axes \
+                 (target usage vs. a free-space floor); pass exactly one"
+            );
             print_command_usage("free");
             std::process::exit(2);
         }
-    };
-
-    let target = match glomeris::executor::recovery_loop::parse_free_target(target_arg) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("glomeris free: {e}");
+        (None, None) => {
+            eprintln!("glomeris free: one of --goal-used-percent or --target is required");
+            print_command_usage("free");
             std::process::exit(2);
+        }
+        (Some(raw), None) => {
+            let percent = match raw.trim().trim_end_matches('%').parse::<f64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!(
+                        "glomeris free: --goal-used-percent must be a number between 0 and 100 \
+                         (percent of disk USED), got '{raw}'"
+                    );
+                    std::process::exit(2);
+                }
+            };
+            let goal = match RecoveryGoal::from_used_percent(percent) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("glomeris free: {e}");
+                    std::process::exit(2);
+                }
+            };
+            (Some(goal), goal.to_free_target())
+        }
+        (None, Some(raw)) => {
+            let target = match glomeris::executor::recovery_loop::parse_free_target(raw) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("glomeris free: {e}");
+                    std::process::exit(2);
+                }
+            };
+            (None, target)
         }
     };
 
-    free_run(target, project_roots);
+    // `--progress-json` streams the *discovery scan's* progress, which only
+    // the `--dry-run` path performs as a visible step. The recovery loop has
+    // no progress sink yet (HORO-1509 adds one), so accepting the flag here
+    // and quietly doing nothing would let a caller believe it had subscribed
+    // to progress it will never receive. Refuse instead of no-op.
+    if progress_json && !dry_run {
+        eprintln!(
+            "glomeris free: --progress-json reports discovery progress and currently requires \
+             --dry-run; a real run does not emit progress events yet"
+        );
+        std::process::exit(2);
+    }
+
+    if dry_run {
+        free_preview(goal, target, project_roots, json, progress_json);
+    } else {
+        free_run(goal, target, project_roots, json);
+    }
 }
 
 /// `glomeris autopilot [show|enable|revoke|run]` (HORO-1310).
@@ -1765,10 +1857,30 @@ fn autopilot_run(_args: &[String]) {
     std::process::exit(1);
 }
 
-fn print_recovery_report(report: &glomeris::executor::recovery_loop::RecoveryReport) {
+/// Print a finished recovery run as prose.
+///
+/// `goal`/`target` are printed because the report alone does not say what the
+/// run was aiming at, and a free-space figure with no stated goal is the
+/// ambiguity HORO-1506 exists to remove. The stop reason is printed as a
+/// sentence from `stop_reason_detail` as well as its `Debug` token: a bare
+/// `SafeExhausted` does not tell a user that the goal was *not* reached.
+fn print_recovery_report(
+    goal: Option<&glomeris::executor::goal::RecoveryGoal>,
+    target: &glomeris::executor::recovery_loop::FreeTarget,
+    report: &glomeris::executor::recovery_loop::RecoveryReport,
+) {
+    use glomeris::cli::recovery::{describe_free_target, stop_reason_detail};
     use glomeris::reporting::human_bytes;
 
+    match goal {
+        Some(goal) => println!("recovery goal:          {}", goal.describe()),
+        None => println!("free-space target:      {}", describe_free_target(target)),
+    }
     println!("stop reason:            {:?}", report.stop_reason);
+    println!(
+        "                        {}",
+        stop_reason_detail(&report.stop_reason)
+    );
     println!("iterations run:         {}", report.iterations_run);
     println!("actions executed:       {}", report.actions_executed);
     println!(
@@ -2083,23 +2195,122 @@ fn daemon_run() {
     );
 }
 
+/// The mount the recovery loop and its preview both measure. One constant so
+/// the pre-flight cannot be computed against a different volume than the run
+/// that follows it.
 #[cfg(target_os = "macos")]
-fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots: Vec<PathBuf>) {
+const RECOVERY_TARGET_MOUNT: &str = "/";
+
+/// `glomeris free --dry-run` — the pre-flight for a goal (HORO-1506).
+///
+/// Takes no execution lock and mutates nothing: it is a read of the volume
+/// plus one discovery pass, which is exactly what the GUI needs to show
+/// current usage, the goal, and the estimated opportunity *before* a user
+/// commits to a destructive run. `--dry-run` on the raw `--target` form is
+/// rendered on the used axis too, via
+/// [`RecoveryGoal::from_free_target`](glomeris::executor::goal::RecoveryGoal::from_free_target),
+/// so no surface has to display a bare percentage whose axis is unstated.
+#[cfg(target_os = "macos")]
+fn free_preview(
+    goal: Option<glomeris::executor::goal::RecoveryGoal>,
+    target: glomeris::executor::recovery_loop::FreeTarget,
+    project_roots: Vec<PathBuf>,
+    json: bool,
+    progress_json: bool,
+) {
+    use glomeris::executor::goal::RecoveryGoal;
+    use glomeris::monitor::{FsStat, ThresholdConfig};
+    use glomeris::platform::macos::MacosFsStat;
+
+    let usage = match MacosFsStat.stat(std::path::Path::new(RECOVERY_TARGET_MOUNT)) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("glomeris free: could not read disk usage for {RECOVERY_TARGET_MOUNT}: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let goal = goal.unwrap_or_else(|| RecoveryGoal::from_free_target(&target, usage.total_bytes));
+
+    let pass = discover_pass_now(project_roots, progress_json);
+    let actions = glomeris::actions::ActionRegistry::builtin();
+    let detect = glomeris::cli::build_detect_report(
+        &pass.candidates,
+        &pass.detectors,
+        &actions,
+        impact_context(),
+    );
+
+    let report = glomeris::cli::recovery::build_recovery_preview_report(
+        &goal,
+        &usage,
+        &ThresholdConfig::default(),
+        detect,
+    );
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::recovery::print_recovery_preview_report(&report);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn free_run(
+    goal: Option<glomeris::executor::goal::RecoveryGoal>,
+    target: glomeris::executor::recovery_loop::FreeTarget,
+    project_roots: Vec<PathBuf>,
+    json: bool,
+) {
     use glomeris::actions::ActionRegistry;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
         run as run_recovery_loop, RecoveryConfig, SystemWallClock,
     };
-    use glomeris::monitor::SystemClock;
+    use glomeris::monitor::{FsStat, SystemClock};
     use glomeris::platform::macos::MacosFsStat;
     use glomeris::policy::PolicyConfig;
     use std::time::Duration;
 
+    let fs_stat = MacosFsStat;
+
+    // A used-percent goal is validated against the real volume before the
+    // lock is taken or anything is deleted (HORO-1506 AC4). A goal at or
+    // above current usage would delete nothing and still print a report
+    // that reads like a successful cleanup; refusing it here, with both
+    // numbers in the message, is the difference between a clear correction
+    // and a user believing Glomeris tidied up. The raw `--target` floor is
+    // deliberately not subject to this — see `run_free_command`'s doc.
+    if let Some(goal) = goal {
+        match fs_stat.stat(std::path::Path::new(RECOVERY_TARGET_MOUNT)) {
+            Ok(usage) => {
+                if let Err(rejection) = goal.progress_toward(&usage) {
+                    if json {
+                        let report =
+                            glomeris::cli::recovery::build_goal_rejection_report(&rejection);
+                        print_json_or_exit(&report);
+                    } else {
+                        eprintln!("glomeris free: {rejection}");
+                    }
+                    std::process::exit(2);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "glomeris free: could not read disk usage for {RECOVERY_TARGET_MOUNT}: {e}"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     // HORO-1054: held for the duration of the real-execution portion
     // below, released automatically (via `Drop`) when this function
-    // returns.
-    let _execution_lock = acquire_execution_lock_or_exit("free", false);
+    // returns. `json` is threaded through so a busy lock answers a
+    // machine-readable caller with a `"busy"` refusal rather than an empty
+    // stdout and a bare exit code.
+    let _execution_lock = acquire_execution_lock_or_exit("free", json);
 
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
@@ -2117,7 +2328,6 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots
         auto_approve_ask: false,
     };
 
-    let fs_stat = MacosFsStat;
     let collector = DefaultEvidenceCollector::default();
     let detector_registry = DetectorRegistry::builtin();
     let action_registry = ActionRegistry::builtin();
@@ -2135,16 +2345,60 @@ fn free_run(target: glomeris::executor::recovery_loop::FreeTarget, project_roots
         &clock,
         &wall_clock,
         &policy_cfg,
-        std::path::Path::new("/"),
+        std::path::Path::new(RECOVERY_TARGET_MOUNT),
         &discovery_ctx,
         &audit_log_path,
     );
 
-    print_recovery_report(&report);
+    if json {
+        // `total_bytes` is re-read rather than remembered from the
+        // validation above: `target_met` must be decided against the volume
+        // as it is now, and a capacity that changed under us (an unmounted
+        // or resized volume) should show up as a read failure rather than be
+        // silently paired with fresh free-space figures. A failure here does
+        // not undo the run, so it reports and exits non-zero rather than
+        // claiming a total it does not have.
+        let total_bytes = match fs_stat.stat(std::path::Path::new(RECOVERY_TARGET_MOUNT)) {
+            Ok(usage) => usage.total_bytes,
+            Err(e) => {
+                eprintln!(
+                    "glomeris free: run finished but disk capacity could not be re-read \
+                     for {RECOVERY_TARGET_MOUNT}: {e}"
+                );
+                std::process::exit(1);
+            }
+        };
+        let run_report = glomeris::cli::recovery::build_recovery_run_report(
+            goal.as_ref(),
+            &config.target,
+            total_bytes,
+            &report,
+        );
+        print_json_or_exit(&run_report);
+    } else {
+        print_recovery_report(goal.as_ref(), &config.target, &report);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-fn free_run(_target: glomeris::executor::recovery_loop::FreeTarget, _project_roots: Vec<PathBuf>) {
+fn free_preview(
+    _goal: Option<glomeris::executor::goal::RecoveryGoal>,
+    _target: glomeris::executor::recovery_loop::FreeTarget,
+    _project_roots: Vec<PathBuf>,
+    _json: bool,
+    _progress_json: bool,
+) {
+    eprintln!("glomeris free: only supported on macOS");
+    std::process::exit(1);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn free_run(
+    _goal: Option<glomeris::executor::goal::RecoveryGoal>,
+    _target: glomeris::executor::recovery_loop::FreeTarget,
+    _project_roots: Vec<PathBuf>,
+    _json: bool,
+) {
     eprintln!("glomeris free: only supported on macOS");
     std::process::exit(1);
 }

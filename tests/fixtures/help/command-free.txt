@@ -1,24 +1,53 @@
-glomeris free — Reclaim space until a target is reached.
+glomeris free — Reclaim space until a recovery goal is reached.
 
-usage: glomeris free --target <N%|NB> [--project-root <path>]...
+usage: glomeris free (--goal-used-percent <N> | --target <N%|NB>)
+                [--dry-run] [--json] [--progress-json]
+                [--project-root <path>]...
 
 Can delete data — every deletion is policy-gated.
 
-Runs the recovery loop until free space reaches the target, then stops. It
-only ever performs actions policy classified as needing no confirmation, so it
-cannot escalate into an ASK or PROTECTED resource to hit a number — if the
-target is unreachable that way, it reports that rather than reaching further.
-Holds the execution lock for the whole run, so it exits 75 if another
-invocation already holds it.
+Runs the recovery loop until the goal is reached, then stops. It only ever
+performs actions policy classified as needing no confirmation, so it cannot
+escalate into an ASK or PROTECTED resource to hit a number — if the target
+is unreachable that way, it reports that rather than reaching further. Holds
+the execution lock for the whole run, so it exits 75 if another invocation
+already holds it. `--dry-run` takes no lock and mutates nothing.
+
+The goal can be given on either axis, and the two flags are not
+interchangeable wordings of one thing. `--goal-used-percent` is the
+product-facing form: target DISK USAGE, the number a person reads off a status
+bar. `--target` is a raw FREE-SPACE floor, which is what the loop itself works
+in. `--goal-used-percent 60` and `--target 40%` request the same end state.
 
 Options
+  --goal-used-percent <N>
+      Target disk USAGE, 0-100. Rejected if it is not an improvement on
+      current usage, since recovering toward it would reclaim nothing and
+      still report success.
   --target <N%|NB>
-      Required. Either a percentage of the filesystem (`20%`) or an
-      absolute byte count.
+      A FREE-SPACE floor: either a percentage of the filesystem that must
+      end up free (`20%`) or an absolute byte count. Unlike
+      `--goal-used-percent`, a floor you already exceed is accepted as a
+      no-op. Exactly one of the two goal flags is required.
+  --dry-run
+      Print the pre-flight for the goal — current usage, free space
+      still needed, and the estimated opportunity split by what policy
+      would permit — and exit without mutating anything.
+  --json
+      Machine-readable report. Pairs with `--dry-run` for the pre-flight
+      shape.
+  --progress-json
+      Same NDJSON discovery-progress stream as `detect`, on stderr.
+      Reports the discovery scan, so it currently requires `--dry-run`; a
+      real run does not emit progress events yet.
   --project-root <path>
       Same meaning as for `detect`. Repeatable.
 
 Examples
+  glomeris free --goal-used-percent 60 --dry-run
+      See what reaching 60% used would take, without touching anything.
+  glomeris free --goal-used-percent 60
+      Reclaim until the disk is at most 60% used.
   glomeris free --target 20%
       Reclaim until a fifth of the disk is free.
 

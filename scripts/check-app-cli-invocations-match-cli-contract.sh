@@ -143,13 +143,17 @@ HANDLER_COMMANDS=(
 # required to still be root-accepting on the Rust side — a stale entry here would
 # silently excuse a real mismatch later.
 #
-#   clean, free       — the app never invokes them at all.
+#   clean             — the app never invokes it at all.
 #   autopilot run     — the stored grant's own kinds and limits decide what it
 #                       may consider; narrowing that with the roots would change
 #                       a grant the user wrote down.
+#
+# `free` was listed here on the same grounds as `clean` until HORO-1506 gave the
+# app a Recovery card that invokes it. It is now scoped, which is the outcome
+# rule 1 is written to force: an omission stops being a decision the moment the
+# app starts making the call.
 DECLARED_OMISSIONS=(
   'clean'
-  'free'
   'autopilot run'
 )
 

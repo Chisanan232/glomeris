@@ -1,0 +1,4 @@
+{
+  "reason": "not_finite",
+  "message": "recovery goal must be a finite percentage of disk used"
+}

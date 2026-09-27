@@ -563,4 +563,228 @@ final class DtoGoldenFixturesTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - Recovery goal (HORO-1506)
+
+    func testDecodesRecoveryPreviewReport() throws {
+        let dto = try decodeFixture("recovery_preview_report.json", as: RecoveryPreviewReportDto.self)
+
+        // Both axes arrive named, and the sentence the GUI shows is Rust's.
+        XCTAssertEqual(dto.goal.usedPercent, 60.0)
+        XCTAssertEqual(dto.goal.freePercent, 40.0)
+        XCTAssertEqual(dto.goal.description, "60% used (40% free)")
+
+        XCTAssertEqual(dto.current.usedPercent, 88.0)
+        XCTAssertEqual(dto.current.freeBytes, 60_000_000_000)
+        XCTAssertEqual(dto.current.freeHuman, "55.9 GB")
+        XCTAssertEqual(dto.current.pressureState, "PRESSURED")
+
+        XCTAssertEqual(dto.requiredFreeBytes, 200_000_000_000)
+        XCTAssertEqual(dto.requiredFreeHuman, "186.3 GB")
+        XCTAssertEqual(dto.bytesNeeded, 140_000_000_000)
+        XCTAssertEqual(dto.bytesNeededHuman, "130.4 GB")
+
+        XCTAssertEqual(dto.opportunity.actionableNowCount, 1)
+        XCTAssertEqual(dto.opportunity.actionableNowBytes, 2_147_483_648)
+        XCTAssertEqual(dto.opportunity.actionableNowHuman, "2.0 GB")
+        XCTAssertEqual(dto.opportunity.requiresConfirmationCount, 1)
+        XCTAssertEqual(dto.opportunity.requiresConfirmationBytes, 5_368_709_120)
+        XCTAssertEqual(dto.opportunity.requiresConfirmationHuman, "5.0 GB")
+        XCTAssertEqual(dto.opportunity.notExecutableCount, 2)
+        XCTAssertEqual(dto.opportunity.protectedCount, 1)
+        XCTAssertTrue(dto.opportunity.isLowerBound)
+
+        XCTAssertFalse(dto.goalAppearsReachable)
+        XCTAssertFalse(dto.discoveryComplete)
+        XCTAssertEqual(dto.candidates.count, 4)
+        XCTAssertEqual(dto.detectors.count, 5)
+
+        // The computed property the card uses instead of re-deriving failure
+        // from `discoveryComplete`, which cannot name who failed.
+        XCTAssertEqual(dto.failedDetectors.map(\.detector), ["homebrew_cache"])
+    }
+
+    /// The already-met goal, which is the state the card must not offer a
+    /// Recover button for.
+    ///
+    /// `bytesNeeded` decoding as a real `0` rather than a missing value is the
+    /// load-bearing part: it is what lets the app tell "already there" from "not
+    /// measured", and the caveat is the only thing that explains the refusal a
+    /// real run would produce. Both are asserted here because both are things
+    /// the app reads rather than computes.
+    func testDecodesRecoveryPreviewReportForAGoalAlreadyMet() throws {
+        let dto = try decodeFixture(
+            "recovery_preview_report_goal_already_met.json",
+            as: RecoveryPreviewReportDto.self
+        )
+
+        XCTAssertEqual(dto.goal.description, "95% used (5% free)")
+        XCTAssertEqual(dto.current.usedPercent, 88.0)
+        XCTAssertEqual(dto.bytesNeeded, 0)
+        XCTAssertEqual(dto.bytesNeededHuman, "0 B")
+        XCTAssertTrue(
+            dto.goalAppearsReachable,
+            "a goal with nothing left to reach is trivially reachable, and the flag says so"
+        )
+        XCTAssertTrue(
+            dto.caveats.contains {
+                $0.contains("already satisfied") && $0.contains("refused")
+            },
+            "the preview must say a real run would be refused: \(dto.caveats)"
+        )
+    }
+
+    /// The preview exists to stop a goal being sold as achievable on the
+    /// strength of bytes no run can take. Asserted on the decoded report
+    /// because it is a property of the numbers, not of any view: the
+    /// opportunity totals must account for the executable candidates only,
+    /// and a goal needing more than the whole opportunity must not claim to
+    /// be reachable.
+    func testRecoveryPreviewOpportunityExcludesWhatNoRunCanReclaim() throws {
+        let dto = try decodeFixture("recovery_preview_report.json", as: RecoveryPreviewReportDto.self)
+
+        let executableBytes = dto.candidates
+            .filter(\.executable)
+            .reduce(UInt64(0)) { $0 + ($1.reclaimableBytes ?? 0) }
+        let offered = dto.opportunity.actionableNowBytes + dto.opportunity.requiresConfirmationBytes
+        XCTAssertEqual(
+            offered, executableBytes,
+            "the opportunity totals must sum the executable candidates and nothing else"
+        )
+
+        let protectedBytes = dto.candidates
+            .filter { $0.policyLabel == "PROTECTED" }
+            .reduce(UInt64(0)) { $0 + ($1.reclaimableBytes ?? 0) }
+        XCTAssertGreaterThan(protectedBytes, 0, "the fixture must contain protected bytes to exclude")
+        XCTAssertLessThan(
+            offered, executableBytes + protectedBytes,
+            "protected bytes leaked into the reported opportunity"
+        )
+
+        XCTAssertGreaterThan(dto.bytesNeeded, offered)
+        XCTAssertFalse(
+            dto.goalAppearsReachable,
+            "a goal needing more than the entire opportunity must not be reported as reachable"
+        )
+    }
+
+    func testDecodesRecoveryRunReport() throws {
+        let dto = try decodeFixture("recovery_run_report.json", as: RecoveryRunReportDto.self)
+
+        let goal = try XCTUnwrap(dto.goal)
+        XCTAssertEqual(goal.usedPercent, 60.0)
+        XCTAssertEqual(goal.description, "60% used (40% free)")
+        XCTAssertEqual(dto.target, "40% free")
+
+        XCTAssertEqual(dto.stopReason, "target_reached")
+        XCTAssertEqual(
+            dto.stopReasonDetail,
+            "The recovery goal was reached: re-measured free space satisfies it."
+        )
+        XCTAssertNil(dto.error)
+
+        XCTAssertEqual(dto.iterationsRun, 3)
+        XCTAssertEqual(dto.actionsExecuted, 4)
+        XCTAssertEqual(dto.actionsDeclinedOrSkipped, 2)
+
+        // Measured, not estimated: the before/after pair is what the card shows
+        // beside the goal, and Rust renders the human strings so they cannot
+        // disagree with a 1000-based ByteCountFormatter.
+        XCTAssertEqual(dto.bytesFreedMeasured, 150_000_000_000)
+        XCTAssertEqual(dto.bytesFreedMeasuredHuman, "139.7 GB")
+        XCTAssertEqual(dto.startedFreeBytes, 60_000_000_000)
+        XCTAssertEqual(dto.startedFreeHuman, "55.9 GB")
+        XCTAssertEqual(dto.finalFreeBytes, 210_000_000_000)
+        XCTAssertEqual(dto.finalFreeHuman, "195.6 GB")
+        XCTAssertEqual(dto.finalFreeBytes - dto.startedFreeBytes, dto.bytesFreedMeasured)
+
+        XCTAssertTrue(dto.targetMet)
+        XCTAssertTrue(dto.detectorFailures.isEmpty)
+        XCTAssertTrue(dto.discoveryComplete)
+        XCTAssertTrue(dto.caveats.isEmpty)
+    }
+
+    /// Two absences are this fixture's whole point. A raw `--target` floor is
+    /// not a used-axis goal, so `goal` is absent rather than null — the app
+    /// must render the free-axis `target` string in that case instead of
+    /// inventing a used figure — and a clean stop carries no `error` key.
+    func testDecodesRecoveryRunReportForARawTargetWithNoGoalAndNoError() throws {
+        let dto = try decodeFixture("recovery_run_report_raw_target.json", as: RecoveryRunReportDto.self)
+
+        XCTAssertNil(dto.goal, "a free-space floor must not be decoded as a used-axis goal")
+        XCTAssertNil(dto.error)
+        XCTAssertEqual(dto.target, "232.8 GB free")
+
+        XCTAssertEqual(dto.stopReason, "safe_exhausted")
+        XCTAssertFalse(dto.targetMet)
+        XCTAssertEqual(dto.iterationsRun, 2)
+        XCTAssertEqual(dto.actionsExecuted, 1)
+        XCTAssertEqual(dto.actionsDeclinedOrSkipped, 3)
+        XCTAssertEqual(dto.bytesFreedMeasured, 2_147_483_648)
+        XCTAssertEqual(dto.bytesFreedMeasuredHuman, "2.0 GB")
+        XCTAssertEqual(dto.detectorFailures, ["homebrew_cache: brew --cache exited 1"])
+        XCTAssertFalse(dto.discoveryComplete)
+    }
+
+    /// A stop short of the goal must be explained, and the explanation is
+    /// rendered verbatim in a SwiftUI `Text`. Mirrors
+    /// `run_caveats_carry_no_terminal_formatting` on the Rust side, from the
+    /// end that actually displays the strings: column padding shows as a gap
+    /// mid-sentence, and a bullet or `note:` prefix is terminal formatting the
+    /// app would have to strip — which is parsing prose.
+    func testRecoveryRunCaveatsAreSentencesRatherThanTerminalLines() throws {
+        let dto = try decodeFixture("recovery_run_report_raw_target.json", as: RecoveryRunReportDto.self)
+
+        XCTAssertFalse(dto.caveats.isEmpty, "a run that stopped short must say why the picture is partial")
+        for caveat in dto.caveats {
+            XCTAssertFalse(caveat.contains("  "), "column padding in a rendered caveat: \(caveat)")
+            XCTAssertFalse(caveat.hasPrefix("-"), "a bullet in a rendered caveat: \(caveat)")
+            XCTAssertFalse(caveat.hasPrefix("note:"), "a terminal prefix in a rendered caveat: \(caveat)")
+            XCTAssertTrue(caveat.hasSuffix("."), "a caveat must be a sentence: \(caveat)")
+        }
+        XCTAssertTrue(
+            dto.caveats.contains { $0.contains("no safe candidate remained") },
+            "the exhausted stop must be stated as a limit of discovery, not as completion"
+        )
+        // The failed detector names belong to `detectorFailures`; repeating
+        // them inside a caveat would make the card show them twice.
+        for failure in dto.detectorFailures {
+            XCTAssertFalse(
+                dto.caveats.contains { $0.contains(failure) },
+                "\(failure) is duplicated into a caveat"
+            )
+        }
+    }
+
+    func testDecodesRecoveryGoalRejectionReport() throws {
+        let dto = try decodeFixture(
+            "recovery_goal_rejection_report.json",
+            as: RecoveryGoalRejectionReportDto.self
+        )
+
+        XCTAssertEqual(dto.reason, "not_an_improvement")
+        XCTAssertEqual(
+            dto.message,
+            "recovery goal 95% used is not an improvement on the current 88.0% used: "
+                + "choose a goal below current usage"
+        )
+        // Both figures, so the card can say what was asked for *and* what it
+        // was compared against without re-reading status itself.
+        XCTAssertEqual(dto.goalUsedPercent, 95.0)
+        XCTAssertEqual(dto.currentUsedPercent, 88.0)
+    }
+
+    /// A rejection that never got as far as measuring anything omits both
+    /// figures rather than sending zeros, which would read as "0% used".
+    func testDecodesRecoveryGoalRejectionReportWithNoFigures() throws {
+        let dto = try decodeFixture(
+            "recovery_goal_rejection_report_not_finite.json",
+            as: RecoveryGoalRejectionReportDto.self
+        )
+
+        XCTAssertEqual(dto.reason, "not_finite")
+        XCTAssertEqual(dto.message, "recovery goal must be a finite percentage of disk used")
+        XCTAssertNil(dto.goalUsedPercent)
+        XCTAssertNil(dto.currentUsedPercent)
+    }
 }

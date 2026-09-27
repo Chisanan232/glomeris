@@ -1,0 +1,23 @@
+{
+  "target": "232.8 GB free",
+  "stop_reason": "safe_exhausted",
+  "stop_reason_detail": "The run stopped before reaching the goal because no safe candidate remained among the detectors that answered.",
+  "iterations_run": 2,
+  "actions_executed": 1,
+  "actions_declined_or_skipped": 3,
+  "bytes_freed_measured": 2147483648,
+  "bytes_freed_measured_human": "2.0 GB",
+  "started_free_bytes": 60000000000,
+  "started_free_human": "55.9 GB",
+  "final_free_bytes": 62147483648,
+  "final_free_human": "57.9 GB",
+  "target_met": false,
+  "detector_failures": [
+    "homebrew_cache: brew --cache exited 1"
+  ],
+  "discovery_complete": false,
+  "caveats": [
+    "Discovery was incomplete: 1 detector(s) failed, so what they would have found is unknown and the real opportunity may be larger.",
+    "This run stopped because no safe candidate remained among the detectors that answered. That is not a finding that nothing safe is left."
+  ]
+}

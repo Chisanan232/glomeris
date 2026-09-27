@@ -715,3 +715,237 @@ struct AutopilotEnvelopeDto: Decodable, Equatable {
         case storedAt = "stored_at"
     }
 }
+
+// MARK: - Recovery goal (HORO-1506)
+
+/// Mirrors `reporting::dto::RecoveryGoalReport` — one recovery goal on both
+/// axes, plus the one sentence that says which is which.
+///
+/// All three fields are decoded and all three are used. `usedPercent` is the
+/// product-facing axis the GUI asks for; `freePercent` is the same goal in the
+/// units the Rust recovery loop itself works in; `description` is the string
+/// every surface shows verbatim.
+///
+/// Nothing in this app converts between the two. `RecoveryGoal` in
+/// `src/executor/goal.rs` is the single typed adapter, and it is tested against
+/// the loop's own `target_met` predicate over a grid of goals and volumes — so
+/// a percentage arriving here has already been checked against the thing that
+/// decides completion. A Swift `100 - x` would be a second, unchecked
+/// conversion of exactly the kind HORO-1506 exists to remove.
+struct RecoveryGoalReportDto: Decodable, Equatable {
+    let usedPercent: Double
+    let freePercent: Double
+    /// e.g. `"60% used (40% free)"`. Shown as-is, never reassembled from the
+    /// two numbers above: the campaign's rule is that no surface may display a
+    /// bare percentage whose axis is unstated, and the only way two surfaces
+    /// cannot word that differently is for neither of them to word it.
+    let description: String
+
+    enum CodingKeys: String, CodingKey {
+        case usedPercent = "used_percent"
+        case freePercent = "free_percent"
+        case description
+    }
+}
+
+/// Mirrors `reporting::dto::RecoveryOpportunityReport` — what is *estimated*
+/// to be reclaimable now, split by what policy would actually permit.
+///
+/// The split is the whole point and the app must keep it: one total would
+/// invite a user to read confirmation-gated and protected space as space they
+/// are about to get back. Note what is deliberately absent — there is no
+/// `protectedBytes`, because bytes no run can ever take are not an
+/// opportunity, and a field for them is the first thing a well-meaning summary
+/// row would add up.
+///
+/// Every byte figure here is an estimate. None of them may decide that a goal
+/// was met; only re-measured free space does that (campaign §9).
+struct RecoveryOpportunityReportDto: Decodable, Equatable {
+    let actionableNowCount: Int
+    let actionableNowBytes: UInt64
+    let actionableNowHuman: String
+    let requiresConfirmationCount: Int
+    let requiresConfirmationBytes: UInt64
+    let requiresConfirmationHuman: String
+    let notExecutableCount: Int
+    let protectedCount: Int
+    /// `true` when at least one candidate behind the totals reported its
+    /// estimate as a lower bound, so the real figure may be larger.
+    /// `GlomerisVocabulary.storageImpact(human:isLowerBound:)` is what renders
+    /// that as a `≥` rather than this file inventing a prefix.
+    let isLowerBound: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case actionableNowCount = "actionable_now_count"
+        case actionableNowBytes = "actionable_now_bytes"
+        case actionableNowHuman = "actionable_now_human"
+        case requiresConfirmationCount = "requires_confirmation_count"
+        case requiresConfirmationBytes = "requires_confirmation_bytes"
+        case requiresConfirmationHuman = "requires_confirmation_human"
+        case notExecutableCount = "not_executable_count"
+        case protectedCount = "protected_count"
+        case isLowerBound = "is_lower_bound"
+    }
+}
+
+/// Mirrors `reporting::dto::RecoveryPreviewReport` — the pre-flight for a
+/// recovery goal, from `glomeris free --dry-run --json`.
+///
+/// This is the report the Recovery card shows *before* offering to run
+/// anything, and it is the reason the card can state current usage, the goal,
+/// the bytes still needed and the reclaimable opportunity without computing any
+/// of them.
+///
+/// `current` is the same `StatusReportDto` the Status card decodes, so the two
+/// cards cannot disagree about how full the disk is.
+struct RecoveryPreviewReportDto: Decodable, Equatable {
+    let goal: RecoveryGoalReportDto
+    let current: StatusReportDto
+    let requiredFreeBytes: UInt64
+    let requiredFreeHuman: String
+    /// Additional free bytes still needed, measured from `current`.
+    let bytesNeeded: UInt64
+    let bytesNeededHuman: String
+    let opportunity: RecoveryOpportunityReportDto
+    /// A planning judgment only, and named "appears" in Rust for that reason:
+    /// whether the estimated actionable bytes cover `bytesNeeded`.
+    ///
+    /// `false` does not mean a run is pointless — estimates are often lower
+    /// bounds — and `true` does not mean the goal will be reached. Any wording
+    /// this app puts next to it has to survive both of those being true, which
+    /// is why the card renders it as a hint and never as a prediction.
+    let goalAppearsReachable: Bool
+    /// `false` as soon as any detector's probe failed. Same contract as
+    /// `DetectReportDto.discoveryComplete`.
+    let discoveryComplete: Bool
+    /// Sentences written in Rust, shown verbatim, covering exactly the ways
+    /// this report can mislead. Rendered rather than summarized: they are the
+    /// estimate/measurement distinction the campaign requires be stated, and a
+    /// client that paraphrased them would be deciding which of them matter.
+    let caveats: [String]
+    let detectors: [DetectorHealthReportDto]
+    let candidates: [DetectCandidateReportDto]
+
+    enum CodingKeys: String, CodingKey {
+        case goal
+        case current
+        case requiredFreeBytes = "required_free_bytes"
+        case requiredFreeHuman = "required_free_human"
+        case bytesNeeded = "bytes_needed"
+        case bytesNeededHuman = "bytes_needed_human"
+        case opportunity
+        case goalAppearsReachable = "goal_appears_reachable"
+        case discoveryComplete = "discovery_complete"
+        case caveats
+        case detectors
+        case candidates
+    }
+
+    /// Detectors whose probe failed, for the same advisory the candidates card
+    /// shows. Derived here rather than decoded, because Rust derives
+    /// `discoveryComplete` from the very same slice — computing it from
+    /// `detectors` is the only way the two cannot drift apart.
+    var failedDetectors: [DetectorHealthReportDto] {
+        detectors.filter(\.didFail)
+    }
+}
+
+/// Mirrors `reporting::dto::RecoveryRunReport` — the outcome of a real
+/// recovery run, from `glomeris free --json`.
+///
+/// Every byte figure is measured, never estimated, and `targetMet` comes from
+/// the final re-measured free space rather than from the sum of what was
+/// deleted (campaign §9).
+struct RecoveryRunReportDto: Decodable, Equatable {
+    /// The goal the run worked toward, present whenever it was started from a
+    /// used-percent goal. `nil` for the raw `--target` free-space floor, whose
+    /// value is reported in `target` instead — so a client cannot read a
+    /// free-space figure as a usage one.
+    let goal: RecoveryGoalReportDto?
+    /// How the target was expressed, always naming its axis: `"20% free"`,
+    /// `"5 GiB free"`.
+    let target: String
+    /// Stable snake_case tag from `reporting::dto::stop_reason_tag`. Turned
+    /// into words by `GlomerisVocabulary.stopReason`, which
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` keeps covering every
+    /// token Rust can emit.
+    ///
+    /// Kept as a plain `String` rather than a Swift enum, like every other
+    /// token in this file: a CLI newer than this app emitting an unknown stop
+    /// reason must render as "unrecognised", not fail the whole decode and
+    /// leave the user with no result at all.
+    let stopReason: String
+    /// One sentence explaining the stop reason. Never the bare word "Done" —
+    /// Rust guarantees that, and the campaign requires it: a run that stopped
+    /// because nothing safe was left has to say so.
+    let stopReasonDetail: String
+    let error: String?
+    let iterationsRun: UInt32
+    let actionsExecuted: UInt32
+    let actionsDeclinedOrSkipped: UInt32
+    /// Sum of **actual** reclaimed bytes.
+    let bytesFreedMeasured: UInt64
+    let bytesFreedMeasuredHuman: String
+    let startedFreeBytes: UInt64
+    let startedFreeHuman: String
+    let finalFreeBytes: UInt64
+    let finalFreeHuman: String
+    /// Whether the goal was satisfied by the final re-measured free space.
+    let targetMet: Bool
+    let detectorFailures: [String]
+    let discoveryComplete: Bool
+    let caveats: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case goal
+        case target
+        case stopReason = "stop_reason"
+        case stopReasonDetail = "stop_reason_detail"
+        case error
+        case iterationsRun = "iterations_run"
+        case actionsExecuted = "actions_executed"
+        case actionsDeclinedOrSkipped = "actions_declined_or_skipped"
+        case bytesFreedMeasured = "bytes_freed_measured"
+        case bytesFreedMeasuredHuman = "bytes_freed_measured_human"
+        case startedFreeBytes = "started_free_bytes"
+        case startedFreeHuman = "started_free_human"
+        case finalFreeBytes = "final_free_bytes"
+        case finalFreeHuman = "final_free_human"
+        case targetMet = "target_met"
+        case detectorFailures = "detector_failures"
+        case discoveryComplete = "discovery_complete"
+        case caveats
+    }
+}
+
+/// Mirrors `reporting::dto::RecoveryGoalRejectionReport` — a goal refused
+/// before anything ran.
+///
+/// Printed on stdout with exit code 2, which is why the Recovery card calls
+/// `GlomerisClient.runRaw` rather than `run`: `run` throws on a non-zero exit
+/// and discards stdout, so the explanation of *why* a goal was refused would be
+/// lost exactly when the user needs it. The same reasoning
+/// `CandidateDetailView.describeExecuteOutcome` documents for `execute`.
+struct RecoveryGoalRejectionReportDto: Decodable, Equatable {
+    /// Stable snake_case tag from `executor::goal::GoalRejection::as_str`:
+    /// `"not_finite"`, `"out_of_range"`, `"not_an_improvement"`. A plain
+    /// `String` for the same forward-compatibility reason as `stopReason`
+    /// above.
+    let reason: String
+    /// The rejection's own text, shown verbatim. Rust decided the refusal and
+    /// Rust words it; this app does not re-explain a judgment it did not make.
+    let message: String
+    /// The goal that was asked for, on the used axis. `nil` when the value was
+    /// not a usable number at all.
+    let goalUsedPercent: Double?
+    /// The usage the refusal was measured against, present only when the
+    /// refusal was decided against an observation.
+    let currentUsedPercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case reason
+        case message
+        case goalUsedPercent = "goal_used_percent"
+        case currentUsedPercent = "current_used_percent"
+    }
+}

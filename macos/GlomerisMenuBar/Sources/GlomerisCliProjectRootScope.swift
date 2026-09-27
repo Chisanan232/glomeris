@@ -34,10 +34,10 @@
 //
 //  This table is the APP's contract and is deliberately narrower than the CLI's
 //  capability. `glomeris::cli::extract_project_roots` is called by seven command
-//  handlers in src/main.rs; four of them are in the set below. The other three
+//  handlers in src/main.rs; five of them are in the set below. The other two
 //  are not, and not by omission:
 //
-//    * `clean` and `free` accept roots, and the app never invokes them at all.
+//    * `clean` accepts roots, and the app never invokes it at all.
 //    * `autopilot run` accepts roots — `autopilot show`, `enable` and `revoke`,
 //      the three the app does invoke, reject extra arguments outright. Were the
 //      app to gain an `autopilot run` call it would still send none: the stored
@@ -48,9 +48,13 @@
 //  `scripts/check-app-cli-invocations-match-cli-contract.sh` is the other half,
 //  and the reason this comment can be trusted: it extracts that set of seven
 //  from the Rust sources, fails if this table is not a subset of it or if the
-//  three absences above stop being the whole difference, and fails if any
+//  two absences above stop being the whole difference, and fails if any
 //  argument vector in the Swift sources attaches roots by hand instead of
 //  through here.
+//
+//  HORO-1506 moved `free` from the second list to the first. The Recovery card
+//  invokes it, so its old excuse — that the app never called it — became a stale
+//  excuse of exactly the kind the guard's first rule exists to catch.
 //
 
 import Foundation
@@ -78,6 +82,11 @@ enum GlomerisCliProjectRootScope {
     /// * `execute` — acts on a candidate, and must resolve it the same way
     ///   `explain` did or it would act on a resource other than the one the user
     ///   was shown.
+    /// * `free` — discovers before it reclaims (HORO-1506). Unscoped, the
+    ///   Recovery card's preview would count an opportunity drawn from a
+    ///   different set of directories than the candidate list shown beneath it,
+    ///   and a real run would then reclaim from a different set again than the
+    ///   preview promised.
     ///
     /// Everything else the app runs — `status`, `daemon status`, `llm-check`,
     /// `history`, `actions history`, `autopilot show`/`enable`/`revoke` — takes
@@ -87,6 +96,7 @@ enum GlomerisCliProjectRootScope {
         "explain",
         "llm-plan",
         "execute",
+        "free",
     ]
 
     /// Whether `command` is one the configured roots belong on.

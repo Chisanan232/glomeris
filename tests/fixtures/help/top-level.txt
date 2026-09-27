@@ -19,7 +19,7 @@ PLAN — decide what to do. Nothing is executed.
 
 ACT — change this machine. Policy decides every deletion.
   execute       Run one action against one resource, under policy.
-  free          Reclaim space until a target is reached.
+  free          Reclaim space until a recovery goal is reached.
   emergency     Degraded-path recovery with no network and no LLM.
   autopilot     Read, grant or revoke a bounded standing authorization.
 

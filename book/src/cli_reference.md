@@ -880,14 +880,30 @@ glomeris actions history --json --limit 2
 }
 ```
 
-## `glomeris free --target <N%|NB> [--project-root <path>]...`
+## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--project-root <path>]...`
 
-macOS only (exits 1 with an error message on other platforms). `--target` is
-required; any other argument is rejected (usage printed to stderr, exit 2).
+macOS only (exits 1 with an error message on other platforms). Exactly one of
+the two goal flags is required; any other argument is rejected (usage printed
+to stderr, exit 2).
 
-`--project-root <path>` is optional and repeatable, same meaning as
-`detect`'s flag above — it feeds the same `DiscoveryContext` the recovery
-loop discovers candidates from.
+### The two axes
+
+The goal can be stated on either axis, and the two flags are **not
+interchangeable wordings of one thing**:
+
+| Flag | Axis | Meaning |
+|---|---|---|
+| `--goal-used-percent <N>` | disk **used** | Stop when the volume is at most `N` percent used. |
+| `--target <N%\|NB>` | free space | Stop when at least this much of the volume is free. |
+
+`--goal-used-percent 60` and `--target 40%` request the same end state.
+`--goal-used-percent` is the product-facing form — it is the number a person
+reads off a status bar, and it is what the Glomeris app sends. `--target` is
+the raw free-space floor the recovery loop itself works in, and its meaning
+and value formats are unchanged.
+
+Passing both exits 2 rather than picking one: they are different numbers about
+how much of a disk to delete, so there is no safe precedence between them.
 
 Accepted `--target` value formats:
 
@@ -899,9 +915,50 @@ Accepted `--target` value formats:
   are binary/1024-based — `--target 5GB` means `5 * 1024^3` bytes free, not
   `5 * 10^9`.
 
-Prints a `RecoveryReport`: stop reason, iterations run, actions executed,
-actions declined/skipped, bytes freed, and free space before/after. See
-[Safety Model](safety_model.md) and
+`--goal-used-percent` takes a plain number from `0` to `100`; a trailing `%`
+is tolerated. It is additionally checked against the current reading and
+**refused with exit 2 if it is not an improvement** on current usage, because
+recovering toward a goal you already satisfy would delete nothing and still
+print a report that reads like a successful cleanup. That check runs before
+the execution lock is taken and before anything is deleted. `--target`
+deliberately keeps its older, looser behaviour: a free-space floor you already
+exceed is a legitimate no-op probe.
+
+### Other flags
+
+- `--dry-run` prints the pre-flight for the goal — current usage, free bytes
+  still needed, and the estimated reclaimable opportunity split by what policy
+  would actually permit — then exits. It takes no execution lock and mutates
+  nothing. A `--target` pre-flight is rendered on the used axis too, so no
+  surface has to show a percentage whose axis is unstated.
+- `--json` prints a machine-readable report instead of prose. With
+  `--dry-run` that is a `RecoveryPreviewReport`; without it, a
+  `RecoveryRunReport`. A goal refused before the run starts prints a
+  `RecoveryGoalRejectionReport` (`reason`, `message`, `goal_used_percent`,
+  `current_used_percent`) and still exits 2. A busy execution lock prints the
+  same `{"reason": "busy", ...}` refusal `execute --json` does, and exits 75.
+- `--progress-json` streams the discovery scan's NDJSON progress on stderr,
+  the same shape `detect` emits. It describes discovery, so it currently
+  requires `--dry-run` and exits 2 otherwise rather than accepting a
+  subscription it would never fulfil.
+- `--project-root <path>` is optional and repeatable, same meaning as
+  `detect`'s flag above — it feeds the same `DiscoveryContext` the recovery
+  loop discovers candidates from.
+
+### Reported figures
+
+Every percentage in the output names its axis (`60% used (40% free)`,
+`20% free`). Every byte figure in a finished run is **measured**, and
+`target_met` is decided from the re-measured free space after the run, never
+from the sum of what the detectors estimated. The reclaimable figures in a
+`--dry-run` preview are estimates and are labelled as such; protected space is
+counted but never added into any opportunity total.
+
+The prose output prints a `RecoveryReport`: the goal or target, stop reason
+(as both a token and a sentence — a run that stopped because nothing safe
+remained says so rather than printing a success word), iterations run, actions
+executed, actions declined/skipped, bytes freed, and free space before/after.
+See [Safety Model](safety_model.md) and
 [Known Limitations](known_limitations.md) for what this loop can and cannot
 currently do end to end.
 

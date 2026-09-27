@@ -106,6 +106,16 @@ final class GlomerisVocabularyTests: XCTestCase {
         "no_active_use_observed",
     ]
 
+    /// `src/reporting/dto.rs` — `stop_reason_tag`, all five. HORO-1506.
+    private static let stopReasonTokens = [
+        "target_reached", "safe_exhausted", "budget_exceeded", "no_progress", "error",
+    ]
+
+    /// `src/executor/goal.rs` — `GoalRejection::as_str`, all three. HORO-1506.
+    private static let goalRejectionTokens = [
+        "not_finite", "out_of_range", "not_an_improvement",
+    ]
+
     /// Every axis, as (name, tokens, lookup) so the shared invariants
     /// below can be asserted once rather than ten times.
     private static var allAxes: [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)] {
@@ -121,6 +131,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("kind", kindTokens, GlomerisVocabulary.kind),
             ("reason", reasonTokens, GlomerisVocabulary.reason),
             ("llmCheck", llmCheckTokens, GlomerisVocabulary.llmCheckOutcome),
+            ("stopReason", stopReasonTokens, GlomerisVocabulary.stopReason),
+            ("goalRejection", goalRejectionTokens, GlomerisVocabulary.goalRejection),
         ]
     }
 
@@ -297,6 +309,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             GlomerisVocabulary.kindAxis,
             GlomerisVocabulary.reasonAxis,
             GlomerisVocabulary.llmCheckAxis,
+            GlomerisVocabulary.stopReasonAxis,
+            GlomerisVocabulary.goalRejectionAxis,
         ]
         XCTAssertEqual(
             Set(axisNames).count,
@@ -318,6 +332,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             "kind": GlomerisVocabulary.kindAxis,
             "reason": GlomerisVocabulary.reasonAxis,
             "llmCheck": GlomerisVocabulary.llmCheckAxis,
+            "stopReason": GlomerisVocabulary.stopReasonAxis,
+            "goalRejection": GlomerisVocabulary.goalRejectionAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -856,5 +872,110 @@ final class GlomerisVocabularyTests: XCTestCase {
                 )
             }
         }
+    }
+
+    // MARK: - Why a recovery run stopped (HORO-1506)
+
+    /// The product rule this axis exists to enforce: a run that stopped short
+    /// of the goal must say so. Four of the five stops did not reach it, and a
+    /// success word on any of them would tell the user their disk is where
+    /// they asked it to be when it is not.
+    func testOnlyReachingTheGoalReadsAsSuccess() {
+        XCTAssertEqual(GlomerisVocabulary.stopReason("target_reached").tone, .positive)
+        for token in Self.stopReasonTokens where token != "target_reached" {
+            let term = GlomerisVocabulary.stopReason(token)
+            XCTAssertNotEqual(
+                term.tone, .positive,
+                "\(token) did not reach the goal and must not read as success"
+            )
+            for word in ["done", "complete", "finished", "success"] {
+                XCTAssertFalse(
+                    term.title.lowercased().contains(word),
+                    "\(token)'s title claims completion: \(term.title)"
+                )
+            }
+            XCTAssertTrue(
+                term.explanation.lowercased().contains("goal")
+                    || term.explanation.lowercased().contains("stopped"),
+                "\(token) must say it stopped, and where that leaves the goal: \(term.explanation)"
+            )
+        }
+    }
+
+    /// `safe_exhausted` is the stop most easily misread as "your disk is
+    /// clean". It means nothing safe remained among what this run could see
+    /// and was allowed to take, so the wording has to name what is still
+    /// there — and must not claim there is nothing.
+    func testExhaustingSafeCandidatesIsNotWordedAsNothingLeft() {
+        let term = GlomerisVocabulary.stopReason("safe_exhausted")
+        let explanation = term.explanation.lowercased()
+
+        XCTAssertTrue(
+            explanation.contains("confirmation"),
+            "must say what is waiting on the user: \(term.explanation)"
+        )
+        XCTAssertTrue(
+            explanation.contains("protected"),
+            "must say protected resources are still there: \(term.explanation)"
+        )
+        XCTAssertFalse(
+            explanation.contains("nothing is left") || explanation.contains("nothing remains"),
+            "must not report an empty disk it did not establish: \(term.explanation)"
+        )
+    }
+
+    /// The five stops leave five different next steps, so each explanation has
+    /// to be its own. Two stops sharing wording would make the report
+    /// decorative.
+    func testEveryStopReasonExplainsSomethingDifferent() {
+        let explanations = Self.stopReasonTokens.map { GlomerisVocabulary.stopReason($0).explanation }
+        XCTAssertEqual(
+            Set(explanations).count, explanations.count,
+            "two stop reasons say the same thing"
+        )
+        let titles = Self.stopReasonTokens.map { GlomerisVocabulary.stopReason($0).title }
+        XCTAssertEqual(Set(titles).count, titles.count, "two stop reasons share a title")
+    }
+
+    // MARK: - A refused recovery goal (HORO-1506)
+
+    /// A refusal means nothing ran, which is the one fact a user must not have
+    /// to infer. The failure being guarded against is a refusal that reads
+    /// like a finished run with nothing to do.
+    func testEveryGoalRefusalSaysNothingRan() {
+        for token in Self.goalRejectionTokens {
+            let term = GlomerisVocabulary.goalRejection(token)
+            XCTAssertTrue(
+                term.explanation.lowercased().contains("nothing ran"),
+                "\(token) must say nothing ran: \(term.explanation)"
+            )
+            XCTAssertNotEqual(
+                term.tone, .positive,
+                "\(token) refused the request and must not read as success"
+            )
+        }
+        XCTAssertTrue(
+            GlomerisVocabulary.goalRejection("a_reason_from_a_newer_cli")
+                .explanation.lowercased().contains("nothing ran"),
+            "even an unrecognised refusal must say nothing ran"
+        )
+    }
+
+    /// An already-met goal is a well-formed request to delete nothing, not a
+    /// typo, and telling the user to fix their number would be wrong. What it
+    /// needs is the one instruction that changes the outcome.
+    func testAnAlreadyMetGoalIsExplainedRatherThanTreatedAsAMistake() {
+        let alreadyMet = GlomerisVocabulary.goalRejection("not_an_improvement")
+        XCTAssertTrue(
+            alreadyMet.explanation.lowercased().contains("below current usage"),
+            "must say which direction to move the goal: \(alreadyMet.explanation)"
+        )
+
+        let outOfRange = GlomerisVocabulary.goalRejection("out_of_range")
+        XCTAssertNotEqual(
+            alreadyMet.title, outOfRange.title,
+            "a goal this disk already meets is not the same as one off the scale"
+        )
+        XCTAssertNotEqual(alreadyMet.symbolName, outOfRange.symbolName)
     }
 }

@@ -39,6 +39,13 @@
 use std::path::PathBuf;
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
+use glomeris::cli::recovery::{
+    build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
+};
+use glomeris::executor::goal::RecoveryGoal;
+use glomeris::executor::recovery_loop::{FreeTarget, RecoveryReport, StopReason};
+use glomeris::monitor::config::ThresholdConfig;
+use glomeris::monitor::fs_stat::FsUsage;
 use glomeris::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, AutopilotAskPreauthorizationReport,
     AutopilotCeilingsReport, AutopilotEnvelopeReport, DaemonStatusReport, DetectCandidateReport,
@@ -617,4 +624,246 @@ fn autopilot_envelope_report_matches_golden_fixture() {
     }
 
     assert_matches_fixture(&report, "autopilot_envelope_report.json");
+}
+
+// ---------------------------------------------------------------------------
+// Recovery goal reports (HORO-1506)
+// ---------------------------------------------------------------------------
+//
+// These four are built through `cli::recovery`'s own builders rather than as
+// struct literals, which is a deliberate departure from every fixture above.
+// The reason is the caveat sentences: they are the report's defence against
+// being misread — estimates are not measurements, an incomplete search is not
+// a complete one, confirmation-gated space is not automatic — and a literal
+// would let the fixture agree with a hand-typed copy of them while the CLI
+// emitted something else entirely. Going through the builder means the fixture
+// pins what `glomeris free` actually prints.
+
+/// The discovery pass both preview fixtures are built from.
+///
+/// Four candidates, chosen so the opportunity split has something in every
+/// bucket: one actionable now, one executable but confirmation-gated, one
+/// `PROTECTED`, one not executable for want of an action. The
+/// confirmation-gated one is also the lower-bound estimate, because
+/// `build_recovery_opportunity` only raises `is_lower_bound` for candidates
+/// that contribute to a byte total — pinning that on a non-executable
+/// candidate would pin nothing.
+fn recovery_discovery_pass() -> DetectReport {
+    DetectReport {
+        candidates: vec![
+            DetectCandidateReport {
+                resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                kind: "cargo_target_dir",
+                reclaimable_bytes: Some(2_147_483_648),
+                reclaimable_human: Some("2.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "AUTO_SAFE",
+                reasons: vec!["no_active_use_observed"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "cargo.clean.target_dir".to_string(),
+                    requires_confirmation: false,
+                }],
+                refusal_reason: None,
+            },
+            DetectCandidateReport {
+                resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                kind: "node_modules",
+                reclaimable_bytes: Some(5_368_709_120),
+                reclaimable_human: Some("5.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: true,
+                impact_tier: "notable",
+                policy_label: "ASK",
+                reasons: vec!["rebuild_cost_high"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "node.remove.node_modules".to_string(),
+                    requires_confirmation: true,
+                }],
+                refusal_reason: None,
+            },
+            DetectCandidateReport {
+                resource_id:
+                    "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-a"
+                        .to_string(),
+                kind: "xcode_derived_data",
+                reclaimable_bytes: Some(1_073_741_824),
+                reclaimable_human: Some("1.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "PROTECTED",
+                reasons: vec!["active_process_using_path"],
+                executable: false,
+                offered_actions: vec![],
+                refusal_reason: Some("an active process is using this path".to_string()),
+            },
+            DetectCandidateReport {
+                resource_id: "docker_build_cache:docker".to_string(),
+                kind: "docker_build_cache",
+                reclaimable_bytes: Some(10_737_418_240),
+                reclaimable_human: Some("10.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: true,
+                impact_tier: "large",
+                policy_label: "UNKNOWN_INCOMPLETE",
+                reasons: vec!["evidence_incomplete"],
+                executable: false,
+                offered_actions: vec![],
+                refusal_reason: Some(
+                    "no registered cleanup action for this resource kind".to_string(),
+                ),
+            },
+        ],
+        detectors: vec![
+            DetectorHealthReport {
+                detector: "cargo_target_dir".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "node_modules".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "xcode_derived_data".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "docker_build_cache".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "homebrew_cache".to_string(),
+                status: "failed",
+                candidates_found: 0,
+                reason: Some("brew --cache exited 1".to_string()),
+            },
+        ],
+        discovery_complete: false,
+    }
+}
+
+#[test]
+fn recovery_preview_report_matches_golden_fixture() {
+    // 440 GB of 500 GB used — 88.0% — against a 60%-used goal, so the goal is
+    // a real improvement and `bytes_needed` is non-zero. The estimated 2.0 GB
+    // actionable now is nowhere near it, which is the point: a preview has to
+    // be able to say "this will not get you there" without that being a
+    // refusal.
+    let usage = FsUsage::new(500_000_000_000, 60_000_000_000);
+    let goal = RecoveryGoal::from_used_percent(60.0).expect("60% used is a valid goal");
+    let report = build_recovery_preview_report(
+        &goal,
+        &usage,
+        &ThresholdConfig::default(),
+        recovery_discovery_pass(),
+    );
+    assert_matches_fixture(&report, "recovery_preview_report.json");
+}
+
+/// The preview of a goal that is already met.
+///
+/// The same volume and the same discovery pass as above, against a 95%-used
+/// goal it is already below. Three things are pinned that the other preview
+/// fixture cannot pin, because there `bytes_needed` is non-zero:
+///
+///   * `bytes_needed` is `0` and its human form is a real formatted zero rather
+///     than an omission — a client that treated a missing figure as "unknown"
+///     would have nothing to distinguish "already there" from "not measured".
+///   * the caveat saying a real run would be refused. `free --dry-run` reports
+///     this state instead of refusing it, so the sentence is the only thing
+///     standing between a user and pressing a button that cannot work.
+///   * `goal_appears_reachable` is `true` here for the trivial reason — there is
+///     nothing left to reach — which is worth having in a fixture so nobody
+///     reads that flag as "there is enough to reclaim".
+#[test]
+fn recovery_preview_report_for_an_already_met_goal_matches_golden_fixture() {
+    let usage = FsUsage::new(500_000_000_000, 60_000_000_000);
+    let goal = RecoveryGoal::from_used_percent(95.0).expect("95% used is a valid goal");
+    let report = build_recovery_preview_report(
+        &goal,
+        &usage,
+        &ThresholdConfig::default(),
+        recovery_discovery_pass(),
+    );
+    assert_matches_fixture(&report, "recovery_preview_report_goal_already_met.json");
+}
+
+#[test]
+fn recovery_run_report_matches_golden_fixture() {
+    let goal = RecoveryGoal::from_used_percent(60.0).expect("60% used is a valid goal");
+    let inner = RecoveryReport {
+        stop_reason: StopReason::TargetReached,
+        iterations_run: 3,
+        actions_executed: 4,
+        actions_declined_or_skipped: 2,
+        total_bytes_freed: 150_000_000_000,
+        started_free_bytes: 60_000_000_000,
+        final_free_bytes: 210_000_000_000,
+        detector_failures: vec![],
+    };
+    // 210 GB free of 500 GB is 42% free, which clears the goal's 40% floor —
+    // so `target_met` is decided by the re-measured reading, not by the
+    // 150 GB that was deleted.
+    let report =
+        build_recovery_run_report(Some(&goal), &goal.to_free_target(), 500_000_000_000, &inner);
+    assert_matches_fixture(&report, "recovery_run_report.json");
+}
+
+/// The raw `--target` form, and the run that did not get there.
+///
+/// Two absences are the fixture's whole purpose: `goal` is omitted because a
+/// free-space floor is not a used-axis goal, and `error` is omitted because
+/// this run did not fail. A client that treated either absence as a zero or a
+/// blank would be inventing a fact, so both are pinned here rather than left to
+/// whichever fixture happened to have them.
+#[test]
+fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
+    let target = FreeTarget::AbsoluteBytes(250_000_000_000);
+    let inner = RecoveryReport {
+        stop_reason: StopReason::SafeExhausted,
+        iterations_run: 2,
+        actions_executed: 1,
+        actions_declined_or_skipped: 3,
+        total_bytes_freed: 2_147_483_648,
+        started_free_bytes: 60_000_000_000,
+        final_free_bytes: 62_147_483_648,
+        detector_failures: vec!["homebrew_cache: brew --cache exited 1".to_string()],
+    };
+    let report = build_recovery_run_report(None, &target, 500_000_000_000, &inner);
+    assert_matches_fixture(&report, "recovery_run_report_raw_target.json");
+}
+
+#[test]
+fn recovery_goal_rejection_report_matches_golden_fixture() {
+    let usage = FsUsage::new(500_000_000_000, 60_000_000_000);
+    let goal = RecoveryGoal::from_used_percent(95.0).expect("95% used is a valid goal");
+    // 88.0% used already, so a 95%-used goal would reclaim nothing. Obtained
+    // from `progress_toward` rather than constructed, so the fixture carries
+    // the rejection the CLI really produces.
+    let rejection = goal
+        .progress_toward(&usage)
+        .expect_err("a goal above current usage is not an improvement");
+    let report = build_goal_rejection_report(&rejection);
+    assert_matches_fixture(&report, "recovery_goal_rejection_report.json");
+}
+
+/// The rejection with both optional figures absent.
+///
+/// `not_finite` is the one rejection with no number to report, and reporting
+/// `0.0` for it would be a fabricated measurement — so the fields are omitted,
+/// and that omission is what this fixture pins.
+#[test]
+fn recovery_goal_rejection_report_with_no_figures_matches_golden_fixture() {
+    let rejection =
+        RecoveryGoal::from_used_percent(f64::NAN).expect_err("NaN is not a usable goal");
+    let report = build_goal_rejection_report(&rejection);
+    assert_matches_fixture(&report, "recovery_goal_rejection_report_not_finite.json");
 }

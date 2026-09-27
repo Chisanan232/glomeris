@@ -144,6 +144,17 @@ targets:
       - path: Sources/CandidateDetailView.swift
       - path: Sources/HistoryAuditSectionView.swift
       - path: Sources/AiPlanSectionView.swift
+      # HORO-1506: the recovery goal card. Compiled in for two reasons the other
+      # cards do not have. Its two summary types turn a report into every
+      # sentence the user reads about a run that has already deleted things, so
+      # the rules worth pinning — a stop is never worded as success unless the
+      # CLI measured the goal as met, and the three reclaimable figures are never
+      # added together — are assertions against real fixtures here rather than a
+      # grep. And `phase(forRunExitCode:stdout:fallbackPreview:)` is where a
+      # busy execution lock would otherwise be mistaken for a refused goal: the
+      # two DTOs share their required fields, so only a test can show the exit
+      # code is what separates them.
+      - path: Sources/RecoverySectionView.swift
       # HORO-1366: the batch itself — the only place in the target that turns a
       # provider's suggestion set into `execute` invocations. Here so its two
       # call sites can be driven against a fixture binary, and so the guards
