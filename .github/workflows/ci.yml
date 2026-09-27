@@ -535,6 +535,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Prove the dependency-watch guard's rules fire
+        run: bash scripts/check-dependency-updates-are-watched.sh --self-test
       - name: Check every dependency this repository runs is watched
         run: bash scripts/check-dependency-updates-are-watched.sh
 
