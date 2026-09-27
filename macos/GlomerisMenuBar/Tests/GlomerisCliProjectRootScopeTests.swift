@@ -45,6 +45,20 @@ final class GlomerisCliProjectRootScopeTests: XCTestCase {
         (["autopilot", "show", "--json"], false),
         (["autopilot", "revoke", "--json"], false),
         (["autopilot", "enable", "--json", "--kinds", "cargo_target_dir"], false),
+        // HORO-1507. Two numbers in a config file. Nothing about them is
+        // discovered, so there is nothing for a root to scope — and a
+        // `--project-root` on a command that writes a global setting would read
+        // as a per-project setting, which is not what it would be.
+        (["settings", "show", "--json"], false),
+        (
+            [
+                "settings", "set",
+                "--notify-at-used-percent", "85",
+                "--default-goal-used-percent", "60",
+                "--json",
+            ],
+            false
+        ),
     ]
 
     func testEveryInvocationTheAppBuildsGetsTheRightAnswer() {
@@ -62,7 +76,7 @@ final class GlomerisCliProjectRootScopeTests: XCTestCase {
     /// about the case that broke.
     func testTheInvocationListCoversBothAnswers() {
         XCTAssertGreaterThanOrEqual(Self.invocations.filter { $0.acceptsRoots }.count, 4)
-        XCTAssertGreaterThanOrEqual(Self.invocations.filter { !$0.acceptsRoots }.count, 8)
+        XCTAssertGreaterThanOrEqual(Self.invocations.filter { !$0.acceptsRoots }.count, 10)
     }
 
     func testStatusIsNotRootScopedUnderAnyArgumentShape() {
