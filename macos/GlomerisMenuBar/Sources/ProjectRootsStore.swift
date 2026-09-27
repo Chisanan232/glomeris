@@ -76,4 +76,46 @@ struct ProjectRootsStore {
     var commandLineArguments: [String] {
         roots.flatMap { ["--project-root", $0] }
     }
+
+    /// `arguments` with the configured roots appended, when its leading token
+    /// names a command that takes them; `arguments` unchanged otherwise.
+    ///
+    /// The intended way to build any invocation in this app, including the ones
+    /// that receive no roots — `projectRootsStore.scoped(["status", "--json"])`
+    /// reads as "the roots do not apply here, and something checked" where a
+    /// bare `["status", "--json"]` only reads as "nobody attached them at this
+    /// site today".
+    ///
+    /// HORO-1501. The property above is what this replaces, and the difference
+    /// is where the question gets asked. `["status", "--json"] +
+    /// projectRootsStore.commandLineArguments` is one token away from the four
+    /// correct sites that look exactly like it, and the CLI rejects it — so the
+    /// Status card failed for every user who had configured a root, which is to
+    /// say for every user of the feature the roots exist for.
+    ///
+    /// Appends rather than inserts. `glomeris`'s own argument scanners
+    /// (`extract_project_roots`, then a positional/flag loop per command) accept
+    /// flags in any order, and the one command whose vector has a positional —
+    /// `explain <resource-id>` — reads that positional before the flags.
+    func scoped(_ arguments: [String]) -> [String] {
+        guard let command = arguments.first else { return arguments }
+        return arguments + projectRootArguments(forCommand: command)
+    }
+
+    /// The configured roots as repeated `--project-root <path>` arguments for
+    /// `command`, or nothing at all when `command` does not take them.
+    ///
+    /// For the two call sites that build their vector through a separate pure
+    /// function — `CandidateDetailView.buildExecuteArguments` and
+    /// `AiProviderPreferencesView.payloadPreview` — where the roots sit in the
+    /// middle of the vector and so cannot be appended by ``scoped(_:)``.
+    ///
+    /// Naming the command is not optional and the answer is not this method's:
+    /// it comes from ``GlomerisCliProjectRootScope``, the same table
+    /// ``scoped(_:)`` consults. There is deliberately no way left to obtain the
+    /// roots in argument form without saying what they are for.
+    func projectRootArguments(forCommand command: String) -> [String] {
+        guard GlomerisCliProjectRootScope.accepts(command: command) else { return [] }
+        return roots.flatMap { ["--project-root", $0] }
+    }
 }
