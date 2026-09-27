@@ -117,15 +117,21 @@ final class GlomerisCliProjectRootScopeTests: XCTestCase {
     /// with a test to update rather than a silent widening of what the app
     /// attaches roots to.
     ///
-    /// Four, not the seven the CLI accepts: `clean` and `free` are commands this
-    /// app never invokes, and `autopilot run` would be given none on purpose
-    /// (see `GlomerisCliProjectRootScope`'s header). The Rust side of that
-    /// comparison is mechanical and lives in
+    /// Five, not the seven the CLI accepts: `clean` is a command this app never
+    /// invokes, and `autopilot run` would be given none on purpose (see
+    /// `GlomerisCliProjectRootScope`'s header). The Rust side of that comparison
+    /// is mechanical and lives in
     /// `scripts/check-app-cli-invocations-match-cli-contract.sh`.
-    func testTheTableIsExactlyTheFourRootScopedCommands() {
+    ///
+    /// `free` joined the set in HORO-1506, when the Recovery card became the
+    /// first place the app invokes it. It belongs here because it discovers
+    /// before it reclaims: unscoped, its preview would count an opportunity
+    /// drawn from a different set of directories than the candidate list shown
+    /// beneath it, and the run that follows would reclaim from a third set.
+    func testTheTableIsExactlyTheFiveRootScopedCommands() {
         XCTAssertEqual(
             GlomerisCliProjectRootScope.rootScopedCommands,
-            ["detect", "explain", "llm-plan", "execute"]
+            ["detect", "explain", "llm-plan", "execute", "free"]
         )
     }
 }
