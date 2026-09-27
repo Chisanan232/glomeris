@@ -561,9 +561,12 @@ run_self_test() {
   expect "an unmutated copy of the configuration passes" 0 "$dir" \
     "none split across versions"
 
-  # 1. The HORO-1497 defect: one action at two versions.
+  # 1. The HORO-1497 defect: one action at two versions. Every mutation below
+  # rewrites whatever version is in the file rather than naming one, so that
+  # bumping a pin for real cannot quietly turn a case into a no-op — which is
+  # exactly what a version named here did the first time one was bumped.
   dir="$(fixture split-version)"
-  perl -0pi -e 's/actions\/checkout\@v6/actions\/checkout\@v4/' \
+  perl -0pi -e 's|(actions/checkout)\@\S+|$1\@v0|' \
     "${dir}/.github/workflows/docs.yml"
   expect "an action referenced at two versions fails" 1 "$dir" \
     "referenced at more than one version"
@@ -636,7 +639,7 @@ run_self_test() {
   # declare. This is the case the whole rule exists for, and it is the one the
   # four-files-agree shape of rule 1 cannot see.
   dir="$(fixture undeclared-pin)"
-  perl -0pi -e 's/^"actions\/checkout" = "v6"\n//m' "${dir}/dist-workspace.toml"
+  perl -0pi -e 's/^"actions\/checkout" = "[^"]+"\n//m' "${dir}/dist-workspace.toml"
   expect "a generated pin with no entry in the dist config fails" 1 "$dir" \
     "does not declare:"
 
@@ -666,7 +669,7 @@ run_self_test() {
   # comment above dist_declared_pins claims this lands in the case above; this
   # is what makes that claim true rather than aspirational.
   dir="$(fixture inline-dist-table)"
-  perl -0pi -e 's/^\[dist\.github-action-commits\]\n((?:"actions[^\n]*\n)+)/github-action-commits = { "actions\/checkout" = "v6" }\n/m' \
+  perl -0pi -e 's/^\[dist\.github-action-commits\]\n((?:"[^\n]*\n)+)/my $b = $1; $b =~ s|\n(?=.)|, |g; $b =~ s|\n$||; "github-action-commits = { $b }\n"/me' \
     "${dir}/dist-workspace.toml"
   expect "an inline dist table is reported rather than read" 1 "$dir" \
     "have no source of truth"
