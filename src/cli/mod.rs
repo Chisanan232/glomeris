@@ -19,6 +19,7 @@
 //! wiring (including the HORO-1054 execution lock) stays in `main.rs`.
 
 pub mod help;
+pub mod pressure;
 pub mod recovery;
 pub mod settings;
 
