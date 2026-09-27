@@ -37,9 +37,10 @@ the binary and its tests.
 | `glomeris <unknown-command>` | A one-line error and a pointer to `--help`, to stderr, exit 2. |
 | `glomeris <command> <bad-flag>` | *That command's* usage only, to stderr, exit 2. |
 
-The groups in top-level help are `INSPECT`, `PLAN`, `ACT`, `OBSERVE` and
-`SERVICE`, ordered so that the read-only commands come before anything that can
-delete. A group heading describes consequence, not category: `INSPECT` says
+The groups in top-level help are `INSPECT`, `PLAN`, `ACT`, `OBSERVE`,
+`SERVICE` and `CONFIGURE`, ordered so that the read-only commands come before
+anything that can delete, and so that a first-time reader meets the product
+before its preferences. A group heading describes consequence, not category: `INSPECT` says
 "nothing is changed", and `ACT` says its commands delete data and that every
 deletion is policy-gated.
 
@@ -57,7 +58,7 @@ Four labels exist, in ascending order of consequence:
 |---|---|
 | `Read-only — changes nothing.` | Nothing is written. |
 | `Advisory — proposes, never executes.` | Produces a plan; executes none of it. |
-| `Writes only Glomeris's own state — never your files.` | Writes the launch agent plist, the monitor's history and heartbeat, or the Autopilot envelope. Nothing you own. |
+| `Writes only Glomeris's own state — never your files.` | Writes the launch agent plist, the monitor's history and heartbeat, the Autopilot envelope, or your stored preferences. Nothing you own. |
 | `Can delete data — every deletion is policy-gated.` | Deletes. |
 
 For a command that takes subcommands, the consequence is a property of the
@@ -1021,6 +1022,84 @@ attempted; `75` another invocation holds the execution lock.
 `3` exists so that "no grant" is distinguishable from "granted, ran, found
 nothing" in a script — both of which are quiet, and only one of which means
 the user has something to configure.
+
+## `glomeris settings <show|set> [--notify-at-used-percent <N>] [--default-goal-used-percent <N>] [--json]`
+
+The subcommand is optional and defaults to `show`, so a bare
+`glomeris settings` reads your preferences rather than changing them.
+
+| Verb | What it does | Can it delete? |
+|---|---|---|
+| `show` | Prints both preferences and their path. Does not create the file it reads. | No |
+| `set` | Stores one or both preferences. Requires at least one flag. | No |
+
+Two preferences live here, and the whole point of the surface is that they are
+**not the same number**:
+
+| Preference | Question it answers | Range | Default |
+|---|---|---|---|
+| `--notify-at-used-percent` | When should Glomeris call my attention to disk usage? | 1–99 percent used | `75` |
+| `--default-goal-used-percent` | Where should recovery stop? | 0–100 percent used | `70` |
+
+Both are **percent of capacity USED, never free** — the same axis
+`free --goal-used-percent` takes, converted to the core's percent-free
+`--target` by the single adapter documented in the `glomeris free` section
+above. Every line this command prints names its axis, in prose and in JSON,
+because `75` beside `70` with no label is the one misreading this feature
+cannot afford.
+
+What this page adds:
+
+- The goal must be **below** the threshold. A goal at or above the point that
+  raised the alert would be satisfied the moment it was announced, so the pair
+  is refused with the reason `goal_not_below_notify_threshold`.
+- Both flags are validated **as a pair, in one step**. Moving from `(75, 70)`
+  to `(60, 55)` is a valid destination that no single-field order can reach —
+  whichever field moved first would be momentarily invalid against the old
+  value of the other. So `set` refuses you for the destination you asked for,
+  never for the order your flags happened to appear in.
+- A trailing `%` is accepted on either value, because a user typing what they
+  read on screen has not made a mistake.
+- `set` with neither flag is a usage error rather than a successful no-op: a
+  command line that did not say what it wanted should not report that it did
+  it.
+- The four disk-pressure states (`healthy`, `warn`, `pressured`, `critical`,
+  `emergency` boundaries) are **not** configurable and this command cannot
+  reach them. That is deliberate: if the `warn` boundary were a preference,
+  lowering it would change what a `warn` recorded last week meant, and raising
+  it would make the next poll report a transition the disk never made. The
+  alert threshold is a separate scalar layered over that machine, and its
+  default tracks the `warn` boundary so the product is no quieter than it is
+  today.
+- Neither preference is an authorization. Raising a goal cannot make a
+  `PROTECTED` resource deletable, cannot bypass an `ASK`, and cannot widen an
+  Autopilot envelope. These two numbers decide when the product speaks and
+  where recovery aims; every gate between a candidate and its deletion is
+  elsewhere.
+- `--json` belongs to both verbs and prints one shape from both:
+  `notify_at_used_percent` and `notify_at_description` for the threshold, a
+  `default_goal` object carrying `used_percent`, `free_percent` and
+  `description` for the goal, `stored_at`, and `loaded_from_file`. It always
+  describes what is in force *after* the command ran. `loaded_from_file` is
+  reported rather than an `is_default` flag, because a user may legitimately
+  store the default numbers and a client must be able to tell "nothing chosen
+  yet" from "these were chosen". A refused `set` prints a rejection object on
+  stdout instead — `reason` (a stable token), `message`, and only whichever of
+  `notify_at_used_percent`/`goal_used_percent` the refusal actually involved.
+- The file is `~/Library/Application Support/Glomeris/settings.conf`, beside
+  the Autopilot envelope and in the same versioned format: a `version` key,
+  one `key = value` per line, unknown keys an error rather than noise, and
+  loading routed through the validating constructor so a hand-edited file
+  cannot install a pair the CLI would have refused.
+
+Exit codes: `0` the preferences were printed, or the change was stored; `1` the
+settings file could not be read or written, or what it contains is not valid;
+`2` usage error, including `set` with neither flag, or a value on this command
+line that was refused.
+
+A refused *stored* file is `1`, not `2`: it is not this command line's mistake,
+and a script must be able to tell "you typed 120" from "the file on disk
+disagrees with itself".
 
 ## Exit codes
 
