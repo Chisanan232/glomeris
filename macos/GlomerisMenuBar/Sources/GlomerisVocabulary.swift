@@ -1019,6 +1019,77 @@ enum GlomerisVocabulary {
         }
     }
 
+    // MARK: - A refused settings change (HORO-1507)
+
+    static let settingsRejectionAxis = "Preferences"
+
+    /// `SettingsRejection` as the CLI tags it (`src/settings/mod.rs` —
+    /// `as_str`, diffed by this project's vocabulary guard).
+    ///
+    /// Every explanation names *which of the two numbers* was refused, and
+    /// names it in words rather than by flag. "Out of range" is useless advice
+    /// on a pane showing two percentages; "the alert threshold has to be
+    /// between 1% and 99% used" tells the user which control to move.
+    ///
+    /// `goal_not_below_notify_threshold` is the one refusal that is about
+    /// neither number on its own, and its wording says so: it names both, and
+    /// says moving either one fixes it. A user told only "invalid goal" would
+    /// try harder at the goal, which is the field they may not want to change.
+    static func settingsRejection(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "notify_threshold_not_finite":
+            return term(
+                "notify_threshold_not_finite", settingsRejectionAxis, "Not a usable number",
+                "Nothing was saved. The alert threshold has to be an ordinary percentage of "
+                    + "the disk in use.",
+                "questionmark.circle.fill", .caution
+            )
+        case "notify_threshold_out_of_range":
+            return term(
+                "notify_threshold_out_of_range", settingsRejectionAxis, "Threshold out of range",
+                "Nothing was saved. The alert threshold has to be between 1% and 99% used — "
+                    + "0% would never stop alerting and 100% would never start.",
+                "arrow.left.and.right.circle.fill", .caution
+            )
+        case "goal_not_finite":
+            return term(
+                "goal_not_finite", settingsRejectionAxis, "Not a usable number",
+                "Nothing was saved. The recovery goal has to be an ordinary percentage of "
+                    + "the disk in use.",
+                "questionmark.circle.fill", .caution
+            )
+        case "goal_out_of_range":
+            return term(
+                "goal_out_of_range", settingsRejectionAxis, "Goal outside 0–100%",
+                "Nothing was saved. A recovery goal is a share of this disk, so it has to "
+                    + "fall between 0% and 100% used.",
+                "arrow.left.and.right.circle.fill", .caution
+            )
+        case "goal_not_below_notify_threshold":
+            return term(
+                "goal_not_below_notify_threshold", settingsRejectionAxis,
+                "Goal is not below the threshold",
+                "Nothing was saved. Recovery would aim at a disk no emptier than the one "
+                    + "that raised the alert. Lower the recovery goal, or raise the alert "
+                    + "threshold above it.",
+                "arrow.down.right.and.arrow.up.left.circle.fill", .caution
+            )
+        case "goal_refused":
+            return term(
+                "goal_refused", settingsRejectionAxis, "Goal refused",
+                "Nothing was saved. The CLI would not accept this recovery goal. Its own "
+                    + "explanation is shown below.",
+                "exclamationmark.circle.fill", .caution
+            )
+        default:
+            return unrecognised(
+                token, settingsRejectionAxis, "Change refused",
+                "The CLI refused this change for a reason this app has no wording for. "
+                    + "Nothing was saved."
+            )
+        }
+    }
+
     // MARK: - Resolved command-line tool (HORO-1466)
 
     static let cliAxis = "Command-line tool"
