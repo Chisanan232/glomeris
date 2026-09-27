@@ -100,6 +100,7 @@
 		DA6E8AA19F3712ADF3F7A273 /* PressureNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E802DFA3BA87D2852D8F475 /* PressureNotification.swift */; };
 		DB5D8383B59675585CAAAB8A /* AiPlanSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */; };
 		DB88E99DC3C79235C5CF19EB /* PressureEpisodeClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA4D9AC03E8F7B1E7FD9FDBF /* PressureEpisodeClientTests.swift */; };
+		DC4AF88F0E7B302B205F4693 /* PressureAlertSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF331AFE6D2969A7AB7F5893 /* PressureAlertSectionViewTests.swift */; };
 		DD869D2E04323DCF4BD5FB50 /* CredentialAccessListTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4F457D173A23C0AD61CBDF /* CredentialAccessListTests.swift */; };
 		E67F00D16D2CAFE9E74443CB /* CandidatesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */; };
 		E88B4CFA5ACC97B1DB28CC07 /* GlomerisExecutableLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */; };
@@ -205,6 +206,7 @@
 		EB357B6854DACD0589265315 /* RecoveryPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryPreferencesTests.swift; sourceTree = "<group>"; };
 		F0D343988045ECE0F0B72093 /* GlomerisDesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisDesignSystem.swift; sourceTree = "<group>"; };
 		FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverviewStateTests.swift; sourceTree = "<group>"; };
+		FF331AFE6D2969A7AB7F5893 /* PressureAlertSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PressureAlertSectionViewTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -302,6 +304,7 @@
 				C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */,
 				FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */,
 				DADBD41F34721D97EB1E2605 /* PlanApplicationTests.swift */,
+				FF331AFE6D2969A7AB7F5893 /* PressureAlertSectionViewTests.swift */,
 				DA4D9AC03E8F7B1E7FD9FDBF /* PressureEpisodeClientTests.swift */,
 				065A9E2A402A94900258E6A8 /* PressureEpisodeMonitorTests.swift */,
 				2A31106BCDF16D319AC886B3 /* PressureNotificationTests.swift */,
@@ -463,6 +466,7 @@
 				5C25EFF7FAF885E8A3A53016 /* PlanApplication.swift in Sources */,
 				F5C7757C1A78DEEA5F600852 /* PlanApplicationTests.swift in Sources */,
 				38F7D0761D47CD7F62727F21 /* PressureAlertSectionView.swift in Sources */,
+				DC4AF88F0E7B302B205F4693 /* PressureAlertSectionViewTests.swift in Sources */,
 				1B82E918C879BCD20EB8A797 /* PressureEpisodeClient.swift in Sources */,
 				DB88E99DC3C79235C5CF19EB /* PressureEpisodeClientTests.swift in Sources */,
 				77F2D4731DA004387FF6714E /* PressureEpisodeMonitor.swift in Sources */,
