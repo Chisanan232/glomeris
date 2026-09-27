@@ -82,6 +82,6 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
 # taken for all four workflow files at once or the guard's no-split-versions
 # rule would fail.
 [dist.github-action-commits]
-"actions/checkout" = "v6"
+"actions/checkout" = "v7"
 "actions/download-artifact" = "v8"
 "actions/upload-artifact" = "v7"

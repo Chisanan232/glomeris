@@ -15,7 +15,7 @@ jobs:
   test:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -30,7 +30,7 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   macos-app:
@@ -73,7 +73,7 @@ jobs:
     # sees rather than an approximation of it.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Select the pinned Xcode
         run: |
           set -euo pipefail
@@ -141,7 +141,7 @@ jobs:
     # pin in .xcodegen-version is what makes this check reproducible.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the pinned XcodeGen
         # Downloaded into RUNNER_TEMP rather than the checkout so the
         # extracted tree cannot show up as untracked files in the repo the
@@ -203,7 +203,7 @@ jobs:
     # rasteriser, so the toolchain is part of what is being asserted.
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Select the pinned Xcode
         run: |
           set -euo pipefail
@@ -232,7 +232,7 @@ jobs:
     # wrong version, and a stale project can still have the right one.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check the app bundle version matches the crate version
         run: bash scripts/check-app-version-matches-crate.sh
 
@@ -247,7 +247,7 @@ jobs:
     # acceptable because it is provably incapable of acting on the result.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check no policy_label branching in Swift
         run: bash scripts/check-no-policy-label-branching.sh
 
@@ -261,7 +261,7 @@ jobs:
     # keychain test that skipped on that would be a permanently green no-op.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check the BYOK credential never leaves the keychain
         run: bash scripts/check-credential-store-uses-keychain.sh
 
@@ -278,7 +278,7 @@ jobs:
     # correct satisfies the first while failing the second.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check stored state is namespaced by the running bundle
         run: bash scripts/check-state-namespaced-by-bundle-id.sh
 
@@ -298,7 +298,7 @@ jobs:
     # namespaced suite still leaves a plist per name, and the names were unique.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check no test opens a UserDefaults suite outside the helper
         run: bash scripts/check-tests-do-not-open-user-defaults-suites.sh
 
@@ -316,7 +316,7 @@ jobs:
     # would let "the versions agree" stand in for "it is the same build".
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check the resolved CLI's path and identity are reported together
         run: bash scripts/check-cli-identity-is-reported.sh
 
@@ -331,7 +331,7 @@ jobs:
     # problems, and neither should hide behind the other's red X.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check every CLI token has GUI wording
         run: bash scripts/check-vocabulary-covers-cli-tokens.sh
 
@@ -356,7 +356,7 @@ jobs:
     # without evidence that its rules still fire.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check every rule of the guard still fires
         run: bash scripts/check-app-cli-invocations-match-cli-contract.sh --self-test
       - name: Check the app's project-root scoping matches the CLI
@@ -375,7 +375,7 @@ jobs:
     # for byte by tests/help_golden.rs in the `test` job.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check the book documents every CLI command
         run: bash scripts/check-docs-cover-cli-commands.sh
 
@@ -404,7 +404,7 @@ jobs:
     # so an image refresh could turn this job red on an unrelated pull request.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the pinned actionlint and shellcheck
         # Into RUNNER_TEMP rather than the checkout, so the extracted binaries
         # cannot show up as untracked files in the repository being linted.
@@ -477,7 +477,7 @@ jobs:
     # refuses to run if the binary on PATH is not that version.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Install the pinned shellcheck
         # Into RUNNER_TEMP rather than the checkout, so the extracted binary
         # cannot show up as an untracked file in the repository being linted —
@@ -544,7 +544,7 @@ jobs:
     # every declaration to be referenced.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Prove the dependency-watch guard's rules fire
         run: bash scripts/check-dependency-updates-are-watched.sh --self-test
       - name: Check every dependency this repository runs is watched
@@ -575,7 +575,7 @@ jobs:
     # and a guard being unreadable must not hide a guard being unreachable.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Check every failure diagnostic can actually run
         run: bash scripts/check-failure-diagnostics-are-reachable.sh
 
@@ -600,7 +600,7 @@ jobs:
     # the part that was missing.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # The whole check is a comparison against the existing tags, and
           # actions/checkout fetches none of them by default. The script treats
