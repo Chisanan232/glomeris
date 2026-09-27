@@ -172,6 +172,19 @@ pub fn build_recovery_preview_report(
     let opportunity = build_recovery_opportunity(&detect.candidates);
 
     let mut caveats = vec![ESTIMATES_CAVEAT.to_string()];
+    // A preview of an already-satisfied goal is a legitimate question to ask,
+    // so this reports rather than refuses — but it must say what a real run
+    // would do, because `free --goal-used-percent` refuses a goal that is not
+    // an improvement (see `RecoveryGoal::progress_toward`). Without this
+    // sentence the preview looks like a green light for a run that will exit
+    // with a rejection.
+    if bytes_needed == 0 {
+        caveats.push(
+            "This goal is already satisfied, so there is nothing to recover: starting a run \
+             would be refused rather than reclaim anything."
+                .to_string(),
+        );
+    }
     if !detect.discovery_complete {
         let failed: Vec<&str> = detect
             .detectors
@@ -508,6 +521,38 @@ mod tests {
         );
         assert_eq!(preview.bytes_needed, 0);
         assert!(preview.goal_appears_reachable);
+        // `goal_appears_reachable` being true must not read as "go ahead":
+        // a real run refuses a goal that is not an improvement, and the
+        // preview has to say so or it is a green light for an exit code 2.
+        assert!(
+            preview
+                .caveats
+                .iter()
+                .any(|c| c.contains("already satisfied") && c.contains("refused")),
+            "{:?}",
+            preview.caveats
+        );
+    }
+
+    #[test]
+    fn a_goal_that_still_needs_bytes_is_not_labelled_already_satisfied() {
+        let goal = RecoveryGoal::from_used_percent(60.0).unwrap();
+        let preview = build_recovery_preview_report(
+            &goal,
+            // 1000-byte volume, 60 free => 94% used, 340 bytes short.
+            &FsUsage::new(1000, 60),
+            &ThresholdConfig::default(),
+            detect_report(vec![], true),
+        );
+        assert_eq!(preview.bytes_needed, 340);
+        assert!(
+            !preview
+                .caveats
+                .iter()
+                .any(|c| c.contains("already satisfied")),
+            "{:?}",
+            preview.caveats
+        );
     }
 
     fn run_report(stop_reason: StopReason, final_free: u64, freed: u64) -> RecoveryReport {
