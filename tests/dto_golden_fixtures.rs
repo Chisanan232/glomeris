@@ -768,6 +768,34 @@ fn recovery_preview_report_matches_golden_fixture() {
     assert_matches_fixture(&report, "recovery_preview_report.json");
 }
 
+/// The preview of a goal that is already met.
+///
+/// The same volume and the same discovery pass as above, against a 95%-used
+/// goal it is already below. Three things are pinned that the other preview
+/// fixture cannot pin, because there `bytes_needed` is non-zero:
+///
+///   * `bytes_needed` is `0` and its human form is a real formatted zero rather
+///     than an omission — a client that treated a missing figure as "unknown"
+///     would have nothing to distinguish "already there" from "not measured".
+///   * the caveat saying a real run would be refused. `free --dry-run` reports
+///     this state instead of refusing it, so the sentence is the only thing
+///     standing between a user and pressing a button that cannot work.
+///   * `goal_appears_reachable` is `true` here for the trivial reason — there is
+///     nothing left to reach — which is worth having in a fixture so nobody
+///     reads that flag as "there is enough to reclaim".
+#[test]
+fn recovery_preview_report_for_an_already_met_goal_matches_golden_fixture() {
+    let usage = FsUsage::new(500_000_000_000, 60_000_000_000);
+    let goal = RecoveryGoal::from_used_percent(95.0).expect("95% used is a valid goal");
+    let report = build_recovery_preview_report(
+        &goal,
+        &usage,
+        &ThresholdConfig::default(),
+        recovery_discovery_pass(),
+    );
+    assert_matches_fixture(&report, "recovery_preview_report_goal_already_met.json");
+}
+
 #[test]
 fn recovery_run_report_matches_golden_fixture() {
     let goal = RecoveryGoal::from_used_percent(60.0).expect("60% used is a valid goal");
