@@ -1225,6 +1225,18 @@ struct PressureRejectionReportDto: Decodable, Equatable {
     /// The refusal's own text. Rust decided it and Rust words it.
     let message: String
 
+    /// A token Rust never emits, used when the CLI exited 3 without printing a
+    /// report this app could decode — an older CLI refusing for a reason it has
+    /// not published, or the non-`--json` path having been run by mistake.
+    ///
+    /// Deliberately not one of the real tokens: claiming `no_open_episode` for an
+    /// unknown refusal would put a specific, confident sentence in front of the
+    /// user about a state nothing established. Reserved rather than invented ad
+    /// hoc at the call site so it can be asserted to stay outside the set the
+    /// vocabulary recognises — `GlomerisVocabulary.episodeRejection` answers it
+    /// through its `unrecognised` branch, which is the honest wording.
+    static let unknownReason = "unrecognized_refusal"
+
     enum CodingKeys: String, CodingKey {
         case reason
         case message

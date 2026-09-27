@@ -181,6 +181,14 @@ targets:
       # percentages from ever being sent as each other, which is the failure this
       # whole pane is shaped to prevent.
       - path: Sources/RecoveryPreferencesView.swift
+      # HORO-1508: the app's half of the daemon/app seam. Compiled in because the
+      # claim that matters is an exit code's *meaning*: `pressure` exits 3 to say
+      # "understood, and there was nothing to record", which is not a failure and
+      # must not be retried at poll speed — and it prints the only account of why
+      # on stdout, where `GlomerisClient.run` would discard it. Only a test can
+      # show that exit 3 with a body, exit 2 with a version-skew marker and exit 2
+      # with prose are read as three different things.
+      - path: Sources/PressureEpisodeClient.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
