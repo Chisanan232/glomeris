@@ -90,6 +90,8 @@
 //    outcomes        `src/reporting/dto.rs`           ExecuteReport::outcome
 //    refusals        `src/reporting/dto.rs`           ExecuteRefusalReport::reason
 //    audit source    `src/monitor/persistence.rs`     AuditRecord::source
+//    alert answers   `src/monitor/episode.rs`          EpisodeResponse::as_str
+//    refused answers `src/monitor/episode.rs`          EpisodeRejection::as_str
 //
 
 import Foundation

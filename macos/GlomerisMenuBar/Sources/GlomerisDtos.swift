@@ -12,9 +12,12 @@
 //  These are pure data mirrors — decoding only, no policy/evidence/action
 //  logic (see the standing project rule in GlomerisMenuBarApp.swift).
 //  Field names and JSON key spelling must match the Rust `Serialize`
-//  output exactly (both sides use plain snake_case field names with no
-//  `#[serde(rename...)]` on the Rust side, so no `CodingKeys` remapping is
-//  needed here either).
+//  output exactly. The Rust side carries no `#[serde(rename...)]`, so its
+//  keys are plain snake_case; a mirror here therefore either spells its
+//  properties in snake_case or maps them in `CodingKeys`. The later DTOs do
+//  the latter, and a mirror that does neither still compiles — a key that
+//  never matches decodes an optional as `nil` and fails a required field only
+//  at run time. That is what the golden-fixture tests are for.
 //
 
 import Foundation
@@ -1044,5 +1047,186 @@ struct SettingsRejectionReportDto: Decodable, Equatable {
         case message
         case notifyAtUsedPercent = "notify_at_used_percent"
         case goalUsedPercent = "goal_used_percent"
+    }
+}
+
+/// Mirrors `reporting::dto::PressureEpisodeReport` (HORO-1508) — one run of
+/// disk pressure, from the poll that crossed the user's threshold to whatever
+/// they last said about it.
+///
+/// An episode is not a reading of the disk. It is the *conversation* about a
+/// reading: opened once, notified about at most once per snooze, answered or
+/// not. That distinction is why `latest_used_percent` and the volume figures in
+/// `PressureStatusReportDto.current` are separate fields rather than one — the
+/// episode's numbers are as of the daemon's last poll, `current` is as of this
+/// call, and showing one where the other belongs tells the user about a disk
+/// they no longer have.
+struct PressureEpisodeReportDto: Decodable, Equatable, Identifiable {
+    /// Monotonic per-episode id, never reused. Doubles as the notification
+    /// identifier, so re-posting the same id updates the existing banner in
+    /// place rather than stacking a second one — which is half of what keeps a
+    /// hovering disk from producing a storm.
+    let episodeId: UInt64
+    var id: UInt64 { episodeId }
+    let openedUnixSecs: UInt64
+    /// Usage when the threshold was crossed, in percent USED.
+    let openedUsedPercent: Double
+    /// The worst reading seen in this episode, in percent USED. Reported
+    /// separately from `latestUsedPercent` because a disk that peaked at 96% and
+    /// is now at 88% is a different story from one that has sat at 88%.
+    let peakUsedPercent: Double
+    /// The most recent reading the daemon took, in percent USED.
+    let latestUsedPercent: Double
+    let latestFreeBytes: UInt64
+    let latestFreeHuman: String
+    /// When that reading was taken. Worth showing: a stale episode from a
+    /// stopped daemon must not read as live.
+    let latestUnixSecs: UInt64
+    /// Whether a banner is owed *right now*. The one field a notifier acts on,
+    /// and it is Rust's answer, not a condition to re-derive: a client
+    /// recomputing it from a threshold and a percentage would get the snoozed
+    /// and already-raised cases wrong, and the symptom is the notification storm
+    /// HORO-1508 AC5 forbids.
+    let notificationDue: Bool
+    /// Banners the user could actually have seen, counted only when delivery was
+    /// reported back through `pressure notified`.
+    let notificationsRaised: UInt32
+    /// Absent until the first banner has been reported as raised.
+    let lastNotifiedUnixSecs: UInt64?
+    /// Stable snake_case tag from `monitor::episode::EpisodeResponse::as_str`.
+    /// Turned into words by `GlomerisVocabulary.episodeResponse`, which
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` keeps covering every
+    /// token Rust can emit. A plain `String` for the same forward-compatibility
+    /// reason as `stopReason`.
+    ///
+    /// Absent — not `"none"` — while the question is still open. The difference
+    /// matters: one means the user has not answered, the other would claim they
+    /// chose to do nothing.
+    let response: String?
+    let respondedUnixSecs: UInt64?
+    /// When a "Remind me later" reminder comes due. Absent for the other two
+    /// answers, which is the shape of "this one has a deadline and those do
+    /// not".
+    let snoozedUntilUnixSecs: UInt64?
+    /// Whether the snooze is still running, *derived by the CLI against its own
+    /// clock*. Read rather than computed from `snoozedUntilUnixSecs`, because
+    /// comparing a stored deadline against this app's clock is how a snooze
+    /// silently comes back early on a machine that slept.
+    let isSnoozed: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case episodeId = "episode_id"
+        case openedUnixSecs = "opened_unix_secs"
+        case openedUsedPercent = "opened_used_percent"
+        case peakUsedPercent = "peak_used_percent"
+        case latestUsedPercent = "latest_used_percent"
+        case latestFreeBytes = "latest_free_bytes"
+        case latestFreeHuman = "latest_free_human"
+        case latestUnixSecs = "latest_unix_secs"
+        case notificationDue = "notification_due"
+        case notificationsRaised = "notifications_raised"
+        case lastNotifiedUnixSecs = "last_notified_unix_secs"
+        case response
+        case respondedUnixSecs = "responded_unix_secs"
+        case snoozedUntilUnixSecs = "snoozed_until_unix_secs"
+        case isSnoozed = "is_snoozed"
+    }
+}
+
+/// Mirrors `reporting::dto::PressureStatusReport` (HORO-1508) — everything the
+/// app needs to decide whether to raise a pressure notification, and what to
+/// put in it.
+///
+/// This DTO exists because the process that notices disk pressure cannot ask
+/// the user about it. An actionable banner needs `UNUserNotificationCenter`,
+/// which needs an app bundle; the monitor daemon is a bare launchd process. So
+/// the daemon records that a notification is *owed* and this app raises it —
+/// with every rule (when an episode opens, when hysteresis closes it, how long
+/// a snooze lasts, whether a banner is owed) staying in Rust.
+///
+/// Four percentages arrive together here and every one of them names its axis.
+/// They are four different things about the same disk: what it is now, when to
+/// speak up, when the episode is over, and where recovery should stop.
+struct PressureStatusReportDto: Decodable, Equatable {
+    /// When to call attention, in percent USED — the user's monitoring setting.
+    let notifyAtUsedPercent: Double
+    /// e.g. `"85% used"`. Shown as-is, never reassembled from the number above.
+    let notifyAtDescription: String
+    /// The hysteresis boundary, in percent USED: at or below this the episode
+    /// closes and a later crossing is a new episode. Reported so a user can be
+    /// told why a disk at 83% is still in an episode when their threshold is
+    /// 85%.
+    let clearAtUsedPercent: Double
+    /// How long "Remind me later" lasts.
+    let snoozeSecs: UInt64
+    /// The volume as measured by *this* call, not by the daemon's last poll.
+    let current: StatusReportDto
+    /// Whether `current` is at or above the threshold. Separate from
+    /// `notificationDue` on purpose: a disk can be over the threshold with
+    /// nothing owed (already raised, or snoozed), and inside the hysteresis gap
+    /// this is `false` while an episode is still open.
+    let thresholdCrossed: Bool
+    /// Whether a banner is owed right now — the same field as on the episode,
+    /// surfaced at the top level so a notifier need not reason about presence.
+    /// `false` whenever there is no episode at all.
+    let notificationDue: Bool
+    /// Absent when disk usage has never crossed the threshold, or the last
+    /// episode has cleared. Absent rather than a zeroed record, because "no
+    /// episode" is a state with no numbers in it.
+    let episode: PressureEpisodeReportDto?
+    /// The goal a "Review & recover" deep link should open Recovery at, carried
+    /// here so the notification and the Recovery card cannot disagree about
+    /// where recovery is heading.
+    let defaultGoal: RecoveryGoalReportDto
+    /// The answers `pressure respond` accepts, in the order they should be
+    /// offered. Read rather than hard-coded so the buttons on the banner are
+    /// exactly what the CLI will take back; `GlomerisVocabulary.episodeResponse`
+    /// supplies the wording for each.
+    let responses: [String]
+    /// Where the episode is persisted. Absent when the CLI could not resolve
+    /// `$HOME` — which must not be read as "monitoring is off": the threshold
+    /// and the answer set are still reported.
+    let statePath: String?
+
+    enum CodingKeys: String, CodingKey {
+        case notifyAtUsedPercent = "notify_at_used_percent"
+        case notifyAtDescription = "notify_at_description"
+        case clearAtUsedPercent = "clear_at_used_percent"
+        case snoozeSecs = "snooze_secs"
+        case current
+        case thresholdCrossed = "threshold_crossed"
+        case notificationDue = "notification_due"
+        case episode
+        case defaultGoal = "default_goal"
+        case responses
+        case statePath = "state_path"
+    }
+}
+
+/// Mirrors `reporting::dto::PressureRejectionReport` (HORO-1508) — an
+/// acknowledgement or an answer the CLI would not record.
+///
+/// Printed on stdout with exit code 3, so the app reads it through
+/// `GlomerisClient.runRaw` for the reason the Recovery card and the settings
+/// pane do: `run` throws on a non-zero exit and discards stdout, losing the
+/// explanation exactly when it is needed.
+///
+/// Neither refusal is a malfunction. Both mean the disk recovered between the
+/// banner appearing and the button being pressed, which is good news worded as
+/// a refusal — hence `GlomerisVocabulary.episodeRejection` renders them as news
+/// about the disk rather than as errors.
+struct PressureRejectionReportDto: Decodable, Equatable {
+    /// Stable snake_case tag from `monitor::episode::EpisodeRejection::as_str`.
+    /// Turned into words by `GlomerisVocabulary.episodeRejection`, which
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` keeps covering every
+    /// token Rust can emit. A plain `String` for the same forward-compatibility
+    /// reason as `stopReason`.
+    let reason: String
+    /// The refusal's own text. Rust decided it and Rust words it.
+    let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case reason
+        case message
     }
 }
