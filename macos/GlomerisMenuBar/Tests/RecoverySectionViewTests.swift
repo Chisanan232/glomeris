@@ -58,6 +58,27 @@ final class RecoverySectionViewTests: XCTestCase {
         )
     }
 
+    /// The spoken value carries the axis too, and spells the unit out.
+    ///
+    /// A stepper read as a bare "70" is the unlabeled percentage control the
+    /// campaign's accessibility rule names, even when a sighted user can see the
+    /// word beside it — VoiceOver announces the value on every increment and the
+    /// label far less often.
+    func testTheSpokenGoalValueNamesTheUsedAxisInWords() {
+        XCTAssertEqual(
+            RecoverySectionView.goalAccessibilityValue(usedPercent: 70),
+            "70 percent used"
+        )
+        XCTAssertFalse(
+            RecoverySectionView.goalAccessibilityValue(usedPercent: 70).contains("%"),
+            "a spoken % is at the mercy of the voice; the word is not"
+        )
+        XCTAssertFalse(
+            RecoverySectionView.goalAccessibilityValue(usedPercent: 70).contains("free"),
+            "one axis here as well, for the same reason the label has one"
+        )
+    }
+
     /// The control's range excludes both ends, and each exclusion has a reason:
     /// 0% used asks Glomeris to empty the disk, and 100% used can never be an
     /// improvement on anything, so a goal there could only ever be refused.

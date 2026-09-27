@@ -300,7 +300,7 @@ struct RecoverySectionView: View {
                 .font(GlomerisDesign.primaryFont)
         }
         .disabled(recovery.isRecovering)
-        .accessibilityValue("\(recovery.goalUsedPercent) percent used")
+        .accessibilityValue(Self.goalAccessibilityValue(usedPercent: recovery.goalUsedPercent))
         .accessibilityHint(
             "The percentage of the disk still in use that Glomeris should work down to."
         )
@@ -312,6 +312,18 @@ struct RecoverySectionView: View {
     /// assertion being a grep for a percent sign in this file.
     static func goalLabel(usedPercent: Int) -> String {
         "Get down to \(usedPercent)% used"
+    }
+
+    /// What VoiceOver reads as the stepper's value: `"70 percent used"`.
+    ///
+    /// Spelled out rather than `%`, because a spoken `%` is at the mercy of the
+    /// voice, and this is the one number in the card a user can change — a value
+    /// read as a bare "70" would leave the axis to be inferred from a label read
+    /// some moments earlier. Static for the same reason `goalLabel` is: the
+    /// campaign's rule that spoken state must distinguish current usage from the
+    /// target is only kept if something checks it.
+    static func goalAccessibilityValue(usedPercent: Int) -> String {
+        "\(usedPercent) percent used"
     }
 
     private var goalBinding: Binding<Int> {
