@@ -59,6 +59,15 @@ final class GlomerisCliProjectRootScopeTests: XCTestCase {
             ],
             false
         ),
+        // HORO-1508. The pressure surface reads and writes one episode record
+        // about the whole volume. Nothing is discovered, so there is nothing for
+        // a root to scope — and scoping it would be worse than useless: an
+        // episode is opened by the daemon, which has no notion of which project
+        // the app happens to have configured, so a per-project answer here could
+        // not match the record it is answering about.
+        (["pressure", "show", "--json"], false),
+        (["pressure", "notified", "--json"], false),
+        (["pressure", "respond", "review_and_recover", "--json"], false),
     ]
 
     func testEveryInvocationTheAppBuildsGetsTheRightAnswer() {
@@ -76,7 +85,7 @@ final class GlomerisCliProjectRootScopeTests: XCTestCase {
     /// about the case that broke.
     func testTheInvocationListCoversBothAnswers() {
         XCTAssertGreaterThanOrEqual(Self.invocations.filter { $0.acceptsRoots }.count, 4)
-        XCTAssertGreaterThanOrEqual(Self.invocations.filter { !$0.acceptsRoots }.count, 10)
+        XCTAssertGreaterThanOrEqual(Self.invocations.filter { !$0.acceptsRoots }.count, 13)
     }
 
     func testStatusIsNotRootScopedUnderAnyArgumentShape() {
