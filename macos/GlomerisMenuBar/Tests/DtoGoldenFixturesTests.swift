@@ -604,6 +604,36 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.failedDetectors.map(\.detector), ["homebrew_cache"])
     }
 
+    /// The already-met goal, which is the state the card must not offer a
+    /// Recover button for.
+    ///
+    /// `bytesNeeded` decoding as a real `0` rather than a missing value is the
+    /// load-bearing part: it is what lets the app tell "already there" from "not
+    /// measured", and the caveat is the only thing that explains the refusal a
+    /// real run would produce. Both are asserted here because both are things
+    /// the app reads rather than computes.
+    func testDecodesRecoveryPreviewReportForAGoalAlreadyMet() throws {
+        let dto = try decodeFixture(
+            "recovery_preview_report_goal_already_met.json",
+            as: RecoveryPreviewReportDto.self
+        )
+
+        XCTAssertEqual(dto.goal.description, "95% used (5% free)")
+        XCTAssertEqual(dto.current.usedPercent, 88.0)
+        XCTAssertEqual(dto.bytesNeeded, 0)
+        XCTAssertEqual(dto.bytesNeededHuman, "0 B")
+        XCTAssertTrue(
+            dto.goalAppearsReachable,
+            "a goal with nothing left to reach is trivially reachable, and the flag says so"
+        )
+        XCTAssertTrue(
+            dto.caveats.contains {
+                $0.contains("already satisfied") && $0.contains("refused")
+            },
+            "the preview must say a real run would be refused: \(dto.caveats)"
+        )
+    }
+
     /// The preview exists to stop a goal being sold as achievable on the
     /// strength of bytes no run can take. Asserted on the decoded report
     /// because it is a property of the numbers, not of any view: the
