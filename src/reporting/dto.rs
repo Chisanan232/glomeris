@@ -1195,6 +1195,31 @@ pub struct RecoveryRunReport {
     pub caveats: Vec<String>,
 }
 
+/// A refused recovery goal, machine-readable (HORO-1506 AC4).
+///
+/// Emitted instead of [`RecoveryRunReport`] when a goal is rejected before
+/// anything runs, so a `--json` client learns *why* without reading terminal
+/// prose. The two axes are named in the field names for the same reason
+/// [`RecoveryGoalReport`] carries both.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveryGoalRejectionReport {
+    /// Stable snake_case tag, from
+    /// [`crate::executor::goal::GoalRejection::as_str`].
+    pub reason: &'static str,
+    /// The rejection's own `Display` text, shown verbatim to a user.
+    pub message: String,
+    /// The goal that was asked for, on the used axis. `null` when the value
+    /// was not a usable number at all (`reason == "not_finite"`), because
+    /// there is no finite figure to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_used_percent: Option<f64>,
+    /// The volume's usage at the moment of refusal, present only when the
+    /// refusal was decided against an observation
+    /// (`reason == "not_an_improvement"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_used_percent: Option<f64>,
+}
+
 /// Stable snake_case tag per [`crate::executor::recovery_loop::StopReason`],
 /// following this module's convention of projecting a domain enum to a
 /// `&'static str` rather than deriving `Serialize` on it.
