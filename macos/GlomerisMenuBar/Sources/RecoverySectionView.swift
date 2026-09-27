@@ -276,6 +276,15 @@ struct RecoverySectionView: View {
                 GlomerisStateMessageView(message: .failure(message))
             }
         }
+        // HORO-1507: seed the control from the stored default recovery goal.
+        //
+        // From `.task {}`, which the run may never use — see this file's header
+        // on cancellation. `settings show` reads a config file and prints it, so
+        // a popover that closes mid-read loses an answer and nothing else, and
+        // the card keeps the number it already had.
+        .task {
+            await seedGoalFromStoredDefault()
+        }
     }
 
     // MARK: - The goal
@@ -332,6 +341,9 @@ struct RecoverySectionView: View {
             set: { newValue in
                 guard newValue != recovery.goalUsedPercent else { return }
                 recovery.goalUsedPercent = newValue
+                // From here on the number is the user's, and the stored default
+                // stops seeding it for the rest of the session (HORO-1507).
+                recovery.noteUserChoseGoal()
                 // Every figure in a pre-flight is measured against the goal that
                 // produced it, so a preview headed "60% used" under a control
                 // now reading 50 would describe a run this button would no
@@ -547,6 +559,104 @@ struct RecoverySectionView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    // MARK: - The stored default goal (HORO-1507)
+
+    /// What the control should start at, given the stored default the CLI
+    /// reported. `nil` when there is no representable answer.
+    ///
+    /// Two adjustments, both stated rather than silent:
+    ///
+    ///   * a fractional percentage is rounded **up** — toward the disk staying
+    ///     fuller. The control is whole percentages, so something has to give,
+    ///     and rounding down would have the card aim at a slightly emptier disk
+    ///     than the number the user stored, which means deleting marginally more
+    ///     than they asked for;
+    ///   * a percentage outside `goalRange` is clamped to it. That range is this
+    ///     app's convenience and not the CLI's limit — `settings` will store a
+    ///     goal of 2% used quite happily — so the clamp is the card admitting
+    ///     what its control can express, not a correction of the setting.
+    ///
+    /// `nil` for a non-finite value, which cannot come from JSON but can come
+    /// from a `Double`: `Int(exactly:)` on one traps, and there is no whole
+    /// percentage that means "not a number".
+    ///
+    /// Static and `internal` so both adjustments are assertions against the real
+    /// function rather than a description of it in a comment.
+    static func storedDefaultGoal(usedPercent: Double) -> Int? {
+        guard usedPercent.isFinite else { return nil }
+        let rounded = usedPercent.rounded(.up)
+        if rounded < Double(Self.goalRange.lowerBound) { return Self.goalRange.lowerBound }
+        if rounded > Double(Self.goalRange.upperBound) { return Self.goalRange.upperBound }
+        return Int(rounded)
+    }
+
+    /// Reads `settings show --json` once per appearance and seeds the control.
+    ///
+    /// The command vector and the exit-code contract are
+    /// `RecoverySettingsCommands` and `RecoverySettingsInterpretation` — the same
+    /// two the Recovery preferences pane uses, so there is one producer of this
+    /// invocation in the app and one reading of what `settings` returns.
+    ///
+    /// Returns early once the user has chosen a goal, which also means no child
+    /// process is spawned every time the popover reopens for an answer that would
+    /// be declined.
+    ///
+    /// A failure is reported rather than absorbed, because the consequence is
+    /// specific: the card is showing a number that is not the user's setting and
+    /// nothing else on it would say so. It does not replace a message already
+    /// there — a failed run or pre-flight is the more important thing to have
+    /// said, and this read is the less urgent of the two.
+    @MainActor
+    private func seedGoalFromStoredDefault() async {
+        guard !recovery.hasUserChosenGoal else { return }
+
+        do {
+            let raw = try await client.runRaw(
+                RecoverySettingsCommands.show,
+                progressType: EmptyProgressDto.self
+            )
+            switch RecoverySettingsInterpretation.interpret(
+                exitCode: raw.exitCode,
+                stdout: raw.stdout,
+                stderr: raw.stderr
+            ) {
+            case .settings(let report):
+                guard let seeded = Self.storedDefaultGoal(
+                    usedPercent: report.defaultGoal.usedPercent
+                ) else {
+                    noteStoredDefaultUnavailable(
+                        "glomeris reported a default recovery goal this card cannot show.")
+                    return
+                }
+                if recovery.adoptStoredDefaultGoal(seeded) {
+                    // A pre-flight is measured against the goal that produced
+                    // it, so one taken before the seed arrived describes a run
+                    // this card would no longer start.
+                    recovery.resetGoalProgress()
+                }
+            case .refused, .usageError, .malformedOutput, .failed:
+                noteStoredDefaultUnavailable(
+                    "glomeris could not say what your default recovery goal is.")
+            }
+        } catch {
+            // `nil` for a cancelled read — the popover closed — which is not a
+            // failure to report.
+            if SectionFetchErrors.shortMessage(error, subject: "settings show") != nil {
+                noteStoredDefaultUnavailable(
+                    "glomeris could not be asked what your default recovery goal is.")
+            }
+        }
+    }
+
+    @MainActor
+    private func noteStoredDefaultUnavailable(_ detail: String) {
+        guard recovery.lastErrorMessage == nil else { return }
+        recovery.lastErrorMessage =
+            detail
+            + " This card is showing \(recovery.goalUsedPercent)% used, which is a starting point "
+            + "rather than your setting. Set one in Settings › Recovery."
     }
 
     // MARK: - The CLI
