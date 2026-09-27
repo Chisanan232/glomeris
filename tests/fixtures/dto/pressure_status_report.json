@@ -1,0 +1,36 @@
+{
+  "notify_at_used_percent": 85.0,
+  "notify_at_description": "85% used",
+  "clear_at_used_percent": 82.0,
+  "snooze_secs": 7200,
+  "current": {
+    "total_bytes": 500000000000,
+    "free_bytes": 45000000000,
+    "used_percent": 91.0,
+    "free_human": "41.9 GB",
+    "total_human": "465.7 GB",
+    "pressure_state": "PRESSURED"
+  },
+  "threshold_crossed": true,
+  "notification_due": true,
+  "episode": {
+    "episode_id": 1,
+    "opened_unix_secs": 1700000000,
+    "opened_used_percent": 91.0,
+    "peak_used_percent": 91.0,
+    "latest_used_percent": 91.0,
+    "latest_free_bytes": 45000000000,
+    "latest_free_human": "41.9 GB",
+    "latest_unix_secs": 1700000000,
+    "notification_due": true,
+    "notifications_raised": 0,
+    "is_snoozed": false
+  },
+  "default_goal": {
+    "used_percent": 60.0,
+    "free_percent": 40.0,
+    "description": "60% used (40% free)"
+  },
+  "responses": ["review_and_recover", "remind_later", "ignore_episode"],
+  "state_path": "/Users/dev/Library/Application Support/Glomeris/pressure-episode.json"
+}
