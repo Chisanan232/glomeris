@@ -1220,6 +1220,68 @@ pub struct RecoveryGoalRejectionReport {
     pub current_used_percent: Option<f64>,
 }
 
+/// The two user-configurable numbers, plus where they came from (HORO-1507).
+///
+/// The alert threshold and the recovery goal are reported as separate fields
+/// with separate names, because they are separate concepts: one decides when
+/// the user is *told*, the other where a recovery run *stops*. A client that
+/// showed them as one "disk percentage" would be describing a product that
+/// does not exist.
+///
+/// The goal reuses [`RecoveryGoalReport`] rather than carrying a bare number,
+/// so the stored default and a goal typed on the command line are rendered by
+/// the same code and cannot disagree about which axis they are on.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoverySettingsReport {
+    /// Percent of capacity **used** at which the user wants to be notified.
+    pub notify_at_used_percent: f64,
+    /// e.g. `"75% used"`. Built in Rust for the same reason
+    /// [`RecoveryGoalReport::description`] is.
+    pub notify_at_description: String,
+    /// The recovery goal a new run starts from unless the user overrides it.
+    pub default_goal: RecoveryGoalReport,
+    /// Absolute path of the settings file, or `null` when `$HOME` could not
+    /// be resolved. Local, and never part of any provider request — same rule
+    /// as [`AutopilotEnvelopeReport::stored_at`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_at: Option<String>,
+    /// `false` when no settings file exists yet and these are therefore the
+    /// built-in defaults.
+    ///
+    /// Deliberately about the file rather than the values: a bool named
+    /// `is_default` would be ambiguous for a user who has explicitly saved
+    /// the default numbers, and a GUI that showed "not configured" to someone
+    /// who had just configured it would be wrong in the more confusing
+    /// direction.
+    pub loaded_from_file: bool,
+}
+
+/// A refused settings change, machine-readable (HORO-1507).
+///
+/// Emitted instead of [`RecoverySettingsReport`] when a change is rejected,
+/// so a `--json` client learns *why* without reading terminal prose — the
+/// same contract as [`RecoveryGoalRejectionReport`].
+///
+/// There is no `field` tag: `reason` already says which field is at fault
+/// (`notify_threshold_*` versus `goal_*`), and a second vocabulary saying the
+/// same thing would be one more thing that can disagree with the first.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SettingsRejectionReport {
+    /// Stable snake_case tag, from
+    /// [`crate::settings::SettingsRejection::as_str`].
+    pub reason: &'static str,
+    /// The rejection's own `Display` text, shown verbatim to a user.
+    pub message: String,
+    /// The alert threshold that would have been in force, on the used axis.
+    /// Present whenever a finite figure was involved in the refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify_at_used_percent: Option<f64>,
+    /// The goal that would have been in force, on the used axis. Present on
+    /// the same terms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_used_percent: Option<f64>,
+}
+
 /// Stable snake_case tag per [`crate::executor::recovery_loop::StopReason`],
 /// following this module's convention of projecting a domain enum to a
 /// `&'static str` rather than deriving `Serialize` on it.
