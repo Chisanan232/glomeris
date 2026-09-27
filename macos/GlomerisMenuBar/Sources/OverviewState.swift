@@ -62,6 +62,13 @@
 //  so a finished batch's per-item detail survives a drill-down and a Back for
 //  the same reason the plan does.
 //
+//  HORO-1506 adds `RecoveryState` under the same rule, and it is the one with
+//  the most to lose: a finished recovery run is the only result in the panel
+//  that describes bytes which are already gone. Its writers are the goal
+//  control, the Check button, the Recover button and the run itself; changing
+//  the goal clears the pre-flight through `resetGoalProgress()`, because a
+//  preview's every figure is measured against the goal that produced it.
+//
 //  A project-roots change keeps its existing documented behaviour and is
 //  deliberately NOT wired to anything here: `ProjectRootsStore` is read at
 //  spawn time, so changing the roots takes effect on the next explicit
@@ -250,5 +257,145 @@ final class PlanState: ObservableObject {
         applyIncludesConfirmable = false
         applyCompletedItems = []
         applyProgressText = nil
+    }
+}
+
+/// Where a recovery goal has got to (HORO-1506).
+///
+/// Shaped like ``PlanApplicationPhase`` and for the same reason: the states are
+/// exclusive, and the combinations a set of booleans invites — a preview on
+/// screen beside a live run, a refusal beside a result — are exactly the ones
+/// that would let a user read one run's numbers as another's.
+///
+/// Every associated value is a DTO the CLI produced. There is no case carrying
+/// an app-computed figure, because there is no figure this app computes: the
+/// goal, the bytes still needed, the opportunity split and the stop reason all
+/// arrive decided.
+enum RecoveryPhase: Equatable {
+    /// No goal has been checked since the panel opened.
+    case idle
+    /// `free --dry-run` is running. Read-only, and cancellable.
+    case previewing
+    /// The pre-flight is on screen and nothing has run. This is the only point
+    /// at which the user can back out, which is why the phase exists at all
+    /// rather than the button going straight from idle to a run.
+    case reviewing(RecoveryPreviewReportDto)
+    /// The goal itself was refused before anything ran — `free` exited 2 with a
+    /// ``RecoveryGoalRejectionReportDto`` on stdout. A distinct case from
+    /// `lastErrorMessage`: nothing failed, a goal was declined, and the
+    /// difference is what the user has to change to get anywhere.
+    case refused(RecoveryGoalRejectionReportDto)
+    /// A real run is in flight. Carries the pre-flight it was started from, so
+    /// the card can keep showing the before state while it runs. Not
+    /// cancellable: see ``RecoveryState``'s absent run handle.
+    case recovering(RecoveryPreviewReportDto)
+    /// The run ended — for any reason, including reaching the goal, running out
+    /// of safe candidates, or an error. Kept on screen until the user asks for
+    /// something else.
+    case finished(RecoveryRunReportDto)
+}
+
+/// The recovery goal the user has set, and what Glomeris has done about it.
+///
+/// Owned by `GlomerisPopoverView` alongside ``ScanState`` and ``PlanState``, for
+/// the reasons that file's comment gives: above every drill-down so a result
+/// survives one, below the scene so a publish cannot re-evaluate `App.body`.
+/// A finished run is the most expensive result in the panel to lose — it is the
+/// only one that describes bytes that are already gone.
+///
+/// Like its siblings this is a store, not a view model. It holds the goal the
+/// user asked for and the reports that came back, and it decides nothing: the
+/// CLI decides whether a goal is usable, whether a candidate may be touched,
+/// and whether the goal was reached.
+final class RecoveryState: ObservableObject {
+    /// The recovery goal, as a percentage of the disk **used**.
+    ///
+    /// One axis, named in the property. The other axis exists — the Rust
+    /// recovery loop works in free space — and `RecoveryGoal` in
+    /// `src/executor/goal.rs` is the single tested conversion between them. This
+    /// app never performs that arithmetic, so a number stored here is only ever
+    /// sent to the CLI as `--goal-used-percent` and only ever displayed through
+    /// the `description` string a report came back with.
+    ///
+    /// Defaults to 70, which is a starting point rather than a preference:
+    /// `ThresholdConfig::default()` starts warning at 75% used, so 70 is the
+    /// nearest round goal that ends below the point the product would have
+    /// raised its voice. HORO-1507 replaces this with the persisted default
+    /// recovery goal and makes it settable, at which point the literal here
+    /// stops being the answer to anything.
+    @Published var goalUsedPercent: Int = 70
+
+    @Published var phase: RecoveryPhase = .idle
+
+    /// A failure to *run* the CLI, which is not the same thing as a refused
+    /// goal — that is `.refused`, and it is a report rather than an error.
+    @Published var lastErrorMessage: String?
+
+    /// Discovery progress from the pre-flight's `--progress-json` stream. A real
+    /// run emits no progress events yet; `free` refuses `--progress-json`
+    /// outside `--dry-run` rather than accepting it and streaming nothing, and
+    /// HORO-1509 is where that changes.
+    @Published var progressStatusText: String?
+
+    /// The pre-flight, held so the user can stop a slow one.
+    ///
+    /// Safe to cancel for the reason `GlomerisClient.runRaw`'s header gives:
+    /// `free --dry-run` discovers and reports, mutating nothing, so
+    /// interrupting one loses the answer and nothing else.
+    var previewTask: Task<Void, Never>?
+
+    /// There is deliberately no handle for the real run, and the absence is the
+    /// safety property — the same one ``PlanState`` documents.
+    ///
+    /// A recovery run deletes things. `GlomerisClient.runRaw`'s header states
+    /// the rule: a `SIGTERM` partway through a deletion leaves the filesystem in
+    /// a state neither this app nor the audit log could describe. A stored
+    /// handle is what a Stop button would reach for, and a long closed loop is
+    /// precisely the surface on which one looks reasonable — so the handle does
+    /// not exist, and the campaign's "Stop after current action" is a
+    /// cooperative stop inside the Rust loop (HORO-1509) rather than a signal
+    /// from here.
+
+    /// `true` from the moment a real run's child starts until it ends.
+    ///
+    /// A fact about a running process rather than display state, which is why
+    /// clearing the phase does not clear it: the UI clears phases routinely, and
+    /// the guard that no second run can start has to outlive that.
+    @Published private(set) var isRecovering = false
+
+    /// Claims the right to run, or reports that a run already holds it.
+    ///
+    /// A compare-and-set for the same reason as
+    /// ``PlanState/beginApplyingBatch()``: two concurrent runs would take turns
+    /// losing. The execution lock (`src/executor/lock.rs`) is exclusive and
+    /// non-blocking, so the second child is refused `busy` — a true sentence
+    /// whose cause would be us. Both calls are on the main actor, so the read
+    /// and the write cannot interleave.
+    func beginRecovering() -> Bool {
+        if isRecovering { return false }
+        isRecovering = true
+        return true
+    }
+
+    func endRecovering() {
+        isRecovering = false
+    }
+
+    /// Clears the pre-flight, the refusal or the result and cancels a running
+    /// pre-flight.
+    ///
+    /// Called when the goal changes, because every number in a pre-flight is
+    /// measured against the goal that produced it — a preview headed "60% used"
+    /// sitting under a control that now reads 50 would be describing a run the
+    /// button would no longer start.
+    ///
+    /// It does **not** stop a running recovery, because nothing can: see the
+    /// absent handle above.
+    func resetGoalProgress() {
+        previewTask?.cancel()
+        previewTask = nil
+        phase = .idle
+        progressStatusText = nil
+        lastErrorMessage = nil
     }
 }
