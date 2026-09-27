@@ -43,15 +43,30 @@ see [Architecture](architecture.md) for how the two differ.
 
 ## Try the bounded recovery loop (macOS only)
 
+Set a goal for how full the disk should end up, and let the loop work toward
+it:
+
+```sh
+glomeris free --goal-used-percent 60
+```
+
+Or state the same thing as a free-space floor, which is what the loop itself
+works in:
+
 ```sh
 glomeris free --target 10GB
 # or
 glomeris free --target 15%
 ```
 
-`--target` is required and accepts either an absolute size (`B`/`KB`/`MB`/
-`GB`/`TB`, binary/1024-based) or a percentage of total capacity (`0`–`100`,
-suffixed `%`).
+Exactly one of the two is required, and they are different axes:
+`--goal-used-percent` is target disk **used**, `--target` is a **free-space**
+floor. `--goal-used-percent 60` and `--target 40%` ask for the same end state.
+`--target` accepts either an absolute size (`B`/`KB`/`MB`/`GB`/`TB`,
+binary/1024-based) or a percentage of total capacity (`0`–`100`, suffixed
+`%`). A `--goal-used-percent` that is not an improvement on your current usage
+is refused before anything is deleted, rather than run and reported as a
+success.
 
 **This one deletes.** An earlier version of this page said no real deletion
 could complete through this path; that stopped being true in HORO-994. Read
@@ -60,7 +75,16 @@ could complete through this path; that stopped being true in HORO-994. Read
 [Known Limitations](known_limitations.md)) — so it reclaims only what policy
 classified `AUTO_SAFE` on its own.
 
-To see the plan without acting, use `glomeris clean --dry-run` instead.
+To see what reaching the goal would take without touching anything:
+
+```sh
+glomeris free --goal-used-percent 60 --dry-run
+```
+
+That prints current usage, the free bytes still needed, and the estimated
+reclaimable opportunity split by what policy would actually permit. It takes
+no execution lock and mutates nothing. `glomeris clean --dry-run` remains the
+way to see a plan for one pass rather than a goal.
 
 ## Run unattended, inside limits you grant
 
