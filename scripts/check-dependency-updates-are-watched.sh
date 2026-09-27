@@ -395,7 +395,10 @@ assess() (
 
     local generated_references declared_pins
     generated_references="$(action_references_in "$GENERATED_WORKFLOW")"
-    declared_pins="$(dist_declared_pins "$DIST_CONFIG")"
+    # `|| true` so the emptiness check below can run. Without it `set -e` ends
+    # the body on a failing read and the check it was written for is dead code —
+    # caught by check-failure-diagnostics-are-reachable.sh, on this very line.
+    declared_pins="$(dist_declared_pins "$DIST_CONFIG" || true)"
 
     if [[ -z "$generated_references" ]]; then
       echo "FAIL: matched no versioned 'uses:' references in ${GENERATED_WORKFLOW}."
