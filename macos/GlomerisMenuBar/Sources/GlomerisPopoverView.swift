@@ -124,10 +124,21 @@ struct GlomerisPopoverView: View {
     /// drilled into is the behaviour we want.
     @State private var navigation = CandidateDetailNavigation()
 
+    /// HORO-1508: the disk-pressure reader, observed rather than owned.
+    ///
+    /// The one store in this panel that is *not* created here, and it cannot be.
+    /// It polls while nothing is on screen, so it has to outlive this view — it is
+    /// created once by `GlomerisMenuBarApp` and handed down. The note on that
+    /// property explains why it is a plain `let` up there rather than an observed
+    /// store, which is the same reason the three above are owned down here.
+    @ObservedObject private var pressure: PressureEpisodeMonitor
+
     init(
+        pressure: PressureEpisodeMonitor,
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore()
     ) {
+        self.pressure = pressure
         self.client = client
         self.projectRootsStore = projectRootsStore
     }
@@ -250,6 +261,11 @@ struct GlomerisPopoverView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlomerisDesign.sectionSpacing) {
                 StatusHealthSectionView()
+                // HORO-1508 AC 6, above the recovery goal and below the status:
+                // it is a question about the disk this panel has just described,
+                // and the answer to it is the card underneath. It draws nothing
+                // when no episode is open, so the ordinary panel is unchanged.
+                PressureAlertSectionView(monitor: pressure)
                 RecoverySectionView(
                     recovery: recovery,
                     client: client,
@@ -384,5 +400,10 @@ struct GlomerisPopoverView: View {
 }
 
 #Preview {
-    GlomerisPopoverView()
+    // Constructed and deliberately never `start()`ed: a preview that polled would
+    // spawn a `glomeris pressure` process every thirty seconds for as long as the
+    // canvas stayed open, and the pressure card draws nothing until a poll has
+    // reported an episode anyway. What the preview shows is the panel without one,
+    // which is the ordinary case.
+    GlomerisPopoverView(pressure: .production())
 }

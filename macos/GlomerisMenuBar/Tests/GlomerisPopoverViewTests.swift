@@ -329,15 +329,65 @@ final class GlomerisPopoverViewTests: XCTestCase {
         XCTAssertTrue(code.contains("scan: scan,"), "the candidates card must get the real scan")
         XCTAssertTrue(code.contains("plan: plan,"), "the AI Plan card must get the real plan")
 
-        // `@ObservedObject` here would be the bug back: an observed object is
-        // re-assigned from the init on every rebuild of this view, so a scan
-        // would last exactly as long as whoever constructed it kept it alive.
-        for forbidden in ["@ObservedObject", "scan: ScanState", "plan: PlanState"] {
+        // Observing any of the three, or taking one as an init parameter, would be
+        // the bug back: an observed object is re-assigned from the init on every
+        // rebuild of this view, so a scan would last exactly as long as whoever
+        // constructed it kept it alive.
+        //
+        // HORO-1508 narrowed this from a blanket ban on the whole word. It was a
+        // ban on `@ObservedObject` anywhere in the file, which read as the rule but
+        // was not it: the rule is about *these three stores*, and the file now also
+        // observes a store it must not own — see the next test. Naming them is
+        // stricter as well as more accurate, because it adds `recovery`, which the
+        // blanket version never actually covered as an init parameter.
+        for forbidden in [
+            "@ObservedObject private var scan",
+            "@ObservedObject private var plan",
+            "@ObservedObject private var recovery",
+            "scan: ScanState",
+            "plan: PlanState",
+            "recovery: RecoveryState",
+        ] {
             XCTAssertFalse(
                 code.contains(forbidden),
                 "\(forbidden) would put the stores' lifetime back in a caller's hands"
             )
         }
+    }
+
+    /// HORO-1508: the one store the shell must NOT own, and the reason the ban
+    /// above had to be narrowed rather than the code changed.
+    ///
+    /// The pressure monitor polls while nothing is on screen — that is the whole
+    /// point of it, since a user who has to open the panel to be told the disk is
+    /// full has not been told anything. So it cannot be a `@StateObject` here: a
+    /// store owned by this view exists only while the view does. It is created once
+    /// by the scene and observed here.
+    ///
+    /// Pinned as an exact count as well as a shape, so a second observed store
+    /// cannot arrive by copying this line — the next one might be a store whose
+    /// lifetime this view really should own, and that is the failure the previous
+    /// test describes.
+    func testThePressureMonitorIsObservedBecauseItOutlivesThePanel() {
+        XCTAssertTrue(
+            code.contains("@ObservedObject private var pressure: PressureEpisodeMonitor"),
+            "the pressure monitor must be observed: it is created by the scene and polls "
+                + "while this view does not exist"
+        )
+        XCTAssertEqual(
+            code.components(separatedBy: "@ObservedObject").count - 1, 1,
+            "exactly one store in this panel is observed rather than owned"
+        )
+        XCTAssertTrue(
+            code.contains("pressure: PressureEpisodeMonitor"),
+            "and it arrives through the init, so the scene's monitor is the one on screen"
+        )
+        XCTAssertFalse(
+            code.contains("PressureEpisodeMonitor("),
+            "constructing a monitor here would give the panel a second reader — two "
+                + "readers mean two banners for one episode, and lastRaised cannot see "
+                + "across them"
+        )
     }
 
     /// A drill-down with no way out of it is the same dead end

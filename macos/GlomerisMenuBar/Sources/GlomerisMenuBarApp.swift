@@ -42,6 +42,7 @@ struct GlomerisMenuBarApp: App {
     /// the app to be told the disk is full has not been told anything. The card in
     /// the popover observes this object; nothing in this file does.
     private let pressure = PressureEpisodeMonitor.production()
+
     /// HORO-1453: one menu-bar item per logged-in user, decided before any scene
     /// exists.
     ///
@@ -109,7 +110,7 @@ struct GlomerisMenuBarApp: App {
         // needs an AppKit template image to be recoloured correctly for
         // light/dark menu bars, highlight state and tinted wallpapers.
         MenuBarExtra {
-            GlomerisPopoverView()
+            GlomerisPopoverView(pressure: pressure)
         } label: {
             Image(nsImage: MenuBarAppearance.menuBarImage())
                 .accessibilityLabel(MenuBarAppearance.title)
