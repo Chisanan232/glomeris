@@ -22,12 +22,12 @@
 //! free-space reading rather than from the sum of what was deleted — which is
 //! the campaign's "filesystem reality wins" rule stated as code.
 
-use crate::executor::goal::RecoveryGoal;
+use crate::executor::goal::{GoalRejection, RecoveryGoal};
 use crate::executor::recovery_loop::{target_met, FreeTarget, RecoveryReport, StopReason};
 use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::reporting::dto::{
-    stop_reason_tag, DetectCandidateReport, DetectReport, RecoveryGoalReport,
-    RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryRunReport,
+    stop_reason_tag, DetectCandidateReport, DetectReport, RecoveryGoalRejectionReport,
+    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryRunReport,
 };
 use crate::reporting::human_bytes;
 
@@ -42,6 +42,30 @@ pub fn build_recovery_goal_report(goal: &RecoveryGoal) -> RecoveryGoalReport {
         used_percent: goal.used_percent(),
         free_percent: goal.free_percent(),
         description: goal.describe(),
+    }
+}
+
+/// Project a refused goal into the shape a `--json` client parses.
+///
+/// Exists so a rejection is machine-readable: the alternative is a client
+/// scraping the rejection sentence out of stderr, which is exactly the
+/// "parse terminal prose" coupling the structured contract is meant to remove.
+/// The optional fields are absent rather than zero-filled — `0.0` for a value
+/// that was `NaN` would be a fabricated number.
+pub fn build_goal_rejection_report(rejection: &GoalRejection) -> RecoveryGoalRejectionReport {
+    let (goal_used_percent, current_used_percent) = match rejection {
+        GoalRejection::NotFinite => (None, None),
+        GoalRejection::OutOfRange { used_percent } => (Some(*used_percent), None),
+        GoalRejection::NotAnImprovement {
+            goal_used_percent,
+            current_used_percent,
+        } => (Some(*goal_used_percent), Some(*current_used_percent)),
+    };
+    RecoveryGoalRejectionReport {
+        reason: rejection.as_str(),
+        message: rejection.to_string(),
+        goal_used_percent,
+        current_used_percent,
     }
 }
 
@@ -413,12 +437,8 @@ mod tests {
             vec![candidate("a", "AUTO_SAFE", true, false, Some(500), false)],
             true,
         );
-        let preview = build_recovery_preview_report(
-            &goal,
-            &usage,
-            &ThresholdConfig::default(),
-            detect,
-        );
+        let preview =
+            build_recovery_preview_report(&goal, &usage, &ThresholdConfig::default(), detect);
 
         assert_eq!(preview.required_free_bytes, 400);
         assert_eq!(preview.bytes_needed, 340);
@@ -470,8 +490,7 @@ mod tests {
             preview
                 .caveats
                 .iter()
-                .any(|c| c.contains("Discovery was incomplete")
-                    && c.contains("cargo_target_dir")),
+                .any(|c| c.contains("Discovery was incomplete") && c.contains("cargo_target_dir")),
             "{:?}",
             preview.caveats
         );
@@ -581,8 +600,12 @@ mod tests {
     #[test]
     fn raw_target_run_has_no_goal_and_reports_the_free_axis() {
         let target = FreeTarget::Percentage(20.0);
-        let report =
-            build_recovery_run_report(None, &target, 1000, &run_report(StopReason::NoProgress, 60, 0));
+        let report = build_recovery_run_report(
+            None,
+            &target,
+            1000,
+            &run_report(StopReason::NoProgress, 60, 0),
+        );
         assert!(report.goal.is_none());
         assert_eq!(report.target, "20% free");
     }
@@ -591,13 +614,74 @@ mod tests {
     fn detector_failures_make_the_run_report_say_discovery_was_incomplete() {
         let mut inner = run_report(StopReason::SafeExhausted, 60, 0);
         inner.detector_failures = vec!["cargo_target_dir: probe exploded".to_string()];
-        let report =
-            build_recovery_run_report(None, &FreeTarget::Percentage(20.0), 1000, &inner);
+        let report = build_recovery_run_report(None, &FreeTarget::Percentage(20.0), 1000, &inner);
         assert!(!report.discovery_complete);
         assert_eq!(report.detector_failures.len(), 1);
         assert!(
             !report.caveats.is_empty(),
             "a failed detector must produce caveat lines"
         );
+    }
+
+    #[test]
+    fn a_rejection_report_carries_the_tag_the_sentence_and_both_numbers() {
+        let report = build_goal_rejection_report(&GoalRejection::NotAnImprovement {
+            goal_used_percent: 80.0,
+            current_used_percent: 60.0,
+        });
+        assert_eq!(report.reason, "not_an_improvement");
+        assert_eq!(report.goal_used_percent, Some(80.0));
+        assert_eq!(report.current_used_percent, Some(60.0));
+        // The sentence is the rejection's own, not a second wording of it.
+        assert_eq!(
+            report.message,
+            GoalRejection::NotAnImprovement {
+                goal_used_percent: 80.0,
+                current_used_percent: 60.0,
+            }
+            .to_string()
+        );
+    }
+
+    #[test]
+    fn a_rejection_with_no_usable_number_reports_no_number_rather_than_zero() {
+        let not_finite = build_goal_rejection_report(&GoalRejection::NotFinite);
+        assert_eq!(not_finite.reason, "not_finite");
+        assert_eq!(
+            not_finite.goal_used_percent, None,
+            "a NaN goal has no finite value to report; 0.0 would be invented"
+        );
+        assert_eq!(not_finite.current_used_percent, None);
+
+        // An out-of-range goal has a goal figure but was never compared to a
+        // volume, so there is no current usage to report either.
+        let out_of_range = build_goal_rejection_report(&GoalRejection::OutOfRange {
+            used_percent: 150.0,
+        });
+        assert_eq!(out_of_range.goal_used_percent, Some(150.0));
+        assert_eq!(out_of_range.current_used_percent, None);
+    }
+
+    #[test]
+    fn rejection_json_omits_absent_numbers_and_never_says_free() {
+        let json =
+            serde_json::to_string(&build_goal_rejection_report(&GoalRejection::NotFinite)).unwrap();
+        assert!(!json.contains("goal_used_percent"), "{json}");
+        assert!(!json.contains("current_used_percent"), "{json}");
+        // Every rejection is a used-axis statement; a stray "free" here is the
+        // ambiguity HORO-1506 exists to remove.
+        for rejection in [
+            GoalRejection::NotFinite,
+            GoalRejection::OutOfRange {
+                used_percent: 150.0,
+            },
+            GoalRejection::NotAnImprovement {
+                goal_used_percent: 80.0,
+                current_used_percent: 60.0,
+            },
+        ] {
+            let json = serde_json::to_string(&build_goal_rejection_report(&rejection)).unwrap();
+            assert!(!json.contains("free"), "{json}");
+        }
     }
 }
