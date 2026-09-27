@@ -1603,13 +1603,42 @@ mod tests {
     }
 
     /// The other half of AC 1: it has to fit a screen, not just a width.
+    ///
+    /// Two bounds rather than one, because a single total conflated two claims
+    /// and only ever moved in the weakening direction — it had to be raised
+    /// every time a command was added, which is how a budget stops meaning
+    /// anything. The claim that matters is the one this test is named for: a
+    /// reader must see the whole COMMAND LIST without scrolling, because a
+    /// reader who has to scroll to find out what the tool can do has not been
+    /// helped. That is pinned here, to where the list actually ends, and it is
+    /// the bound that bites: five more commands break it. What follows the list
+    /// is a worked example someone scrolls to deliberately, so the total is
+    /// bounded loosely — enough to catch the whole screen filling up with
+    /// preamble, not enough to make the next command an argument about line
+    /// budgets.
     #[test]
     fn top_level_help_fits_a_terminal_screen() {
-        let lines = render_top_level_help("0.2.0").lines().count();
+        let text = render_top_level_help("0.2.0");
+        let lines: Vec<&str> = text.lines().collect();
+
+        let list_ends_at = lines
+            .iter()
+            .rposition(|line| {
+                COMMANDS
+                    .iter()
+                    .any(|command| line.starts_with(&format!("  {}", command.name)))
+            })
+            .expect("the command list must appear in top-level help")
+            + 1;
         assert!(
-            lines <= 48,
-            "top-level help is {lines} lines; a reader should not have to scroll to see the \
-             command list"
+            list_ends_at <= 40,
+            "the command list ends at line {list_ends_at}; a reader should not have to scroll \
+             to see what glomeris can do"
+        );
+        assert!(
+            lines.len() <= 52,
+            "top-level help is {} lines in total",
+            lines.len()
         );
     }
 
