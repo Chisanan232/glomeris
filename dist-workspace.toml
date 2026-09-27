@@ -49,3 +49,39 @@ publish-jobs = ["homebrew"]
 # kept so Intel Mac users get a native artifact too. Linux/Windows are
 # deliberately not targeted yet — this is a macOS-only MVP release.
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
+# HORO-1502: the versions of the third-party actions dist writes into the
+# generated .github/workflows/release.yml.
+#
+# This block is the source of truth for those pins, and it exists because
+# without it there is nowhere to change them. dist hard-defaults each one and
+# verifies at CI time that release.yml byte-matches what it would generate, so
+# an edit to the generated file — which is what Dependabot makes, having no way
+# to know the file is generated — fails the `plan` job with a diff whose stated
+# remedy, `dist init`, reverts the bump. The versions were unreachable from
+# inside this repository, and every github-actions update PR that named one of
+# them was therefore unmergeable.
+#
+# Every third-party `uses:` in dist's release.yml template is substituted from
+# this map, so every action reference in the generated file is reachable here.
+# Only the three that this configuration actually generates are listed: the
+# other four in dist's default set (actions/attest, swatinem/rust-cache,
+# actions/setup-node, azure/login) belong to features this repository does not
+# turn on — attestations, Windows signing, npm installers — and declaring a
+# version for an action that appears nowhere would be a pin nothing can check.
+#
+# check-dependency-updates-are-watched.sh enforces that correspondence in both
+# directions: a reference in release.yml with no entry here fails, and an entry
+# here that release.yml does not reference fails too.
+#
+# The key is `github-action-commits` and the values are tags rather than
+# commits. dist's own field name says commits and its doc comment says specific
+# commits, but it substitutes the string verbatim into `{action}@{value}`, so a
+# tag works and is what the rest of this repository's workflows use. Pinning to
+# SHAs would be a different decision than this ticket's, and would have to be
+# taken for all four workflow files at once or the guard's no-split-versions
+# rule would fail.
+[dist.github-action-commits]
+"actions/checkout" = "v7"
+"actions/download-artifact" = "v8"
+"actions/upload-artifact" = "v7"
