@@ -53,6 +53,13 @@
 //! caller to get stuck in. Same reasoning as the two-pass parse in
 //! [`crate::autopilot::store`].
 
+pub mod store;
+
+pub use store::{
+    default_settings_path, load_settings, load_settings_at, save_settings, save_settings_at,
+    SettingsStoreError, FORMAT_VERSION,
+};
+
 use crate::executor::goal::{GoalRejection, RecoveryGoal};
 use std::fmt;
 
