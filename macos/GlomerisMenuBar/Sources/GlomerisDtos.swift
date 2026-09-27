@@ -949,3 +949,69 @@ struct RecoveryGoalRejectionReportDto: Decodable, Equatable {
         case currentUsedPercent = "current_used_percent"
     }
 }
+
+/// Mirrors `reporting::dto::RecoverySettingsReport` — the two stored
+/// preferences, as `glomeris settings show --json` prints them (HORO-1507).
+///
+/// Two percentages, about the same disk, meaning different things. They are
+/// decoded into separately named fields and rendered from separately named
+/// labels for that reason alone: an app that held them in one array, or showed
+/// them under one heading, would be one off-by-one away from telling a user
+/// their recovery goal is the point at which they will be warned.
+struct RecoverySettingsReportDto: Decodable, Equatable {
+    /// When to call the user's attention to disk usage, in percent USED.
+    let notifyAtUsedPercent: Double
+    /// e.g. `"75% used"`. Shown as-is; never reassembled from the number above,
+    /// for the same reason `RecoveryGoalReportDto.description` is not.
+    let notifyAtDescription: String
+    /// Where recovery should stop. Carries its own axes and its own sentence,
+    /// so the goal shown here and the goal shown on the Recovery card are one
+    /// number worded one way.
+    let defaultGoal: RecoveryGoalReportDto
+    /// Absent when the CLI could not resolve `$HOME`.
+    let storedAt: String?
+    /// `false` means these are the built-in defaults and nothing has been
+    /// stored. Reported rather than inferred from the values, because a user may
+    /// legitimately store the default numbers, and "nothing chosen yet" is a
+    /// different thing to show than "these were chosen".
+    let loadedFromFile: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case notifyAtUsedPercent = "notify_at_used_percent"
+        case notifyAtDescription = "notify_at_description"
+        case defaultGoal = "default_goal"
+        case storedAt = "stored_at"
+        case loadedFromFile = "loaded_from_file"
+    }
+}
+
+/// Mirrors `reporting::dto::SettingsRejectionReport` — a settings change
+/// refused before anything was written.
+///
+/// Printed on stdout with exit code 2, so the pane reads it through
+/// `GlomerisClient.runRaw` for the same reason the Recovery card does: `run`
+/// throws on a non-zero exit and discards stdout, which would lose the
+/// explanation exactly when the user needs it.
+struct SettingsRejectionReportDto: Decodable, Equatable {
+    /// Stable snake_case tag from `settings::SettingsRejection::as_str`. Turned
+    /// into words by `GlomerisVocabulary.settingsRejection`, which
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh` keeps covering every
+    /// token Rust can emit. A plain `String` for the same
+    /// forward-compatibility reason as `stopReason`.
+    let reason: String
+    /// The refusal's own text, shown verbatim. Rust decided it and Rust words
+    /// it; this app does not re-explain a judgment it did not make.
+    let message: String
+    /// Present only when the refusal involved the threshold. Absent rather than
+    /// zero, because `0.0` would be a number nobody supplied.
+    let notifyAtUsedPercent: Double?
+    /// Present only when the refusal involved the goal.
+    let goalUsedPercent: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case reason
+        case message
+        case notifyAtUsedPercent = "notify_at_used_percent"
+        case goalUsedPercent = "goal_used_percent"
+    }
+}
