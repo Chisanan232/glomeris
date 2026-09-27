@@ -464,6 +464,109 @@ final class PressureEpisodeMonitorTests: XCTestCase {
         XCTAssertTrue(cli.calls.contains("respond:remind_later"))
     }
 
+    // MARK: - Review & recover opens Recovery
+
+    @MainActor
+    private func makeMonitor(
+        showing outcomes: [PressureEpisodeOutcome],
+        opening opener: StubRecoveryOpener
+    ) -> (PressureEpisodeMonitor, StubPressureCli, StubBannerRaiser) {
+        let cli = StubPressureCli(showOutcomes: outcomes)
+        let banners = StubBannerRaiser()
+        return (
+            PressureEpisodeMonitor(client: cli, banners: banners, deepLink: opener), cli, banners
+        )
+    }
+
+    /// AC 2, and the detail that makes it honest: the surface is handed the disk as
+    /// it is *now*, not as it was when the banner went up. A user who took ten
+    /// minutes to press the button would otherwise open Recovery on a stale figure
+    /// and act on it.
+    @MainActor
+    func testAnsweringReviewAndRecoverOpensRecoveryOnThePostAnswerReading() async throws {
+        let opener = StubRecoveryOpener()
+        let (monitor, _, _) = makeMonitor(
+            showing: [
+                .status(try owed()),  // 91% used, when the banner went up
+                .status(try variant(currentUsedPercent: 77.0)),  // and by the time it was pressed
+            ],
+            opening: opener
+        )
+
+        await monitor.pollOnce()
+        await monitor.answer("review_and_recover")
+
+        XCTAssertEqual(opener.opened.count, 1)
+        let context = try XCTUnwrap(opener.opened.first.flatMap { $0 })
+        XCTAssertEqual(
+            context.currentUsedPercent, 77.0,
+            "Recovery opened on the reading the banner was raised from rather than the one taken "
+                + "when the user answered"
+        )
+        XCTAssertEqual(context.episodeId, 1)
+    }
+
+    /// The other two answers adjust when the user is spoken to. Neither opens
+    /// anything: a "later" button that took over the screen would be the opposite of
+    /// what it says.
+    @MainActor
+    func testTheAnswersThatAreNotReviewOpenNothing() async throws {
+        for token in ["remind_later", "ignore_episode"] {
+            let opener = StubRecoveryOpener()
+            let (monitor, cli, _) = makeMonitor(
+                showing: [.status(try owed())],
+                opening: opener
+            )
+
+            await monitor.answer(token)
+
+            XCTAssertTrue(cli.calls.contains("respond:" + token))
+            XCTAssertTrue(opener.opened.isEmpty, "\(token) opened the Recovery surface")
+        }
+    }
+
+    /// A refused answer still opens the surface. Both refusals the CLI can give
+    /// mean the pressure resolved itself before the button was pressed — which is
+    /// news, not an error — and a user who asked to see Recovery should still see
+    /// it.
+    @MainActor
+    func testAReviewAnswerTheRecordRefusedStillOpensRecovery() async throws {
+        let opener = StubRecoveryOpener()
+        let (monitor, _, _) = makeMonitor(
+            showing: [.status(try owed()), .status(try recovered())],
+            opening: opener
+        )
+        // Exit 3: there was no open episode left to answer.
+
+        await monitor.pollOnce()
+        await monitor.answer("review_and_recover")
+
+        XCTAssertEqual(opener.opened.count, 1)
+        let context = try XCTUnwrap(opener.opened.first.flatMap { $0 })
+        // No episode to name, and it does not invent one.
+        XCTAssertNil(context.episodeId)
+        XCTAssertEqual(context.currentUsedPercent, 60.0)
+        XCTAssertNil(monitor.lastErrorMessage)
+    }
+
+    /// And with no readable report at all, the surface still opens — without a
+    /// header. Pressing "Review & recover" and having *nothing happen*, with no
+    /// error anywhere, is the one outcome this deep link exists to prevent; the
+    /// Recovery card reads the disk for itself when it appears.
+    @MainActor
+    func testAReviewAnswerWithNoReadableReportStillOpensRecovery() async throws {
+        let opener = StubRecoveryOpener()
+        let (monitor, _, _) = makeMonitor(showing: [.malformedOutput], opening: opener)
+
+        await monitor.answer("review_and_recover")
+
+        XCTAssertEqual(opener.opened.count, 1)
+        XCTAssertNil(
+            try XCTUnwrap(opener.opened.first),
+            "a context was invented for a report that could not be read"
+        )
+    }
+
     // MARK: - What is not written down
 
     /// The monitor cannot offer a fourth answer, for the same structural reason
@@ -556,5 +659,19 @@ private final class StubBannerRaiser: PressureBannerRaising {
     func raise(_ banner: PressureBanner) async -> Bool {
         raised.append(banner)
         return reachesTheScreen
+    }
+}
+
+/// A Recovery surface that records being asked to open instead of opening.
+///
+/// The optional element is the point: a `nil` here is a window opened without a
+/// pressure header, which is a real and correct outcome, so the record has to be
+/// able to tell it apart from not being asked at all.
+@MainActor
+private final class StubRecoveryOpener: RecoveryDeepLinkOpening {
+    private(set) var opened: [RecoveryDeepLinkContext?] = []
+
+    func openRecovery(_ context: RecoveryDeepLinkContext?) {
+        opened.append(context)
     }
 }
