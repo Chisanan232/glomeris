@@ -889,6 +889,136 @@ enum GlomerisVocabulary {
         }
     }
 
+    // MARK: - Why a recovery run stopped (HORO-1506)
+
+    static let stopReasonAxis = "Why it stopped"
+
+    /// `StopReason` as the CLI tags it (`src/reporting/dto.rs` —
+    /// `stop_reason_tag`, diffed by this project's vocabulary guard).
+    ///
+    /// # Why every one of these is a sentence about the goal
+    ///
+    /// A recovery run either reached the goal or did not, and the product
+    /// rule is that a run which did not must say so rather than collapsing
+    /// into "Done". Four of these five stops leave the disk short of what the
+    /// user asked for, and each leaves them a different next step: wait for
+    /// the tools to release what they are holding, raise a limit, look at
+    /// what needs confirming, or read an error. A single "Finished" would be
+    /// true of all four and useful for none.
+    ///
+    /// `safe_exhausted` is the one with teeth. It means nothing safe remained
+    /// *among the resources this run could see and was allowed to take* —
+    /// which is not a finding that the disk holds nothing else, and must not
+    /// be worded as one. Anything that needed confirmation, belonged to work
+    /// in progress, or was protected is still there, and saying "nothing left
+    /// to clean" would be false in the ordinary case rather than a rare one.
+    ///
+    /// # Why tone is used here
+    ///
+    /// Same reasoning as the connection test above: nothing in this table
+    /// ever renders in a candidate row, where tint is reserved for the safety
+    /// axis. This is the result of one run the user started, where "did it
+    /// get there" is the whole content. The symbol and the words carry it
+    /// alone in greyscale and under VoiceOver.
+    static func stopReason(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "target_reached":
+            return term(
+                "target_reached", stopReasonAxis, "Goal reached",
+                "Re-measured free space meets your recovery goal. The figure is read from "
+                    + "the disk after the last action, not added up from estimates.",
+                "checkmark.circle.fill", .positive
+            )
+        case "safe_exhausted":
+            return term(
+                "safe_exhausted", stopReasonAxis, "Nothing safe left to take",
+                "The run stopped short of the goal because nothing remained that it could "
+                    + "take on its own. What is left needs your confirmation, belongs to work "
+                    + "in progress, or is protected — it has not gone anywhere.",
+                "hand.raised.fill", .caution
+            )
+        case "budget_exceeded":
+            return term(
+                "budget_exceeded", stopReasonAxis, "Reached a limit you set",
+                "The run stopped short of the goal because it hit one of its own limits on "
+                    + "actions, bytes or time. Raise the limit, or run it again to continue "
+                    + "from where the disk now stands.",
+                "gauge.with.dots.needle.33percent", .caution
+            )
+        case "no_progress":
+            return term(
+                "no_progress", stopReasonAxis, "Stopped making headway",
+                "An iteration freed nothing measurable, so the run stopped rather than "
+                    + "repeat itself. What the detectors offered is no longer there, or "
+                    + "something is putting it back as fast as it is removed.",
+                "arrow.triangle.2.circlepath", .caution
+            )
+        case "error":
+            return term(
+                "error", stopReasonAxis, "Stopped by an error",
+                "Something went wrong mid-run and it stopped there. Whatever had already "
+                    + "been freed stays freed — the reported figure is the disk as it now "
+                    + "stands.",
+                "exclamationmark.triangle.fill", .warning
+            )
+        default:
+            return unrecognised(
+                token, stopReasonAxis, "Unrecognised stop",
+                "The CLI reported a reason for stopping this app has no wording for. The "
+                    + "measured before and after figures beside it are still what the disk says."
+            )
+        }
+    }
+
+    // MARK: - A refused recovery goal (HORO-1506)
+
+    static let goalRejectionAxis = "Recovery goal"
+
+    /// `GoalRejection` as the CLI tags it (`src/executor/goal.rs` — `as_str`,
+    /// diffed by this project's vocabulary guard).
+    ///
+    /// These are the states where *nothing ran*, which is the fact each
+    /// explanation leads with. A refusal that read like a result would be the
+    /// worse failure of the two: a user shown "recovery finished, 0 bytes
+    /// freed" learns nothing about the disk and something false about the
+    /// tool.
+    ///
+    /// `not_an_improvement` is not an input error. It is the guard against a
+    /// goal that a full disk already satisfies — asking a 94%-used volume to
+    /// reach 95% used is a well-formed request to delete nothing, and the CLI
+    /// refuses it rather than running an empty loop and reporting success.
+    static func goalRejection(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "not_finite":
+            return term(
+                "not_finite", goalRejectionAxis, "Not a usable number",
+                "Nothing ran. The recovery goal has to be an ordinary percentage of the "
+                    + "disk in use.",
+                "questionmark.circle.fill", .caution
+            )
+        case "out_of_range":
+            return term(
+                "out_of_range", goalRejectionAxis, "Outside 0–100%",
+                "Nothing ran. A recovery goal is a share of this disk, so it has to fall "
+                    + "between 0% and 100% used.",
+                "arrow.left.and.right.circle.fill", .caution
+            )
+        case "not_an_improvement":
+            return term(
+                "not_an_improvement", goalRejectionAxis, "Already met",
+                "Nothing ran, because this goal asks for no more free space than the disk "
+                    + "already has. Choose a goal below current usage to reclaim anything.",
+                "equal.circle.fill", .caution
+            )
+        default:
+            return unrecognised(
+                token, goalRejectionAxis, "Goal refused",
+                "The CLI refused this recovery goal for a reason this app has no wording "
+                    + "for. Nothing ran."
+            )
+        }
+    }
+
     // MARK: - Resolved command-line tool (HORO-1466)
 
     static let cliAxis = "Command-line tool"
