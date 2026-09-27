@@ -172,6 +172,15 @@ targets:
       - path: Sources/GlomerisLlmSettingsStore.swift
       - path: Sources/AiProviderPreferencesView.swift
       - path: Sources/AutopilotPreferencesView.swift
+      # HORO-1507: the recovery settings pane. Compiled in because the two things
+      # worth pinning are types, not pixels. `RecoverySettingsInterpretation` is
+      # the only place in the app that has to tell a *refused pair* — a
+      # structured rejection printed to stdout with exit 2 — apart from a usage
+      # error on the same exit code, and only a test can show which stream
+      # decides that. And `RecoverySettingsDraft` is what keeps the two
+      # percentages from ever being sent as each other, which is the failure this
+      # whole pane is shaped to prevent.
+      - path: Sources/RecoveryPreferencesView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests

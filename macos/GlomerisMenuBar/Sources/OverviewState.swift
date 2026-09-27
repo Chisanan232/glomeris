@@ -317,13 +317,53 @@ final class RecoveryState: ObservableObject {
     /// sent to the CLI as `--goal-used-percent` and only ever displayed through
     /// the `description` string a report came back with.
     ///
-    /// Defaults to 70, which is a starting point rather than a preference:
+    /// Starts at 70, which is a starting point rather than a preference:
     /// `ThresholdConfig::default()` starts warning at 75% used, so 70 is the
     /// nearest round goal that ends below the point the product would have
-    /// raised its voice. HORO-1507 replaces this with the persisted default
-    /// recovery goal and makes it settable, at which point the literal here
-    /// stops being the answer to anything.
+    /// raised its voice.
+    ///
+    /// HORO-1507 made the default settable, and `RecoverySectionView` reads it
+    /// from `settings show --json` when the card appears — so the literal here is
+    /// only what the card shows for the moment before the CLI answers, and what
+    /// it keeps if the CLI cannot be asked. It is deliberately still a literal
+    /// and not `nil`: a card with no number would have to render a control with
+    /// nothing in it, and there is no honest placeholder for "the goal".
     @Published var goalUsedPercent: Int = 70
+
+    /// `true` once the user has moved the goal control in this session.
+    ///
+    /// The stored default is a *default*, so it seeds the card and never
+    /// overrides it. Without this flag the seed would re-apply every time the
+    /// popover reappears, and a goal the user set two minutes ago would silently
+    /// revert to the stored one between one look at the panel and the next.
+    ///
+    /// Session-scoped on purpose, and it is the goal control that sets it rather
+    /// than any write to `goalUsedPercent`: adoption itself assigns that
+    /// property, and a flag the adopter trips is a flag that blocks the next
+    /// adoption for no reason.
+    private(set) var hasUserChosenGoal = false
+
+    /// Records that the number in the control is now the user's, not a default.
+    func noteUserChoseGoal() {
+        hasUserChosenGoal = true
+    }
+
+    /// Seeds the goal from the stored default recovery goal (HORO-1507).
+    ///
+    /// Returns `true` when the value actually changed, so the caller can clear a
+    /// pre-flight measured against the old goal — every figure in one is measured
+    /// against the goal that produced it.
+    ///
+    /// Declines once the user has chosen a goal. This store does not decide what
+    /// a usable percentage is: `RecoverySectionView.storedDefaultGoal` maps the
+    /// reported percentage onto what the control can represent, and the CLI
+    /// decides whether the goal is usable at all.
+    @discardableResult
+    func adoptStoredDefaultGoal(_ usedPercent: Int) -> Bool {
+        guard !hasUserChosenGoal, usedPercent != goalUsedPercent else { return false }
+        goalUsedPercent = usedPercent
+        return true
+    }
 
     @Published var phase: RecoveryPhase = .idle
 

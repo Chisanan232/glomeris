@@ -117,6 +117,14 @@ VOCABULARIES=(
   # need diffing here rather than by the type checker.
   'stopReason;;src/reporting/dto.rs;;stop_reason_tag;;StopReason'
   'goalRejection;;src/executor/goal.rs;;as_str;;GoalRejection'
+  # HORO-1507. `SettingsRejection::as_str` is the sole producer of the
+  # `reason` token in `SettingsRejectionReport`, and the Swift side keeps the
+  # field a `String` for the same forward-compatibility reason as the two
+  # above. Six tokens, not five: `goal_refused` is a deliberate catch-all for
+  # a `GoalRejection` variant that `RecoverySettings` cannot map onto one of
+  # its own arms, so it is a token Rust can emit and therefore a token the app
+  # must have wording for.
+  'settingsRejection;;src/settings/mod.rs;;as_str;;SettingsRejection'
 )
 
 # Print the body of a function, from its `fn <name>` line to the line

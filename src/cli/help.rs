@@ -102,12 +102,16 @@ impl Safety {
     }
 }
 
-/// The five groups top-level help is organized into.
+/// The six groups top-level help is organized into.
 ///
 /// Ordered as a session runs, not alphabetically: look at the machine, decide
-/// what to do, do it, check what happened, and only then the background
-/// service. A first-time reader should be able to start at the top and stop
-/// when they have what they came for.
+/// what to do, do it, check what happened, then the background service, and
+/// last the preferences that change how the rest behave. A first-time reader
+/// should be able to start at the top and stop when they have what they came
+/// for, which is why CONFIGURE is at the bottom despite being what a long-term
+/// user reaches for first: you adjust preferences once you have decided the
+/// product should behave differently, and you cannot decide that before
+/// watching it behave.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
     Inspect,
@@ -115,6 +119,7 @@ pub enum Group {
     Act,
     Observe,
     Service,
+    Configure,
 }
 
 impl Group {
@@ -125,6 +130,7 @@ impl Group {
         Group::Act,
         Group::Observe,
         Group::Service,
+        Group::Configure,
     ];
 
     pub fn title(self) -> &'static str {
@@ -134,6 +140,7 @@ impl Group {
             Group::Act => "ACT",
             Group::Observe => "OBSERVE",
             Group::Service => "SERVICE",
+            Group::Configure => "CONFIGURE",
         }
     }
 
@@ -147,6 +154,7 @@ impl Group {
             Group::Act => "change this machine. Policy decides every deletion.",
             Group::Observe => "what happened before. Nothing is changed.",
             Group::Service => "the background disk-pressure monitor.",
+            Group::Configure => "your preferences. Nothing on this machine is deleted.",
         }
     }
 }
@@ -1090,6 +1098,106 @@ pub const COMMANDS: &[CommandSpec] = &[
         ],
         exit_codes: &[],
         see_also: &["status", "history"],
+    },
+    // --------------------------------------------------------------- Configure
+    CommandSpec {
+        name: "settings",
+        group: Group::Configure,
+        safety: Safety::WritesOwnState,
+        summary: "Read or change the alert threshold and the recovery goal.",
+        usage: &[
+            "settings <show|set>",
+            "[--notify-at-used-percent <N>]",
+            "[--default-goal-used-percent <N>]",
+            "[--json]",
+        ],
+        details: "Two preferences, and they are not the same number. The alert threshold is \
+                  when Glomeris should call your attention to disk usage; the recovery goal is \
+                  where recovery should stop. One is a question, the other a destination. \
+                  \n\nBoth are percent of capacity USED, never free. A goal of 70% used means \
+                  30% of the disk should end up free, and every line this command prints names \
+                  the axis so the two numbers cannot be read as each other. A goal must be \
+                  below the threshold: a goal at or above the point that raised the alert \
+                  would be satisfied the moment it was announced. \
+                  \n\nThese preferences change what is suggested and when you are told, not \
+                  what policy permits. Raising a goal cannot make a PROTECTED resource \
+                  deletable, and no value here authorizes any deletion. The four disk-pressure \
+                  states themselves are not configurable and this command cannot reach them, \
+                  so changing a preference never fabricates a pressure transition the disk did \
+                  not make.",
+        subcommands: &[
+            SubcommandSpec {
+                name: "show",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
+                description: "Print both preferences and where they are stored. The default, so \
+                              a bare `glomeris settings` reads rather than writes. With nothing \
+                              stored yet, prints the built-in defaults and says so.",
+            },
+            SubcommandSpec {
+                name: "set",
+                args: "",
+                safety: Safety::WritesOwnState,
+                description: "Change one or both preferences. Requires at least one of the two \
+                              flags; the one you omit keeps its current value. Either the whole \
+                              change is stored or none of it is.",
+            },
+        ],
+        options: &[
+            OptionSpec {
+                syntax: "--notify-at-used-percent <N>",
+                description: "For `set`: notify me when disk usage reaches N% used. Between 1 \
+                              and 99. Defaults to 75, the warn boundary.",
+            },
+            OptionSpec {
+                syntax: "--default-goal-used-percent <N>",
+                description: "For `set`: where recovery should stop, in percent used. Between 0 \
+                              and 100, and must be below the alert threshold. Defaults to 70.",
+            },
+            OptionSpec {
+                syntax: "--json",
+                description: "For `show` and `set`: print the preferences as JSON — both \
+                              percentages under separate names, the goal on both axes, the file \
+                              they came from, and whether anything was stored. The same shape \
+                              from both, always describing what is in force after the command \
+                              ran. This is what the menu-bar app reads. A refused change prints \
+                              a rejection object on stdout instead, with the reason as a stable \
+                              token.",
+            },
+        ],
+        examples: &[
+            ExampleSpec {
+                command: "glomeris settings",
+                purpose: "When will it tell me, and where will it stop?",
+            },
+            ExampleSpec {
+                command: "glomeris settings set --notify-at-used-percent 85",
+                purpose: "Tell me later, and leave the goal alone.",
+            },
+            ExampleSpec {
+                command: "glomeris settings set --notify-at-used-percent 85 \\\n    \
+                          --default-goal-used-percent 60",
+                purpose: "Move both at once, when neither is valid without the other.",
+            },
+        ],
+        exit_codes: &[
+            ExitCodeSpec {
+                code: 0,
+                meaning: "the preferences were printed, or the change was stored.",
+            },
+            ExitCodeSpec {
+                code: 1,
+                meaning: "the settings file could not be read or written, or what it contains \
+                          is not valid.",
+            },
+            ExitCodeSpec {
+                code: 2,
+                meaning: "usage error, including `set` with neither flag, or a value on this \
+                          command line that was refused — out of range, not a number, or a goal \
+                          at or above the threshold.",
+            },
+        ],
+        see_also: &["free", "status", "autopilot"],
     },
 ];
 

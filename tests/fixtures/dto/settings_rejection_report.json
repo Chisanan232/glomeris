@@ -1,0 +1,6 @@
+{
+  "reason": "goal_not_below_notify_threshold",
+  "message": "default recovery goal 90% used is not below the alert threshold of 85% used: recovery would aim at a disk no emptier than the one that raised the alert",
+  "notify_at_used_percent": 85.0,
+  "goal_used_percent": 90.0
+}

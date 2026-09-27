@@ -92,13 +92,131 @@ final class RecoverySectionViewTests: XCTestCase {
         XCTAssertEqual(RecoverySectionView.goalRange.upperBound % RecoverySectionView.goalStep, 0)
     }
 
-    /// The default is in the range the control can express, and below the point
-    /// the CLI's own default thresholds start warning — see the property's
+    /// The starting point is in the range the control can express, and below the
+    /// point the CLI's own default thresholds start warning — see the property's
     /// documentation in OverviewState.swift.
     func testDefaultGoalIsReachableByTheControl() {
         let state = RecoveryState()
         XCTAssertTrue(RecoverySectionView.goalRange.contains(state.goalUsedPercent))
         XCTAssertEqual(state.goalUsedPercent % RecoverySectionView.goalStep, 0)
+    }
+
+    // MARK: - Seeding from the stored default (HORO-1507)
+
+    /// A whole stored percentage arrives unchanged. This is the ordinary case and
+    /// the one that would be quietly wrong if the rounding below were applied
+    /// unconditionally.
+    func testAWholeStoredDefaultIsTakenAsItIs() {
+        XCTAssertEqual(RecoverySectionView.storedDefaultGoal(usedPercent: 60), 60)
+        XCTAssertEqual(RecoverySectionView.storedDefaultGoal(usedPercent: 70), 70)
+    }
+
+    /// Not snapped to `goalStep`. A stored 62 presents as 62, because showing 60
+    /// for it would have the card describe a run aiming somewhere the user did
+    /// not ask for — and the control can still step from there.
+    func testAStoredDefaultOffTheStepGridIsNotSnappedToIt() {
+        XCTAssertEqual(RecoverySectionView.storedDefaultGoal(usedPercent: 62), 62)
+        XCTAssertNotEqual(
+            RecoverySectionView.storedDefaultGoal(usedPercent: 62)! % RecoverySectionView.goalStep,
+            0,
+            "a value off the grid proves the snap is absent; if this ever passes trivially the "
+                + "step changed and this test is no longer testing anything"
+        )
+    }
+
+    /// Rounded up, toward the disk staying fuller. Something has to give on a
+    /// whole-percentage control, and rounding down would aim at a slightly
+    /// emptier disk than the stored number — which means deleting marginally more
+    /// than was asked for.
+    func testAFractionalStoredDefaultRoundsTowardLessDeletion() {
+        XCTAssertEqual(RecoverySectionView.storedDefaultGoal(usedPercent: 62.5), 63)
+        XCTAssertEqual(RecoverySectionView.storedDefaultGoal(usedPercent: 62.1), 63)
+        XCTAssertEqual(RecoverySectionView.storedDefaultGoal(usedPercent: 62.9), 63)
+    }
+
+    /// Clamped into what the control can express. `settings` will store a goal of
+    /// 2% used quite happily — its range is 0…100 — so this is the card admitting
+    /// its own limit rather than correcting the setting.
+    func testAStoredDefaultOutsideTheControlsRangeIsClampedToIt() {
+        XCTAssertEqual(
+            RecoverySectionView.storedDefaultGoal(usedPercent: 2),
+            RecoverySectionView.goalRange.lowerBound
+        )
+        XCTAssertEqual(
+            RecoverySectionView.storedDefaultGoal(usedPercent: 99),
+            RecoverySectionView.goalRange.upperBound
+        )
+        XCTAssertEqual(
+            RecoverySectionView.storedDefaultGoal(usedPercent: 0),
+            RecoverySectionView.goalRange.lowerBound
+        )
+        XCTAssertEqual(
+            RecoverySectionView.storedDefaultGoal(usedPercent: 100),
+            RecoverySectionView.goalRange.upperBound
+        )
+    }
+
+    /// `Int(exactly:)` traps on a non-finite `Double`, and there is no whole
+    /// percentage that means "not a number". It cannot arrive from JSON, which is
+    /// why the answer is `nil` rather than a number the card would then show.
+    func testANonFiniteStoredDefaultHasNoAnswer() {
+        XCTAssertNil(RecoverySectionView.storedDefaultGoal(usedPercent: .nan))
+        XCTAssertNil(RecoverySectionView.storedDefaultGoal(usedPercent: .infinity))
+        XCTAssertNil(RecoverySectionView.storedDefaultGoal(usedPercent: -.infinity))
+    }
+
+    /// Every representable answer is one the control can reach, so the seed can
+    /// never put a value into a `Stepper(value:in:)` that its own range excludes.
+    func testEverySeededGoalIsInsideTheControlsRange() {
+        for tenths in stride(from: -50, through: 1500, by: 7) {
+            let percent = Double(tenths) / 10
+            guard let seeded = RecoverySectionView.storedDefaultGoal(usedPercent: percent) else {
+                return XCTFail("\(percent) produced no answer")
+            }
+            XCTAssertTrue(
+                RecoverySectionView.goalRange.contains(seeded),
+                "\(percent) seeded \(seeded), outside \(RecoverySectionView.goalRange)"
+            )
+        }
+    }
+
+    /// The seed is a default, so it applies to a card the user has not touched.
+    func testTheStoredDefaultSeedsAnUntouchedGoal() {
+        let state = RecoveryState()
+        XCTAssertTrue(state.adoptStoredDefaultGoal(55))
+        XCTAssertEqual(state.goalUsedPercent, 55)
+    }
+
+    /// And never overrides a goal the user set. Without this the seed would
+    /// re-apply on every popover appearance, and a goal chosen two minutes ago
+    /// would revert between one look at the panel and the next.
+    func testTheStoredDefaultNeverOverridesAGoalTheUserChose() {
+        let state = RecoveryState()
+        state.goalUsedPercent = 40
+        state.noteUserChoseGoal()
+
+        XCTAssertFalse(state.adoptStoredDefaultGoal(55))
+        XCTAssertEqual(state.goalUsedPercent, 40)
+    }
+
+    /// Adoption does not trip the flag. A store that treated its own seed as a
+    /// user choice would decline the next one for no reason — including the one
+    /// that follows the user changing the setting and reopening the panel.
+    func testAdoptingTheStoredDefaultIsNotAUserChoice() {
+        let state = RecoveryState()
+        XCTAssertTrue(state.adoptStoredDefaultGoal(55))
+        XCTAssertFalse(state.hasUserChosenGoal)
+        XCTAssertTrue(state.adoptStoredDefaultGoal(50), "a later report must still be adoptable")
+        XCTAssertEqual(state.goalUsedPercent, 50)
+    }
+
+    /// Re-seeding the same number reports no change, so a caller does not clear a
+    /// pre-flight that is still measured against the goal it was taken under.
+    func testReSeedingTheSameGoalReportsNoChange() {
+        let state = RecoveryState()
+        XCTAssertTrue(state.adoptStoredDefaultGoal(55))
+        XCTAssertFalse(state.adoptStoredDefaultGoal(55))
+        XCTAssertEqual(state.goalUsedPercent, 55)
     }
 
     // MARK: - Arguments

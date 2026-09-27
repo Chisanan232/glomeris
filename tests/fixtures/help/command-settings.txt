@@ -1,0 +1,71 @@
+glomeris settings — Read or change the alert threshold and the recovery goal.
+
+usage: glomeris settings <show|set> [--notify-at-used-percent <N>]
+                [--default-goal-used-percent <N>] [--json]
+
+Safety depends on the subcommand; each is labelled below. The strongest of
+them: Writes only Glomeris's own state — never your files.
+
+Two preferences, and they are not the same number. The alert threshold is when
+Glomeris should call your attention to disk usage; the recovery goal is where
+recovery should stop. One is a question, the other a destination.
+
+Both are percent of capacity USED, never free. A goal of 70% used means 30% of
+the disk should end up free, and every line this command prints names the axis
+so the two numbers cannot be read as each other. A goal must be below the
+threshold: a goal at or above the point that raised the alert would be
+satisfied the moment it was announced.
+
+These preferences change what is suggested and when you are told, not what
+policy permits. Raising a goal cannot make a PROTECTED resource deletable, and
+no value here authorizes any deletion. The four disk-pressure states
+themselves are not configurable and this command cannot reach them, so
+changing a preference never fabricates a pressure transition the disk did not
+make.
+
+Subcommands
+  show [--json]
+      Read-only — changes nothing.
+      Print both preferences and where they are stored. The default, so a
+      bare `glomeris settings` reads rather than writes. With nothing
+      stored yet, prints the built-in defaults and says so.
+  set
+      Writes only Glomeris's own state — never your files.
+      Change one or both preferences. Requires at least one of the two
+      flags; the one you omit keeps its current value. Either the whole
+      change is stored or none of it is.
+
+Options
+  --notify-at-used-percent <N>
+      For `set`: notify me when disk usage reaches N% used. Between 1 and
+      99. Defaults to 75, the warn boundary.
+  --default-goal-used-percent <N>
+      For `set`: where recovery should stop, in percent used. Between 0
+      and 100, and must be below the alert threshold. Defaults to 70.
+  --json
+      For `show` and `set`: print the preferences as JSON — both
+      percentages under separate names, the goal on both axes, the file
+      they came from, and whether anything was stored. The same shape from
+      both, always describing what is in force after the command ran. This
+      is what the menu-bar app reads. A refused change prints a rejection
+      object on stdout instead, with the reason as a stable token.
+
+Examples
+  glomeris settings
+      When will it tell me, and where will it stop?
+  glomeris settings set --notify-at-used-percent 85
+      Tell me later, and leave the goal alone.
+  glomeris settings set --notify-at-used-percent 85 \
+    --default-goal-used-percent 60
+      Move both at once, when neither is valid without the other.
+
+Exit codes
+  0   the preferences were printed, or the change was stored.
+  1   the settings file could not be read or written, or what it contains
+      is not valid.
+  2   usage error, including `set` with neither flag, or a value on this
+      command line that was refused — out of range, not a number, or a
+      goal at or above the threshold.
+  Run `glomeris help exit-codes` for the codes shared by every command.
+
+See also: free, status, autopilot

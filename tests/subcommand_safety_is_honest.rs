@@ -366,6 +366,15 @@ fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
             "daemon status".to_string(),
             argv(&["daemon", "status", "--json"]),
         ),
+        // Worth its own scrutiny: `settings show` reads a file that may not
+        // exist yet and answers with the built-in defaults. The tempting
+        // implementation writes those defaults out so the next read is simple,
+        // which would make reading your preferences create them (HORO-1507).
+        ("settings show".to_string(), argv(&["settings", "show"])),
+        (
+            "settings show".to_string(),
+            argv(&["settings", "show", "--json"]),
+        ),
     ]
 }
 

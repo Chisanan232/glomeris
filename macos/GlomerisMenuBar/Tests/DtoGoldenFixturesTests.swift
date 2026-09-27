@@ -787,4 +787,68 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(dto.goalUsedPercent)
         XCTAssertNil(dto.currentUsedPercent)
     }
+
+    // MARK: - Settings (HORO-1507)
+
+    func testDecodesRecoverySettingsReport() throws {
+        let dto = try decodeFixture(
+            "recovery_settings_report.json",
+            as: RecoverySettingsReportDto.self
+        )
+
+        // The two numbers arrive under two names and mean two things. This
+        // assertion is the Swift half of that contract: swapping the fields in
+        // the mirror would make one read 60 and the other 85.
+        XCTAssertEqual(dto.notifyAtUsedPercent, 85.0)
+        XCTAssertEqual(dto.notifyAtDescription, "85% used")
+        XCTAssertEqual(dto.defaultGoal.usedPercent, 60.0)
+        XCTAssertEqual(dto.defaultGoal.freePercent, 40.0)
+        XCTAssertEqual(dto.defaultGoal.description, "60% used (40% free)")
+
+        XCTAssertEqual(dto.bounds.notifyAtMinimumUsedPercent, 1.0)
+        XCTAssertEqual(dto.bounds.notifyAtMaximumUsedPercent, 99.0)
+        XCTAssertEqual(dto.bounds.goalMinimumUsedPercent, 0.0)
+        XCTAssertEqual(dto.bounds.goalMaximumUsedPercent, 100.0)
+
+        XCTAssertEqual(
+            dto.storedAt,
+            "/Users/dev/Library/Application Support/Glomeris/settings.conf"
+        )
+        XCTAssertTrue(dto.loadedFromFile)
+    }
+
+    /// Nothing stored yet: the path is absent and the flag says so.
+    ///
+    /// The flag is the assertion that matters. A pane that inferred "not
+    /// configured" from a missing path would say it to anyone whose `$HOME`
+    /// could not be resolved, and would say the opposite to someone who had
+    /// never opened the app.
+    func testDecodesRecoverySettingsReportForTheBuiltInDefaults() throws {
+        let dto = try decodeFixture(
+            "recovery_settings_report_defaults.json",
+            as: RecoverySettingsReportDto.self
+        )
+
+        XCTAssertEqual(dto.notifyAtUsedPercent, 75.0)
+        XCTAssertEqual(dto.defaultGoal.usedPercent, 70.0)
+        XCTAssertNil(dto.storedAt)
+        XCTAssertFalse(dto.loadedFromFile)
+    }
+
+    /// The cross-field refusal, which is the one that carries both figures.
+    func testDecodesSettingsRejectionReport() throws {
+        let dto = try decodeFixture(
+            "settings_rejection_report.json",
+            as: SettingsRejectionReportDto.self
+        )
+
+        XCTAssertEqual(dto.reason, "goal_not_below_notify_threshold")
+        XCTAssertEqual(
+            dto.message,
+            "default recovery goal 90% used is not below the alert threshold of 85% used: "
+                + "recovery would aim at a disk no emptier than the one that raised the alert"
+        )
+        XCTAssertEqual(dto.notifyAtUsedPercent, 85.0)
+        XCTAssertEqual(dto.goalUsedPercent, 90.0)
+    }
 }
