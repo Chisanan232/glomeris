@@ -92,6 +92,11 @@ targets:
       - path: Sources/MenuBarAppearance.swift
       - path: Sources/GlomerisMark.swift
       - path: Sources/ProjectRootsStore.swift
+      # HORO-1501: the table deciding which CLI commands the roots are attached
+      # to. Compiled in so every command the app actually runs is asserted
+      # against the real set — `status` included, which is the one that shipped
+      # broken — rather than against a list retyped into the test file.
+      - path: Sources/GlomerisCliProjectRootScope.swift
       # HORO-1325: the view, not just its store, so ProjectRootsWording's
       # labels can be asserted rather than read.
       - path: Sources/ProjectRootsPreferencesView.swift
