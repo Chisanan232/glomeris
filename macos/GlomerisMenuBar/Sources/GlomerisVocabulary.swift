@@ -1090,6 +1090,112 @@ enum GlomerisVocabulary {
         }
     }
 
+    // MARK: - Answers to a pressure alert (HORO-1508)
+
+    static let episodeResponseAxis = "Pressure alert"
+
+    /// `EpisodeResponse` as the CLI tags it (`src/monitor/episode.rs` —
+    /// `EpisodeResponse::as_str`, diffed by this project's vocabulary guard).
+    ///
+    /// These three are not only display wording: they are the *buttons* on a
+    /// macOS notification, and the set is read from
+    /// `PressureStatusReport.responses` rather than known here, so the app
+    /// cannot offer a fourth action the CLI would refuse after the user pressed
+    /// it.
+    ///
+    /// Every title says what the button does, and none of them is "Skip".
+    /// HORO-1508 requires that, and the reason is the difference between the
+    /// last two: one of them silences this episode and one of them silences it
+    /// *for a while*. "Skip" would be an equally good name for either, so a
+    /// user choosing it could not know which they had chosen.
+    ///
+    /// # Nothing here deletes anything
+    ///
+    /// Note what the first title does *not* say. "Review & recover" opens the
+    /// Recovery screen at the user's goal; it does not start a recovery. A
+    /// notification button that began deleting files on one press would be the
+    /// campaign's rule about crossing a threshold broken at the one place a user
+    /// is least able to read carefully, and the wording has to survive being
+    /// skimmed.
+    static func episodeResponse(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "review_and_recover":
+            return term(
+                "review_and_recover", episodeResponseAxis, "Review & recover",
+                "Opens Recovery at your recovery goal, showing what could be reclaimed. "
+                    + "Nothing is deleted until you start a run there.",
+                "arrow.forward.circle.fill", .positive
+            )
+        case "remind_later":
+            return term(
+                "remind_later", episodeResponseAxis, "Remind me later",
+                "Puts this alert aside and raises it again after the snooze, if the disk is "
+                    + "still under pressure then. Monitoring carries on meanwhile.",
+                "clock.arrow.circlepath", .caution
+            )
+        case "ignore_episode":
+            return term(
+                "ignore_episode", episodeResponseAxis, "Ignore this alert",
+                "Says nothing more about this particular episode. If usage drops and climbs "
+                    + "past your threshold again, that is a new episode and it will alert.",
+                "bell.slash.fill", .neutral
+            )
+        default:
+            return unrecognised(
+                token, episodeResponseAxis, "Unrecognised answer",
+                "The CLI reported an answer to a pressure alert this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - A refused answer to a pressure alert (HORO-1508)
+
+    /// Deliberately not the same axis name as the answers above, even though
+    /// both belong to one notification. These terms are about the *answer* —
+    /// whether the one the user gave could be recorded — and a VoiceOver user
+    /// hearing "Pressure alert: no longer under pressure" would reasonably take
+    /// it for a reading of the disk rather than the fate of their button press.
+    static let episodeRejectionAxis = "Pressure alert answer"
+
+    /// `EpisodeRejection` as the CLI tags it (`src/monitor/episode.rs` —
+    /// `EpisodeRejection::as_str`, diffed by this project's vocabulary guard).
+    ///
+    /// Both of these are races, not malfunctions, and the ordinary cause of both
+    /// is the good news: the disk recovered between the banner appearing and the
+    /// button being pressed. So neither is worded as an error, and both say what
+    /// is true of the machine rather than what went wrong with the request —
+    /// "there is no longer an alert to answer" is information; "invalid state"
+    /// is not.
+    ///
+    /// Both are `.neutral` for that reason. A user who pressed a button and was
+    /// shown a warning would reasonably conclude their choice had not been
+    /// taken, and would go looking for a way to make it stick — for a condition
+    /// that had already resolved itself.
+    static func episodeRejection(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "no_open_episode":
+            return term(
+                "no_open_episode", episodeRejectionAxis, "No longer under pressure",
+                "Nothing was recorded, because disk usage has already fallen back below your "
+                    + "alert threshold. There is no alert left to answer.",
+                "checkmark.circle.fill", .neutral
+            )
+        case "no_notification_due":
+            return term(
+                "no_notification_due", episodeRejectionAxis, "Nothing was owed",
+                "Nothing was recorded, because no alert was waiting to be shown — it had "
+                    + "already been shown, or the episode had ended.",
+                "bell.badge.slash.fill", .neutral
+            )
+        default:
+            return unrecognised(
+                token, episodeRejectionAxis, "Answer not recorded",
+                "The CLI would not record this answer, for a reason this app has no wording "
+                    + "for. Disk monitoring is unaffected."
+            )
+        }
+    }
+
     // MARK: - Resolved command-line tool (HORO-1466)
 
     static let cliAxis = "Command-line tool"

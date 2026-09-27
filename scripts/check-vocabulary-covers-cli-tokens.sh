@@ -132,12 +132,30 @@ VOCABULARIES=(
   # its own arms, so it is a token Rust can emit and therefore a token the app
   # must have wording for.
   'settingsRejection;;src/settings/mod.rs;;as_str;;SettingsRejection'
+  # HORO-1508. The two halves of the pressure-notification surface: the three
+  # answers a banner's buttons send back, and the two refusals an answer can
+  # meet. Both are the sole producers of their tokens —
+  # `PressureEpisodeReport::response` and `PressureStatusReport::responses` go
+  # through `EpisodeResponse::as_str`, and `PressureRejectionReport::reason`
+  # through `EpisodeRejection::as_str`.
+  #
+  # Scoped to their impl blocks, and they are why the scoping exists: both live
+  # in src/monitor/episode.rs, so a bare `as_str` anchor would have extracted
+  # the first one twice and reported the second as verified while never looking
+  # at it.
+  #
+  # The answers matter here more than most. An unrecognised token in this set
+  # is not a question mark on a card — it is a button on a notification whose
+  # label the app had to invent, at the moment the user is being asked what to
+  # do about a disk that is nearly full.
+  'episodeResponse;;src/monitor/episode.rs;;EpisodeResponse::as_str;;EpisodeResponse'
+  'episodeRejection;;src/monitor/episode.rs;;EpisodeRejection::as_str;;EpisodeRejection'
 )
 
 # One more than the number of rows above: `outcome` has no producer to diff
 # against (see this script's header). Cross-checked against the rows actually
 # walked, at the end.
-TOTAL_VOCABULARIES=15
+TOTAL_VOCABULARIES=17
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent
