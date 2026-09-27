@@ -236,6 +236,41 @@ pub fn build_recovery_preview_report(
     }
 }
 
+/// The caveat sentences a finished run carries in its structured report.
+///
+/// Deliberately NOT [`RecoveryReport::discovery_caveat_lines`], which this
+/// originally reused. Those lines are written for the terminal: they carry
+/// column-alignment padding (`"discovery incomplete:   1 detector(s) failed"`),
+/// a `"  - "` bullet prefix and a `"note: "` prefix, because the prose printer
+/// puts them straight after a block of aligned label/value rows. A GUI showing
+/// them renders the padding as a gap in the middle of a sentence, and a client
+/// that stripped the prefixes back off would be parsing terminal formatting —
+/// the exact coupling the structured contract exists to remove.
+///
+/// The failed detectors themselves are not repeated here. They are their own
+/// field on [`RecoveryRunReport`], so a surface lists them from there; these
+/// sentences say what their failure *means*, which is the part no client should
+/// be deciding for itself.
+fn build_run_caveats(report: &RecoveryReport) -> Vec<String> {
+    if report.detector_failures.is_empty() {
+        return Vec::new();
+    }
+
+    let mut caveats = vec![format!(
+        "Discovery was incomplete: {} detector(s) failed, so what they would have \
+         found is unknown and the real opportunity may be larger.",
+        report.detector_failures.len()
+    )];
+    if report.stop_reason == StopReason::SafeExhausted {
+        caveats.push(
+            "This run stopped because no safe candidate remained among the detectors \
+             that answered. That is not a finding that nothing safe is left."
+                .to_string(),
+        );
+    }
+    caveats
+}
+
 /// Project a finished run.
 ///
 /// `total_bytes` is required because [`RecoveryReport`] carries free bytes
@@ -274,7 +309,7 @@ pub fn build_recovery_run_report(
         target_met: target_met(&final_usage, target),
         detector_failures: report.detector_failures.clone(),
         discovery_complete: report.detector_failures.is_empty(),
-        caveats: report.discovery_caveat_lines(),
+        caveats: build_run_caveats(report),
     }
 }
 
@@ -666,6 +701,61 @@ mod tests {
             !report.caveats.is_empty(),
             "a failed detector must produce caveat lines"
         );
+        assert!(
+            report
+                .caveats
+                .iter()
+                .any(|c| c.contains("no safe candidate remained")),
+            "SafeExhausted after a failed probe must say it is not a finding that \
+             nothing safe is left: {:?}",
+            report.caveats
+        );
+    }
+
+    /// The structured caveats are sentences, not the terminal's lines.
+    ///
+    /// This is the assertion that keeps `build_run_caveats` from being
+    /// "simplified" back into a call to `discovery_caveat_lines()`, which is
+    /// where these strings used to come from. Those lines carry alignment
+    /// padding and `"  - "`/`"note: "` prefixes for the prose printer, and a
+    /// client that stripped them back off would be parsing terminal
+    /// formatting.
+    #[test]
+    fn run_caveats_carry_no_terminal_formatting() {
+        let mut inner = run_report(StopReason::SafeExhausted, 60, 0);
+        inner.detector_failures = vec![
+            "cargo_target_dir: probe exploded".to_string(),
+            "homebrew_cache: brew --cache exited 1".to_string(),
+        ];
+        let report = build_recovery_run_report(None, &FreeTarget::Percentage(20.0), 1000, &inner);
+
+        for caveat in &report.caveats {
+            assert!(
+                !caveat.contains("  "),
+                "a caveat must not carry column padding: {caveat:?}"
+            );
+            assert!(
+                !caveat.starts_with('-') && !caveat.starts_with("note:"),
+                "a caveat must not carry a prose-printer prefix: {caveat:?}"
+            );
+            assert!(
+                caveat.ends_with('.'),
+                "a caveat must be a sentence: {caveat:?}"
+            );
+        }
+
+        // The names live in `detector_failures`; the caveats explain what their
+        // absence means. Repeating them here would make one of the two the
+        // place a surface reads, and nothing would say which.
+        assert!(
+            report
+                .caveats
+                .iter()
+                .all(|c| !c.contains("probe exploded") && !c.contains("brew --cache")),
+            "caveats must not duplicate the detector_failures list: {:?}",
+            report.caveats
+        );
+        assert_eq!(report.detector_failures.len(), 2);
     }
 
     #[test]
