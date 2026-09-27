@@ -376,11 +376,26 @@ struct StatusHealthSectionView: View {
         cliIdentity = identityResult
     }
 
+    /// HORO-1501: `["status", "--json"]`, and nothing else.
+    ///
+    /// This used to append `projectRootsStore.commandLineArguments`. `glomeris
+    /// status` reports disk figures and runs no detectors, so a project root
+    /// cannot change its answer and the command does not accept one — it exits 2
+    /// on an unrecognised argument (HORO-1322). The card therefore failed for
+    /// every user who had configured a root and worked for everyone who had not,
+    /// which is why four correct-looking sibling call sites kept it company for
+    /// as long as they did.
+    ///
+    /// Still routed through `scoped(_:)` rather than passing the array directly.
+    /// The vector is identical either way; what differs is that the question
+    /// "does this command take the configured roots?" is asked and answered in
+    /// one table for every invocation in the app, instead of being left to
+    /// whoever edits this line next.
     @MainActor
     private func fetchStatus() async -> StatusReportDto? {
         do {
             let result = try await client.run(
-                ["status", "--json"] + projectRootsStore.commandLineArguments,
+                projectRootsStore.scoped(["status", "--json"]),
                 outputType: StatusReportDto.self,
                 progressType: EmptyProgressDto.self
             )
