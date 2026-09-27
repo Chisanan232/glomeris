@@ -968,6 +968,9 @@ struct RecoverySettingsReportDto: Decodable, Equatable {
     /// so the goal shown here and the goal shown on the Recovery card are one
     /// number worded one way.
     let defaultGoal: RecoveryGoalReportDto
+    /// What each of the two numbers may be, so a control can be built that
+    /// cannot ask for one the CLI refuses.
+    let bounds: RecoverySettingsBoundsReportDto
     /// Absent when the CLI could not resolve `$HOME`.
     let storedAt: String?
     /// `false` means these are the built-in defaults and nothing has been
@@ -980,8 +983,36 @@ struct RecoverySettingsReportDto: Decodable, Equatable {
         case notifyAtUsedPercent = "notify_at_used_percent"
         case notifyAtDescription = "notify_at_description"
         case defaultGoal = "default_goal"
+        case bounds
         case storedAt = "stored_at"
         case loadedFromFile = "loaded_from_file"
+    }
+}
+
+/// Mirrors `reporting::dto::RecoverySettingsBoundsReport` — the limits each
+/// setting is validated against.
+///
+/// Read rather than known, for the reason the Autopilot pane reads its
+/// ceilings: a control bounded by this app's own idea of the limits eventually
+/// offers a value the CLI refuses, and the refusal lands after the user pressed
+/// Save.
+///
+/// Note what is absent: any expression of "the goal must be below the
+/// threshold". That is not a bound on either number — it moves as the other one
+/// moves — and a client that turned it into a range would be reimplementing the
+/// validator instead of reading it. The pane learns that rule the only honest
+/// way, from the refusal.
+struct RecoverySettingsBoundsReportDto: Decodable, Equatable {
+    let notifyAtMinimumUsedPercent: Double
+    let notifyAtMaximumUsedPercent: Double
+    let goalMinimumUsedPercent: Double
+    let goalMaximumUsedPercent: Double
+
+    enum CodingKeys: String, CodingKey {
+        case notifyAtMinimumUsedPercent = "notify_at_minimum_used_percent"
+        case notifyAtMaximumUsedPercent = "notify_at_maximum_used_percent"
+        case goalMinimumUsedPercent = "goal_minimum_used_percent"
+        case goalMaximumUsedPercent = "goal_maximum_used_percent"
     }
 }
 

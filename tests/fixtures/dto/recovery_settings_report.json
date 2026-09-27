@@ -1,0 +1,17 @@
+{
+  "notify_at_used_percent": 85.0,
+  "notify_at_description": "85% used",
+  "default_goal": {
+    "used_percent": 60.0,
+    "free_percent": 40.0,
+    "description": "60% used (40% free)"
+  },
+  "bounds": {
+    "notify_at_minimum_used_percent": 1.0,
+    "notify_at_maximum_used_percent": 99.0,
+    "goal_minimum_used_percent": 0.0,
+    "goal_maximum_used_percent": 100.0
+  },
+  "stored_at": "/Users/dev/Library/Application Support/Glomeris/settings.conf",
+  "loaded_from_file": true
+}

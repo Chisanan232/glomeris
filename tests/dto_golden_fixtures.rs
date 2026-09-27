@@ -35,6 +35,9 @@
 //! for the same reason: `AiPlanSectionView.swift` decodes it.
 //! `LlmCheckReport` and `LlmPayloadReport` were added in HORO-1309, when
 //! `AiProviderPreferencesView.swift` started decoding both.
+//! The recovery reports were added in HORO-1506 and the settings reports in
+//! HORO-1507, when `RecoverySectionView.swift` and
+//! `RecoveryPreferencesView.swift` started decoding them.
 
 use std::path::PathBuf;
 
@@ -42,6 +45,7 @@ use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLET
 use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
 };
+use glomeris::cli::settings::{build_settings_rejection_report, build_settings_report};
 use glomeris::executor::goal::RecoveryGoal;
 use glomeris::executor::recovery_loop::{FreeTarget, RecoveryReport, StopReason};
 use glomeris::monitor::config::ThresholdConfig;
@@ -53,6 +57,7 @@ use glomeris::reporting::dto::{
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
     OfferedAction, StatusReport,
 };
+use glomeris::settings::RecoverySettings;
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -866,4 +871,62 @@ fn recovery_goal_rejection_report_with_no_figures_matches_golden_fixture() {
         RecoveryGoal::from_used_percent(f64::NAN).expect_err("NaN is not a usable goal");
     let report = build_goal_rejection_report(&rejection);
     assert_matches_fixture(&report, "recovery_goal_rejection_report_not_finite.json");
+}
+
+// ---------------------------------------------------------------------------
+// Settings reports (HORO-1507)
+// ---------------------------------------------------------------------------
+//
+// Built through the validators for the same reason the recovery fixtures go
+// through their builders, plus one of their own: the two numbers here are
+// constrained *against each other*, so a struct literal could pin a pair the
+// CLI would refuse and the settings pane would then be tested against a state
+// no user can reach.
+
+/// The settings report, with a stored pair (HORO-1507).
+///
+/// Built through `with_changes` rather than as a struct literal, so the fixture
+/// carries a pair the validator actually accepted — a hand-written literal could
+/// pin a combination `settings set` would refuse, and the app would then be
+/// tested against a state it can never be in.
+#[test]
+fn recovery_settings_report_matches_golden_fixture() {
+    let settings = RecoverySettings::default()
+        .with_changes(Some(85.0), Some(60.0))
+        .expect("85% threshold with a 60% goal is a valid pair");
+    let report = build_settings_report(
+        &settings,
+        Some("/Users/dev/Library/Application Support/Glomeris/settings.conf".to_string()),
+        true,
+    );
+    assert_matches_fixture(&report, "recovery_settings_report.json");
+}
+
+/// The same report before anything has been stored.
+///
+/// Two things are pinned that the populated fixture cannot pin: `stored_at`
+/// omitted rather than null — the one case where `$HOME` could not be resolved —
+/// and `loaded_from_file: false`, which is the flag a pane needs to tell "these
+/// are the built-in numbers" from "these were chosen". A client that read the
+/// absence of the path as "not configured" would be conflating two different
+/// facts.
+#[test]
+fn recovery_settings_report_for_the_built_in_defaults_matches_golden_fixture() {
+    let report = build_settings_report(&RecoverySettings::default(), None, false);
+    assert_matches_fixture(&report, "recovery_settings_report_defaults.json");
+}
+
+/// A refused change (HORO-1507).
+///
+/// The cross-field refusal, chosen because it is the only one carrying *both*
+/// figures: it is about neither number on its own, and a client showing only one
+/// of them would send the user to the field they may not have wanted to change.
+/// Obtained from the validator, so the message is the one the CLI really prints.
+#[test]
+fn settings_rejection_report_matches_golden_fixture() {
+    let rejection = RecoverySettings::default()
+        .with_changes(Some(85.0), Some(90.0))
+        .expect_err("a goal above the alert threshold is refused");
+    let report = build_settings_rejection_report(&rejection);
+    assert_matches_fixture(&report, "settings_rejection_report.json");
 }

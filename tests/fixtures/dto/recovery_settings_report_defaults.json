@@ -1,0 +1,16 @@
+{
+  "notify_at_used_percent": 75.0,
+  "notify_at_description": "75% used",
+  "default_goal": {
+    "used_percent": 70.0,
+    "free_percent": 30.0,
+    "description": "70% used (30% free)"
+  },
+  "bounds": {
+    "notify_at_minimum_used_percent": 1.0,
+    "notify_at_maximum_used_percent": 99.0,
+    "goal_minimum_used_percent": 0.0,
+    "goal_maximum_used_percent": 100.0
+  },
+  "loaded_from_file": false
+}
