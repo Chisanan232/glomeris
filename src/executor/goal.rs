@@ -136,6 +136,39 @@ impl RecoveryGoal {
         FreeTarget::Percentage(self.free_percent())
     }
 
+    /// The used-percent goal equivalent to a raw free-space `target` on a
+    /// volume of `total_bytes`.
+    ///
+    /// The inverse direction, here rather than at the call site for the same
+    /// reason as [`RecoveryGoal::to_free_target`]: two conversions can
+    /// disagree. It exists so `free --target <floor> --dry-run` can render a
+    /// preview on the used axis without any caller doing arithmetic on a
+    /// percentage.
+    ///
+    /// Clamps rather than fails. A `total_bytes` of `0` yields a `0% used`
+    /// goal, matching
+    /// [`crate::executor::recovery_loop::target_met`]'s own treatment of a
+    /// degenerate volume; a byte floor above capacity also yields `0% used`,
+    /// which is the honest equivalent of an unreachable ask rather than a
+    /// silently shrunk one.
+    pub fn from_free_target(target: &FreeTarget, total_bytes: u64) -> Self {
+        let free_percent = match target {
+            FreeTarget::Percentage(pct) => *pct,
+            FreeTarget::AbsoluteBytes(bytes) => {
+                if total_bytes == 0 {
+                    100.0
+                } else {
+                    (*bytes as f64 / total_bytes as f64) * 100.0
+                }
+            }
+        };
+        let used_percent = (100.0 - free_percent).clamp(0.0, 100.0);
+        // The clamp above makes this infallible; `expect` documents that
+        // rather than hiding it behind a silent default.
+        Self::from_used_percent(used_percent)
+            .expect("clamped used percentage is always within 0..=100")
+    }
+
     /// Free bytes required on a volume of `total_bytes` for this goal to be
     /// met, rounded up so the returned figure genuinely satisfies
     /// [`crate::executor::recovery_loop::target_met`] rather than landing one
@@ -234,9 +267,7 @@ mod tests {
         );
         assert_eq!(
             RecoveryGoal::from_used_percent(-0.5),
-            Err(GoalRejection::OutOfRange {
-                used_percent: -0.5
-            })
+            Err(GoalRejection::OutOfRange { used_percent: -0.5 })
         );
     }
 
@@ -283,6 +314,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn from_free_target_round_trips_a_percentage_floor() {
+        for free_pct in [0.0, 12.5, 40.0, 100.0] {
+            let goal = RecoveryGoal::from_free_target(&FreeTarget::Percentage(free_pct), 1000);
+            assert_eq!(goal.free_percent(), free_pct);
+            assert_eq!(goal.to_free_target(), FreeTarget::Percentage(free_pct));
+        }
+    }
+
+    #[test]
+    fn from_free_target_expresses_a_byte_floor_on_the_used_axis() {
+        // A 400-byte floor on a 1000-byte volume is 40% free, i.e. 60% used.
+        let goal = RecoveryGoal::from_free_target(&FreeTarget::AbsoluteBytes(400), 1000);
+        assert_eq!(goal.used_percent(), 60.0);
+        assert_eq!(goal.describe(), "60% used (40% free)");
+    }
+
+    #[test]
+    fn from_free_target_clamps_an_unreachable_or_degenerate_ask_to_zero_used() {
+        // A floor above capacity cannot be met; 0% used is the honest
+        // equivalent of that, not a quietly shrunk goal.
+        let above = RecoveryGoal::from_free_target(&FreeTarget::AbsoluteBytes(9999), 1000);
+        assert_eq!(above.used_percent(), 0.0);
+        // Zero-capacity volume.
+        let degenerate = RecoveryGoal::from_free_target(&FreeTarget::AbsoluteBytes(1), 0);
+        assert_eq!(degenerate.used_percent(), 0.0);
     }
 
     #[test]
