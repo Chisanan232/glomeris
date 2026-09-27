@@ -221,6 +221,16 @@ targets:
       # .current()` traps without an app bundle, which is why its centre is
       # injected with no default.
       - path: Sources/PressureNotification.swift
+      # HORO-1508: the in-app alert card's wording. Compiled in because the two
+      # claims worth pinning are invisible on screen. Whether the card appears for
+      # someone who already answered "Remind me later" turns on the *episode*
+      # rather than on `notification_due`, and keying it on the banner's field
+      # would hide the only remaining route to the three answers from exactly the
+      # person who asked to be reminded. And what VoiceOver says is not a
+      # rendering: `spokenState` has to name the threshold and the goal as separate
+      # figures, which is the one accessibility claim a sighted reviewer cannot
+      # check by looking at the card.
+      - path: Sources/PressureAlertSectionView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
