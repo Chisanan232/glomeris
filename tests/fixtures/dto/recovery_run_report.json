@@ -1,0 +1,23 @@
+{
+  "goal": {
+    "used_percent": 60.0,
+    "free_percent": 40.0,
+    "description": "60% used (40% free)"
+  },
+  "target": "40% free",
+  "stop_reason": "target_reached",
+  "stop_reason_detail": "The recovery goal was reached: re-measured free space satisfies it.",
+  "iterations_run": 3,
+  "actions_executed": 4,
+  "actions_declined_or_skipped": 2,
+  "bytes_freed_measured": 150000000000,
+  "bytes_freed_measured_human": "139.7 GB",
+  "started_free_bytes": 60000000000,
+  "started_free_human": "55.9 GB",
+  "final_free_bytes": 210000000000,
+  "final_free_human": "195.6 GB",
+  "target_met": true,
+  "detector_failures": [],
+  "discovery_complete": true,
+  "caveats": []
+}

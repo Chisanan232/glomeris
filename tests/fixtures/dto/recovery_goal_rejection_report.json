@@ -1,0 +1,6 @@
+{
+  "reason": "not_an_improvement",
+  "message": "recovery goal 95% used is not an improvement on the current 88.0% used: choose a goal below current usage",
+  "goal_used_percent": 95.0,
+  "current_used_percent": 88.0
+}
