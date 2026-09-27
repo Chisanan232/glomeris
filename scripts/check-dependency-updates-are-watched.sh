@@ -58,11 +58,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
 
 WORKFLOW_DIR=".github/workflows"
 CONFIG=".github/dependabot.yml"
-
 # Ecosystems with a manifest in this repository that are deliberately not given
 # to Dependabot. Each entry is `<ecosystem>|<manifest that must still exist>`,
 # so an entry cannot outlive the thing it excuses: if the manifest goes away the
@@ -95,194 +93,229 @@ ECOSYSTEM_MANIFESTS=(
   "gitsubmodule|.gitmodules"
 )
 
-if [[ ! -d "$WORKFLOW_DIR" ]]; then
-  echo "FAIL: ${WORKFLOW_DIR} not found — run this from a full checkout."
-  exit 1
-fi
-
-if ! git rev-parse --git-dir >/dev/null 2>&1; then
-  echo "FAIL: not inside a git checkout, so the manifest set cannot be discovered."
-  echo "Guessing at it would report a pass over whatever happened to be on disk."
-  exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# 1. Collect every action reference.
-# ---------------------------------------------------------------------------
 # A step's `uses:` line, with or without the list dash. A commented-out one is
 # not matched, because a `#` cannot appear before the key.
 USES_RE='^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*'
 
-workflows=()
-while IFS= read -r found; do
-  workflows+=("$found")
-done < <(
-  find "$WORKFLOW_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
-    | LC_ALL=C sort
-)
-
-if [[ ${#workflows[@]} -eq 0 ]]; then
-  echo "FAIL: found no workflow files under ${WORKFLOW_DIR}."
-  echo "Passing by comparing nothing is the one outcome this guard must never produce."
-  exit 1
-fi
-
-# The value up to the first whitespace or comment, which is the `owner/repo@ref`
-# form. Local (`./path`) and container (`docker://`) references have no version
-# to compare and are dropped below.
-references="$(
-  grep -hE "$USES_RE" "${workflows[@]}" \
+# The versioned `owner/repo@ref` references in the files named as arguments.
+# Local (`./path`) and container (`docker://`) references have no version to
+# compare and are dropped.
+action_references_in() {
+  grep -hE "$USES_RE" "$@" \
     | sed -E "s|${USES_RE}||" \
     | sed -E 's|[[:space:]#].*$||' \
     | grep -E '^[^./][^[:space:]]*@[^[:space:]@]+$' \
     | LC_ALL=C sort -u \
     || true
-)"
-
-if [[ -z "$references" ]]; then
-  echo "FAIL: matched no versioned 'uses:' references across ${#workflows[@]} workflow file(s)."
-  echo "Every job in this repository checks out with an action, so zero means the pattern"
-  echo "above stopped matching — not that the workflows have no dependencies."
-  exit 1
-fi
-
-reference_count="$(printf '%s\n' "$references" | wc -l | tr -d '[:space:]')"
-action_count="$(printf '%s\n' "$references" | awk -F'@' '{print $1}' | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
-
-# ---------------------------------------------------------------------------
-# 2. No action referenced at two versions.
-# ---------------------------------------------------------------------------
-split="$(
-  printf '%s\n' "$references" \
-    | awk -F'@' '{ count[$1]++; seen[$1] = seen[$1] " @" $2 }
-                 END { for (name in count) if (count[name] > 1) printf "%s%s\n", name, seen[name] }' \
-    | LC_ALL=C sort
-)"
-
-if [[ -n "$split" ]]; then
-  echo "FAIL: an action is referenced at more than one version:"
-  printf '  %s\n' "$split"
-  echo ""
-  echo "Pick one and use it everywhere. Two majors of the same action means CI behaves"
-  echo "differently depending on which workflow fired, and the older pin is the one that"
-  echo "breaks first — at a moment nobody chose."
-  echo ""
-  echo "Find them with:"
-  echo "  grep -rn 'uses:' ${WORKFLOW_DIR}"
-  exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# 3. The configuration exists, watches the actions, and is not neutered.
-# ---------------------------------------------------------------------------
-if [[ ! -f "$CONFIG" ]]; then
-  echo "FAIL: ${CONFIG} does not exist, so nothing proposes updates for the"
-  echo "${action_count} action(s) above."
-  echo "Dependabot alerts are a repository setting and may also be off; this file is the"
-  echo "part that lives in the repository, and it is the part a checkout can verify."
-  exit 1
-fi
-
-# Uncommented key lines only. A `#` before the key means it is prose about the
-# key, which is how the header of that file explains itself.
-config_keys="$(grep -E '^[[:space:]]*(-[[:space:]]+)?[a-z-]+:' "$CONFIG" || true)"
-
-if ! printf '%s\n' "$config_keys" | grep -qE "package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*$"; then
-  echo "FAIL: ${CONFIG} does not declare the 'github-actions' ecosystem."
-  echo "Without it the ${action_count} action(s) this repository runs are watched by nothing,"
-  echo "which is the state HORO-1497 was filed about."
-  exit 1
-fi
-
-if printf '%s\n' "$config_keys" | grep -qE 'target-branch:'; then
-  echo "FAIL: ${CONFIG} sets 'target-branch:'."
-  echo ""
-  echo "That key silently disables security updates for the default branch. It does not"
-  echo "appear in the repository's settings UI, it produces no warning, and a configuration"
-  echo "carrying it is indistinguishable from a working one until someone checks whether a"
-  echo "known advisory ever opened a pull request."
-  exit 1
-fi
-
-if ! printf '%s\n' "$config_keys" | grep -qE '^[[:space:]]*version:[[:space:]]*2[[:space:]]*$'; then
-  echo "FAIL: ${CONFIG} does not declare 'version: 2'."
-  echo "GitHub rejects the whole file without it, and a rejected configuration watches"
-  echo "nothing while still being present in the repository."
-  exit 1
-fi
-
-watched_ecosystems="$(
-  printf '%s\n' "$config_keys" \
-    | grep -E 'package-ecosystem:' \
-    | sed -E 's|.*package-ecosystem:[[:space:]]*||; s|["'"'"']||g; s|[[:space:]]*$||' \
-    | LC_ALL=C sort -u
-)"
-
-# ---------------------------------------------------------------------------
-# 4. Every ecosystem with a manifest is watched, or excused by name.
-# ---------------------------------------------------------------------------
-is_watched() {
-  printf '%s\n' "$watched_ecosystems" | grep -qxF "$1"
 }
 
-is_excused() {
-  local wanted="$1" entry
+# --- rules -------------------------------------------------------------------
+#
+# Factored out so the self-test can run them against fixtures rather than
+# against a second copy of the logic. A guard whose self-test exercises a
+# paraphrase of the rules proves nothing about the rules.
+#
+# Runs in a subshell so that `cd` and the local variables cannot leak into the
+# next fixture. Returns 0 when the repository at $1 satisfies every rule.
+assess() (
+  local root="$1"
+  cd "$root" || {
+    echo "FAIL: ${root} is not a directory that can be entered."
+    return 1
+  }
+
+  if [[ ! -d "$WORKFLOW_DIR" ]]; then
+    echo "FAIL: ${WORKFLOW_DIR} not found — run this from a full checkout."
+    return 1
+  fi
+
+  if ! git rev-parse --git-dir >/dev/null 2>&1; then
+    echo "FAIL: not inside a git checkout, so the manifest set cannot be discovered."
+    echo "Guessing at it would report a pass over whatever happened to be on disk."
+    return 1
+  fi
+
+  # -------------------------------------------------------------------------
+  # 1. Collect every action reference.
+  # -------------------------------------------------------------------------
+  local workflows=()
+  local found
+  while IFS= read -r found; do
+    workflows+=("$found")
+  done < <(
+    find "$WORKFLOW_DIR" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) \
+      | LC_ALL=C sort
+  )
+
+  if [[ ${#workflows[@]} -eq 0 ]]; then
+    echo "FAIL: found no workflow files under ${WORKFLOW_DIR}."
+    echo "Passing by comparing nothing is the one outcome this guard must never produce."
+    return 1
+  fi
+
+  local references
+  references="$(action_references_in "${workflows[@]}")"
+
+  if [[ -z "$references" ]]; then
+    echo "FAIL: matched no versioned 'uses:' references across ${#workflows[@]} workflow file(s)."
+    echo "Every job in this repository checks out with an action, so zero means the pattern"
+    echo "above stopped matching — not that the workflows have no dependencies."
+    return 1
+  fi
+
+  local reference_count action_count
+  reference_count="$(printf '%s\n' "$references" | wc -l | tr -d '[:space:]')"
+  action_count="$(printf '%s\n' "$references" | awk -F'@' '{print $1}' | LC_ALL=C sort -u | wc -l | tr -d '[:space:]')"
+
+  # -------------------------------------------------------------------------
+  # 2. No action referenced at two versions.
+  # -------------------------------------------------------------------------
+  local split
+  split="$(
+    printf '%s\n' "$references" \
+      | awk -F'@' '{ count[$1]++; seen[$1] = seen[$1] " @" $2 }
+                   END { for (name in count) if (count[name] > 1) printf "%s%s\n", name, seen[name] }' \
+      | LC_ALL=C sort
+  )"
+
+  if [[ -n "$split" ]]; then
+    echo "FAIL: an action is referenced at more than one version:"
+    printf '  %s\n' "$split"
+    echo ""
+    echo "Pick one and use it everywhere. Two majors of the same action means CI behaves"
+    echo "differently depending on which workflow fired, and the older pin is the one that"
+    echo "breaks first — at a moment nobody chose."
+    echo ""
+    echo "Find them with:"
+    echo "  grep -rn 'uses:' ${WORKFLOW_DIR}"
+    return 1
+  fi
+
+  # -------------------------------------------------------------------------
+  # 3. The configuration exists, watches the actions, and is not neutered.
+  # -------------------------------------------------------------------------
+  if [[ ! -f "$CONFIG" ]]; then
+    echo "FAIL: ${CONFIG} does not exist, so nothing proposes updates for the"
+    echo "${action_count} action(s) above."
+    echo "Dependabot alerts are a repository setting and may also be off; this file is the"
+    echo "part that lives in the repository, and it is the part a checkout can verify."
+    return 1
+  fi
+
+  # Uncommented key lines only. A `#` before the key means it is prose about the
+  # key, which is how the header of that file explains itself.
+  local config_keys
+  config_keys="$(grep -E '^[[:space:]]*(-[[:space:]]+)?[a-z-]+:' "$CONFIG" || true)"
+
+  if ! printf '%s\n' "$config_keys" | grep -qE "package-ecosystem:[[:space:]]*[\"']?github-actions[\"']?[[:space:]]*$"; then
+    echo "FAIL: ${CONFIG} does not declare the 'github-actions' ecosystem."
+    echo "Without it the ${action_count} action(s) this repository runs are watched by nothing,"
+    echo "which is the state HORO-1497 was filed about."
+    return 1
+  fi
+
+  if printf '%s\n' "$config_keys" | grep -qE 'target-branch:'; then
+    echo "FAIL: ${CONFIG} sets 'target-branch:'."
+    echo ""
+    echo "That key silently disables security updates for the default branch. It does not"
+    echo "appear in the repository's settings UI, it produces no warning, and a configuration"
+    echo "carrying it is indistinguishable from a working one until someone checks whether a"
+    echo "known advisory ever opened a pull request."
+    return 1
+  fi
+
+  if ! printf '%s\n' "$config_keys" | grep -qE '^[[:space:]]*version:[[:space:]]*2[[:space:]]*$'; then
+    echo "FAIL: ${CONFIG} does not declare 'version: 2'."
+    echo "GitHub rejects the whole file without it, and a rejected configuration watches"
+    echo "nothing while still being present in the repository."
+    return 1
+  fi
+
+  local watched_ecosystems
+  watched_ecosystems="$(
+    printf '%s\n' "$config_keys" \
+      | grep -E 'package-ecosystem:' \
+      | sed -E 's|.*package-ecosystem:[[:space:]]*||; s|["'"'"']||g; s|[[:space:]]*$||' \
+      | LC_ALL=C sort -u
+  )"
+
+  # -------------------------------------------------------------------------
+  # 4. Every ecosystem with a manifest is watched, or excused by name.
+  # -------------------------------------------------------------------------
+  local entry
+  is_watched() {
+    printf '%s\n' "$watched_ecosystems" | grep -qxF "$1"
+  }
+
+  is_excused() {
+    local wanted="$1" candidate
+    for candidate in "${DELIBERATELY_UNWATCHED[@]}"; do
+      [[ "${candidate%%|*}" == "$wanted" ]] && return 0
+    done
+    return 1
+  }
+
+  # An exclusion cannot outlive the manifest it was written for.
+  local excused_manifest
   for entry in "${DELIBERATELY_UNWATCHED[@]}"; do
-    [[ "${entry%%|*}" == "$wanted" ]] && return 0
+    excused_manifest="${entry#*|}"
+    if [[ ! -e "$excused_manifest" ]]; then
+      echo "FAIL: '${entry%%|*}' is listed in DELIBERATELY_UNWATCHED in this script, but"
+      echo "${excused_manifest} no longer exists."
+      echo "Remove the entry — a stale exclusion is an exemption nobody is looking at."
+      return 1
+    fi
   done
-  return 1
-}
 
-# An exclusion cannot outlive the manifest it was written for.
-for entry in "${DELIBERATELY_UNWATCHED[@]}"; do
-  excused_manifest="${entry#*|}"
-  if [[ ! -e "$excused_manifest" ]]; then
-    echo "FAIL: '${entry%%|*}' is listed in DELIBERATELY_UNWATCHED in this script, but"
-    echo "${excused_manifest} no longer exists."
-    echo "Remove the entry — a stale exclusion is an exemption nobody is looking at."
-    exit 1
+  local unaccounted=()
+  local present_count=0
+  local ecosystem pathspec
+  for entry in "${ECOSYSTEM_MANIFESTS[@]}"; do
+    ecosystem="${entry%%|*}"
+    pathspec="${entry#*|}"
+
+    found="$(git ls-files -- "$pathspec" | head -1)"
+    [[ -n "$found" ]] || continue
+    present_count=$((present_count + 1))
+
+    if is_watched "$ecosystem" || is_excused "$ecosystem"; then
+      continue
+    fi
+    unaccounted+=("${ecosystem} (found ${found})")
+  done
+
+  if [[ ${#unaccounted[@]} -gt 0 ]]; then
+    echo "FAIL: ${#unaccounted[@]} dependency ecosystem(s) have a manifest here and are"
+    echo "neither watched by ${CONFIG} nor excused in this script:"
+    printf '  %s\n' "${unaccounted[@]}"
+    echo ""
+    echo "Either add an 'updates:' entry for it, or add it to DELIBERATELY_UNWATCHED above"
+    echo "with the reason. Doing neither leaves a dependency surface that nothing looks at"
+    echo "and nobody decided to ignore."
+    return 1
   fi
-done
 
-unaccounted=()
-present_count=0
-for entry in "${ECOSYSTEM_MANIFESTS[@]}"; do
-  ecosystem="${entry%%|*}"
-  pathspec="${entry#*|}"
-
-  found="$(git ls-files -- "$pathspec" | head -1)"
-  [[ -n "$found" ]] || continue
-  present_count=$((present_count + 1))
-
-  if is_watched "$ecosystem" || is_excused "$ecosystem"; then
-    continue
-  fi
-  unaccounted+=("${ecosystem} (found ${found})")
-done
-
-if [[ ${#unaccounted[@]} -gt 0 ]]; then
-  echo "FAIL: ${#unaccounted[@]} dependency ecosystem(s) have a manifest here and are"
-  echo "neither watched by ${CONFIG} nor excused in this script:"
-  printf '  %s\n' "${unaccounted[@]}"
+  echo "Action references across ${#workflows[@]} workflow file(s):"
+  printf '%s\n' "$references" | sed 's|^|  |'
   echo ""
-  echo "Either add an 'updates:' entry for it, or add it to DELIBERATELY_UNWATCHED above"
-  echo "with the reason. Doing neither leaves a dependency surface that nothing looks at"
-  echo "and nobody decided to ignore."
-  exit 1
+  echo "Ecosystems watched by ${CONFIG}:"
+  printf '%s\n' "$watched_ecosystems" | sed 's|^|  |'
+  if [[ ${#DELIBERATELY_UNWATCHED[@]} -gt 0 ]]; then
+    echo ""
+    echo "Deliberately unwatched, with the reason in this script's DELIBERATELY_UNWATCHED:"
+    for entry in "${DELIBERATELY_UNWATCHED[@]}"; do
+      echo "  ${entry%%|*} (${entry#*|})"
+    done
+  fi
+  echo ""
+  echo "PASS: ${reference_count} reference(s) to ${action_count} action(s), none split across versions; ${present_count} ecosystem(s) with a manifest, all accounted for."
+  return 0
+)
+
+# --- run ---------------------------------------------------------------------
+
+if assess "$REPO_ROOT"; then
+  exit 0
 fi
 
-echo "Action references across ${#workflows[@]} workflow file(s):"
-printf '%s\n' "$references" | sed 's|^|  |'
-echo ""
-echo "Ecosystems watched by ${CONFIG}:"
-printf '%s\n' "$watched_ecosystems" | sed 's|^|  |'
-if [[ ${#DELIBERATELY_UNWATCHED[@]} -gt 0 ]]; then
-  echo ""
-  echo "Deliberately unwatched, with the reason in this script's DELIBERATELY_UNWATCHED:"
-  for entry in "${DELIBERATELY_UNWATCHED[@]}"; do
-    echo "  ${entry%%|*} (${entry#*|})"
-  done
-fi
-echo ""
-echo "PASS: ${reference_count} reference(s) to ${action_count} action(s), none split across versions; ${present_count} ecosystem(s) with a manifest, all accounted for."
-exit 0
+exit 1
