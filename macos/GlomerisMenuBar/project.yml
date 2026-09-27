@@ -189,6 +189,16 @@ targets:
       # show that exit 3 with a body, exit 2 with a version-skew marker and exit 2
       # with prose are read as three different things.
       - path: Sources/PressureEpisodeClient.swift
+      # HORO-1508: the background reader, compiled in because every acceptance
+      # scenario AC 7 lists is a sequence of its calls. `PressureBannerPlan.decide`
+      # is a pure function of a report and what this session already raised, so
+      # crossing, recovery below the hysteresis margin, re-crossing, snooze and
+      # ignore are assertions about values — no disk has to fill up and no banner
+      # has to appear. The two that could not be checked any other way: the
+      # post-snooze re-raise is a *different* banner for the *same* episode (keyed
+      # on the id alone, "remind me later" would silently mean "never again"), and
+      # a raise that failed must not consume the episode's one chance to be shown.
+      - path: Sources/PressureEpisodeMonitor.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests

@@ -44,6 +44,7 @@
 		66FFC9C14B1A422451DC56ED /* GlomerisLlmSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 558C6D9B51E2DBA8DFBEA99D /* GlomerisLlmSettingsStore.swift */; };
 		67877F0AB6306B03114DDDDD /* GlomerisVocabulary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D48A22858E94A17C0A670F4 /* GlomerisVocabulary.swift */; };
 		6C58229013620B28F0455D6F /* GlomerisByteFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = CAB8A9241AA91E088AF94047 /* GlomerisByteFormat.swift */; };
+		6CF43758E0FD7B6F343F35D6 /* PressureEpisodeMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 065A9E2A402A94900258E6A8 /* PressureEpisodeMonitorTests.swift */; };
 		6D9DD1B21DA0C217B8B11758 /* GlomerisDesignSystemTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BECB6ADDEAAC408D1C8FBD6A /* GlomerisDesignSystemTests.swift */; };
 		6EDF8A0DD97C09CBCE5ABE8A /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
 		6EF44220294C701CFE6C2DC0 /* SingleInstanceGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0803EC181FBF0B0D1507D2C /* SingleInstanceGuardTests.swift */; };
@@ -51,6 +52,7 @@
 		74B89E9F04018A21BB2E177A /* GlomerisExecutableLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A3E6A530DA68EDBAE46ED8 /* GlomerisExecutableLocatorTests.swift */; };
 		75B85E1DE42B288E5148DDFE /* ApplyPlanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E169B1E4235782D6C59E4FE /* ApplyPlanView.swift */; };
 		7765D1EC48C4DACF135BD63F /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
+		77F2D4731DA004387FF6714E /* PressureEpisodeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F906F72C72A1FB6C19DFB37 /* PressureEpisodeMonitor.swift */; };
 		79370CF11525490DD5B73CC3 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
 		7994B235BE871884E2AEAB08 /* BundleIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F64EDD803CBF517A519597B /* BundleIdentity.swift */; };
 		7B6DDC175DFBFBB860E5CBA5 /* BundleIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */; };
@@ -66,6 +68,7 @@
 		89543AEC87E7A164FB4ABCB1 /* ProjectRootsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017031320C8922881F4739BC /* ProjectRootsStore.swift */; };
 		8B353B39BE18016E0CA9624F /* ProjectRootsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA84B79B4966F05DE18D3127 /* ProjectRootsStoreTests.swift */; };
 		9105F63CB2E9FF2919AC35A0 /* AutopilotPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */; };
+		A16BA411D89D8E92962D8EE7 /* PressureEpisodeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F906F72C72A1FB6C19DFB37 /* PressureEpisodeMonitor.swift */; };
 		A2F3A16A6E272E1B72C78FBA /* GlomerisPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCB103016472A37B7F09292B /* GlomerisPopoverView.swift */; };
 		A407F3D2CBB4A2C23A6AED8E /* SpokenLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FAC22B023BB94EA556577 /* SpokenLabel.swift */; };
 		A9ABA737E2A4AC531B8640A0 /* TestUserDefaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E5B2CB785BF50188F2E792A /* TestUserDefaults.swift */; };
@@ -114,6 +117,7 @@
 
 /* Begin PBXFileReference section */
 		017031320C8922881F4739BC /* ProjectRootsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsStore.swift; sourceTree = "<group>"; };
+		065A9E2A402A94900258E6A8 /* PressureEpisodeMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PressureEpisodeMonitorTests.swift; sourceTree = "<group>"; };
 		0A18F5BC6D9640B8FC883724 /* GlomerisCliProjectRootScope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisCliProjectRootScope.swift; sourceTree = "<group>"; };
 		0A4F457D173A23C0AD61CBDF /* CredentialAccessListTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialAccessListTests.swift; sourceTree = "<group>"; };
 		10A827F907A91AEA5B790A11 /* GlomerisLlmSettingsStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisLlmSettingsStoreTests.swift; sourceTree = "<group>"; };
@@ -151,6 +155,7 @@
 		8AA164A09246B00F00F33DAB /* SpokenLabelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpokenLabelTests.swift; sourceTree = "<group>"; };
 		8DD38E68A0373439B59F1F98 /* DtoGoldenFixturesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DtoGoldenFixturesTests.swift; sourceTree = "<group>"; };
 		8E5B2CB785BF50188F2E792A /* TestUserDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestUserDefaults.swift; sourceTree = "<group>"; };
+		8F906F72C72A1FB6C19DFB37 /* PressureEpisodeMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PressureEpisodeMonitor.swift; sourceTree = "<group>"; };
 		99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidatesSectionView.swift; sourceTree = "<group>"; };
 		9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutopilotPreferencesTests.swift; sourceTree = "<group>"; };
 		9D48A22858E94A17C0A670F4 /* GlomerisVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisVocabulary.swift; sourceTree = "<group>"; };
@@ -240,6 +245,7 @@
 				1A38DA67075A1D20749AA40B /* OverviewState.swift */,
 				8906B36CF3E4AA34D9E7564C /* PlanApplication.swift */,
 				6A9C42447F19B4FF8062E510 /* PressureEpisodeClient.swift */,
+				8F906F72C72A1FB6C19DFB37 /* PressureEpisodeMonitor.swift */,
 				B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */,
 				017031320C8922881F4739BC /* ProjectRootsStore.swift */,
 				E7DD0C693454E87FB2AEBAF9 /* RecoveryPreferencesView.swift */,
@@ -281,6 +287,7 @@
 				FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */,
 				DADBD41F34721D97EB1E2605 /* PlanApplicationTests.swift */,
 				DA4D9AC03E8F7B1E7FD9FDBF /* PressureEpisodeClientTests.swift */,
+				065A9E2A402A94900258E6A8 /* PressureEpisodeMonitorTests.swift */,
 				8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */,
 				DA84B79B4966F05DE18D3127 /* ProjectRootsStoreTests.swift */,
 				EB357B6854DACD0589265315 /* RecoveryPreferencesTests.swift */,
@@ -439,6 +446,8 @@
 				F5C7757C1A78DEEA5F600852 /* PlanApplicationTests.swift in Sources */,
 				1B82E918C879BCD20EB8A797 /* PressureEpisodeClient.swift in Sources */,
 				DB88E99DC3C79235C5CF19EB /* PressureEpisodeClientTests.swift in Sources */,
+				77F2D4731DA004387FF6714E /* PressureEpisodeMonitor.swift in Sources */,
+				6CF43758E0FD7B6F343F35D6 /* PressureEpisodeMonitorTests.swift in Sources */,
 				36F60F807942391399DB01D2 /* ProjectRootsPreferencesView.swift in Sources */,
 				D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */,
 				89543AEC87E7A164FB4ABCB1 /* ProjectRootsStore.swift in Sources */,
@@ -489,6 +498,7 @@
 				6EDF8A0DD97C09CBCE5ABE8A /* OverviewState.swift in Sources */,
 				5574CDBBE4BC468971B1A704 /* PlanApplication.swift in Sources */,
 				4C8E1D088CA3CF301394382B /* PressureEpisodeClient.swift in Sources */,
+				A16BA411D89D8E92962D8EE7 /* PressureEpisodeMonitor.swift in Sources */,
 				316F2E44994F8F44D10C01F6 /* ProjectRootsPreferencesView.swift in Sources */,
 				861A2E9ED2F71299D3BB44C9 /* ProjectRootsStore.swift in Sources */,
 				CCF168A524A4A873F44FD1EB /* RecoveryPreferencesView.swift in Sources */,
