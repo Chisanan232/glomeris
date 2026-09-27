@@ -20,6 +20,7 @@
 
 pub mod help;
 pub mod recovery;
+pub mod settings;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
