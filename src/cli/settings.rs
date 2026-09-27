@@ -13,8 +13,13 @@
 //! every prose line names its axis, and the used↔free inversion still happens
 //! only inside [`RecoveryGoal`](crate::executor::goal::RecoveryGoal).
 
-use crate::reporting::dto::{RecoverySettingsReport, SettingsRejectionReport};
-use crate::settings::{RecoverySettings, SettingsRejection};
+use crate::executor::goal::RecoveryGoal;
+use crate::reporting::dto::{
+    RecoverySettingsBoundsReport, RecoverySettingsReport, SettingsRejectionReport,
+};
+use crate::settings::{
+    RecoverySettings, SettingsRejection, MAX_NOTIFY_AT_USED_PERCENT, MIN_NOTIFY_AT_USED_PERCENT,
+};
 
 use super::recovery::build_recovery_goal_report;
 
@@ -33,8 +38,23 @@ pub fn build_settings_report(
         notify_at_used_percent: settings.notify_at_used_percent(),
         notify_at_description: settings.describe_notify_at(),
         default_goal: build_recovery_goal_report(&settings.default_goal()),
+        bounds: bounds_report(),
         stored_at,
         loaded_from_file,
+    }
+}
+
+/// The bounds, read from the constants the validators themselves read.
+///
+/// Not a `const` in the DTO module: that would put the numbers somewhere a
+/// client reads and nothing checks, which is exactly the drift this field
+/// exists to prevent.
+fn bounds_report() -> RecoverySettingsBoundsReport {
+    RecoverySettingsBoundsReport {
+        notify_at_minimum_used_percent: MIN_NOTIFY_AT_USED_PERCENT,
+        notify_at_maximum_used_percent: MAX_NOTIFY_AT_USED_PERCENT,
+        goal_minimum_used_percent: RecoveryGoal::MINIMUM_USED_PERCENT,
+        goal_maximum_used_percent: RecoveryGoal::MAXIMUM_USED_PERCENT,
     }
 }
 
@@ -207,6 +227,64 @@ mod tests {
         .unwrap();
         assert!(!json.contains("used_percent"), "{json}");
         assert!(json.contains("notify_threshold_not_finite"), "{json}");
+    }
+
+    /// The reported bounds are proven against the validators rather than
+    /// compared to the constants they were built from.
+    ///
+    /// Mirroring the constants would pass even if the validators enforced
+    /// something else entirely, which is the whole failure this field exists to
+    /// prevent — a pane built to these numbers would then offer a value the CLI
+    /// refuses. So each reported edge is *accepted*, and a value just outside
+    /// each one is *refused*.
+    #[test]
+    fn the_reported_bounds_are_the_ones_actually_enforced() {
+        let bounds = build_settings_report(&RecoverySettings::default(), None, false).bounds;
+        let base = RecoverySettings::default();
+
+        // A goal low enough to stay below either threshold edge, so these
+        // cases test the threshold and nothing else.
+        let low_goal = Some(0.5);
+        assert!(base
+            .with_changes(Some(bounds.notify_at_minimum_used_percent), low_goal)
+            .is_ok());
+        assert!(base
+            .with_changes(Some(bounds.notify_at_maximum_used_percent), low_goal)
+            .is_ok());
+        for outside in [
+            bounds.notify_at_minimum_used_percent - 0.5,
+            bounds.notify_at_maximum_used_percent + 0.5,
+        ] {
+            assert_eq!(
+                base.with_changes(Some(outside), low_goal).map(|_| ()),
+                Err(SettingsRejection::NotifyThresholdOutOfRange {
+                    used_percent: outside
+                }),
+                "{outside} should be outside the reported threshold bounds"
+            );
+        }
+
+        // The goal's own edges, each paired with a threshold above it so the
+        // cross-field rule is not what is being measured. The maximum goal
+        // (100% used) cannot be below any threshold, so it is checked through
+        // `RecoveryGoal` directly — the constructor is what the bound is a
+        // bound on.
+        assert!(base
+            .with_changes(Some(1.0), Some(bounds.goal_minimum_used_percent))
+            .is_ok());
+        assert!(RecoveryGoal::from_used_percent(bounds.goal_maximum_used_percent).is_ok());
+        for outside in [
+            bounds.goal_minimum_used_percent - 0.5,
+            bounds.goal_maximum_used_percent + 0.5,
+        ] {
+            assert_eq!(
+                RecoveryGoal::from_used_percent(outside).map(|_| ()),
+                Err(crate::executor::goal::GoalRejection::OutOfRange {
+                    used_percent: outside
+                }),
+                "{outside} should be outside the reported goal bounds"
+            );
+        }
     }
 
     #[test]

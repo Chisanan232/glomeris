@@ -108,13 +108,24 @@ pub struct GoalProgress {
 }
 
 impl RecoveryGoal {
+    /// Inclusive bounds on a goal, named so a client can be built that cannot
+    /// ask for one outside them (HORO-1507's settings pane reports these
+    /// rather than knowing them).
+    ///
+    /// Constants rather than a literal range inside the constructor, because a
+    /// surface that offered a control bounded by its own idea of the limits
+    /// would drift from the thing that enforces them. `from_used_percent`
+    /// reads these too, so there is one pair of numbers.
+    pub const MINIMUM_USED_PERCENT: f64 = 0.0;
+    pub const MAXIMUM_USED_PERCENT: f64 = 100.0;
+
     /// The only constructor. Rejects non-finite values and anything outside
-    /// `0..=100`.
+    /// [`Self::MINIMUM_USED_PERCENT`]`..=`[`Self::MAXIMUM_USED_PERCENT`].
     pub fn from_used_percent(used_percent: f64) -> Result<Self, GoalRejection> {
         if !used_percent.is_finite() {
             return Err(GoalRejection::NotFinite);
         }
-        if !(0.0..=100.0).contains(&used_percent) {
+        if !(Self::MINIMUM_USED_PERCENT..=Self::MAXIMUM_USED_PERCENT).contains(&used_percent) {
             return Err(GoalRejection::OutOfRange { used_percent });
         }
         Ok(Self { used_percent })

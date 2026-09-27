@@ -1079,7 +1079,14 @@ What this page adds:
 - `--json` belongs to both verbs and prints one shape from both:
   `notify_at_used_percent` and `notify_at_description` for the threshold, a
   `default_goal` object carrying `used_percent`, `free_percent` and
-  `description` for the goal, `stored_at`, and `loaded_from_file`. It always
+  `description` for the goal, a `bounds` object carrying the four limits above
+  as `notify_at_minimum_used_percent`, `notify_at_maximum_used_percent`,
+  `goal_minimum_used_percent` and `goal_maximum_used_percent`, `stored_at`, and
+  `loaded_from_file`. `bounds` is there so a settings screen can offer a
+  control that cannot compose a value this command would refuse, without
+  knowing the limits independently and drifting from them; the cross-field rule
+  is deliberately absent from it, because a limit that moves as the other
+  number moves is not a bound on either one. It always
   describes what is in force *after* the command ran. `loaded_from_file` is
   reported rather than an `is_default` flag, because a user may legitimately
   store the default numbers and a client must be able to tell "nothing chosen

@@ -1240,6 +1240,8 @@ pub struct RecoverySettingsReport {
     pub notify_at_description: String,
     /// The recovery goal a new run starts from unless the user overrides it.
     pub default_goal: RecoveryGoalReport,
+    /// What each of the two numbers is allowed to be.
+    pub bounds: RecoverySettingsBoundsReport,
     /// Absolute path of the settings file, or `null` when `$HOME` could not
     /// be resolved. Local, and never part of any provider request — same rule
     /// as [`AutopilotEnvelopeReport::stored_at`].
@@ -1254,6 +1256,33 @@ pub struct RecoverySettingsReport {
     /// who had just configured it would be wrong in the more confusing
     /// direction.
     pub loaded_from_file: bool,
+}
+
+/// What the two settings are each allowed to be (HORO-1507).
+///
+/// Reported for the same reason [`AutopilotCeilingsReport`] is: a settings
+/// screen that knew these numbers independently would eventually offer a value
+/// the CLI then refuses, and the refusal would arrive after the user pressed
+/// Save. Published as data, a control can be built that cannot compose a
+/// request outside them.
+///
+/// What is deliberately **not** here is the cross-field rule — that the goal
+/// must be below the threshold. It is not a bound on either number: it depends
+/// on the other one, it moves as the other one moves, and a client that tried
+/// to encode it as a range would be reimplementing
+/// [`RecoverySettings::with_changes`](crate::settings::RecoverySettings::with_changes)
+/// rather than reading it. That rule stays where it is enforced, and a client
+/// learns it from the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct RecoverySettingsBoundsReport {
+    /// Inclusive lower bound on the alert threshold, percent used.
+    pub notify_at_minimum_used_percent: f64,
+    /// Inclusive upper bound on the alert threshold, percent used.
+    pub notify_at_maximum_used_percent: f64,
+    /// Inclusive lower bound on the recovery goal, percent used.
+    pub goal_minimum_used_percent: f64,
+    /// Inclusive upper bound on the recovery goal, percent used.
+    pub goal_maximum_used_percent: f64,
 }
 
 /// A refused settings change, machine-readable (HORO-1507).
