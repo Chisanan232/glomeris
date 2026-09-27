@@ -633,7 +633,7 @@ struct ApplyPlanView: View {
         let arguments = buildExecuteArguments(
             actionId: actionId,
             resourceId: step.resourceId,
-            projectRootsArguments: projectRootsStore.projectRootArguments(forCommand: "execute"),
+            projectRootsArguments: executeProjectRootArguments(projectRootsStore),
             requiresConfirmation: step.disposition == .willRunAfterConfirming,
             fingerprintToken: step.fingerprintToken
         )

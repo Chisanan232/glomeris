@@ -657,7 +657,7 @@ struct CandidateDetailView: View {
         let arguments = buildExecuteArguments(
             actionId: actionId,
             resourceId: resourceId,
-            projectRootsArguments: projectRootsStore.projectRootArguments(forCommand: "execute"),
+            projectRootsArguments: executeProjectRootArguments(projectRootsStore),
             requiresConfirmation: viewModel.requiresConfirmation,
             fingerprintToken: viewModel.fingerprintToken
         )
@@ -696,6 +696,25 @@ struct CandidateDetailView: View {
         executeProgressText = nil
         isExecuting = false
     }
+}
+
+/// The configured project roots as arguments for `execute`, for the two views
+/// that call ``buildExecuteArguments(actionId:resourceId:projectRootsArguments:requiresConfirmation:fingerprintToken:)``.
+///
+/// HORO-1501 requires every caller to name the command it is attaching roots to,
+/// and this is where `execute` is named: the builder below is the one place that
+/// writes the subcommand, which `ApplyPlanViewTests
+/// .testEveryMutationGoesThroughTheSharedArgumentBuilder` asserts by requiring
+/// that the batch view never contains the string at all. Re-typing it at each
+/// call site to satisfy the new accessor would have put the CLI's own command
+/// names back into the views that test exists to keep them out of, for no gain —
+/// the question and the name belong on adjacent lines, not in two files.
+///
+/// The answer still comes from ``GlomerisCliProjectRootScope`` by way of
+/// ``ProjectRootsStore/projectRootArguments(forCommand:)``. This wrapper supplies
+/// the command, not the policy.
+func executeProjectRootArguments(_ store: ProjectRootsStore) -> [String] {
+    store.projectRootArguments(forCommand: "execute")
 }
 
 /// Pure builder for the `glomeris execute` argument array (HORO-1065).

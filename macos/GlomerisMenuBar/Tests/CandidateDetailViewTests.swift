@@ -405,6 +405,36 @@ final class CandidateDetailViewTests: XCTestCase {
         )
     }
 
+    /// HORO-1501. The two views that mutate ask this wrapper for `execute`'s
+    /// roots rather than naming the command themselves, so the wrapper is the
+    /// only thing standing between a configured root and the builder above.
+    /// It must pass the roots through, and it must be the scope table it asks —
+    /// `ProjectRootsStoreTests` proves the table's answer for `execute`, and this
+    /// proves the wrapper asks about `execute` and not about something else that
+    /// happens to be root-scoped too.
+    func testExecuteProjectRootArgumentsPassesEveryConfiguredRootThrough() {
+        let store = ProjectRootsStore(defaults: TestUserDefaults.inMemory())
+        store.addRoot("/tmp/proj-a")
+        store.addRoot("/tmp/proj-b")
+
+        XCTAssertEqual(
+            executeProjectRootArguments(store),
+            ["--project-root", "/tmp/proj-a", "--project-root", "/tmp/proj-b"]
+        )
+        XCTAssertEqual(
+            executeProjectRootArguments(store),
+            store.projectRootArguments(forCommand: "execute")
+        )
+    }
+
+    /// And with nothing configured it adds nothing, so the batch and the
+    /// single-item Clean both invoke `execute` exactly as they did before any
+    /// root existed.
+    func testExecuteProjectRootArgumentsIsEmptyWithNoRootsConfigured() {
+        let store = ProjectRootsStore(defaults: TestUserDefaults.inMemory())
+        XCTAssertEqual(executeProjectRootArguments(store), [])
+    }
+
     func testBuildExecuteArgumentsOmitsConfirmationFlagsWhenNotRequired() {
         let arguments = buildExecuteArguments(
             actionId: "cargo.clean.target_dir",
