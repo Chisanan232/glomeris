@@ -209,6 +209,18 @@ targets:
       # claim: it seeds the Recovery card's control through that card's own
       # conversion rather than a second rule of its own.
       - path: Sources/RecoveryDeepLink.swift
+      # HORO-1508: what the notification says and which button press becomes which
+      # answer. Compiled in because the two rules that matter cannot be seen
+      # failing on screen. Re-posting a request whose identifier was already
+      # delivered updates the old banner *in place with no new banner*, so the
+      # post-snooze reminder must carry the raised count in its identifier or a
+      # working snooze and a broken one look identical — silent. And *dismissing* a
+      # banner must not become an answer: recording it as "ignore this alert" would
+      # close an episode the user never answered. The delivery class in the same
+      # file is compiled but never constructed here: `UNUserNotificationCenter
+      # .current()` traps without an app bundle, which is why its centre is
+      # injected with no default.
+      - path: Sources/PressureNotification.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
