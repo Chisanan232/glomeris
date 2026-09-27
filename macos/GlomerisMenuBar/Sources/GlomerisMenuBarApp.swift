@@ -28,6 +28,20 @@ import SwiftUI
 
 @main
 struct GlomerisMenuBarApp: App {
+    /// HORO-1508: the disk-pressure reader, and the only thing in this app that
+    /// runs when nothing is on screen.
+    ///
+    /// A plain `let`, emphatically not an `@StateObject`, and the note on `body`
+    /// below is the reason: an observed store at this level re-evaluates `body` on
+    /// every change, and `body` constructs the Settings tabs. This monitor publishes
+    /// on every poll, all day. The measured consequence of hoisting an observed
+    /// store to this scene was the menu-bar item vanishing mid-session.
+    ///
+    /// It still has to live here rather than in the popover, because the popover
+    /// does not exist until somebody clicks the icon — and a user who has to open
+    /// the app to be told the disk is full has not been told anything. The card in
+    /// the popover observes this object; nothing in this file does.
+    private let pressure = PressureEpisodeMonitor.production()
     /// HORO-1453: one menu-bar item per logged-in user, decided before any scene
     /// exists.
     ///
@@ -61,6 +75,12 @@ struct GlomerisMenuBarApp: App {
         if !SingleInstanceGuard.enforce() {
             exit(0)
         }
+        // After the guard, never before. A process that is about to yield must not
+        // start polling, must not register a notification category, and must not
+        // ask for notification authorisation on behalf of the instance that is
+        // staying — two readers would also mean two banners for one episode, which
+        // `lastRaised` cannot prevent across processes.
+        pressure.start()
     }
 
     /// HORO-1365 deliberately does NOT put the scan and the plan here.
