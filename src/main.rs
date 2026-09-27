@@ -2657,6 +2657,34 @@ fn daemon_run() {
     let notifier = MacosNotifier;
     let persistence = FilePersistence::new(history_path);
 
+    // HORO-1508. Where the loop stops being only about the four built-in
+    // pressure states and starts being about the user's own threshold.
+    //
+    // Deliberately *outside* `monitor::run`. The loop's four states are
+    // Glomeris's, fixed and not configurable; an episode is the user's, and it
+    // exists to decide when they are spoken to. Threading a settings file and
+    // an episode store through `poll_once` would put a preference inside the
+    // thing that classifies disk pressure, and a pressure state must mean the
+    // same thing on every machine. The per-iteration hook is the right seam:
+    // the loop reports what it measured, and this decides what to say about it.
+    let episode_state_path = monitor::default_episode_state_path().ok();
+    if episode_state_path.is_none() {
+        // Said once, at startup, rather than every poll. The monitor still runs
+        // — the four pressure states and the history it records do not depend
+        // on this — so what is lost is the threshold notification and nothing
+        // else, and that is worth exactly one line.
+        eprintln!(
+            "glomeris monitor: HOME is not set, so pressure episodes cannot be recorded and \
+             threshold notifications will not be raised; disk-pressure monitoring continues"
+        );
+    }
+    // The last settings that loaded cleanly. Kept so that saving a malformed
+    // settings file cannot stop the daemon noticing a full disk: a parse error
+    // means the *new* preference is unusable, not that the old one stopped
+    // being what the user asked for.
+    let mut settings = glomeris::settings::RecoverySettings::default();
+    let mut reported_settings_error = false;
+
     monitor::run(
         &config,
         &thresholds,
@@ -2667,11 +2695,102 @@ fn daemon_run() {
         &heartbeat_path,
         None,
         |outcome| {
-            if let Err(e) = outcome {
-                eprintln!("glomeris monitor: poll failed: {e}");
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    eprintln!("glomeris monitor: poll failed: {e}");
+                    return;
+                }
+            };
+            let Some(state_path) = episode_state_path.as_deref() else {
+                return;
+            };
+
+            // Re-read every poll, not once at startup, so a threshold the user
+            // changes while the daemon is running takes effect at the next poll
+            // instead of at the next reboot. It is one small file read per
+            // interval.
+            match glomeris::settings::load_settings() {
+                Ok(loaded) => {
+                    settings = loaded;
+                    reported_settings_error = false;
+                }
+                Err(e) => {
+                    if !reported_settings_error {
+                        eprintln!(
+                            "glomeris monitor: could not read your settings ({e}); continuing \
+                             with the last good alert threshold of {}",
+                            settings.describe_notify_at()
+                        );
+                        reported_settings_error = true;
+                    }
+                }
             }
+
+            episode_step(state_path, &settings, &outcome);
         },
     );
+}
+
+/// One poll's worth of episode bookkeeping (HORO-1508).
+///
+/// Re-read from disk every poll rather than held in memory across the loop, and
+/// that is the whole reason this is a file at all: between two polls the
+/// menu-bar app may have written the user's answer through `glomeris pressure
+/// respond`. A daemon holding its own copy would overwrite that answer on the
+/// next save and re-raise a notification the user had already dismissed —
+/// which is precisely the storm this ticket exists to prevent.
+///
+/// The threshold is applied from `settings` at load, so an episode opened under
+/// a threshold the user has since raised is judged against the new one from
+/// here on.
+///
+/// Every failure is reported and survived. Nothing in this function can widen
+/// what may be deleted — an episode decides when the user is spoken to, never
+/// what may be removed — so there is no fail-closed obligation here, and
+/// stopping the monitor over an unwritable notification record would trade a
+/// missed banner for a blind machine.
+#[cfg(target_os = "macos")]
+fn episode_step(
+    state_path: &std::path::Path,
+    settings: &glomeris::settings::RecoverySettings,
+    outcome: &monitor::PollOutcome,
+) {
+    let config = monitor::EpisodeConfig::new(settings.notify_at_used_percent());
+    let mut tracker = monitor::load_tracker_at(state_path, config);
+    let episode = tracker.observe(
+        outcome.used_percent,
+        outcome.free_bytes,
+        monitor::persistence::unix_now_secs(),
+    );
+
+    // Logged to launchd's stderr, because an episode's life is otherwise
+    // invisible: a user asking "why was I not told?" or "why was I told twice?"
+    // needs these four moments and the numbers behind them.
+    if let Some(id) = episode.opened {
+        eprintln!(
+            "glomeris monitor: pressure episode #{id} opened at {:.1}% used (your alert \
+             threshold is {})",
+            outcome.used_percent,
+            settings.describe_notify_at()
+        );
+    }
+    if let Some(id) = episode.closed {
+        eprintln!(
+            "glomeris monitor: pressure episode #{id} closed at {:.1}% used",
+            outcome.used_percent
+        );
+    }
+    if episode.notification_became_due {
+        eprintln!("glomeris monitor: a pressure notification is owed and awaits the app");
+    }
+    if episode.snooze_elapsed {
+        eprintln!("glomeris monitor: a snoozed pressure notification is owed again");
+    }
+
+    if let Err(e) = monitor::save_tracker_at(state_path, &tracker) {
+        eprintln!("glomeris monitor: could not record the pressure episode: {e}");
+    }
 }
 
 /// The mount the recovery loop and its preview both measure. One constant so
