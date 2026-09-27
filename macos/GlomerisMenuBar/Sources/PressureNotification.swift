@@ -291,3 +291,29 @@ extension PressureNotificationCenterBanner: UNUserNotificationCenterDelegate {
         completionHandler([.banner, .list])
     }
 }
+
+// MARK: - The production wiring
+
+extension PressureEpisodeMonitor {
+    /// The monitor as the shipped app runs it: the real CLI, the real notification
+    /// centre, a real window.
+    ///
+    /// A named factory rather than three arguments at the call site, because there
+    /// are two call sites — the app's scene and the panel's `#Preview` — and the
+    /// dangerous half of this wiring is the one they must not disagree about.
+    /// `UNUserNotificationCenter.current()` traps in a process with no bundle,
+    /// which is why `PressureNotificationCenterBanner` takes its centre with no
+    /// default and why this function is the only place in the target that calls
+    /// `.current()`. Every test builds its own monitor from doubles instead.
+    ///
+    /// It does not `start()`. Polling begins when the caller says so — the app
+    /// starts it only after the single-instance guard has let this process live,
+    /// and the preview never starts it at all.
+    static func production() -> PressureEpisodeMonitor {
+        PressureEpisodeMonitor(
+            client: PressureEpisodeClient(),
+            banners: PressureNotificationCenterBanner(center: .current()),
+            deepLink: RecoveryDeepLinkWindowPresenter()
+        )
+    }
+}
