@@ -1051,6 +1051,164 @@ pub struct AutopilotEnvelopeReport {
     pub stored_at: Option<String>,
 }
 
+/// A recovery goal, rendered on **both** axes plus one unambiguous sentence
+/// (HORO-1506).
+///
+/// Both percentages are present deliberately. A client that shows only one
+/// of them still cannot be wrong about which it has, because the field names
+/// say so, and `description` gives a client with nowhere to put two numbers
+/// a single string that is still unambiguous. Produced by
+/// [`crate::executor::goal::RecoveryGoal`], which is the only type allowed
+/// to convert between the two.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveryGoalReport {
+    /// Target disk usage. The product-facing axis.
+    pub used_percent: f64,
+    /// The same goal as the recovery loop's own `FreeTarget::Percentage`
+    /// value, i.e. percent of capacity free.
+    pub free_percent: f64,
+    /// e.g. `"60% used (40% free)"`. Built in Rust so the CLI, the JSON, the
+    /// menu-bar label and the spoken accessibility string cannot word this
+    /// differently — the same reasoning as [`ExecuteReport`]'s human byte
+    /// fields (HORO-1312).
+    pub description: String,
+}
+
+/// What is *estimated* to be reclaimable right now, split by what policy
+/// would actually permit (HORO-1506).
+///
+/// Every byte figure here is a detector **estimate**, and the split is the
+/// point: a client that shows one total invites the user to read protected
+/// and confirmation-gated space as space they are about to get back. Nothing
+/// in this struct may be used to decide that a goal was met — see
+/// [`RecoveryPreviewReport::goal_appears_reachable`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RecoveryOpportunityReport {
+    /// Candidates that are `executable` and whose offered action does not
+    /// require confirmation: the space a recovery run could take without
+    /// asking.
+    pub actionable_now_count: usize,
+    pub actionable_now_bytes: u64,
+    pub actionable_now_human: String,
+    /// Candidates that are `executable` but whose offered action requires
+    /// confirmation. Real opportunity, but not automatic.
+    pub requires_confirmation_count: usize,
+    pub requires_confirmation_bytes: u64,
+    pub requires_confirmation_human: String,
+    /// Candidates that are not executable at all, and the `PROTECTED` subset
+    /// of them. Counted, not summed: presenting bytes a run can never take
+    /// as an "opportunity" would be the exact misread this split exists to
+    /// prevent.
+    pub not_executable_count: usize,
+    pub protected_count: usize,
+    /// `true` when any candidate contributing to a byte total above reported
+    /// its estimate as a lower bound, so the real figure may be larger.
+    pub is_lower_bound: bool,
+}
+
+/// The pre-flight for a recovery goal: what the volume looks like now, what
+/// the goal requires, and what is estimated to be available toward it —
+/// before anything is mutated (HORO-1506).
+///
+/// Produced by `glomeris free --dry-run`. Nothing in this report deletes
+/// anything, and nothing in it is authoritative about completion: the loop
+/// decides that from re-measured filesystem state.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveryPreviewReport {
+    pub goal: RecoveryGoalReport,
+    /// Current capacity and pressure state, the same shape `status --json`
+    /// prints, so a client parses one thing to learn one thing.
+    pub current: StatusReport,
+    /// Free bytes the volume must reach for the goal to be met.
+    pub required_free_bytes: u64,
+    pub required_free_human: String,
+    /// Additional free bytes still needed. Measured, from `current`.
+    pub bytes_needed: u64,
+    pub bytes_needed_human: String,
+    pub opportunity: RecoveryOpportunityReport,
+    /// A **planning** judgment only: whether the estimated
+    /// `actionable_now_bytes` covers `bytes_needed`.
+    ///
+    /// Deliberately named "appears". Section 9 of the recovery campaign is
+    /// explicit that a target may never be satisfied from summed candidate
+    /// estimates, and this field is that forbidden sum — safe here precisely
+    /// because it decides nothing. `false` does not mean a run is pointless
+    /// (estimates are often lower bounds), and `true` does not mean the goal
+    /// will be reached. Only re-measured free space determines that.
+    pub goal_appears_reachable: bool,
+    /// `false` as soon as any detector's probe failed, so an incomplete
+    /// search cannot read as a complete one.
+    pub discovery_complete: bool,
+    /// Plain sentences a client can show verbatim, covering exactly the ways
+    /// this report can mislead: estimates are not measurements, discovery may
+    /// be partial, and confirmation-gated space is not automatic.
+    pub caveats: Vec<String>,
+    pub detectors: Vec<DetectorHealthReport>,
+    pub candidates: Vec<DetectCandidateReport>,
+}
+
+/// The outcome of a real recovery run, machine-readable (HORO-1506).
+///
+/// `glomeris free` printed prose only, which left a GUI with nothing to
+/// parse but terminal output. Every number here comes from
+/// [`crate::executor::recovery_loop::RecoveryReport`], and the byte figures
+/// are measured, never estimated.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecoveryRunReport {
+    /// The goal this run worked toward, present whenever the run was started
+    /// from a used-percent goal. `null` for the raw `--target` form, whose
+    /// value is a free-space floor and is reported in `target` instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<RecoveryGoalReport>,
+    /// How the target was expressed on the command line, e.g.
+    /// `"20% free"` or `"5 GiB free"` — always naming the axis.
+    pub target: String,
+    /// Stable snake_case tag, from [`stop_reason_tag`].
+    pub stop_reason: &'static str,
+    /// One sentence explaining the stop reason in the terms a user cares
+    /// about. Never the bare word "Done": a run that stopped because nothing
+    /// safe was left says so.
+    pub stop_reason_detail: String,
+    /// Present only for `stop_reason == "error"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub iterations_run: u32,
+    pub actions_executed: u32,
+    pub actions_declined_or_skipped: u32,
+    /// Sum of **actual** reclaimed bytes, never expected.
+    pub bytes_freed_measured: u64,
+    pub bytes_freed_measured_human: String,
+    pub started_free_bytes: u64,
+    pub started_free_human: String,
+    pub final_free_bytes: u64,
+    pub final_free_human: String,
+    /// `true` when the goal/target was satisfied by the final re-measured
+    /// free space. Derived from the filesystem reading, not from the sum of
+    /// what was deleted.
+    pub target_met: bool,
+    /// Detectors whose probe failed during the run, `<id>: <reason>`.
+    pub detector_failures: Vec<String>,
+    /// `false` when `detector_failures` is non-empty.
+    pub discovery_complete: bool,
+    /// The same caveat sentences the prose output prints, so a client cannot
+    /// present a partial search as a complete one.
+    pub caveats: Vec<String>,
+}
+
+/// Stable snake_case tag per [`crate::executor::recovery_loop::StopReason`],
+/// following this module's convention of projecting a domain enum to a
+/// `&'static str` rather than deriving `Serialize` on it.
+pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &'static str {
+    use crate::executor::recovery_loop::StopReason;
+    match reason {
+        StopReason::TargetReached => "target_reached",
+        StopReason::SafeExhausted => "safe_exhausted",
+        StopReason::BudgetExceeded => "budget_exceeded",
+        StopReason::NoProgress => "no_progress",
+        StopReason::Error(_) => "error",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
