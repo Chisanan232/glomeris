@@ -129,7 +129,14 @@ pub enum SettingsRejection {
     /// rejection is reported truthfully rather than mapped onto whichever
     /// existing message is closest, which is how a user ends up reading a
     /// message about the wrong field.
-    GoalRefused { reason: &'static str },
+    ///
+    /// Carries the offending figure as well as the underlying tag, so that if
+    /// this ever does fire the user is told which number was refused rather
+    /// than only that one was.
+    GoalRefused {
+        reason: &'static str,
+        used_percent: f64,
+    },
 }
 
 impl fmt::Display for SettingsRejection {
@@ -162,9 +169,13 @@ impl fmt::Display for SettingsRejection {
                  threshold of {notify_at_used_percent}% used: recovery would aim at a disk \
                  no emptier than the one that raised the alert"
             ),
-            Self::GoalRefused { reason } => {
-                write!(f, "default recovery goal was refused ({reason})")
-            }
+            Self::GoalRefused {
+                reason,
+                used_percent,
+            } => write!(
+                f,
+                "default recovery goal {used_percent}% used was refused ({reason})"
+            ),
         }
     }
 }
@@ -196,8 +207,11 @@ impl SettingsRejection {
         match reason {
             GoalRejection::NotFinite => Self::GoalNotFinite,
             GoalRejection::OutOfRange { used_percent } => Self::GoalOutOfRange { used_percent },
-            GoalRejection::NotAnImprovement { .. } => Self::GoalRefused {
+            GoalRejection::NotAnImprovement {
+                goal_used_percent, ..
+            } => Self::GoalRefused {
                 reason: reason.as_str(),
+                used_percent: goal_used_percent,
             },
         }
     }
@@ -511,6 +525,7 @@ mod tests {
             },
             SettingsRejection::GoalRefused {
                 reason: "not_an_improvement",
+                used_percent: 42.0,
             },
         ];
         let mut tokens: Vec<&str> = all.iter().map(|r| r.as_str()).collect();
@@ -535,6 +550,10 @@ mod tests {
             SettingsRejection::GoalNotBelowNotifyThreshold {
                 goal_used_percent: 80.0,
                 notify_at_used_percent: 75.0,
+            },
+            SettingsRejection::GoalRefused {
+                reason: "not_an_improvement",
+                used_percent: 42.0,
             },
         ];
         for rejection in all {
