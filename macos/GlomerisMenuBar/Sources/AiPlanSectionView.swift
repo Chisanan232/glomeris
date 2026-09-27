@@ -830,8 +830,7 @@ struct AiPlanSectionView: View {
             let raw = try await client
                 .withEnvironment(await settingsStore.resolvedChildEnvironment())
                 .runRaw(
-                    ["llm-plan", "--json", "--progress-json"]
-                        + projectRootsStore.commandLineArguments,
+                    projectRootsStore.scoped(["llm-plan", "--json", "--progress-json"]),
                     progressType: ProgressEventDto.self,
                     onProgress: { event in
                         Task { @MainActor in

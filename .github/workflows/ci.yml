@@ -335,6 +335,33 @@ jobs:
       - name: Check every CLI token has GUI wording
         run: bash scripts/check-vocabulary-covers-cli-tokens.sh
 
+  app-cli-invocations-match-cli-contract:
+    # HORO-1501: the app builds argument vectors for the CLI and nothing
+    # compared them against the arguments the CLI accepts. The Status card ran
+    # `status --json --project-root <path>` for every user who had configured a
+    # project root; `status` accepts no project root and exits 2 when given one,
+    # so the card showed a CLI error instead of the disk figures it exists to
+    # show. With no roots configured the same code worked, which is how it
+    # passed review, tests and manual use.
+    #
+    # A separate job from vocabulary-covers-cli-tokens, which guards the
+    # neighbouring drift: that one is about the GUI having no word for a state
+    # the CLI reports, this one about the GUI sending an argument the CLI
+    # rejects. Both diff Swift against Rust and neither should hide behind the
+    # other's red X.
+    #
+    # The self-test runs first and in the same job. Every rule here is a
+    # negative assertion over source text, which is the shape of check that can
+    # quietly stop matching anything; a passing run of the guard means little
+    # without evidence that its rules still fire.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check every rule of the guard still fires
+        run: bash scripts/check-app-cli-invocations-match-cli-contract.sh --self-test
+      - name: Check the app's project-root scoping matches the CLI
+        run: bash scripts/check-app-cli-invocations-match-cli-contract.sh
+
   docs-cover-cli-commands:
     # HORO-1312: the book's CLI Reference had no mechanical tie to the command
     # surface, so it drifted and then excused the drift with a disclaimer

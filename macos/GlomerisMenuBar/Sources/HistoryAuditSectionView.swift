@@ -17,9 +17,16 @@
 //  Neither `glomeris history` nor `glomeris actions history` accepts a
 //  `--project-root` flag (see `book/src/cli_reference.md`) — both read
 //  global daemon-state files (`history.tsv` / `actions.jsonl`), not
-//  project-scoped detection state — so, unlike StatusHealthSectionView's
-//  `status --json` call, this view does not append
-//  `ProjectRootsStore.commandLineArguments`.
+//  project-scoped detection state — so this view attaches no project roots.
+//
+//  HORO-1501: that used to be phrased as a contrast with
+//  StatusHealthSectionView's `status --json` call, which did append them. It
+//  should not have. `status` accepts no project root either, and the CLI exits 2
+//  when handed one, so the Status card was broken for every user with a root
+//  configured while this comment recorded its behaviour as the norm to differ
+//  from. Which command takes roots is now one table — `GlomerisCliProjectRootScope`
+//  — rather than a claim restated per view, and the reason this view sends none
+//  is asserted there instead of described here.
 //
 //  Polling-vs-explicit-refresh design decision: this section follows
 //  StatusHealthSectionView's poll-on-appear-and-interval convention,

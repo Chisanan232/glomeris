@@ -501,7 +501,7 @@ struct ApplyPlanView: View {
             let resourceId = item.candidate.resourceId
             do {
                 let result = try await client.run(
-                    ["explain", resourceId, "--json"] + projectRootsStore.commandLineArguments,
+                    projectRootsStore.scoped(["explain", resourceId, "--json"]),
                     outputType: ExplainReportDto.self,
                     progressType: ProgressEventDto.self
                 )
@@ -633,7 +633,7 @@ struct ApplyPlanView: View {
         let arguments = buildExecuteArguments(
             actionId: actionId,
             resourceId: step.resourceId,
-            projectRootsArguments: projectRootsStore.commandLineArguments,
+            projectRootsArguments: executeProjectRootArguments(projectRootsStore),
             requiresConfirmation: step.disposition == .willRunAfterConfirming,
             fingerprintToken: step.fingerprintToken
         )
