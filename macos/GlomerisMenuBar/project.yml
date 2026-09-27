@@ -231,6 +231,15 @@ targets:
       # figures, which is the one accessibility claim a sighted reviewer cannot
       # check by looking at the card.
       - path: Sources/PressureAlertSectionView.swift
+      # HORO-1508: what the Recovery window holds once the deep link has opened it.
+      # `RecoveryDeepLinkWindowModel` is split out from the AppKit presenter in the
+      # same file precisely so it can be driven here — a test may not put an
+      # NSWindow on screen — and the case it exists for is silent: the daemon polls
+      # every thirty seconds, so a second alert can arrive while the user is
+      # deciding, and it must not replace a goal they set by hand on the screen
+      # where that number is about to be acted on. The presenter itself is compiled
+      # but never constructed; everything it does is NSWindow and NSApp.
+      - path: Sources/RecoveryDeepLinkWindow.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
