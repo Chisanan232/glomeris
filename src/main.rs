@@ -61,6 +61,7 @@ fn main() {
         Some("history") => run_history_command(&args[1..]),
         Some("free") => run_free_command(&args[1..]),
         Some("autopilot") => run_autopilot_command(&args[1..]),
+        Some("settings") => run_settings_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             eprintln!("{}", help::render_unknown_command_hint());
@@ -1413,14 +1414,16 @@ fn autopilot_reject_extra_args(sub: &str, args: &[String]) {
     }
 }
 
-/// Splits `--json` off an autopilot argument list, returning whether it was
+/// Splits `--json` off a strict argument list, returning whether it was
 /// present and whatever else was there.
 ///
-/// Separate from [`split_flags`] because the autopilot verbs reject anything
-/// they do not recognize rather than collecting it, so the remainder has to
-/// stay `String` for the existing rejection paths to keep reporting the
-/// offending token.
-fn autopilot_take_json_flag(args: &[String]) -> (bool, Vec<String>) {
+/// Separate from [`split_flags`] because the verbs that use this reject
+/// anything they do not recognize rather than collecting it, so the remainder
+/// has to stay `String` for the existing rejection paths to keep reporting the
+/// offending token. Shared by `autopilot`, `actions` and `settings`: three
+/// commands whose `--json` means the same thing should not have three parsers
+/// that could come to disagree about where the flag may appear.
+fn take_json_flag(args: &[String]) -> (bool, Vec<String>) {
     let mut json = false;
     let mut rest = Vec::with_capacity(args.len());
     for arg in args {
@@ -1458,7 +1461,7 @@ fn autopilot_flag_value<'a>(args: &'a [String], i: usize, flag: &str) -> &'a str
 /// Prints the stored envelope. AC 6: what Autopilot is authorized to do,
 /// readable before anything is enabled and without running anything.
 fn autopilot_show(args: &[String]) {
-    let (json, rest) = autopilot_take_json_flag(args);
+    let (json, rest) = take_json_flag(args);
     autopilot_reject_extra_args("show", &rest);
 
     let envelope = match glomeris::autopilot::load_envelope() {
@@ -1645,7 +1648,7 @@ fn autopilot_enable(args: &[String]) {
 /// `glomeris autopilot revoke` — AC 7. One bit, and every run re-reads the
 /// file, so this takes effect on the next run with nothing to restart.
 fn autopilot_revoke(args: &[String]) {
-    let (json, rest) = autopilot_take_json_flag(args);
+    let (json, rest) = take_json_flag(args);
     autopilot_reject_extra_args("revoke", &rest);
 
     let mut envelope = match glomeris::autopilot::load_envelope() {
@@ -1916,6 +1919,201 @@ fn print_recovery_report(
     // lives on the report so it has one producer and is testable.
     for line in report.discovery_caveat_lines() {
         println!("{line}");
+    }
+}
+
+/// `glomeris settings [show|set]` (HORO-1507).
+///
+/// `show` is the default, so a bare `glomeris settings` reads rather than
+/// writes — the same choice `autopilot` makes, and for the same reason: the
+/// command whose name is a noun should answer a question.
+///
+/// Nothing here deletes anything, and nothing here can widen what policy
+/// permits. The two numbers this command stores decide when the product
+/// speaks up and where recovery stops; every gate that stands between a
+/// candidate and its deletion is somewhere else entirely.
+fn run_settings_command(args: &[String]) {
+    let sub = args.first().map(String::as_str).unwrap_or("show");
+    let rest: &[String] = if args.is_empty() { &[] } else { &args[1..] };
+
+    match sub {
+        "show" => settings_show(rest),
+        "set" => settings_set(rest),
+        other => {
+            eprintln!("glomeris settings: unknown subcommand '{other}'");
+            print_command_usage("settings");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn settings_usage_exit(message: &str) -> ! {
+    eprintln!("glomeris settings: {message}");
+    print_command_usage("settings");
+    std::process::exit(2);
+}
+
+/// Exits 1 with the store's own message. One function so that a read failure
+/// and a write failure cannot drift into different exit codes — the same
+/// arrangement as [`autopilot_store_error_exit`].
+///
+/// Every store error lands here, including a `Refused` one. A stored file whose
+/// two numbers contradict each other is not this command line's mistake, and
+/// reporting it as a usage error would tell a script "you typed something
+/// wrong" about an invocation that typed nothing. Exit 2 is reserved for values
+/// that arrived as arguments.
+fn settings_store_error_exit(what: &str, e: glomeris::settings::SettingsStoreError) -> ! {
+    eprintln!("glomeris settings: failed to {what} your settings: {e}");
+    std::process::exit(1);
+}
+
+/// Prints settings as JSON, resolving the store path the same way the human
+/// output does.
+///
+/// One function for both verbs, so a client that reads `settings show` and a
+/// client that reads the result of `settings set` cannot be looking at two
+/// different shapes of the same two numbers.
+fn settings_print_json(settings: &glomeris::settings::RecoverySettings, loaded_from_file: bool) {
+    let stored_at = glomeris::settings::default_settings_path()
+        .ok()
+        .map(|path| path.display().to_string());
+    print_json_or_exit(&glomeris::cli::settings::build_settings_report(
+        settings,
+        stored_at,
+        loaded_from_file,
+    ));
+}
+
+fn settings_print_human(settings: &glomeris::settings::RecoverySettings, loaded_from_file: bool) {
+    for line in glomeris::cli::settings::describe_settings(settings) {
+        println!("{line}");
+    }
+    if let Ok(path) = glomeris::settings::default_settings_path() {
+        println!("stored at:         {}", path.display());
+    }
+    if !loaded_from_file {
+        // Said plainly, because "75% used" looks identical whether the user
+        // chose it or the product did, and only one of those is a decision
+        // anybody made.
+        println!("(built-in defaults — nothing stored yet)");
+    }
+}
+
+/// Whether a settings file exists at the default path.
+///
+/// Asked separately from loading rather than reported by the loader, because
+/// [`glomeris::settings::load_settings`] deliberately answers a missing file
+/// with the defaults — that is what makes a first run work. The GUI still
+/// needs to know which of the two happened.
+fn settings_file_exists() -> bool {
+    glomeris::settings::default_settings_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+fn settings_show(args: &[String]) {
+    let (json, rest) = take_json_flag(args);
+    if let Some(unexpected) = rest.first() {
+        settings_usage_exit(&format!("show takes no arguments (got '{unexpected}')"));
+    }
+
+    let stored = settings_file_exists();
+    let settings = match glomeris::settings::load_settings() {
+        Ok(settings) => settings,
+        Err(e) => settings_store_error_exit("read", e),
+    };
+
+    if json {
+        settings_print_json(&settings, stored);
+    } else {
+        settings_print_human(&settings, stored);
+    }
+}
+
+/// `glomeris settings set [--notify-at-used-percent N] [--default-goal-used-percent M]`.
+///
+/// Both flags are applied in one call to
+/// [`glomeris::settings::RecoverySettings::with_changes`] rather than one after
+/// the other, and that is load-bearing rather than tidy. A goal must stay below
+/// the threshold, so moving a pair from (75, 70) down to (60, 55) is a valid
+/// destination that is unreachable one field at a time: whichever field moves
+/// first is momentarily invalid against the old value of the other. Validating
+/// the pair once means the user is refused for the destination they asked for,
+/// never for the order the flags happened to appear in.
+///
+/// Requires at least one flag. `set` with neither is not an expensive no-op to
+/// be tolerated — it is a command line that did not say what it wanted, and
+/// silently succeeding at nothing is how a typo becomes "I changed it and it
+/// didn't work".
+fn settings_set(args: &[String]) {
+    let (json, rest) = take_json_flag(args);
+
+    let mut notify_at: Option<f64> = None;
+    let mut goal: Option<f64> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let flag = rest[i].as_str();
+        match flag {
+            "--notify-at-used-percent" | "--default-goal-used-percent" => {
+                let raw = match rest.get(i + 1) {
+                    Some(value) => value.as_str(),
+                    None => settings_usage_exit(&format!("{flag} needs a value")),
+                };
+                // The percent sign is accepted here for the same reason the
+                // config parser accepts it: a user who types what they read on
+                // screen has not made a mistake.
+                let value: f64 = match raw.trim_end_matches('%').parse() {
+                    Ok(value) => value,
+                    Err(_) => settings_usage_exit(&format!("{flag} needs a number (got '{raw}')")),
+                };
+                let slot = if flag == "--notify-at-used-percent" {
+                    &mut notify_at
+                } else {
+                    &mut goal
+                };
+                if slot.is_some() {
+                    settings_usage_exit(&format!("{flag} was given twice"));
+                }
+                *slot = Some(value);
+                i += 2;
+            }
+            other => settings_usage_exit(&format!("unknown option '{other}'")),
+        }
+    }
+
+    if notify_at.is_none() && goal.is_none() {
+        settings_usage_exit(
+            "set needs --notify-at-used-percent, --default-goal-used-percent, or both",
+        );
+    }
+
+    let current = match glomeris::settings::load_settings() {
+        Ok(settings) => settings,
+        Err(e) => settings_store_error_exit("read", e),
+    };
+    let updated = match current.with_changes(notify_at, goal) {
+        Ok(settings) => settings,
+        Err(rejection) => {
+            if json {
+                print_json_or_exit(&glomeris::cli::settings::build_settings_rejection_report(
+                    &rejection,
+                ));
+            } else {
+                eprintln!("glomeris settings: {rejection}");
+            }
+            std::process::exit(2);
+        }
+    };
+    if let Err(e) = glomeris::settings::save_settings(&updated) {
+        settings_store_error_exit("write", e);
+    }
+
+    // Reported as stored, not as requested: after a successful write the file
+    // exists, so `loaded_from_file` is true even on the run that created it.
+    if json {
+        settings_print_json(&updated, true);
+    } else {
+        settings_print_human(&updated, true);
     }
 }
 
