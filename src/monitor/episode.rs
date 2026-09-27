@@ -456,20 +456,24 @@ impl EpisodeTracker {
 
     /// Records that the app raised the due notification.
     ///
-    /// Returns whether there was one to raise, so a caller that reports
+    /// Refuses when there was nothing to raise, so a caller that reports
     /// success has to have been told so. Idempotent in the safe direction:
-    /// calling it twice clears a flag that is already clear and returns
-    /// `false` the second time, rather than crediting a second notification
-    /// that was never shown.
-    pub fn mark_notified(&mut self, now: u64) -> bool {
+    /// calling it twice clears a flag that is already clear and refuses the
+    /// second time, rather than crediting a second notification that was never
+    /// shown.
+    ///
+    /// The two ways it can refuse — no episode at all, and an episode whose
+    /// notification is not owed — are one rejection deliberately. From the
+    /// app's side they are the same fact: there was nothing to acknowledge.
+    pub fn mark_notified(&mut self, now: u64) -> Result<(), EpisodeRejection> {
         match self.current.as_mut() {
             Some(episode) if episode.notification_due => {
                 episode.notification_due = false;
                 episode.notifications_raised += 1;
                 episode.last_notified_unix_secs = Some(now);
-                true
+                Ok(())
             }
-            _ => false,
+            _ => Err(EpisodeRejection::NoNotificationDue),
         }
     }
 
@@ -484,10 +488,10 @@ impl EpisodeTracker {
     /// Clears `notification_due` as well, so answering a notification that the
     /// app has not yet reported raising cannot leave one queued behind the
     /// answer.
-    pub fn respond(&mut self, response: EpisodeResponse, now: u64) -> Result<(), RespondRejection> {
+    pub fn respond(&mut self, response: EpisodeResponse, now: u64) -> Result<(), EpisodeRejection> {
         let snooze = self.config.snooze.as_secs();
         let Some(episode) = self.current.as_mut() else {
-            return Err(RespondRejection::NoOpenEpisode);
+            return Err(EpisodeRejection::NoOpenEpisode);
         };
 
         episode.response = Some(response);
@@ -504,18 +508,31 @@ impl EpisodeTracker {
     }
 }
 
-/// Why a response could not be recorded.
+/// Why an answer or an acknowledgement could not be recorded.
+///
+/// Both write paths refuse through one type, because both refuse for the same
+/// underlying reason — the state the app was told about is no longer the state
+/// on disk — and a caller that handled one and not the other would be handling
+/// half a race.
+///
+/// Neither of these is a malfunction. The ordinary cause of both is benign: the
+/// disk recovered between the banner appearing and the button being pressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RespondRejection {
+pub enum EpisodeRejection {
     /// There is no episode to respond to — the disk is below the threshold, or
     /// the episode ended between the notification being shown and the button
     /// being pressed. Reported rather than silently accepted, because an
     /// answer stored against nothing would be an answer that never applies to
     /// anything.
     NoOpenEpisode,
+    /// There was no notification owed to acknowledge: either no episode is
+    /// open, or its notification was already raised. Reported rather than
+    /// counted, so `notifications_raised` can only ever mean "banners the user
+    /// could have seen" — the figure AC5 is checked against.
+    NoNotificationDue,
 }
 
-impl std::fmt::Display for RespondRejection {
+impl std::fmt::Display for EpisodeRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NoOpenEpisode => write!(
@@ -523,19 +540,29 @@ impl std::fmt::Display for RespondRejection {
                 "there is no open pressure episode to respond to \
                  (disk usage is below the alert threshold)"
             ),
+            Self::NoNotificationDue => write!(
+                f,
+                "no pressure notification is owed \
+                 (there is no open episode, or its notification was already raised)"
+            ),
         }
     }
 }
 
-impl std::error::Error for RespondRejection {}
+impl std::error::Error for EpisodeRejection {}
 
-impl RespondRejection {
+impl EpisodeRejection {
     /// Stable machine tag, sole producer.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NoOpenEpisode => "no_open_episode",
+            Self::NoNotificationDue => "no_notification_due",
         }
     }
+
+    /// Every variant, for the vocabulary test and for a client that wants to
+    /// enumerate what it must handle.
+    pub const ALL: [Self; 2] = [Self::NoOpenEpisode, Self::NoNotificationDue];
 }
 
 #[cfg(test)]
@@ -567,7 +594,7 @@ mod tests {
     fn staying_above_the_threshold_never_opens_a_second_episode() {
         let mut t = tracker();
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         for i in 0..50 {
             let outcome = t.observe(80.0 + (i % 3) as f64, 5 * GIB, 1_100 + i);
             assert_eq!(outcome.opened, None, "poll {i} opened a second episode");
@@ -589,7 +616,7 @@ mod tests {
             // 72% clear boundary.
             let used = if i % 2 == 0 { 75.5 } else { 74.5 };
             t.observe(used, 5 * GIB, 1_000 + i);
-            if t.mark_notified(1_000 + i) {
+            if t.mark_notified(1_000 + i).is_ok() {
                 raised += 1;
             }
         }
@@ -617,14 +644,14 @@ mod tests {
     fn recovering_and_re_crossing_opens_a_new_episode_with_a_new_id() {
         let mut t = tracker();
         t.observe(80.0, 5 * GIB, 1_000);
-        assert!(t.mark_notified(1_000));
+        assert!(t.mark_notified(1_000).is_ok());
         t.observe(60.0, 40 * GIB, 2_000);
         assert!(t.current().is_none());
 
         let outcome = t.observe(80.0, 5 * GIB, 3_000);
         assert_eq!(outcome.opened, Some(2), "a new episode, not the old one");
         assert!(outcome.notification_became_due);
-        assert!(t.mark_notified(3_000));
+        assert!(t.mark_notified(3_000).is_ok());
         assert_eq!(t.current().unwrap().notifications_raised, 1);
     }
 
@@ -636,7 +663,7 @@ mod tests {
         ] {
             let mut t = tracker();
             t.observe(80.0, 5 * GIB, 1_000);
-            t.mark_notified(1_000);
+            t.mark_notified(1_000).unwrap();
             t.respond(response, 1_050).unwrap();
             for i in 0..100 {
                 let outcome = t.observe(85.0, 2 * GIB, 1_100 + i);
@@ -655,7 +682,7 @@ mod tests {
     fn ignoring_an_episode_cannot_silence_the_next_one() {
         let mut t = tracker();
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::IgnoreEpisode, 1_050).unwrap();
 
         // Recover below the clear boundary, then fill up again.
@@ -666,7 +693,7 @@ mod tests {
             outcome.notification_became_due,
             "ignoring one episode must not disable monitoring"
         );
-        assert!(t.mark_notified(3_000));
+        assert!(t.mark_notified(3_000).is_ok());
         assert_eq!(t.current().unwrap().response, None);
     }
 
@@ -677,7 +704,7 @@ mod tests {
         let mut t =
             EpisodeTracker::new(EpisodeConfig::new(75.0).with_snooze(Duration::from_secs(600)));
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::RemindLater, 1_000).unwrap();
         assert_eq!(
             t.current().unwrap().snoozed_until_unix_secs,
@@ -694,7 +721,7 @@ mod tests {
         let outcome = t.observe(80.0, 5 * GIB, 1_600);
         assert!(outcome.snooze_elapsed);
         assert!(outcome.notification_became_due);
-        assert!(t.mark_notified(1_600));
+        assert!(t.mark_notified(1_600).is_ok());
         assert_eq!(t.current().unwrap().notifications_raised, 2);
 
         // And never again without another snooze.
@@ -709,14 +736,14 @@ mod tests {
         let mut t =
             EpisodeTracker::new(EpisodeConfig::new(75.0).with_snooze(Duration::from_secs(100)));
         t.observe(80.0, 5 * GIB, 1_000);
-        let mut raised = if t.mark_notified(1_000) { 1 } else { 0 };
+        let mut raised = if t.mark_notified(1_000).is_ok() { 1 } else { 0 };
 
         for round in 0..2 {
             let at = 1_000 + round * 1_000;
             t.respond(EpisodeResponse::RemindLater, at).unwrap();
             for step in 0..200u64 {
                 t.observe(80.0, 5 * GIB, at + step);
-                if t.mark_notified(at + step) {
+                if t.mark_notified(at + step).is_ok() {
                     raised += 1;
                 }
             }
@@ -729,7 +756,7 @@ mod tests {
         let mut t =
             EpisodeTracker::new(EpisodeConfig::new(75.0).with_snooze(Duration::from_secs(100)));
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::RemindLater, 1_000).unwrap();
         t.respond(EpisodeResponse::ReviewAndRecover, 1_010).unwrap();
         assert_eq!(t.current().unwrap().snoozed_until_unix_secs, None);
@@ -747,7 +774,7 @@ mod tests {
         let mut t =
             EpisodeTracker::new(EpisodeConfig::new(75.0).with_snooze(Duration::from_secs(100)));
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::RemindLater, 1_000).unwrap();
         // Episode ends while the snooze is still pending.
         t.observe(50.0, 60 * GIB, 1_050);
@@ -764,18 +791,69 @@ mod tests {
         let mut t = tracker();
         assert_eq!(
             t.respond(EpisodeResponse::ReviewAndRecover, 1_000),
-            Err(RespondRejection::NoOpenEpisode)
+            Err(EpisodeRejection::NoOpenEpisode)
         );
     }
 
     #[test]
     fn mark_notified_reports_whether_there_was_anything_to_raise() {
         let mut t = tracker();
-        assert!(!t.mark_notified(1_000), "no episode, nothing due");
+        assert_eq!(
+            t.mark_notified(1_000),
+            Err(EpisodeRejection::NoNotificationDue),
+            "no episode, nothing due"
+        );
         t.observe(80.0, 5 * GIB, 1_000);
-        assert!(t.mark_notified(1_000));
-        assert!(!t.mark_notified(1_001), "already raised");
+        assert!(t.mark_notified(1_000).is_ok());
+        assert_eq!(
+            t.mark_notified(1_001),
+            Err(EpisodeRejection::NoNotificationDue),
+            "already raised"
+        );
         assert_eq!(t.current().unwrap().notifications_raised, 1);
+    }
+
+    /// An acknowledgement that was refused must not be counted. Otherwise
+    /// `notifications_raised` would drift above the number of banners the user
+    /// could have seen, and it is the figure AC5's "no storms" claim is checked
+    /// against.
+    #[test]
+    fn a_refused_acknowledgement_credits_nothing() {
+        let mut t = tracker();
+        t.observe(80.0, 5 * GIB, 1_000);
+        t.mark_notified(1_000).unwrap();
+        for i in 0..20 {
+            assert!(t.mark_notified(1_100 + i).is_err());
+        }
+        assert_eq!(t.current().unwrap().notifications_raised, 1);
+        assert_eq!(t.current().unwrap().last_notified_unix_secs, Some(1_000));
+    }
+
+    /// Both refusal tokens are distinct and non-empty, and `ALL` lists each
+    /// exactly once — the same shape the settings vocabulary test asserts, so a
+    /// new variant cannot ship without a tag.
+    #[test]
+    fn rejection_tokens_are_distinct_and_fully_enumerated() {
+        let tags: Vec<&str> = EpisodeRejection::ALL.iter().map(|r| r.as_str()).collect();
+        assert_eq!(tags.len(), EpisodeRejection::ALL.len());
+        for tag in &tags {
+            assert!(!tag.is_empty());
+            assert_eq!(*tag, tag.to_lowercase());
+        }
+        let mut sorted = tags.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), tags.len(), "duplicate tag in {tags:?}");
+        // And each one's message says which situation it is, so a user reading
+        // it is not left with a token.
+        for rejection in EpisodeRejection::ALL {
+            let message = rejection.to_string();
+            assert!(!message.is_empty(), "{rejection:?}");
+            assert!(
+                message.contains("episode") || message.contains("notification"),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -897,7 +975,7 @@ mod tests {
     fn a_restored_episode_is_not_re_notified() {
         let mut t = tracker();
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::IgnoreEpisode, 1_050).unwrap();
         let saved = *t.current().unwrap();
         let next = t.next_episode_id();
@@ -921,7 +999,7 @@ mod tests {
     fn reconfiguring_the_threshold_upward_closes_an_episode_it_no_longer_breaches() {
         let mut t = tracker();
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.reconfigure(EpisodeConfig::new(90.0));
         let outcome = t.observe(80.0, 5 * GIB, 1_100);
         assert_eq!(outcome.closed, Some(1));
@@ -934,7 +1012,7 @@ mod tests {
     fn reconfiguring_does_not_re_notify_an_open_episode() {
         let mut t = tracker();
         t.observe(80.0, 5 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::IgnoreEpisode, 1_010).unwrap();
         t.reconfigure(EpisodeConfig::new(60.0));
         let outcome = t.observe(80.0, 5 * GIB, 1_100);

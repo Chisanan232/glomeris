@@ -1446,9 +1446,9 @@ pub struct PressureStatusReport {
 /// button being pressed, so there is no longer an episode the answer belongs
 /// to.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct PressureRespondRejectionReport {
+pub struct PressureRejectionReport {
     /// Stable snake_case tag, from
-    /// [`crate::monitor::RespondRejection::as_str`].
+    /// [`crate::monitor::EpisodeRejection::as_str`].
     pub reason: &'static str,
     /// The rejection's own `Display` text, shown verbatim to a user.
     pub message: String,

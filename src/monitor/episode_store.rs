@@ -179,7 +179,7 @@ mod tests {
         let path = unique_path("round-trip");
         let mut tracker = EpisodeTracker::new(config());
         tracker.observe(88.0, 4 * GIB, 1_000);
-        tracker.mark_notified(1_010);
+        tracker.mark_notified(1_010).unwrap();
         tracker
             .respond(EpisodeResponse::RemindLater, 1_020)
             .unwrap();
@@ -204,7 +204,7 @@ mod tests {
         let path = unique_path("no-re-notify");
         let mut tracker = EpisodeTracker::new(config());
         tracker.observe(88.0, 4 * GIB, 1_000);
-        tracker.mark_notified(1_010);
+        tracker.mark_notified(1_010).unwrap();
         tracker
             .respond(EpisodeResponse::IgnoreEpisode, 1_020)
             .unwrap();
@@ -216,7 +216,7 @@ mod tests {
             assert_eq!(outcome.opened, None);
             assert!(!outcome.notification_became_due, "re-notified at poll {i}");
         }
-        assert!(!restarted.mark_notified(3_000));
+        assert!(restarted.mark_notified(3_000).is_err());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -332,7 +332,7 @@ mod tests {
         for i in 0..10u64 {
             tracker.observe(80.0 + i as f64, (10 - i) * GIB, 1_000 + i);
             if i == 3 {
-                tracker.mark_notified(1_000 + i);
+                tracker.mark_notified(1_000 + i).unwrap();
             }
             if i == 5 {
                 tracker
@@ -354,7 +354,7 @@ mod tests {
         let path = unique_path("config-from-caller");
         let mut tracker = EpisodeTracker::new(config());
         tracker.observe(80.0, 5 * GIB, 1_000);
-        tracker.mark_notified(1_000);
+        tracker.mark_notified(1_000).unwrap();
         save_tracker_at(&path, &tracker).unwrap();
 
         // Restored under a threshold the open episode no longer breaches: the

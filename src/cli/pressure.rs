@@ -30,12 +30,10 @@
 //! and the recovery goal — so every field names its axis and every prose line
 //! says `used`.
 
-use crate::monitor::episode::{EpisodeResponse, EpisodeTracker, PressureEpisode, RespondRejection};
+use crate::monitor::episode::{EpisodeRejection, EpisodeResponse, EpisodeTracker, PressureEpisode};
 use crate::monitor::fs_stat::FsUsage;
 use crate::monitor::ThresholdConfig;
-use crate::reporting::dto::{
-    PressureEpisodeReport, PressureRespondRejectionReport, PressureStatusReport,
-};
+use crate::reporting::dto::{PressureEpisodeReport, PressureRejectionReport, PressureStatusReport};
 use crate::reporting::human_bytes;
 use crate::settings::RecoverySettings;
 
@@ -106,10 +104,8 @@ pub fn build_pressure_status_report(
 
 /// Project a refused answer or acknowledgement into the shape a `--json`
 /// client parses.
-pub fn build_respond_rejection_report(
-    rejection: &RespondRejection,
-) -> PressureRespondRejectionReport {
-    PressureRespondRejectionReport {
+pub fn build_pressure_rejection_report(rejection: &EpisodeRejection) -> PressureRejectionReport {
+    PressureRejectionReport {
         reason: rejection.as_str(),
         message: rejection.to_string(),
     }
@@ -296,7 +292,7 @@ mod tests {
         let mut t = tracker_at(75.0);
         t.observe(94.0, 60 * GIB, 1_000);
         assert!(report(&t, 94.0, 1_000).notification_due);
-        assert!(t.mark_notified(1_010));
+        assert!(t.mark_notified(1_010).is_ok());
         let r = report(&t, 94.0, 1_020);
         assert!(!r.notification_due);
         let episode = r.episode.unwrap();
@@ -315,7 +311,7 @@ mod tests {
     fn the_hysteresis_gap_is_reported_as_two_separate_facts() {
         let mut t = tracker_at(75.0);
         t.observe(76.0, 200 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         let r = report(&t, 73.5, 1_100);
         assert!(!r.threshold_crossed, "73.5% is below a 75% threshold");
         assert!(
@@ -329,7 +325,7 @@ mod tests {
     fn a_snooze_is_reported_as_a_deadline_and_a_derived_flag() {
         let mut t = tracker_at(75.0);
         t.observe(94.0, 60 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::RemindLater, 1_010).unwrap();
         let snooze = t.config().snooze().as_secs();
 
@@ -352,7 +348,7 @@ mod tests {
     fn an_ignored_episode_reports_the_answer_and_stays_open() {
         let mut t = tracker_at(75.0);
         t.observe(94.0, 60 * GIB, 1_000);
-        t.mark_notified(1_000);
+        t.mark_notified(1_000).unwrap();
         t.respond(EpisodeResponse::IgnoreEpisode, 1_010).unwrap();
         let r = report(&t, 94.0, 1_020);
         assert!(!r.notification_due);
@@ -434,7 +430,7 @@ mod tests {
         let mut t = tracker_at(75.0);
         t.observe(94.0, 60 * GIB, 1_000);
         let due = notification_line(&report(&t, 94.0, 1_000));
-        t.mark_notified(1_010);
+        t.mark_notified(1_010).unwrap();
         let raised = notification_line(&report(&t, 94.0, 1_020));
         t.respond(EpisodeResponse::RemindLater, 1_020).unwrap();
         let snoozed = notification_line(&report(&t, 94.0, 1_030));
@@ -501,8 +497,8 @@ mod tests {
 
     #[test]
     fn a_refusal_reports_the_domain_types_own_tag_and_wording() {
-        let rejection = RespondRejection::NoOpenEpisode;
-        let report = build_respond_rejection_report(&rejection);
+        let rejection = EpisodeRejection::NoOpenEpisode;
+        let report = build_pressure_rejection_report(&rejection);
         assert_eq!(report.reason, "no_open_episode");
         assert_eq!(report.message, rejection.to_string());
         let json = serde_json::to_string(&report).unwrap();
@@ -528,7 +524,7 @@ mod tests {
                 r.notification_due
             );
             if r.notification_due {
-                t.mark_notified(now);
+                t.mark_notified(now).unwrap();
             }
         }
     }

@@ -17,8 +17,8 @@ pub mod state_machine;
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use config::ThresholdConfig;
 pub use episode::{
-    EpisodeConfig, EpisodeOutcome, EpisodeResponse, EpisodeTracker, PressureEpisode,
-    RespondRejection,
+    EpisodeConfig, EpisodeOutcome, EpisodeRejection, EpisodeResponse, EpisodeTracker,
+    PressureEpisode,
 };
 pub use episode_store::{
     default_episode_state_path, load_tracker_at, read_episode_state, save_tracker_at, EpisodeState,
