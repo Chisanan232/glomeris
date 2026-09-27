@@ -16,12 +16,18 @@
 //  to exist, persist, be observable/testable, and produce the correct
 //  `--project-root` argument shape for those tickets to consume.
 //
+//  HORO-1501: producing that shape is no longer unconditional. The flag is
+//  formatted only for the commands that accept it, per
+//  `GlomerisCliProjectRootScope` — because one of the call sites C4-C8 went on
+//  to add was `status`, which takes no project root and exits 2 when handed
+//  one, and nothing in this file's contract said it could not be asked.
+//
 
 import Foundation
 
-/// Reads and writes the configured list of project-root paths, and
-/// formats them as repeated `--project-root <path>` arguments for
-/// `GlomerisClient.run(_:)`.
+/// Reads and writes the configured list of project-root paths, and formats them
+/// as repeated `--project-root <path>` arguments for the `GlomerisClient.run(_:)`
+/// invocations whose command accepts them.
 ///
 /// Backed by `UserDefaults.standard`, which for a bundled app *is* the
 /// domain named by its bundle identifier — so this app's preference state is
@@ -70,13 +76,6 @@ struct ProjectRootsStore {
         defaults.set(current.filter { $0 != path }, forKey: Self.defaultsKey)
     }
 
-    /// The configured roots formatted as repeated `--project-root <path>`
-    /// arguments, ready to append to the `arguments` array passed to
-    /// `GlomerisClient.run(_:)`. Empty when no roots are configured.
-    var commandLineArguments: [String] {
-        roots.flatMap { ["--project-root", $0] }
-    }
-
     /// `arguments` with the configured roots appended, when its leading token
     /// names a command that takes them; `arguments` unchanged otherwise.
     ///
@@ -86,12 +85,13 @@ struct ProjectRootsStore {
     /// bare `["status", "--json"]` only reads as "nobody attached them at this
     /// site today".
     ///
-    /// HORO-1501. The property above is what this replaces, and the difference
-    /// is where the question gets asked. `["status", "--json"] +
-    /// projectRootsStore.commandLineArguments` is one token away from the four
-    /// correct sites that look exactly like it, and the CLI rejects it — so the
-    /// Status card failed for every user who had configured a root, which is to
-    /// say for every user of the feature the roots exist for.
+    /// HORO-1501. This replaced a `commandLineArguments` property that formatted
+    /// the roots for any caller that asked, and the difference is where the
+    /// question gets asked. `["status", "--json"] + projectRootsStore
+    /// .commandLineArguments` is one token away from the four correct sites that
+    /// look exactly like it, and the CLI rejects it — so the Status card failed
+    /// for every user who had configured a root, which is to say for every user
+    /// of the feature the roots exist for.
     ///
     /// Appends rather than inserts. `glomeris`'s own argument scanners
     /// (`extract_project_roots`, then a positional/flag loop per command) accept
