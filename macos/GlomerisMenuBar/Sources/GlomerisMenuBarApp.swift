@@ -114,11 +114,27 @@ struct GlomerisMenuBarApp: App {
         // through `autopilot enable|revoke`; every choice it offers — the
         // kinds, the ceilings, the refusals — arrives from the CLI as data,
         // and there is no way to start a run from it.
+        //
+        // HORO-1507 added the fourth, and it is the one that shipped as a CLI
+        // flag first and should not have: the two numbers deciding when Glomeris
+        // speaks up and where recovery stops are the product's own settings, not
+        // arguments to a command. That pane renders `settings show --json` and
+        // writes through `settings set` — including the limits each number has to
+        // stay inside, so its steppers cannot compose a value the CLI refuses.
+        // Nothing on it deletes anything.
         Settings {
             TabView {
                 ProjectRootsPreferencesView()
                     .tabItem {
                         Label("Projects", systemImage: "folder")
+                    }
+                // Ahead of AI Provider on purpose (campaign §13): the recovery
+                // goal is the product capability and AI assistance is optional
+                // help with it, so the goal must not read as a setting reached
+                // past the model's.
+                RecoveryPreferencesView()
+                    .tabItem {
+                        Label("Recovery", systemImage: "gauge")
                     }
                 AiProviderPreferencesView()
                     .tabItem {
