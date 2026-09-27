@@ -199,6 +199,16 @@ targets:
       # on the id alone, "remind me later" would silently mean "never again"), and
       # a raise that failed must not consume the episode's one chance to be shown.
       - path: Sources/PressureEpisodeMonitor.swift
+      # HORO-1508: the deep link. Compiled in for one test above all others —
+      # `RecoveryDeepLink.reviewToken` is the single literal in this app that names
+      # an answer in order to *act* on it rather than to word it, and
+      # RecoveryDeepLinkTests asserts the CLI still publishes it. Without that, a
+      # rename in `EpisodeResponse::as_str` would turn "Review & recover" into a
+      # button that opens nothing and reports nothing, which no other check in the
+      # repo would notice. `RecoveryDeepLinkContext` is here for the neighbouring
+      # claim: it seeds the Recovery card's control through that card's own
+      # conversion rather than a second rule of its own.
+      - path: Sources/RecoveryDeepLink.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests

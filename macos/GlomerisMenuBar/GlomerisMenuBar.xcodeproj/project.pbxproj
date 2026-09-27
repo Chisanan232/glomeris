@@ -54,10 +54,12 @@
 		7765D1EC48C4DACF135BD63F /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
 		77F2D4731DA004387FF6714E /* PressureEpisodeMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F906F72C72A1FB6C19DFB37 /* PressureEpisodeMonitor.swift */; };
 		79370CF11525490DD5B73CC3 /* CredentialStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2434F70295E81CCDEA48C9 /* CredentialStore.swift */; };
+		793901AF0EC6E8A6DB40B218 /* RecoveryDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B19DC05F505C060A54791A /* RecoveryDeepLink.swift */; };
 		7994B235BE871884E2AEAB08 /* BundleIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F64EDD803CBF517A519597B /* BundleIdentity.swift */; };
 		7B6DDC175DFBFBB860E5CBA5 /* BundleIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */; };
 		7D61BB3D174236A429452646 /* OverviewStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEC3A7ED8C30CBA9ECC33527 /* OverviewStateTests.swift */; };
 		7F89092A2FEA202C9405C241 /* CredentialAccessList.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74C6C8DE3240E7647ACE73E5 /* CredentialAccessList.swift */; };
+		7FE0CA6171DE214EB3CB69E8 /* RecoveryDeepLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2B19DC05F505C060A54791A /* RecoveryDeepLink.swift */; };
 		7FFD77E56D8CF3CE1D989A71 /* GlomerisCliIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28CD7E46959C90D96BA19391 /* GlomerisCliIdentity.swift */; };
 		81DD0203CA5AE10816276612 /* SpokenLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FAC22B023BB94EA556577 /* SpokenLabel.swift */; };
 		847FDF28A3C3FFE0307946CF /* GlomerisMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29CCC97F9DEA1F53F834AF90 /* GlomerisMenuBarApp.swift */; };
@@ -85,6 +87,7 @@
 		C49D0E67DB2391025B3E7064 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */; };
 		C79301D61905D743C5B5B52C /* GlomerisPopoverViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2538D1D665F56D4E896B4CE2 /* GlomerisPopoverViewTests.swift */; };
+		C7C1ABA8FE2B32ABA4B0168F /* RecoveryDeepLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE314DB9D37F8B5EC603468D /* RecoveryDeepLinkTests.swift */; };
 		CCF168A524A4A873F44FD1EB /* RecoveryPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7DD0C693454E87FB2AEBAF9 /* RecoveryPreferencesView.swift */; };
 		D0A81955E6A629C95685F942 /* SpokenLabelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AA164A09246B00F00F33DAB /* SpokenLabelTests.swift */; };
 		D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */; };
@@ -161,6 +164,7 @@
 		9D48A22858E94A17C0A670F4 /* GlomerisVocabulary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisVocabulary.swift; sourceTree = "<group>"; };
 		9E169B1E4235782D6C59E4FE /* ApplyPlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplyPlanView.swift; sourceTree = "<group>"; };
 		A258960CB7D0D961F0980060 /* HistoryAuditSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAuditSectionViewTests.swift; sourceTree = "<group>"; };
+		A2B19DC05F505C060A54791A /* RecoveryDeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryDeepLink.swift; sourceTree = "<group>"; };
 		A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisExecutableLocator.swift; sourceTree = "<group>"; };
 		A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiProviderPreferencesView.swift; sourceTree = "<group>"; };
 		A98E13E5FE5F4E90FE76683D /* GlomerisMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisMark.swift; sourceTree = "<group>"; };
@@ -176,6 +180,7 @@
 		C6C6CC02C2C88B2B364E5697 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		CAB8A9241AA91E088AF94047 /* GlomerisByteFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisByteFormat.swift; sourceTree = "<group>"; };
 		CCB103016472A37B7F09292B /* GlomerisPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisPopoverView.swift; sourceTree = "<group>"; };
+		CE314DB9D37F8B5EC603468D /* RecoveryDeepLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryDeepLinkTests.swift; sourceTree = "<group>"; };
 		D0803EC181FBF0B0D1507D2C /* SingleInstanceGuardTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingleInstanceGuardTests.swift; sourceTree = "<group>"; };
 		D0EF776D63062A306819D429 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		D2EC959107399B1D4F311033 /* ApplyPlanViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplyPlanViewTests.swift; sourceTree = "<group>"; };
@@ -248,6 +253,7 @@
 				8F906F72C72A1FB6C19DFB37 /* PressureEpisodeMonitor.swift */,
 				B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */,
 				017031320C8922881F4739BC /* ProjectRootsStore.swift */,
+				A2B19DC05F505C060A54791A /* RecoveryDeepLink.swift */,
 				E7DD0C693454E87FB2AEBAF9 /* RecoveryPreferencesView.swift */,
 				AE7CBDDAA17C4F3C77E9C9AD /* RecoverySectionView.swift */,
 				32DF9E12B32B0A4F24572FA8 /* SingleInstanceGuard.swift */,
@@ -290,6 +296,7 @@
 				065A9E2A402A94900258E6A8 /* PressureEpisodeMonitorTests.swift */,
 				8530A7EB7932829E63C60741 /* ProjectRootsPreferencesViewTests.swift */,
 				DA84B79B4966F05DE18D3127 /* ProjectRootsStoreTests.swift */,
+				CE314DB9D37F8B5EC603468D /* RecoveryDeepLinkTests.swift */,
 				EB357B6854DACD0589265315 /* RecoveryPreferencesTests.swift */,
 				2919845D6CED96F0D7E6C882 /* RecoverySectionViewTests.swift */,
 				D0803EC181FBF0B0D1507D2C /* SingleInstanceGuardTests.swift */,
@@ -452,6 +459,8 @@
 				D6F31E0EADCBEAC38E264880 /* ProjectRootsPreferencesViewTests.swift in Sources */,
 				89543AEC87E7A164FB4ABCB1 /* ProjectRootsStore.swift in Sources */,
 				8B353B39BE18016E0CA9624F /* ProjectRootsStoreTests.swift in Sources */,
+				793901AF0EC6E8A6DB40B218 /* RecoveryDeepLink.swift in Sources */,
+				C7C1ABA8FE2B32ABA4B0168F /* RecoveryDeepLinkTests.swift in Sources */,
 				390B0E4A45A8107C546AD452 /* RecoveryPreferencesTests.swift in Sources */,
 				D7966CDEDB65D651E1BC6809 /* RecoveryPreferencesView.swift in Sources */,
 				F5F870ACCEBC63B0F7DB3192 /* RecoverySectionView.swift in Sources */,
@@ -501,6 +510,7 @@
 				A16BA411D89D8E92962D8EE7 /* PressureEpisodeMonitor.swift in Sources */,
 				316F2E44994F8F44D10C01F6 /* ProjectRootsPreferencesView.swift in Sources */,
 				861A2E9ED2F71299D3BB44C9 /* ProjectRootsStore.swift in Sources */,
+				7FE0CA6171DE214EB3CB69E8 /* RecoveryDeepLink.swift in Sources */,
 				CCF168A524A4A873F44FD1EB /* RecoveryPreferencesView.swift in Sources */,
 				49FAB65EF49AEFBF46CBEFB5 /* RecoverySectionView.swift in Sources */,
 				1F1FE9086F33A50BC1E49EFF /* SingleInstanceGuard.swift in Sources */,
