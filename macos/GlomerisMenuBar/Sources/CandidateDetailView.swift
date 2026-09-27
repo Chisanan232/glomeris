@@ -630,7 +630,7 @@ struct CandidateDetailView: View {
         errorMessage = nil
         do {
             let result = try await client.run(
-                ["explain", resourceId, "--json"] + projectRootsStore.commandLineArguments,
+                projectRootsStore.scoped(["explain", resourceId, "--json"]),
                 outputType: ExplainReportDto.self,
                 progressType: ProgressEventDto.self
             )
@@ -657,7 +657,7 @@ struct CandidateDetailView: View {
         let arguments = buildExecuteArguments(
             actionId: actionId,
             resourceId: resourceId,
-            projectRootsArguments: projectRootsStore.commandLineArguments,
+            projectRootsArguments: projectRootsStore.projectRootArguments(forCommand: "execute"),
             requiresConfirmation: viewModel.requiresConfirmation,
             fingerprintToken: viewModel.fingerprintToken
         )

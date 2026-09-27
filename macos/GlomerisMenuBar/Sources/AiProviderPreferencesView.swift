@@ -319,11 +319,12 @@ enum AiProviderCommands {
     /// app reads the report rather than the human rendering.
     static let connectionTest = ["llm-check", "--json"]
 
-    /// Builds the request without sending it. `projectRootArguments` comes
-    /// from `ProjectRootsStore.commandLineArguments`, the same value
-    /// `AiPlanSectionView` passes to a live `llm-plan` — a preview scoped
+    /// Builds the request without sending it. `projectRootArguments` comes from
+    /// `ProjectRootsStore.projectRootArguments(forCommand: "llm-plan")`, the same
+    /// roots `AiPlanSectionView` scopes a live `llm-plan` to — a preview scoped
     /// differently from the real call would disclose the wrong payload, which
-    /// is worse than disclosing none.
+    /// is worse than disclosing none. Both are the same command, so both get
+    /// the same answer out of `GlomerisCliProjectRootScope` (HORO-1501).
     static func payloadPreview(projectRootArguments: [String]) -> [String] {
         ["llm-plan", "--print-payload", "--json"] + projectRootArguments
     }
@@ -1409,7 +1410,8 @@ struct AiProviderPreferencesView: View {
         do {
             let raw = try await client.runRaw(
                 AiProviderCommands.payloadPreview(
-                    projectRootArguments: projectRootsStore.commandLineArguments),
+                    projectRootArguments: projectRootsStore.projectRootArguments(
+                        forCommand: "llm-plan")),
                 progressType: ProgressEventDto.self
             )
             previewOutcome = LlmPayloadPreviewInterpretation.interpret(

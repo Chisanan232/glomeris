@@ -798,7 +798,7 @@ struct CandidatesSectionView: View {
 
         do {
             let result = try await client.run(
-                ["detect", "--json", "--progress-json"] + projectRootsStore.commandLineArguments,
+                projectRootsStore.scoped(["detect", "--json", "--progress-json"]),
                 outputType: DetectReportDto.self,
                 progressType: ProgressEventDto.self,
                 onProgress: { event in
