@@ -59,6 +59,33 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+usage() {
+  echo "usage: $(basename "$0") [--self-test]"
+  echo ""
+  echo "  (no arguments)  Checks this repository."
+  echo "  --self-test     Runs every rule against throwaway fixtures, proving each"
+  echo "                  one fires. See the block comment above run_self_test."
+}
+
+self_test=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-test)
+      self_test=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1"
+      usage
+      exit 2
+      ;;
+  esac
+done
+
 WORKFLOW_DIR=".github/workflows"
 CONFIG=".github/dependabot.yml"
 # Ecosystems with a manifest in this repository that are deliberately not given
@@ -312,7 +339,172 @@ assess() (
   return 0
 )
 
+# --- self-test ---------------------------------------------------------------
+#
+# Every rule above, fired against a disposable copy of this repository's own
+# configuration. The reason this exists is the shape of the rules: all of them
+# are negative assertions over file text, and a negative assertion whose
+# extraction stops matching reports agreement between two empty sets. This
+# repository has already paid for that once — a blank-line-intolerant regex gave
+# a clean bill of health over 135 workflow files — and the defect each rule here
+# is written for appears once every few months, so a failing case in this
+# function is the only evidence that the rule fires at all.
+run_self_test() {
+  local work
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064  # $work must expand now, not at trap time.
+  trap "rm -rf '$work'" RETURN
+
+  local cases_run=0 cases_failed=0
+
+  # A copy of the real configuration under $work/<name>, ready to be mutated.
+  # `git init` and `git add` and no commit: the ecosystem discovery reads the
+  # index, so a fixture needs one, and committing would need an identity this
+  # script has no business choosing.
+  fixture() {
+    local name="$1"
+    local dir="${work}/${name}"
+    mkdir -p "${dir}/.github"
+    cp -R "${REPO_ROOT}/.github/workflows" "${dir}/.github/workflows"
+    cp "${REPO_ROOT}/.github/dependabot.yml" "${dir}/.github/dependabot.yml"
+    cp "${REPO_ROOT}/Cargo.toml" "${dir}/Cargo.toml"
+    if [[ "${2:-}" != "--no-git" ]]; then
+      git -C "$dir" -c init.defaultBranch=main init -q
+      git -C "$dir" add -A
+    fi
+    printf '%s' "$dir"
+  }
+
+  quoted() {
+    local line
+    while IFS= read -r line; do
+      printf '      %s\n' "$line"
+    done <<< "$1"
+  }
+
+  # $1 = description, $2 = expected exit, $3 = fixture dir, $4 = phrase the
+  # output must contain on one line.
+  expect() {
+    local what="$1" want="$2" dir="$3" phrase="$4"
+    cases_run=$((cases_run + 1))
+    local out status=0
+    out="$(assess "$dir" 2>&1)" || status=1
+    if [[ "$status" -ne "$want" ]]; then
+      echo "  SELF-TEST FAIL: ${what}: expected exit ${want}, got ${status}"
+      quoted "$out"
+      cases_failed=$((cases_failed + 1))
+      return 0
+    fi
+    if ! grep -qF "$phrase" <<< "$out"; then
+      echo "  SELF-TEST FAIL: ${what}: exit ${status} was right but the output does not say why."
+      echo "      expected to contain: ${phrase}"
+      quoted "$out"
+      cases_failed=$((cases_failed + 1))
+      return 0
+    fi
+    echo "  ok: ${what}"
+  }
+
+  local dir
+
+  # An unmutated copy passes. Without this case every rule below could be firing
+  # on the copy itself rather than on the mutation.
+  dir="$(fixture pristine)"
+  expect "an unmutated copy of the configuration passes" 0 "$dir" \
+    "none split across versions"
+
+  # 1. The HORO-1497 defect: one action at two versions.
+  dir="$(fixture split-version)"
+  perl -0pi -e 's/actions\/checkout\@v6/actions\/checkout\@v4/' \
+    "${dir}/.github/workflows/docs.yml"
+  expect "an action referenced at two versions fails" 1 "$dir" \
+    "referenced at more than one version"
+
+  # 2. No configuration at all — the state HORO-1497 was filed about.
+  dir="$(fixture no-config)"
+  rm "${dir}/.github/dependabot.yml"
+  expect "a missing dependabot.yml fails" 1 "$dir" \
+    "does not exist, so nothing proposes updates"
+
+  # 2b. A configuration that watches something else.
+  dir="$(fixture wrong-ecosystem)"
+  perl -0pi -e 's/package-ecosystem: "github-actions"/package-ecosystem: "npm"/' \
+    "${dir}/.github/dependabot.yml"
+  expect "a configuration that does not watch the actions fails" 1 "$dir" \
+    "does not declare the 'github-actions' ecosystem"
+
+  # 2c. The silent kill switch. This is the case worth the whole function: a
+  # configuration carrying it reads exactly like a working one.
+  dir="$(fixture target-branch)"
+  perl -0pi -e 's/^(\s*)(schedule:)/$1target-branch: "main"\n$1$2/m' \
+    "${dir}/.github/dependabot.yml"
+  expect "target-branch: fails" 1 "$dir" \
+    "silently disables security updates"
+
+  # 2d. Without `version: 2` GitHub rejects the whole file, and a rejected
+  # configuration watches nothing while still being present.
+  dir="$(fixture no-version-key)"
+  perl -0pi -e 's/^version: 2$//m' "${dir}/.github/dependabot.yml"
+  expect "a configuration without version: 2 fails" 1 "$dir" \
+    "does not declare 'version: 2'"
+
+  # 3. A manifest for an ecosystem nobody has decided about.
+  dir="$(fixture unwatched-ecosystem)"
+  printf '{}\n' > "${dir}/package.json"
+  git -C "$dir" add -A
+  expect "a new manifest for an unwatched ecosystem fails" 1 "$dir" \
+    "neither watched by"
+
+  # 3b. An exclusion that outlived the manifest it excuses.
+  dir="$(fixture stale-exclusion)"
+  rm "${dir}/Cargo.toml"
+  git -C "$dir" add -A
+  expect "a DELIBERATELY_UNWATCHED entry whose manifest is gone fails" 1 "$dir" \
+    "no longer exists"
+
+  # Extraction failures must fail, not pass quietly. Each of these is a way this
+  # guard loses its reach rather than its subject.
+  dir="$(fixture no-workflow-dir)"
+  rm -rf "${dir}/.github/workflows"
+  expect "a missing workflow directory fails" 1 "$dir" \
+    "not found — run this from a full checkout"
+
+  dir="$(fixture empty-workflow-dir)"
+  rm -f "${dir}/.github/workflows/"*
+  expect "a workflow directory with no workflows in it fails" 1 "$dir" \
+    "found no workflow files"
+
+  dir="$(fixture no-uses-lines)"
+  perl -0pi -e 's/uses:/used:/g' "${dir}/.github/workflows/"*
+  expect "workflows with no matchable uses: lines fail" 1 "$dir" \
+    "matched no versioned 'uses:' references"
+
+  dir="$(fixture not-a-checkout --no-git)"
+  expect "a tree that is not a git checkout fails" 1 "$dir" \
+    "not inside a git checkout"
+
+  if [[ "$cases_run" -lt 12 ]]; then
+    echo "FAIL: the self-test ran only ${cases_run} case(s); it is supposed to cover 12."
+    echo "Cases were removed or a fixture failed to build. Either way this is not a pass."
+    return 1
+  fi
+
+  if [[ "$cases_failed" -gt 0 ]]; then
+    echo "FAIL: ${cases_failed} of ${cases_run} self-test case(s) did not behave as specified."
+    return 1
+  fi
+
+  echo "PASS: ${cases_run} self-test case(s) — every rule fires as specified."
+  return 0
+}
+
 # --- run ---------------------------------------------------------------------
+
+if [[ "$self_test" -eq 1 ]]; then
+  echo "Self-test: every rule, against disposable copies of this repository's configuration."
+  run_self_test
+  exit $?
+fi
 
 if assess "$REPO_ROOT"; then
   exit 0
