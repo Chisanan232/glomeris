@@ -29,6 +29,7 @@ OBSERVE — what happened before. Nothing is changed.
 
 SERVICE — the background disk-pressure monitor.
   daemon        Install, remove, inspect or run the background monitor.
+  pressure      Read the pressure episode, or answer its notification.
 
 CONFIGURE — your preferences. Nothing on this machine is deleted.
   settings      Read or change the alert threshold and the recovery goal.

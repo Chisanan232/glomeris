@@ -375,6 +375,19 @@ fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
             "settings show".to_string(),
             argv(&["settings", "show", "--json"]),
         ),
+        // Worth its own scrutiny for a different reason: `pressure show` is
+        // asked "is a notification owed?" while standing next to an
+        // `EpisodeTracker` that could answer by observing the disk — and
+        // observing opens episodes. If it did, the menu-bar app would become a
+        // second place where pressure policy is decided, notifications would
+        // appear on machines whose monitor was never installed, and a verb
+        // named `show` would have side effects. The evidence that it does not
+        // is that the episode state file is absent afterwards (HORO-1508).
+        ("pressure show".to_string(), argv(&["pressure", "show"])),
+        (
+            "pressure show".to_string(),
+            argv(&["pressure", "show", "--json"]),
+        ),
     ]
 }
 

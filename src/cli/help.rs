@@ -1099,6 +1099,119 @@ pub const COMMANDS: &[CommandSpec] = &[
         exit_codes: &[],
         see_also: &["status", "history"],
     },
+    CommandSpec {
+        name: "pressure",
+        group: Group::Service,
+        safety: Safety::WritesOwnState,
+        summary: "Read the pressure episode, or answer its notification.",
+        usage: &["pressure <show|notified|respond>", "[<answer>]", "[--json]"],
+        details: "The seam between the background monitor and the menu-bar app. Only an app \
+                  bundle can put buttons on a macOS notification, and the monitor is not one — \
+                  so the monitor records that a notification is owed, and the app raises it. \
+                  This command is how the app asks what is owed and reports what you pressed. \
+                  \n\nA pressure episode begins the first time disk usage crosses your alert \
+                  threshold and lasts until usage drops clearly below it again, so one spell of \
+                  a full disk produces one notification rather than one per poll. `show` reports \
+                  whether a notification is owed; it does not decide it, and it does not open or \
+                  close episodes — only the monitor observes. On a machine where the monitor is \
+                  not installed there is therefore no episode at all, and `show` says so while \
+                  still reporting whether usage is above your threshold. \
+                  \n\nAn episode decides when you are spoken to, never what may be deleted. \
+                  Answering `review_and_recover` opens the recovery screen; it does not start \
+                  recovery, and nothing here can delete anything or widen what policy permits.",
+        subcommands: &[
+            SubcommandSpec {
+                name: "show",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
+                description: "Print the current episode, whether a notification is owed, your \
+                              alert threshold, your recovery goal, and the answers that can be \
+                              given. The default, so a bare `glomeris pressure` reads rather \
+                              than writes.",
+            },
+            SubcommandSpec {
+                name: "notified",
+                args: "[--json]",
+                safety: Safety::WritesOwnState,
+                description: "Record that the notification was put on screen, so it is not \
+                              raised again for the same episode. Refused with exit 3 if none \
+                              was owed.",
+            },
+            SubcommandSpec {
+                name: "respond",
+                args: "<answer> [--json]",
+                safety: Safety::WritesOwnState,
+                description: "Record which button was pressed. Refused with exit 3 if no \
+                              episode is open — which is the ordinary outcome when the disk \
+                              recovered while the notification was on screen.",
+            },
+        ],
+        options: &[
+            OptionSpec {
+                syntax: "review_and_recover",
+                description: "For `respond`: open the recovery screen for this episode. Opens \
+                              it — it does not start recovery, and deletes nothing.",
+            },
+            OptionSpec {
+                syntax: "remind_later",
+                description: "For `respond`: say nothing for two hours, then notify again if \
+                              usage is still above the threshold. The episode stays open, so \
+                              this is a delay and not a dismissal.",
+            },
+            OptionSpec {
+                syntax: "ignore_episode",
+                description: "For `respond`: say nothing more about THIS spell of disk \
+                              pressure. Monitoring continues and the next episode notifies \
+                              again — this cannot switch notifications off.",
+            },
+            OptionSpec {
+                syntax: "--json",
+                description: "Print the episode as JSON: both percentages under separate \
+                              names, the byte figures, the episode's identity and answer, \
+                              whether a notification is owed, and the answers that can be \
+                              given. The same shape from all three subcommands, always \
+                              describing the state after the command ran. This is what the \
+                              menu-bar app reads. A refusal prints a rejection object on \
+                              stdout instead, with the reason as a stable token.",
+            },
+        ],
+        examples: &[
+            ExampleSpec {
+                command: "glomeris pressure",
+                purpose: "Is there a notification owed, and about what?",
+            },
+            ExampleSpec {
+                command: "glomeris pressure respond remind_later",
+                purpose: "Not now — ask me again in two hours.",
+            },
+            ExampleSpec {
+                command: "glomeris pressure respond ignore_episode",
+                purpose: "Stop mentioning this one. Keep watching.",
+            },
+        ],
+        exit_codes: &[
+            ExitCodeSpec {
+                code: 0,
+                meaning: "the episode was printed, or the answer was recorded.",
+            },
+            ExitCodeSpec {
+                code: 1,
+                meaning: "the episode state or your settings could not be read or written, or \
+                          filesystem usage could not be measured.",
+            },
+            ExitCodeSpec {
+                code: 2,
+                meaning: "usage error, including an answer that is not one of the three.",
+            },
+            ExitCodeSpec {
+                code: 3,
+                meaning: "there was nothing to record — no episode is open, or no notification \
+                          was owed. Not a failure: the usual cause is that the disk recovered \
+                          before the button was pressed.",
+            },
+        ],
+        see_also: &["daemon", "settings", "status", "free"],
+    },
     // --------------------------------------------------------------- Configure
     CommandSpec {
         name: "settings",
