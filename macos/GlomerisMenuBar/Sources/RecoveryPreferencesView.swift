@@ -352,15 +352,20 @@ enum RecoveryPreferencesWording {
         this number was reached.
         """
 
-    /// HORO-1508 owns the notification itself and this sentence goes when it
-    /// lands. Until then the threshold is stored and reported but the background
-    /// service still speaks up at its own built-in pressure levels, and a pane
-    /// that implied otherwise would be promising a notification that does not
-    /// arrive.
-    static let thresholdNotYetNotifying = """
-        Glomeris does not raise a notification from this number yet — the \
-        background service still uses its own built-in pressure levels. What \
-        you set here is stored and used as the starting point for recovery.
+    /// What crossing the threshold actually does, now that it does something.
+    ///
+    /// This replaced a caveat HORO-1507 shipped on purpose: the number was stored
+    /// and reported, but nothing notified from it, and a pane that implied
+    /// otherwise would have been promising a notification that never arrived.
+    /// HORO-1508 landed the notification, so the caveat became the false sentence
+    /// and went.
+    ///
+    /// It names the one answer that leads anywhere rather than listing them. The
+    /// set of answers comes from the CLI, and prose here that counted them would be
+    /// a second, unversioned copy of that set — wrong the first time one is added.
+    static let thresholdNotification = """
+        Crossing it raises a notification offering to review and recover. \
+        Nothing is deleted unless you choose it there.
         """
 
     static let goalExplanation = """
@@ -643,7 +648,7 @@ struct RecoveryPreferencesView: View {
                     + "to it.")
             .disabled(isSaving)
 
-            Text(RecoveryPreferencesWording.thresholdNotYetNotifying)
+            Text(RecoveryPreferencesWording.thresholdNotification)
                 .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
