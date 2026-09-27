@@ -238,6 +238,17 @@ final class PressureEpisodeMonitor: ObservableObject {
     private let client: PressureEpisodeReading
     private let banners: PressureBannerRaising
 
+    /// Where "show me" goes. Optional so the monitor can be constructed — and
+    /// driven — with no window server at all; a `nil` here means answers are
+    /// recorded and nothing is opened, which is the correct behaviour for a
+    /// headless test rather than a degraded one.
+    ///
+    /// Held strongly, deliberately. A `weak` reference here would turn "the
+    /// presenter was released" into "the button silently does nothing", which is
+    /// the failure mode this deep link is shaped to avoid. Nothing it points at
+    /// holds the monitor, so there is no cycle to break.
+    private let deepLink: RecoveryDeepLinkOpening?
+
     /// This session's memory of the last banner that reached the screen. See
     /// `PressureBannerPlan.decide`.
     private var lastRaised: PressureBannerKey?
@@ -254,9 +265,14 @@ final class PressureEpisodeMonitor: ObservableObject {
     /// either — it is the same non-reentrancy, one step earlier.
     private var isRaising = false
 
-    init(client: PressureEpisodeReading, banners: PressureBannerRaising) {
+    init(
+        client: PressureEpisodeReading,
+        banners: PressureBannerRaising,
+        deepLink: RecoveryDeepLinkOpening? = nil
+    ) {
         self.client = client
         self.banners = banners
+        self.deepLink = deepLink
         banners.onAnswer = { [weak self] token in
             // A button press arrives from the notification centre's own callback,
             // so it becomes an answer through the same path a poll does.
@@ -335,6 +351,16 @@ final class PressureEpisodeMonitor: ObservableObject {
         // surface showing the old state for up to thirty seconds after the user
         // answered would read as the answer not having been taken.
         adopt(await client.show())
+
+        // AC 2. Opened *after* the re-read, so the surface is handed the disk as
+        // it is now rather than as it was when the banner went up — and regardless
+        // of what `respond` returned, because the two refusals it can give both
+        // mean the pressure resolved itself, and a user who asked to see Recovery
+        // should still see it. A `nil` context is passed on rather than
+        // suppressing the window: pressing this button and having nothing happen
+        // is the one outcome worth avoiding at the cost of a sparser screen.
+        guard RecoveryDeepLink.opensRecovery(responseToken) else { return }
+        deepLink?.openRecovery(lastReport.map(RecoveryDeepLinkContext.init(report:)))
     }
 
     /// Takes on whatever an invocation turned out to be.
