@@ -89,6 +89,47 @@ final class UnpromptedRecoveryTests: XCTestCase {
         )
     }
 
+    /// The same run having reclaimed nothing: a loop that looked and found nothing
+    /// it was allowed to take. Edited from the fixture rather than written out, for
+    /// the reason ``grant(startsUnprompted:)`` gives — a change to the report's shape
+    /// should reach this file rather than be absorbed by a literal.
+    ///
+    /// The free-space figures are made to agree with that, because a report claiming
+    /// zero bytes reclaimed *and* a disk that gained 139 GB would be testing against
+    /// a state Rust cannot produce.
+    private func runReportThatTookNothing() throws -> RecoveryRunReportDto {
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try fixtureData("recovery_run_report.json"))
+                as? [String: Any]
+        )
+        object["stop_reason"] = "safe_exhausted"
+        object["stop_reason_detail"] = "Nothing left that may be removed without confirmation."
+        object["bytes_freed_measured"] = 0
+        object["bytes_freed_measured_human"] = "0 B"
+        object["final_free_bytes"] = object["started_free_bytes"]
+        object["final_free_human"] = object["started_free_human"]
+        object["target_met"] = false
+        return try JSONDecoder().decode(
+            RecoveryRunReportDto.self,
+            from: try JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
+    /// A banner owed for a *different* episode — the disk filled up again next week.
+    private func owedInASecondEpisode() throws -> PressureStatusReportDto {
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try fixtureData("pressure_status_report.json"))
+                as? [String: Any]
+        )
+        var episode = try XCTUnwrap(object["episode"] as? [String: Any])
+        episode["episode_id"] = 2
+        object["episode"] = episode
+        return try JSONDecoder().decode(
+            PressureStatusReportDto.self,
+            from: try JSONSerialization.data(withJSONObject: object)
+        )
+    }
+
     /// The grant, with the two HORO-1510 fields set as asked.
     ///
     /// Built by editing the fixture's JSON rather than by writing a literal, so a
@@ -256,6 +297,213 @@ final class UnpromptedRecoveryTests: XCTestCase {
         }
     }
 
+    // MARK: - What the app may say about one
+
+    /// The partition `mayHaveDeleted` exists for, stated against the one it is
+    /// nearly identical to.
+    ///
+    /// `notAuthorized` is where the two disagree, and getting that wrong in either
+    /// direction is a real defect: read as "may have deleted" the app worries a user
+    /// about a run `free` refused before it started, and read the other way round
+    /// `failed` would reassure them about a run that stopped mid-deletion.
+    func testWhatMayHaveDeletedIsNotTheSameQuestionAsWhatSpentTheAttempt() throws {
+        let refused = UnpromptedRecoveryOutcome.notAuthorized("no grant covers this")
+        XCTAssertTrue(refused.consumesTheAttempt)
+        XCTAssertFalse(refused.mayHaveDeleted, "free refuses exit 3 before the loop starts")
+
+        let stopped = UnpromptedRecoveryOutcome.failed("the run was stopped before it answered")
+        XCTAssertTrue(stopped.consumesTheAttempt)
+        XCTAssertTrue(stopped.mayHaveDeleted, "a run that stopped without reporting is unaccounted")
+
+        let held = UnpromptedRecoveryOutcome.busy("another execution is in progress")
+        XCTAssertFalse(held.consumesTheAttempt)
+        XCTAssertFalse(held.mayHaveDeleted)
+    }
+
+    /// Campaign §9, in the smallest place it applies: a run is judged on the figure
+    /// the volume was re-measured for, not on having run.
+    func testARunIsJudgedOnItsMeasuredFigureRatherThanOnHavingRun() throws {
+        XCTAssertTrue(UnpromptedRecoveryOutcome.ran(try runReport()).mayHaveDeleted)
+        XCTAssertFalse(
+            UnpromptedRecoveryOutcome.ran(try runReportThatTookNothing()).mayHaveDeleted,
+            "the loop ran, re-read the volume, and nothing had gone"
+        )
+    }
+
+    /// No automatic run — no runner, a grant that never opted in, an attempt never
+    /// made — keeps the sentence every Mac had before HORO-1510.
+    func testWithNoAutomaticRunTheReassuranceStands() {
+        XCTAssertEqual(
+            UnpromptedRecoveryAccount.deletionClause(after: nil),
+            UnpromptedRecoveryAccount.nothingDeleted
+        )
+    }
+
+    /// A user who comes back to a machine that deleted things on their behalf is owed
+    /// the amount, in the sentence that mentions it — and must not also be told that
+    /// nothing was deleted.
+    func testAfterARunThatReclaimedTheClauseNamesTheMeasuredAmount() throws {
+        let clause = UnpromptedRecoveryAccount.deletionClause(after: .ran(try runReport()))
+
+        XCTAssertTrue(clause.contains(try runReport().bytesFreedMeasuredHuman), clause)
+        XCTAssertFalse(clause.contains(UnpromptedRecoveryAccount.nothingDeleted), clause)
+    }
+
+    /// "Tried, and there is nothing here it may take" is a different thing to say
+    /// than "not tried yet", and the difference is what tells a user whether pressing
+    /// Review & recover is likely to help.
+    func testARunThatTookNothingSaysSoRatherThanSayingNothingHappened() throws {
+        let clause = UnpromptedRecoveryAccount.deletionClause(
+            after: .ran(try runReportThatTookNothing())
+        )
+
+        XCTAssertEqual(clause, "Autopilot ran and found nothing it could safely reclaim.")
+    }
+
+    /// A run that stopped without reporting is the one outcome the app cannot account
+    /// for, and it must not be accounted for by reassurance: "may already have been
+    /// reclaimed" is what sends a user to look, and it is the only direction it is safe
+    /// to be wrong in.
+    ///
+    /// The words are pinned rather than paraphrased, because this sentence is the whole
+    /// behaviour — a `deletionClause` that quietly returned the reassurance here would
+    /// be indistinguishable from a correct one to every other test in this file.
+    func testAnUnaccountedRunSaysSoRatherThanReassuring() {
+        XCTAssertEqual(
+            UnpromptedRecoveryAccount.deletionClause(after: .failed("stopped")),
+            "An automatic recovery run stopped without reporting, so some space may already "
+                + "have been reclaimed."
+        )
+    }
+
+    /// The invariant tying the sentence to the property that decides it: the
+    /// reassurance is never said about an outcome that may have deleted something.
+    ///
+    /// Only that one direction holds, and the exception is worth stating rather than
+    /// designing around — a run that took nothing has deleted nothing and *still* does
+    /// not get the reassurance, because "tried, and there is nothing here it may take"
+    /// is a different thing to tell someone deciding whether to press Review & recover.
+    ///
+    /// A loop rather than a case list, so a fifth outcome added later has this asked of
+    /// it without anyone remembering to.
+    func testTheReassuranceIsNeverSaidAboutARunThatMayHaveDeleted() throws {
+        for outcome: UnpromptedRecoveryOutcome in [
+            .ran(try runReport()),
+            .ran(try runReportThatTookNothing()),
+            .notAuthorized("no"),
+            .busy("held"),
+            .failed("stopped"),
+        ] where outcome.mayHaveDeleted {
+            XCTAssertNotEqual(
+                UnpromptedRecoveryAccount.deletionClause(after: outcome),
+                UnpromptedRecoveryAccount.nothingDeleted,
+                "\(outcome)"
+            )
+        }
+    }
+
+    /// The two outcomes that attempted nothing keep the reassurance, because for them
+    /// it is simply true.
+    func testAnAttemptThatNeverStartedKeepsTheReassurance() {
+        for outcome: UnpromptedRecoveryOutcome in [.notAuthorized("no"), .busy("held")] {
+            XCTAssertEqual(
+                UnpromptedRecoveryAccount.deletionClause(after: outcome),
+                UnpromptedRecoveryAccount.nothingDeleted,
+                "\(outcome) attempted nothing"
+            )
+        }
+    }
+
+    /// Which outcomes are dressed as a problem, and which are not.
+    ///
+    /// A run that reclaimed 139 GB is `success` rather than a warning: by
+    /// `GlomerisStateMessage`'s own documentation that kind means something the user
+    /// asked for happened, and on this path the asking is the grant they wrote.
+    /// `failed` is the single outcome the app cannot account for, so it is the single
+    /// one shown as a failure.
+    func testOnlyAnUnaccountedRunIsShownAsAFailure() throws {
+        for outcome: UnpromptedRecoveryOutcome? in [
+            nil,
+            .ran(try runReport()),
+            .ran(try runReportThatTookNothing()),
+            .notAuthorized("no"),
+            .busy("held"),
+        ] {
+            XCTAssertEqual(
+                UnpromptedRecoveryAccount.message(after: outcome).kind,
+                .success,
+                "\(String(describing: outcome)) is an account, not a problem"
+            )
+        }
+
+        XCTAssertEqual(
+            UnpromptedRecoveryAccount.message(after: .failed("stopped")).kind,
+            .failure
+        )
+    }
+
+    /// Whatever the outcome, the message a surface renders says the same thing as the
+    /// sentence the notification carries. The two cards and the banner differing only
+    /// in glyph is the drift this shared enum exists to prevent.
+    func testTheStateMessageAndTheSentenceNeverDisagree() throws {
+        for outcome: UnpromptedRecoveryOutcome? in [
+            nil,
+            .ran(try runReport()),
+            .ran(try runReportThatTookNothing()),
+            .notAuthorized("no"),
+            .busy("held"),
+            .failed("stopped"),
+        ] {
+            XCTAssertEqual(
+                UnpromptedRecoveryAccount.message(after: outcome).title,
+                UnpromptedRecoveryAccount.deletionClause(after: outcome)
+            )
+        }
+    }
+
+    /// The reassurance is worded once, and this is the guard that keeps it that way.
+    ///
+    /// Three surfaces have to account for one automatic run. Each of them said
+    /// "Nothing has been deleted." as a constant before HORO-1510, and each of them
+    /// would have gone on saying it — truthfully everywhere except the one Mac where
+    /// it matters. A fourth surface that writes the sentence for itself is the same
+    /// defect again, so it fails here rather than in front of a user.
+    func testTheReassuranceIsWrittenInExactlyOnePlace() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // GlomerisMenuBar
+            .appendingPathComponent("Sources")
+
+        var files: [String] = []
+
+        for name in try FileManager.default.contentsOfDirectory(atPath: sources.path)
+            .filter({ $0.hasSuffix(".swift") })
+            .sorted()
+        {
+            let source = try String(
+                contentsOf: sources.appendingPathComponent(name), encoding: .utf8
+            )
+            for line in source.split(separator: "\n", omittingEmptySubsequences: false) {
+                let code = line.trimmingCharacters(in: .whitespaces)
+                guard !code.hasPrefix("//"), code.contains("Nothing has been deleted") else {
+                    continue
+                }
+                files.append(name)
+                break
+            }
+        }
+
+        XCTAssertEqual(
+            files,
+            ["UnpromptedRecovery.swift"],
+            """
+            The sentence that tells a user nothing was deleted must be read from \
+            UnpromptedRecoveryAccount, which checks whether it is true, rather than \
+            written out by a surface that cannot (HORO-1510).
+            """
+        )
+    }
+
     // MARK: - The vector
 
     /// `--unattended` is this app's statement about itself, and saying it is what
@@ -384,6 +632,90 @@ final class UnpromptedRecoveryTests: XCTestCase {
         XCTAssertEqual(runner.runs.count, 1)
         XCTAssertEqual(banners.raised.count, 1)
         XCTAssertEqual(banners.raised.first?.key, key)
+    }
+
+    /// And it reaches them with an account of that run, which is what the banner's
+    /// last sentence is composed from.
+    ///
+    /// This is the case the whole account exists for: the user is being told about a
+    /// disk that is still too full *after* something was deleted on their behalf, and
+    /// a banner ending "Nothing has been deleted" would be the app's most confident
+    /// false sentence.
+    @MainActor
+    func testTheBannerAfterARunCarriesWhatThatRunDid() async throws {
+        let runner = StubUnpromptedRecovery(
+            grant: try grant(startsUnprompted: true),
+            outcome: .ran(try runReport())
+        )
+        let (monitor, _, banners) = makeMonitor(showing: [.status(try owed())], runner: runner)
+
+        await monitor.pollOnce()
+
+        XCTAssertEqual(banners.raised.first?.automaticRun, .ran(try runReport()))
+    }
+
+    /// The default Mac's banner carries nothing, so its reassurance stands.
+    @MainActor
+    func testABannerWithNoRunBehindItCarriesNothing() async throws {
+        let (monitor, _, banners) = makeMonitor(showing: [.status(try owed())], runner: nil)
+
+        await monitor.pollOnce()
+
+        XCTAssertEqual(banners.raised.count, 1)
+        XCTAssertNil(banners.raised.first?.automaticRun)
+    }
+
+    /// The outcome is remembered against the episode it belongs to, and the episode
+    /// check is the whole point of storing it that way.
+    ///
+    /// Without it, next month's pressure event would open by reporting a deletion that
+    /// happened during this one — an account that is wrong in the direction that
+    /// matters, because it tells a user space was reclaimed when the disk in front of
+    /// them has had nothing taken from it.
+    @MainActor
+    func testAnOutcomeIsNotReportedAgainstADifferentEpisode() async throws {
+        let runner = StubUnpromptedRecovery(
+            grant: try grant(startsUnprompted: true),
+            outcome: .ran(try runReport())
+        )
+        let (monitor, _, _) = makeMonitor(showing: [.status(try owed())], runner: runner)
+
+        await monitor.pollOnce()
+
+        XCTAssertEqual(
+            monitor.automaticRun(forEpisodeIn: try owed()),
+            .ran(try runReport()),
+            "the episode it ran for"
+        )
+        XCTAssertNil(monitor.automaticRun(forEpisodeIn: try owedInASecondEpisode()))
+        XCTAssertNil(
+            monitor.automaticRun(forEpisodeIn: try recovered()),
+            "a report with no open episode has no automatic run to account for"
+        )
+    }
+
+    /// The deep link carries it too, because "Review & recover" lands on a window that
+    /// opens with the same account — and a user who arrives there *because* a bounded
+    /// run did not finish the job must not be told that nothing has been deleted.
+    @MainActor
+    func testReviewAndRecoverCarriesTheRunIntoTheRecoveryWindow() async throws {
+        let runner = StubUnpromptedRecovery(
+            grant: try grant(startsUnprompted: true),
+            outcome: .ran(try runReport())
+        )
+        let opener = StubRecoveryOpener()
+        let monitor = PressureEpisodeMonitor(
+            client: StubPressureReader(showOutcomes: [.status(try owed())]),
+            banners: StubBannerRecorder(),
+            deepLink: opener,
+            unpromptedRecovery: runner
+        )
+
+        await monitor.pollOnce()
+        await monitor.answer(RecoveryDeepLink.reviewToken)
+
+        XCTAssertEqual(opener.opened.count, 1)
+        XCTAssertEqual(opener.opened.first??.automaticRun, .ran(try runReport()))
     }
 
     /// Five polls of a disk that stays full: one run.
@@ -649,6 +981,19 @@ private final class StubPressureReader: PressureEpisodeReading {
     func respond(_ responseToken: String) async -> PressureEpisodeOutcome {
         calls.append("respond:" + responseToken)
         return showOutcomes.first ?? .malformedOutput
+    }
+}
+
+/// A `RecoveryDeepLinkOpening` that records the context instead of opening a window.
+///
+/// Its own rather than shared with `PressureEpisodeMonitorTests`, whose doubles are
+/// file-private.
+@MainActor
+private final class StubRecoveryOpener: RecoveryDeepLinkOpening {
+    private(set) var opened: [RecoveryDeepLinkContext?] = []
+
+    func openRecovery(_ context: RecoveryDeepLinkContext?) {
+        opened.append(context)
     }
 }
 

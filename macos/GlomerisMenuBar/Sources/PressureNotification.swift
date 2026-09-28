@@ -80,16 +80,22 @@ enum PressureNotificationContent {
     }
 
     /// The body, in the order a hurried reader needs it: what is true now, why
-    /// they are being told, where recovery would stop, and that nothing has
-    /// happened yet.
+    /// they are being told, where recovery would stop, and what has happened so
+    /// far.
     ///
     /// The threshold and the goal are named as two separate things. Collapsing
     /// them into one figure is the specific misreading this campaign exists to
     /// prevent: one is when to speak, the other is where a run stops.
+    ///
+    /// The last sentence used to be a constant, and HORO-1510 is why it is not.
+    /// On a Mac whose grant allows a run to start unasked, a banner is raised
+    /// *after* that run — because the run did not get the disk under its goal — so
+    /// "Nothing has been deleted" would be false in precisely the case the user
+    /// most needs to be told about. See `UnpromptedRecoveryAccount`.
     static func body(for banner: PressureBanner) -> String {
         "\(banner.freeHuman) free. You asked to be alerted at "
             + "\(banner.notifyAtDescription); your recovery goal is \(banner.goalDescription). "
-            + "Nothing has been deleted."
+            + UnpromptedRecoveryAccount.deletionClause(after: banner.automaticRun)
     }
 
     /// The buttons, built from the tokens the CLI published.

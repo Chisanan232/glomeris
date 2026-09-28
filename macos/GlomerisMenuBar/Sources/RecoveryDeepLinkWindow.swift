@@ -132,9 +132,18 @@ struct RecoveryDeepLinkWindowView: View {
                 Text(context.goalDescription)
                     .font(GlomerisDesign.secondaryFont)
             }
+            // What has happened so far, then what happens next. The first half is
+            // the shared account rather than a constant: on a Mac whose grant
+            // allows it, the user is on this screen *because* a bounded run
+            // already ran and did not reach the goal (HORO-1510), and a window
+            // that opened by reassuring them nothing had been deleted would be
+            // the most confident wrong sentence in the app.
             GlomerisStateMessageView(
-                message: .success("Nothing has been deleted. Recovery starts when you start it.")
+                message: UnpromptedRecoveryAccount.message(after: context.automaticRun)
             )
+            Text("Recovery starts when you start it.")
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .contain)
     }

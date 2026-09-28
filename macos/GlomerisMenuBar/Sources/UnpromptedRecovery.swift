@@ -85,6 +85,93 @@ enum UnpromptedRecoveryOutcome: Equatable {
             return true
         }
     }
+
+    /// Whether this outcome leaves the app unable to say that nothing was deleted.
+    ///
+    /// A different partition from ``consumesTheAttempt``, and the difference is
+    /// `notAuthorized`: that spends the attempt — a grant that does not cover this
+    /// run will not cover the next poll either — while deleting nothing, because
+    /// `free` refuses before the loop starts.
+    ///
+    /// `ran` is judged on the *measured* figure rather than on having run at all
+    /// (campaign §9): a loop that found nothing safe to take genuinely deleted
+    /// nothing, and the volume was re-read to establish that.
+    ///
+    /// `failed` is the case this property exists for. A run that stopped without a
+    /// readable report may have deleted any amount before it did, so the honest
+    /// answer is that the app does not know — and "may have deleted" is the only
+    /// direction it is safe to be wrong in.
+    var mayHaveDeleted: Bool {
+        switch self {
+        case .ran(let report):
+            return report.bytesFreedMeasured > 0
+        case .failed:
+            return true
+        case .notAuthorized, .busy:
+            return false
+        }
+    }
+}
+
+// MARK: - What the app may say about one
+
+/// The one place an automatic run is put into words.
+///
+/// Three surfaces have to account for one: the notification, the in-app alert card
+/// and the deep-linked recovery window. Each of them used to end with "Nothing has
+/// been deleted." — a sentence that was simply true before HORO-1510 and is now a
+/// claim that has to be checked. Worded in three places it would be corrected in
+/// one and left wrong in the other two, which is the failure mode worth designing
+/// against here: the wrong version is a reassurance, and a user who has been
+/// reassured does not go looking.
+enum UnpromptedRecoveryAccount {
+    /// The reassurance, for a surface with nothing to correct.
+    static let nothingDeleted = "Nothing has been deleted."
+
+    /// What to say about deletion, given whatever automatic run this episode has
+    /// already had.
+    ///
+    /// `nil` — no runner, a grant that never opted in, an episode whose attempt was
+    /// never made — is by far the common case and keeps the original sentence.
+    static func deletionClause(after outcome: UnpromptedRecoveryOutcome?) -> String {
+        guard let outcome else { return Self.nothingDeleted }
+        switch outcome {
+        case .ran(let report) where report.bytesFreedMeasured > 0:
+            // The measured figure, named. A user who comes back to a machine that
+            // deleted things on their behalf is owed the amount, in the first
+            // sentence that mentions it.
+            return "Autopilot already reclaimed \(report.bytesFreedMeasuredHuman)."
+        case .ran:
+            // A run happened and took nothing, which is worth saying as well as
+            // the reassurance: it is the difference between "not tried yet" and
+            // "tried, and there is nothing here it may take".
+            return "Autopilot ran and found nothing it could safely reclaim."
+        case .failed:
+            return "An automatic recovery run stopped without reporting, so some space may "
+                + "already have been reclaimed."
+        case .notAuthorized, .busy:
+            // Nothing was attempted — `free` refused before the loop, or another
+            // run held the execution lock — so the reassurance is still true.
+            return Self.nothingDeleted
+        }
+    }
+
+    /// The same clause for a surface that renders a state message rather than a
+    /// sentence, so the two cards and the notification cannot end up disagreeing
+    /// about what happened while differing only in glyph.
+    ///
+    /// `success` is the ordinary kind here, including for a run that reclaimed
+    /// space: by its own documentation that kind means something the user asked for
+    /// happened, and on this path the asking is the grant they wrote. Only
+    /// `failed` is dressed as a problem, because it is one — a run that stopped
+    /// without reporting is the single outcome the app cannot account for.
+    static func message(after outcome: UnpromptedRecoveryOutcome?) -> GlomerisStateMessage {
+        let clause = Self.deletionClause(after: outcome)
+        if case .failed = outcome {
+            return .failure(clause)
+        }
+        return .success(clause)
+    }
 }
 
 // MARK: - Whether to start one

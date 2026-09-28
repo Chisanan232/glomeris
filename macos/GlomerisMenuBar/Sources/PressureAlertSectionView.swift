@@ -29,6 +29,15 @@
 //  whether a banner is owed and what the two percentages are all arrive from
 //  `pressure show`. See the standing project rule in GlomerisMenuBarApp.swift.
 //
+//  ---------------------------------------------------------------------
+//  It may have to report a deletion it did not make (HORO-1510)
+//  ---------------------------------------------------------------------
+//  On a Mac whose grant allows a run to start unasked, this card can appear after
+//  one already has — because a banner is owed precisely when that run did not get
+//  the disk under its goal. So the card carries something HORO-1508 did not need:
+//  what the automatic run turned out to be. It is read from the monitor, not
+//  composed here.
+//
 
 import SwiftUI
 
@@ -61,12 +70,20 @@ enum PressureAlertPresentation {
 
     /// What a screen reader is told, as one element.
     ///
-    /// Three clauses, deliberately. The threshold and the goal are different
-    /// things — one is when Glomeris speaks, the other is where a run stops — and
-    /// a listener given a single percentage has been told the wrong thing. The
-    /// campaign's accessibility rule names this case directly: spoken state must
-    /// distinguish current usage, threshold and target.
-    static func spokenState(report: PressureStatusReportDto) -> String {
+    /// Four clauses, and the first three are deliberately separate. The threshold
+    /// and the goal are different things — one is when Glomeris speaks, the other
+    /// is where a run stops — and a listener given a single percentage has been
+    /// told the wrong thing. The campaign's accessibility rule names this case
+    /// directly: spoken state must distinguish current usage, threshold and target.
+    ///
+    /// The fourth is what has happened so far, and `automaticRun` is why it is not
+    /// a constant: on an opted-in Mac a bounded run may already have reclaimed
+    /// something, and a listener told "nothing has been deleted" would have been
+    /// read a sentence the app knows to be false (HORO-1510).
+    static func spokenState(
+        report: PressureStatusReportDto,
+        automaticRun: UnpromptedRecoveryOutcome?
+    ) -> String {
         SpokenLabel.compose([
             SpokenLabel.clause(
                 "Disk now",
@@ -74,9 +91,9 @@ enum PressureAlertPresentation {
             ),
             SpokenLabel.clause("Alert threshold", report.notifyAtDescription),
             SpokenLabel.clause("Recovery goal", report.defaultGoal.description),
-            // Said last because it is the reassurance, and a listener should not
-            // have to wait through it to hear the figures.
-            "Nothing has been deleted",
+            // Said last because it is the account of what has happened, and a
+            // listener should not have to wait through it to hear the figures.
+            UnpromptedRecoveryAccount.deletionClause(after: automaticRun),
         ])
     }
 
@@ -144,9 +161,27 @@ struct PressureAlertSectionView: View {
                 Text(report.defaultGoal.description)
                     .font(GlomerisDesign.secondaryFont)
             }
+            // What has happened so far. Inside the spoken element above rather
+            // than beside it, so a listener hears the figures and the account as
+            // one statement — and so the account cannot be missed by someone who
+            // stops listening after the third figure.
+            GlomerisStateMessageView(
+                message: UnpromptedRecoveryAccount.message(after: automaticRun(report))
+            )
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(PressureAlertPresentation.spokenState(report: report))
+        .accessibilityLabel(
+            PressureAlertPresentation.spokenState(
+                report: report,
+                automaticRun: automaticRun(report)
+            )
+        )
+    }
+
+    /// The outcome of an automatic run for *this* episode, asked of the monitor so
+    /// the episode check lives in one place.
+    private func automaticRun(_ report: PressureStatusReportDto) -> UnpromptedRecoveryOutcome? {
+        monitor.automaticRun(forEpisodeIn: report)
     }
 
     /// One button per answer the CLI published, in its order.

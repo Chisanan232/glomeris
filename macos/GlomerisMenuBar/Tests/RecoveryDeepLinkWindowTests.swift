@@ -37,7 +37,8 @@ final class RecoveryDeepLinkWindowTests: XCTestCase {
             report: try JSONDecoder().decode(
                 PressureStatusReportDto.self,
                 from: try Data(contentsOf: Self.fixturesDir.appendingPathComponent(name))
-            )
+            ),
+            automaticRun: nil
         )
     }
 

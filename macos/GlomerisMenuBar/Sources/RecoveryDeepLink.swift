@@ -64,7 +64,17 @@ struct RecoveryDeepLinkContext: Equatable {
     /// rather than being seeded with a guess.
     let goalUsedPercent: Int?
 
-    init(report: PressureStatusReportDto) {
+    /// What an automatic run already did during this episode, or `nil` if it had
+    /// none (HORO-1510).
+    ///
+    /// The window this seeds opens with a reassurance, and on an opted-in Mac the
+    /// reassurance can be false: the user is on this screen because a bounded run
+    /// already happened and did not finish the job. Passed rather than defaulted
+    /// for the reason `PressureBanner.automaticRun` gives.
+    let automaticRun: UnpromptedRecoveryOutcome?
+
+    init(report: PressureStatusReportDto, automaticRun: UnpromptedRecoveryOutcome?) {
+        self.automaticRun = automaticRun
         episodeId = report.episode?.episodeId
         currentUsedPercent = report.current.usedPercent
         currentFreeHuman = report.current.freeHuman

@@ -173,13 +173,29 @@ struct PressureBanner: Equatable {
     /// after the user pressed it.
     let responseTokens: [String]
 
-    init(key: PressureBannerKey, report: PressureStatusReportDto) {
+    /// What an automatic run already did for this episode, or `nil` if it never
+    /// had one (HORO-1510).
+    ///
+    /// Carried so the banner's last sentence can be true. A notification raised
+    /// after an unprompted run is raised *because that run did not resolve the
+    /// pressure* — exactly the case where "Nothing has been deleted" is wrong. No
+    /// default value, deliberately: a surface that forgets to pass this reassures
+    /// the user about a deletion that happened, and a `nil` default is how that
+    /// gets forgotten.
+    let automaticRun: UnpromptedRecoveryOutcome?
+
+    init(
+        key: PressureBannerKey,
+        report: PressureStatusReportDto,
+        automaticRun: UnpromptedRecoveryOutcome?
+    ) {
         self.key = key
         currentUsedPercent = report.current.usedPercent
         notifyAtDescription = report.notifyAtDescription
         freeHuman = report.current.freeHuman
         goalDescription = report.defaultGoal.description
         responseTokens = report.responses
+        self.automaticRun = automaticRun
     }
 }
 
@@ -315,6 +331,17 @@ final class PressureEpisodeMonitor: ObservableObject {
     /// case would be stating a grant nobody read.
     @Published private(set) var unpromptedMode: AutopilotUnpromptedMode?
 
+    /// What an automatic run did for the episode it ran against, so a surface
+    /// speaking about *that* episode can account for it.
+    ///
+    /// Keyed on the episode rather than on the banner key, because the claim it
+    /// settles — whether anything has been deleted — is a fact about the episode: a
+    /// post-snooze reminder is a second banner for the same pressure, and the
+    /// deletion an earlier banner's run performed is still the reason the figures
+    /// moved. One slot rather than a set, because `pressure show` reports at most
+    /// one open episode, so there is never a second one to remember.
+    private var automaticRunByEpisode: (episodeId: UInt64, outcome: UnpromptedRecoveryOutcome)?
+
     /// The last automatic run's outcome, so the in-app surface can account for a
     /// run the user was not present for. Published for the same reason the banner
     /// path publishes its episode: an action taken on someone's behalf that leaves
@@ -405,7 +432,16 @@ final class PressureEpisodeMonitor: ObservableObject {
         defer { isRaising = false }
 
         banners.prepare(responseTokens: report.responses)
-        let reachedTheScreen = await banners.raise(PressureBanner(key: key, report: report))
+        let reachedTheScreen = await banners.raise(
+            PressureBanner(
+                key: key,
+                report: report,
+                // A banner raised after an unprompted run is raised *because* that
+                // run did not resolve the pressure, so this is the ordinary case
+                // for an opted-in Mac rather than an edge one.
+                automaticRun: automaticRun(forEpisodeIn: report)
+            )
+        )
 
         // Set only on the path where a banner actually appeared. A raise that
         // failed must not consume the episode's one chance to be shown: the flag
@@ -476,6 +512,7 @@ final class PressureEpisodeMonitor: ObservableObject {
         // `pressure show` clears. An automatic run's report surviving exactly until
         // the following poll would be worse than not keeping it.
         lastUnpromptedOutcome = outcome
+        automaticRunByEpisode = (episodeId: key.episodeId, outcome: outcome)
         if outcome.consumesTheAttempt {
             lastAutomaticAttempt = key
         }
@@ -483,6 +520,24 @@ final class PressureEpisodeMonitor: ObservableObject {
         // A busy lock mutated nothing, so there is nothing for the caller to
         // re-read and no reason to delay the banner by a round trip.
         return outcome.consumesTheAttempt
+    }
+
+    /// What an automatic run did for the episode `report` describes, if that
+    /// episode is the one a run was made for.
+    ///
+    /// The episode check is the whole function. Without it, an outcome from the
+    /// pressure event last Tuesday would be reported against today's — and in the
+    /// direction that matters: a surface telling someone that space was reclaimed
+    /// during an episode in which nothing was.
+    ///
+    /// `internal` so a test can ask the same question the surfaces do.
+    func automaticRun(forEpisodeIn report: PressureStatusReportDto) -> UnpromptedRecoveryOutcome? {
+        guard
+            let episodeId = report.episode?.episodeId,
+            let record = automaticRunByEpisode,
+            record.episodeId == episodeId
+        else { return nil }
+        return record.outcome
     }
 
     /// Sends the user's answer. One of the tokens the CLI published — this app
@@ -507,7 +562,14 @@ final class PressureEpisodeMonitor: ObservableObject {
         // suppressing the window: pressing this button and having nothing happen
         // is the one outcome worth avoiding at the cost of a sparser screen.
         guard RecoveryDeepLink.opensRecovery(responseToken) else { return }
-        deepLink?.openRecovery(lastReport.map(RecoveryDeepLinkContext.init(report:)))
+        deepLink?.openRecovery(
+            lastReport.map { report in
+                RecoveryDeepLinkContext(
+                    report: report,
+                    automaticRun: automaticRun(forEpisodeIn: report)
+                )
+            }
+        )
     }
 
     /// Takes on whatever an invocation turned out to be.

@@ -77,7 +77,7 @@ final class RecoveryDeepLinkTests: XCTestCase {
     /// the other is where a run stops — and a context carrying a single "level"
     /// would make the surface unable to say which it had.
     func testTheContextCarriesTheThresholdAndTheGoalSeparately() throws {
-        let context = RecoveryDeepLinkContext(report: try report())
+        let context = RecoveryDeepLinkContext(report: try report(), automaticRun: nil)
 
         XCTAssertEqual(context.notifyAtDescription, "85% used")
         XCTAssertEqual(context.goalDescription, "60% used (40% free)")
@@ -85,7 +85,7 @@ final class RecoveryDeepLinkTests: XCTestCase {
     }
 
     func testTheContextCarriesTheReadingTheAlertWasAbout() throws {
-        let context = RecoveryDeepLinkContext(report: try report())
+        let context = RecoveryDeepLinkContext(report: try report(), automaticRun: nil)
 
         XCTAssertEqual(context.currentUsedPercent, 91.0)
         XCTAssertEqual(context.currentFreeHuman, "41.9 GB")
@@ -98,7 +98,7 @@ final class RecoveryDeepLinkTests: XCTestCase {
     /// where it is about to be acted on.
     func testTheGoalIsSeededThroughTheRecoveryCardsOwnConversion() throws {
         let dto = try report()
-        let context = RecoveryDeepLinkContext(report: dto)
+        let context = RecoveryDeepLinkContext(report: dto, automaticRun: nil)
 
         XCTAssertEqual(context.goalUsedPercent, 60)
         XCTAssertEqual(
@@ -113,7 +113,8 @@ final class RecoveryDeepLinkTests: XCTestCase {
     /// alert. The context says so rather than inventing an id.
     func testAContextWithNoEpisodeNamesNone() throws {
         let context = RecoveryDeepLinkContext(
-            report: try report("pressure_status_report_no_episode.json")
+            report: try report("pressure_status_report_no_episode.json"),
+            automaticRun: nil
         )
 
         XCTAssertNil(context.episodeId)
@@ -145,8 +146,8 @@ final class RecoveryDeepLinkTests: XCTestCase {
         )
 
         XCTAssertNotEqual(
-            RecoveryDeepLinkContext(report: try report()),
-            RecoveryDeepLinkContext(report: later)
+            RecoveryDeepLinkContext(report: try report(), automaticRun: nil),
+            RecoveryDeepLinkContext(report: later, automaticRun: nil)
         )
     }
 }
