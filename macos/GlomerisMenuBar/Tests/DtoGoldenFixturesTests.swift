@@ -197,6 +197,144 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertTrue(dto.detectors.isEmpty)
         XCTAssertTrue(dto.discoveryComplete)
         XCTAssertTrue(dto.failedDetectors.isEmpty)
+        XCTAssertTrue(
+            dto.workspaces.isEmpty,
+            "an older CLI reports no families, which is not the same as having none"
+        )
+    }
+
+    // MARK: - WorkspaceFamilyReport (HORO-1511)
+
+    func testDecodesWorkspaceFamilyReport() throws {
+        let dto = try decodeFixture(
+            "workspace_family_report.json", as: WorkspaceFamilyReportDto.self)
+
+        XCTAssertEqual(dto.commonDir, "/Users/dev/proj/.git")
+        XCTAssertEqual(dto.worktreeCount, 3)
+        XCTAssertEqual(dto.actionableNowBytes, 2_147_483_648)
+        XCTAssertEqual(dto.actionableNowHuman, "2.0 GB")
+        XCTAssertEqual(dto.actionableNowCount, 1)
+        XCTAssertEqual(dto.requiresConfirmationBytes, 5_368_709_120)
+        XCTAssertEqual(dto.requiresConfirmationHuman, "5.0 GB")
+        XCTAssertEqual(dto.requiresConfirmationCount, 1)
+        XCTAssertEqual(dto.protectedCount, 1)
+        XCTAssertEqual(dto.unknownCount, 1)
+        XCTAssertEqual(dto.unmeasuredCount, 1)
+        XCTAssertTrue(dto.isLowerBound)
+        XCTAssertEqual(dto.worktreesHoldingWorkInProgress, 2)
+        XCTAssertEqual(dto.worktrees.count, 3)
+        XCTAssertEqual(dto.memberCount, 4)
+    }
+
+    /// The three worktrees are deliberately unalike, and every assertion here
+    /// is on the distinction rather than on decoding succeeding: a mirror that
+    /// collapsed `"unknown"` into `"idle"`, or read an unreadable branch as a
+    /// detached HEAD, would decode all three without throwing.
+    func testWorkspaceWorktreesEachKeepTheirOwnAnswer() throws {
+        let dto = try decodeFixture(
+            "workspace_family_report.json", as: WorkspaceFamilyReportDto.self)
+
+        let main = dto.worktrees[0]
+        XCTAssertEqual(main.root, "/Users/dev/proj")
+        XCTAssertFalse(main.linkedWorktree, "the main checkout, not a `git worktree add` sibling")
+        XCTAssertEqual(main.branch, "main")
+        XCTAssertEqual(main.upstream, "tracking")
+        XCTAssertEqual(main.ahead, 0)
+        XCTAssertEqual(main.behind, 12)
+        XCTAssertEqual(main.merged, "merged")
+        XCTAssertEqual(main.mergedInto, "origin/main")
+        XCTAssertFalse(
+            main.holdsWorkInProgress,
+            "clean, idle, nothing unpushed — the only worktree here with nothing outstanding"
+        )
+
+        let feature = dto.worktrees[1]
+        XCTAssertTrue(feature.linkedWorktree)
+        XCTAssertTrue(feature.dirty)
+        XCTAssertFalse(feature.untracked)
+        XCTAssertEqual(feature.ahead, 3, "three commits no remote has")
+        XCTAssertEqual(feature.merged, "not_merged")
+        XCTAssertTrue(feature.holdsWorkInProgress)
+        XCTAssertEqual(
+            feature.memberResourceIds,
+            [
+                "node_modules:/Users/dev/proj-feature/node_modules",
+                "docker_build_cache:/Users/dev/proj-feature/.docker",
+            ])
+
+        // A branch state no probe could read. Three `"unknown"`s and no
+        // names — not a detached HEAD with no upstream and no merge answer,
+        // which would be three claims manufactured from one failure.
+        let hotfix = dto.worktrees[2]
+        XCTAssertEqual(hotfix.activity, "in_use")
+        XCTAssertTrue(hotfix.untracked)
+        XCTAssertEqual(hotfix.upstream, "unknown")
+        XCTAssertEqual(hotfix.merged, "unknown")
+        XCTAssertNil(hotfix.branch)
+        XCTAssertNil(hotfix.mergedInto)
+        XCTAssertNil(hotfix.ahead)
+        XCTAssertNil(hotfix.behind)
+        XCTAssertTrue(hotfix.holdsWorkInProgress)
+    }
+
+    /// AC 5: a family total a person can read beside the candidate lines that
+    /// carry the actual action and refusal evidence.
+    ///
+    /// Every id a family publishes resolves to a candidate in the same
+    /// report, the candidate is where `executable`/`offeredActions`/
+    /// `refusalReason` live, and one candidate belongs to no family at all —
+    /// so a surface must not treat the families as the whole disk.
+    func testWorkspaceMembersJoinBackToTheCandidatesThatAuthorize() throws {
+        let dto = try decodeFixture(
+            "detect_report_with_workspaces.json", as: DetectReportDto.self)
+
+        XCTAssertEqual(dto.candidates.count, 5)
+        XCTAssertEqual(dto.workspaces.count, 1)
+        let family = dto.workspaces[0]
+
+        let byId = Dictionary(uniqueKeysWithValues: dto.candidates.map { ($0.resourceId, $0) })
+        var joined = 0
+        for worktree in family.worktrees {
+            for id in worktree.memberResourceIds {
+                let candidate = try XCTUnwrap(
+                    byId[id], "family member \(id) names no candidate in the same report")
+                // The candidate, and only the candidate, says what may run.
+                if candidate.policyLabel == "PROTECTED" {
+                    XCTAssertFalse(candidate.executable)
+                    XCTAssertTrue(candidate.offeredActions.isEmpty)
+                    XCTAssertNotNil(candidate.refusalReason)
+                }
+                joined += 1
+            }
+        }
+        XCTAssertEqual(joined, 4)
+        XCTAssertEqual(Int(family.memberCount), joined, "every member is counted exactly once")
+
+        let ungrouped = Set(dto.candidates.map(\.resourceId)).subtracting(
+            family.worktrees.flatMap(\.memberResourceIds))
+        XCTAssertEqual(
+            ungrouped, ["homebrew_cache:/Users/dev/Library/Caches/Homebrew"],
+            "a resource outside any git working tree has no family, and the list is still complete"
+        )
+    }
+
+    /// The protected member's 1.0 GB is real bulk and is in neither byte
+    /// total. Asserted against the candidate it comes from, so a family that
+    /// started summing it would fail here as well as in Rust.
+    func testProtectedBulkIsCountedAndNotInAnyFamilyByteTotal() throws {
+        let dto = try decodeFixture(
+            "detect_report_with_workspaces.json", as: DetectReportDto.self)
+        let family = dto.workspaces[0]
+
+        let protected = try XCTUnwrap(dto.candidates.first { $0.policyLabel == "PROTECTED" })
+        let protectedBytes = try XCTUnwrap(protected.reclaimableBytes)
+
+        XCTAssertEqual(family.protectedCount, 1)
+        XCTAssertEqual(family.actionableNowBytes, 2_147_483_648)
+        XCTAssertEqual(family.requiresConfirmationBytes, 5_368_709_120)
+        XCTAssertNotEqual(family.actionableNowBytes, 2_147_483_648 + protectedBytes)
+        XCTAssertNotEqual(
+            family.requiresConfirmationBytes, 5_368_709_120 + protectedBytes)
     }
 
     /// An older `glomeris` on `PATH` predates `impact_tier`. Losing an
