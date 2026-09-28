@@ -16,6 +16,7 @@ mod homebrew;
 mod maven;
 mod node;
 mod python;
+mod swiftpm;
 mod xcode;
 
 use std::fs;
@@ -573,6 +574,8 @@ impl DetectorRegistry {
                 Box::new(go::GoModuleCacheDetector),
                 Box::new(gradle::GradleCacheDetector),
                 Box::new(maven::MavenLocalRepositoryDetector),
+                Box::new(swiftpm::SwiftPmCacheDetector),
+                Box::new(swiftpm::SwiftPmBuildDirDetector),
             ],
         }
     }
@@ -703,6 +706,8 @@ mod tests {
                 "go_module_cache",
                 "gradle_cache",
                 "maven_local_repository",
+                "swiftpm_cache",
+                "swiftpm_build_dir",
             ]
         );
     }
