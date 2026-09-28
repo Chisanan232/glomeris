@@ -12,7 +12,7 @@ mod default;
 mod git;
 mod open_files;
 mod process;
-mod timeout;
+pub(crate) mod timeout;
 mod tool_liveness;
 
 use std::time::Duration;
