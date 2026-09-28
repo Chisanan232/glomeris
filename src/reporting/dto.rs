@@ -1936,6 +1936,7 @@ mod tests {
         let mut ev = base_evidence();
         ev.git_state = ProbeOutcome::Observed(Some(GitState {
             repo_root: PathBuf::from("/tmp/proj"),
+            common_dir: PathBuf::from("/tmp/proj/.git"),
             dirty: true,
             untracked: false,
             worktree: false,

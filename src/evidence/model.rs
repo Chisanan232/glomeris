@@ -576,9 +576,31 @@ pub struct ProcessRef {
 /// field wraps this in `Option`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitState {
+    /// The working tree this resource sits in. For a linked worktree this
+    /// is the worktree's own directory, **not** the main checkout — which
+    /// is why `repo_root` cannot identify a family of sibling worktrees
+    /// and `common_dir` exists.
     pub repo_root: PathBuf,
+    /// The git directory shared by every worktree of one repository:
+    /// `<main-checkout>/.git`, the same value from the main checkout and
+    /// from each `git worktree add` sibling. Two resources agreeing here
+    /// are in one repository's worktree family (HORO-1511).
+    ///
+    /// Always absolute. Git prints this relative to the directory it was
+    /// asked from in a main checkout (a bare `.git`) and absolute in a
+    /// linked worktree, so the probe resolves it against `repo_root`
+    /// before recording it — a stored `.git` would be the same string for
+    /// every unrelated repository on the machine, and grouping on it
+    /// would merge them all into one family.
+    ///
+    /// Identity, not authority: nothing may become executable because of
+    /// what else shares this directory.
+    pub common_dir: PathBuf,
     pub dirty: bool,
     pub untracked: bool,
+    /// `true` when `repo_root` is a `git worktree add` sibling rather than
+    /// the main checkout — equivalently, when this resource's git
+    /// directory is not `common_dir` itself.
     pub worktree: bool,
 }
 
