@@ -59,10 +59,14 @@
 //  `SIGTERM` partway through a deletion leaves the filesystem in a state neither
 //  this app nor the audit log could describe. So the real run is launched from a
 //  button action in a detached `Task {}` — never from `.task {}`, which SwiftUI
-//  cancels on disappear — and no handle is kept. The campaign's "stop after the
-//  current action" is a cooperative stop inside the Rust loop (HORO-1509), not a
-//  signal from here, and until it exists this card says plainly before starting
-//  that a run cannot be interrupted.
+//  cancels on disappear — and no handle is kept.
+//
+//  "Stop after current action" (HORO-1509) exists *because* no handle does. It
+//  writes a sentinel file (``RecoveryStopRequest``) that the Rust loop checks
+//  between actions; the loop finishes the action it is on, stops itself, and
+//  reports `stopped_by_user` like any other termination. Nothing here signals,
+//  interrupts or waits, and the card says before starting that a stop takes
+//  effect after the action in flight rather than immediately.
 //
 
 import SwiftUI
@@ -187,6 +191,19 @@ struct RecoveryRunSummary: Equatable {
     let freeSpaceText: String
     /// `"2 rounds · 1 action run · 3 left alone"`.
     let effortText: String
+    /// What the run left behind, as `"2 need your confirmation · 1 protected"` —
+    /// or `nil` when the CLI reported no breakdown.
+    ///
+    /// Present only on a run that stopped because nothing safe was left, because
+    /// that is the only stop the CLI computes it for, and the reason it does is
+    /// the campaign's: "no more safe candidates" must be accompanied by what
+    /// remains, or it reads as "the disk is as clean as it can get" when the truth
+    /// may be "there are four things here you could say yes to".
+    ///
+    /// Each count is a different next step for the user, so they are listed and
+    /// never totalled: a confirmation can be given, an active worktree can be
+    /// waited for, and a protected resource will be refused again tomorrow.
+    let remainingText: String?
     /// Present only for the two outcomes that are a claim in their own right:
     /// the goal was met, or the run hit an error. `nil` otherwise, because the
     /// badge and `stopReasonDetail` already say what happened and a second
@@ -205,6 +222,7 @@ struct RecoveryRunSummary: Equatable {
         reclaimedText = "\(dto.bytesFreedMeasuredHuman) reclaimed"
         freeSpaceText = "\(dto.startedFreeHuman) free → \(dto.finalFreeHuman) free"
         effortText = Self.effortText(dto)
+        remainingText = dto.remaining.flatMap(Self.remainingText)
 
         if let error = dto.error, !error.isEmpty {
             outcomeMessage = .failure("The run stopped with an error: \(error)")
@@ -224,6 +242,34 @@ struct RecoveryRunSummary: Equatable {
         let run = "\(dto.actionsExecuted) \(dto.actionsExecuted == 1 ? "action" : "actions") run"
         let left = "\(dto.actionsDeclinedOrSkipped) left alone"
         return "\(rounds) · \(run) · \(left)"
+    }
+
+    /// The three remaining counts, listed, with zero counts omitted.
+    ///
+    /// `nil` when all three are zero — which is a real state and means something
+    /// worth not obscuring: the run genuinely looked and found nothing at all,
+    /// rather than found things it was not allowed to take. A row of three zeros
+    /// would say the same thing less clearly, and a "0 protected" invites the
+    /// reader to check a number that is only there for symmetry.
+    ///
+    /// `not_executable` is worded as being in use rather than as a refusal,
+    /// because that is what it is: past policy, but the action declined to run
+    /// against the resource as it currently stands — a live tool, work in
+    /// progress. It is the one of the three that may simply be available
+    /// tomorrow, and wording it like `protected` would tell the user to give up
+    /// on it.
+    private static func remainingText(_ remaining: RecoveryRemainingReportDto) -> String? {
+        var parts: [String] = []
+        if remaining.requiresConfirmationCount > 0 {
+            parts.append("\(remaining.requiresConfirmationCount) need your confirmation")
+        }
+        if remaining.protectedCount > 0 {
+            parts.append("\(remaining.protectedCount) protected")
+        }
+        if remaining.notExecutableCount > 0 {
+            parts.append("\(remaining.notExecutableCount) in use right now")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }
 
@@ -467,11 +513,12 @@ struct RecoverySectionView: View {
         }
         if !alreadyMet {
             // Said before the run rather than after it, because it is a fact
-            // about what the user is about to start. A cooperative stop arrives
-            // with the progress contract; until then there is nothing to offer
-            // and claiming otherwise would be worse than saying so.
-            Text("A run cannot be interrupted once it starts. It stops when the goal is "
-                + "reached or when nothing safe is left.")
+            // about what the user is about to start — including the shape of the
+            // stop they will be offered. "After the current action" is the whole
+            // of the promise: nothing is interrupted partway through, so a stop
+            // can take as long as the action in flight does.
+            Text("A run stops when the goal is reached, when nothing safe is left, or "
+                + "when you stop it — always after the action in flight has finished.")
                 .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -493,19 +540,152 @@ struct RecoverySectionView: View {
         }
     }
 
+    /// The closed loop while it is running (HORO-1509).
+    ///
+    /// Every figure here comes from ``RecoveryLiveProgress``, which folds the
+    /// run's own NDJSON stream, so the card reports what the loop says it is doing
+    /// rather than what this app assumes a loop does. The rows are in the order
+    /// §7 asks them to be readable: where the disk started, where it is now, how
+    /// much of that is this run's doing, which round, and what it is working on.
+    ///
+    /// The whole block carries one spoken sentence rather than eight separately
+    /// navigable rows, because the current reading and the reclaimed total are
+    /// both "a percentage and a byte figure about this disk" and a listener gets
+    /// them one at a time.
     @ViewBuilder
     private func runningContent(_ summary: RecoveryPreviewSummary) -> some View {
-        GlomerisStateMessageView(message: .loading("Working toward \(summary.goalText)…"))
-        GlomerisDetailRow(label: "Started at") {
-            Text(summary.currentText)
-                .font(GlomerisDesign.secondaryFont)
-                .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
+            GlomerisStateMessageView(
+                message: .loading(
+                    recovery.liveProgress.statusText
+                        ?? "Working toward \(summary.goalText)…"
+                )
+            )
+            GlomerisDetailRow(label: "Started at") {
+                Text(summary.currentText)
+                    .font(GlomerisDesign.secondaryFont)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // Absent until the run measures, rather than seeded from the
+            // pre-flight: the two were taken at different moments, and a "Now"
+            // row showing the pre-flight's reading would be presenting a stale
+            // measurement as a live one.
+            if let usage = recovery.liveProgress.currentUsageText {
+                GlomerisDetailRow(label: "Now") {
+                    Text(usage)
+                        .font(GlomerisDesign.secondaryFont)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            GlomerisDetailRow(label: "Goal") {
+                Text(summary.goalText)
+                    .font(GlomerisDesign.secondaryFont)
+            }
+            if let reclaimed = recovery.liveProgress.reclaimedSoFarText {
+                GlomerisDetailRow(label: "Reclaimed") {
+                    Text(reclaimed)
+                        .font(GlomerisDesign.secondaryFont)
+                }
+            }
+            if recovery.liveProgress.iteration > 0 {
+                GlomerisDetailRow(label: "Round") {
+                    Text("\(recovery.liveProgress.iteration)")
+                        .font(GlomerisDesign.secondaryFont)
+                }
+            }
+            // Resource and action on one row but as two lines: the resource is
+            // what the user recognises and the action id is what actually ran.
+            if let resource = recovery.liveProgress.currentResource {
+                GlomerisDetailRow(label: "Working on") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(resource)
+                            .font(GlomerisDesign.secondaryFont)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let action = recovery.liveProgress.currentAction {
+                            // Verbatim, for the reason `ActionHistoryRowViewModel`
+                            // gives: the action registry is open-ended, so there
+                            // is no vocabulary for action ids and inventing one
+                            // here would leave a newly registered action worded
+                            // as unrecognised.
+                            Text(action)
+                                .font(GlomerisDesign.captionFont)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+            if let done = recovery.liveProgress.workDoneText {
+                GlomerisDetailRow(label: "Done so far") {
+                    Text(done)
+                        .font(GlomerisDesign.secondaryFont)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
-        Text("Each step is checked again before it runs, so this can take a while. "
-            + "Per-step progress is not reported yet.")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Self.runningAccessibilityLabel(
+            liveProgress: recovery.liveProgress,
+            goalText: summary.goalText
+        ))
+
+        stopButton
+        Text(Self.runningCaption(hasRequestedStop: recovery.hasRequestedStop))
             .font(GlomerisDesign.captionFont)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// "Stop after current action" — named for what it does, because the
+    /// difference between it and a Cancel button is the whole safety property.
+    ///
+    /// Disabled once pressed. The request is a file the loop checks between
+    /// actions, so there is a real gap between asking and being heard — a button
+    /// that stayed live across it would invite a second press that changes
+    /// nothing, and the caption below is what explains the wait instead.
+    @ViewBuilder
+    private var stopButton: some View {
+        Button(Self.stopButtonTitle) {
+            if let message = recovery.requestStop() {
+                recovery.lastErrorMessage = message
+            }
+        }
+        .disabled(recovery.hasRequestedStop)
+        .accessibilityHint(
+            "Lets the action already running finish, then stops. Nothing is interrupted."
+        )
+    }
+
+    static let stopButtonTitle = "Stop after current action"
+
+    /// The caption under the running card, before and after a stop is asked for.
+    ///
+    /// `static` for the reason the rest of this file's wording is: a sentence
+    /// inside `body` can only be grepped, and a grep cannot tell whether the
+    /// sentence it found is the one a user sees. This one is worth pinning
+    /// because it is where the app promises not to interrupt a deletion.
+    static func runningCaption(hasRequestedStop: Bool) -> String {
+        if hasRequestedStop {
+            return "Stopping. The action already running will finish first — nothing is "
+                + "interrupted partway through."
+        }
+        return "Each step is checked again before it runs, so this can take a while. "
+            + "Stopping lets the current action finish first."
+    }
+
+    /// One sentence for the whole running block (campaign §14).
+    ///
+    /// Falls back to naming the goal when the run has not reported anything yet,
+    /// so the block is never unlabelled — an unlabelled progress element is the
+    /// case the campaign's "do not rely on progress graphics alone" names.
+    static func runningAccessibilityLabel(
+        liveProgress: RecoveryLiveProgress,
+        goalText: String
+    ) -> String {
+        let spoken = liveProgress.spokenState
+        let opening = "Recovering toward \(goalText)"
+        return spoken.isEmpty
+            ? SpokenLabel.terminated(opening)
+            : SpokenLabel.compose([opening, spoken])
     }
 
     /// The result. Reads the same whether the goal was reached or not — the
@@ -537,6 +717,19 @@ struct RecoverySectionView: View {
             Text(summary.effortText)
                 .font(GlomerisDesign.secondaryFont)
                 .fixedSize(horizontal: false, vertical: true)
+        }
+        // HORO-1509: what the run stopped short of, when the CLI said. Without
+        // this row a `safe_exhausted` stop reads as "the disk is as clean as it
+        // can get", when what it usually means is that several things are waiting
+        // for the user to say yes. The row is absent rather than zeroed when the
+        // report carries no breakdown — the CLI only computes one for the stop
+        // that turns on it.
+        if let remaining = summary.remainingText {
+            GlomerisDetailRow(label: "Left behind") {
+                Text(remaining)
+                    .font(GlomerisDesign.secondaryFont)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         caveatList(summary.caveats)
         Button("Dismiss") {
@@ -711,12 +904,13 @@ struct RecoverySectionView: View {
         recovery.previewTask = nil
     }
 
-    /// `free --goal-used-percent N --json`, for real.
+    /// `free --goal-used-percent N --json --progress-json --stop-file …`, for
+    /// real.
     ///
-    /// No `--progress-json`: a real run emits no progress events, and `free`
-    /// refuses the flag outside `--dry-run` rather than accepting it and
-    /// streaming nothing. Passing it would be asking for a stream that does not
-    /// exist and being told so, with exit 2, for every run.
+    /// Since HORO-1509 a real run streams its own progress on stderr and watches
+    /// a sentinel file for a cooperative stop, so both flags are passed. They are
+    /// what make the run watchable and stoppable without a run handle — see this
+    /// file's header on why the handle must not exist.
     ///
     /// `internal` so the tests can drive it; its one production call site is the
     /// Recover button's detached `Task {}`.
@@ -724,9 +918,12 @@ struct RecoverySectionView: View {
     func runRecovery(preview: RecoveryPreviewReportDto) async {
         // The compare-and-set, for the reason `RecoveryState.beginRecovering()`
         // documents: two runs would take turns losing to an exclusive execution
-        // lock, and the refusal would be true with us as its cause.
+        // lock, and the refusal would be true with us as its cause. It also
+        // generates this run's stop-file path, so there is no window in which a
+        // run is in flight with nothing able to stop it.
         guard recovery.beginRecovering() else { return }
         defer { recovery.endRecovering() }
+        guard let stopRequest = recovery.stopRequest else { return }
 
         recovery.phase = .recovering(preview)
         recovery.lastErrorMessage = nil
@@ -735,9 +932,19 @@ struct RecoverySectionView: View {
             let raw = try await client.runRaw(
                 Self.runArguments(
                     goalUsedPercent: recovery.goalUsedPercent,
+                    stopFile: stopRequest.url,
                     projectRootsStore: projectRootsStore
                 ),
-                progressType: EmptyProgressDto.self
+                progressType: RecoveryProgressEventDto.self,
+                onProgress: { event in
+                    // Hopped onto the main actor for the same reason the
+                    // pre-flight's closure is: `readAllWithLiveProgress` calls
+                    // this from the drain, off the main actor, and the value it
+                    // updates is published.
+                    Task { @MainActor in
+                        recovery.absorbRunProgress(event)
+                    }
+                }
             )
             if let phase = Self.phase(forRunExitCode: raw.exitCode, stdout: raw.stdout) {
                 recovery.phase = phase
@@ -791,11 +998,32 @@ struct RecoverySectionView: View {
         ])
     }
 
+    /// The complete real-run vector: the same goal on the same axis, plus the two
+    /// flags HORO-1509 added.
+    ///
+    /// `--progress-json` streams the loop's own account of itself on stderr,
+    /// which is what ``RecoveryLiveProgress`` folds up. `--stop-file` names a
+    /// path the loop checks between actions, which is what makes the Stop button
+    /// cooperative rather than a kill — see ``RecoveryStopRequest``.
+    ///
+    /// The path is a parameter rather than derived here because it belongs to a
+    /// *run*: `RecoveryState.beginRecovering()` mints it, so the button and the
+    /// child agree on one path, and a builder that generated its own would hand
+    /// the loop a file nothing would ever create.
+    ///
+    /// Both flags are also the reason this vector cannot be built with
+    /// `--dry-run`: `free` refuses `--stop-file` alongside it, because a preview
+    /// performs no actions and so has nothing to stop after.
     static func runArguments(
         goalUsedPercent: Int,
+        stopFile: URL,
         projectRootsStore: ProjectRootsStore
     ) -> [String] {
-        projectRootsStore.scoped(["free", "--goal-used-percent", "\(goalUsedPercent)", "--json"])
+        projectRootsStore.scoped([
+            "free", "--goal-used-percent", "\(goalUsedPercent)",
+            "--json", "--progress-json",
+            "--stop-file", stopFile.path,
+        ])
     }
 
     /// Maps a real run's exit code and stdout to the phase the card should show,

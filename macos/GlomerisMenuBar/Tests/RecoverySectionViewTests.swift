@@ -238,7 +238,11 @@ final class RecoverySectionViewTests: XCTestCase {
         XCTAssertTrue(preview.contains("--dry-run"))
         XCTAssertTrue(preview.contains("--json"))
 
-        let run = RecoverySectionView.runArguments(goalUsedPercent: 60, projectRootsStore: store)
+        let run = RecoverySectionView.runArguments(
+            goalUsedPercent: 60,
+            stopFile: URL(fileURLWithPath: "/tmp/stop"),
+            projectRootsStore: store
+        )
         XCTAssertEqual(run.first, "free")
         XCTAssertTrue(run.contains("--goal-used-percent"))
         XCTAssertFalse(run.contains("--target"))
@@ -249,20 +253,59 @@ final class RecoverySectionViewTests: XCTestCase {
         )
     }
 
-    /// `--progress-json` is asked for only where the CLI will accept it. A real
-    /// run emits no progress events, and `free` exits 2 on the flag outside
-    /// `--dry-run` rather than accepting it and streaming nothing — so asking
-    /// would fail every run.
-    func testProgressEventsAreRequestedOnlyForThePreflight() {
+    /// HORO-1509: both invocations ask for the stream now, because since this
+    /// ticket the CLI produces one for both. They are not the same stream — the
+    /// pre-flight streams detector discovery and the run streams the loop — which
+    /// is why the app decodes them as different types, and
+    /// `testARunsEventCannotBeReadAsAScansAndViceVersa` is what holds that apart.
+    ///
+    /// Asserted on the run because the previous version of this test asserted the
+    /// opposite: before HORO-1509 a real run emitted nothing, so asking would have
+    /// bought an empty stream. Leaving that assertion in place would have kept the
+    /// run silent no matter what the loop learned to say.
+    func testBothInvocationsAskForTheProgressStream() {
         let store = ProjectRootsStore(defaults: TestUserDefaults.inMemory())
 
         XCTAssertTrue(
             RecoverySectionView.previewArguments(goalUsedPercent: 60, projectRootsStore: store)
                 .contains("--progress-json")
         )
+        XCTAssertTrue(
+            RecoverySectionView.runArguments(
+                goalUsedPercent: 60,
+                stopFile: URL(fileURLWithPath: "/tmp/stop"),
+                projectRootsStore: store
+            ).contains("--progress-json")
+        )
+    }
+
+    /// The stop path reaches the CLI, as a value beside `--stop-file`.
+    ///
+    /// Worth its own test because the failure is silent in the direction that
+    /// matters: a run started without the flag runs fine and ignores every press
+    /// of a Stop button that is right there on screen. Nothing else would notice.
+    func testTheRunNamesTheStopFileItWillWatch() throws {
+        let store = ProjectRootsStore(defaults: TestUserDefaults.inMemory())
+        let stop = URL(fileURLWithPath: "/tmp/glomeris-test-stop.stop")
+
+        let run = RecoverySectionView.runArguments(
+            goalUsedPercent: 60,
+            stopFile: stop,
+            projectRootsStore: store
+        )
+        let flag = try XCTUnwrap(run.firstIndex(of: "--stop-file"), "\(run)")
+        XCTAssertEqual(run[run.index(after: flag)], stop.path)
+    }
+
+    /// `--stop-file` is asked for only on the run. `free` refuses it alongside
+    /// `--dry-run` — a preview performs no actions, so there is nothing to stop
+    /// after — and a pre-flight that sent it would exit 2 every time.
+    func testThePreflightDoesNotAskToBeStoppable() {
+        let store = ProjectRootsStore(defaults: TestUserDefaults.inMemory())
+
         XCTAssertFalse(
-            RecoverySectionView.runArguments(goalUsedPercent: 60, projectRootsStore: store)
-                .contains("--progress-json")
+            RecoverySectionView.previewArguments(goalUsedPercent: 60, projectRootsStore: store)
+                .contains("--stop-file")
         )
     }
 
@@ -277,7 +320,11 @@ final class RecoverySectionViewTests: XCTestCase {
 
         for arguments in [
             RecoverySectionView.previewArguments(goalUsedPercent: 60, projectRootsStore: store),
-            RecoverySectionView.runArguments(goalUsedPercent: 60, projectRootsStore: store),
+            RecoverySectionView.runArguments(
+                goalUsedPercent: 60,
+                stopFile: URL(fileURLWithPath: "/tmp/stop"),
+                projectRootsStore: store
+            ),
         ] {
             XCTAssertTrue(arguments.contains("--project-root"), "\(arguments)")
             XCTAssertTrue(arguments.contains("/Users/dev/proj"), "\(arguments)")
@@ -1127,6 +1174,92 @@ final class RecoverySectionViewTests: XCTestCase {
     /// rather than a string of bare stops.
     func testAnUnstartedRunSpeaksNothing() {
         XCTAssertEqual(RecoveryLiveProgress().spokenState, "")
+    }
+
+    // MARK: - The running card's wording (HORO-1509)
+
+    /// The block is labelled even before the run has said anything. An
+    /// unlabelled progress element is exactly the case the campaign's "do not
+    /// rely on progress graphics alone" names: a spinner with no spoken state is
+    /// silence for as long as the run lasts.
+    func testTheRunningBlockIsSpokenBeforeTheRunHasSaidAnything() {
+        let label = RecoverySectionView.runningAccessibilityLabel(
+            liveProgress: RecoveryLiveProgress(),
+            goalText: "60% used (40% free)"
+        )
+        XCTAssertEqual(label, "Recovering toward 60% used (40% free).")
+    }
+
+    /// Once the stream starts, the goal and the live state are both spoken, in
+    /// that order: what it is working toward, then where it has got to.
+    func testTheRunningBlockSpeaksTheGoalAndThenTheProgress() throws {
+        let progress = try accumulate([
+            measuredLine(
+                iteration: 1, usedPercent: 88.0, freeHuman: "60 GB",
+                freedSoFar: 0, freedSoFarHuman: "0 B"
+            )
+        ])
+
+        let label = RecoverySectionView.runningAccessibilityLabel(
+            liveProgress: progress,
+            goalText: "60% used (40% free)"
+        )
+        XCTAssertTrue(label.hasPrefix("Recovering toward 60% used (40% free)."), "got: \(label)")
+        XCTAssertTrue(label.contains("Disk now 88.0% used — 60 GB free."), "got: \(label)")
+    }
+
+    /// The caption is where the app promises not to interrupt a deletion, so both
+    /// of its states have to say so. Before the press it explains what Stop will
+    /// do; after it, that the wait is the promise being kept rather than the
+    /// button having failed.
+    func testTheCaptionPromisesTheCurrentActionFinishesEitherWay() {
+        let before = RecoverySectionView.runningCaption(hasRequestedStop: false)
+        let after = RecoverySectionView.runningCaption(hasRequestedStop: true)
+
+        XCTAssertNotEqual(before, after)
+        for caption in [before, after] {
+            XCTAssertTrue(
+                caption.lowercased().contains("finish"),
+                "neither caption may leave a user thinking Stop kills the run: \(caption)"
+            )
+        }
+        XCTAssertTrue(after.lowercased().contains("interrupted"), "got: \(after)")
+    }
+
+    /// The button is named for what it does. "Cancel" or "Stop" alone would
+    /// promise something this app must not do — `GlomerisClient.runRaw`'s header
+    /// is the rule, and the title is where a user meets it.
+    func testTheStopButtonIsNamedForTheGuaranteeItKeeps() {
+        XCTAssertEqual(RecoverySectionView.stopButtonTitle, "Stop after current action")
+    }
+
+    // MARK: - What a run left behind (HORO-1509)
+
+    /// A `safe_exhausted` stop reads as "nothing safe is left", which without
+    /// this row a user is entitled to hear as "the disk is as clean as it can
+    /// get". The three counts are the three different next steps, so they are
+    /// rendered apart — and their sum, 6, must not appear anywhere.
+    func testASafeExhaustedRunSaysWhatItLeftBehind() throws {
+        let dto = try fixture("recovery_run_report_raw_target.json", as: RecoveryRunReportDto.self)
+        let summary = RecoveryRunSummary(dto)
+
+        let remaining = try XCTUnwrap(summary.remainingText)
+        XCTAssertTrue(remaining.contains("2 need your confirmation"), "got: \(remaining)")
+        XCTAssertTrue(remaining.contains("1 protected"), "got: \(remaining)")
+        XCTAssertTrue(remaining.contains("3 in use right now"), "got: \(remaining)")
+        XCTAssertFalse(
+            remaining.contains("6"),
+            "one total would say 6 things are waiting for the user, when 2 are: \(remaining)"
+        )
+    }
+
+    /// A report with no breakdown says nothing rather than zeros. The CLI only
+    /// computes one for the stop that turns on it, so three noughts here would be
+    /// this app asserting a fact about candidates nobody counted.
+    func testARunWithNoBreakdownSaysNothingAboutWhatIsLeft() throws {
+        let dto = try fixture("recovery_run_report.json", as: RecoveryRunReportDto.self)
+        XCTAssertNil(dto.remaining, "fixture precondition")
+        XCTAssertNil(RecoveryRunSummary(dto).remainingText)
     }
 
     // MARK: - The stop sentinel (HORO-1509)
