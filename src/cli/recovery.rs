@@ -586,6 +586,7 @@ mod tests {
                 },
             }],
             discovery_complete: complete,
+            workspaces: Vec::new(),
         }
     }
 

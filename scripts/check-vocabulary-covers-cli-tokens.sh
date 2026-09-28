@@ -63,7 +63,7 @@
 # src/executor/lock.rs, which is why a repo-wide grep was never a
 # substitute for a producer here.
 #
-# Exit 0 = the seventeen checked vocabularies match. Exit 1 = drift, or an
+# Exit 0 = the twenty checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -163,12 +163,29 @@ VOCABULARIES=(
   # apart. "Nothing more can be done here" and "raise the limit you set" are
   # opposite next steps.
   'autopilotRefusal;;src/autopilot/gate.rs;;RefusalReason::as_str;;AutopilotRefusalReason'
+  # HORO-1511. The three developer-workspace vocabularies, each with one `tag`
+  # producer. Two of the three live in src/workspace/branch.rs, so those rows
+  # are scoped to their impl blocks for the same reason the episode rows are:
+  # an unscoped `fn tag(` anchor would extract `UpstreamState`'s tokens twice
+  # and report `MergedState` as verified without ever reading it.
+  #
+  # Every one of these sets contains `unknown`, and that is why they are here.
+  # `unknown` means a probe could not answer, and Rust deliberately counts it as
+  # *possible* work in progress rather than as an absence of it. A token that
+  # reached the fallback would be shown as "the CLI reported a state this app has
+  # no wording for" — survivable — but a token MISSING from Rust and present here
+  # is the dangerous direction on this surface: it means wording exists for a
+  # state that cannot occur, next to eight that can, and nobody would notice
+  # which of them a real worktree was getting.
+  'worktreeActivity;;src/workspace/group.rs;;ActivityState::tag;;ActivityState'
+  'worktreeUpstream;;src/workspace/branch.rs;;UpstreamState::tag;;UpstreamState'
+  'worktreeMerged;;src/workspace/branch.rs;;MergedState::tag;;MergedState'
 )
 
 # One more than the number of rows above: `outcome` has no producer to diff
 # against (see this script's header). Cross-checked against the rows actually
 # walked, at the end.
-TOTAL_VOCABULARIES=18
+TOTAL_VOCABULARIES=21
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent

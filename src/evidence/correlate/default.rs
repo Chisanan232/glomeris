@@ -129,6 +129,7 @@ mod tests {
         fn state_of(&self, path: &Path, _timeout: Duration) -> ProbeOutcome<Option<GitState>> {
             ProbeOutcome::Observed(Some(GitState {
                 repo_root: path.to_path_buf(),
+                common_dir: path.join(".git"),
                 dirty: false,
                 untracked: false,
                 worktree: false,

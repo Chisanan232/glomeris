@@ -52,6 +52,7 @@ use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
 };
 use glomeris::cli::settings::{build_settings_rejection_report, build_settings_report};
+use glomeris::evidence::{ProbeOutcome, ProbeReason};
 use glomeris::executor::goal::RecoveryGoal;
 use glomeris::executor::recovery_loop::{
     FreeTarget, RecoveryReport, RemainingCandidates, StopReason,
@@ -64,9 +65,14 @@ use glomeris::reporting::dto::{
     AutopilotCeilingsReport, AutopilotEnvelopeReport, DaemonStatusReport, DetectCandidateReport,
     DetectReport, DetectorHealthReport, ExecuteReport, HistoryEventReport, HistoryReport,
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    OfferedAction, StatusReport,
+    OfferedAction, StatusReport, WorkspaceFamilyReport,
 };
+use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
+use glomeris::workspace::{
+    ActivityState, MergedState, UpstreamState, WorkspaceFamily, WorkspaceMember, WorkspaceWorktree,
+    WorktreeBranchState,
+};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -236,6 +242,13 @@ fn detect_report_matches_golden_fixture() {
         // False because of `project_roots` above: two candidates were
         // found, and the list they are in is still not the whole picture.
         discovery_complete: false,
+        // Empty on purpose, and the fixture has no `workspaces` key at all:
+        // the field is `skip_serializing_if = "Vec::is_empty"`, so this
+        // pins the shape a caller that did not group produces. The
+        // populated shape is a fixture of its own — see
+        // `detect_report_with_workspaces_matches_golden_fixture`, and the
+        // note above about "absent" being a meaning of its own here.
+        workspaces: vec![],
     };
     assert_matches_fixture(&report, "detect_report.json");
 }
@@ -643,6 +656,307 @@ fn autopilot_envelope_report_matches_golden_fixture() {
 }
 
 // ---------------------------------------------------------------------------
+// Developer-workspace aggregation (HORO-1511)
+// ---------------------------------------------------------------------------
+
+/// One repository's three checkouts, built through
+/// [`WorkspaceFamilyReport::from_family`] rather than as a DTO literal.
+///
+/// The builder is the point. This report's whole job is to let a client say
+/// "this project accounts for 7.5 GB across three worktrees" *without* that
+/// sentence becoming permission, and the two ways it could fail are both in
+/// the projection rather than in the shape: protected bulk being summed into
+/// the reclaimable total, and an unmeasured member being totalled as a
+/// confident zero. A hand-typed literal would agree with a fixture that
+/// asserts neither.
+///
+/// The family is deliberately mixed (AC 6): a clean merged main checkout, a
+/// dirty linked worktree with unpushed commits and an unmeasured member, and
+/// a linked worktree that is in use and whose branch could not be read at
+/// all. Two of the three hold work in progress, which is the number that
+/// makes the family total unusable as delete authority — the bulk and the
+/// outstanding work are in the same group.
+fn one_repositorys_three_checkouts() -> WorkspaceFamily {
+    WorkspaceFamily {
+        common_dir: PathBuf::from("/Users/dev/proj/.git"),
+        worktrees: vec![
+            // The main checkout: nothing outstanding anywhere, and the only
+            // worktree whose `holds_work_in_progress` is false.
+            WorkspaceWorktree {
+                root: PathBuf::from("/Users/dev/proj"),
+                linked: false,
+                dirty: false,
+                untracked: false,
+                activity: ActivityState::Idle,
+                newest_member_modified_at: None,
+                branch: ProbeOutcome::Observed(WorktreeBranchState {
+                    branch: Some("main".to_string()),
+                    upstream: UpstreamState::Tracking {
+                        ahead: 0,
+                        behind: 12,
+                    },
+                    merged: MergedState::Merged {
+                        into: "origin/main".to_string(),
+                    },
+                }),
+                members: vec![WorkspaceMember {
+                    resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                    reclaimable_bytes: Some(2_147_483_648),
+                    reclaimable_bytes_is_lower_bound: false,
+                    label: PolicyLabel::AutoSafe,
+                }],
+            },
+            // Dirty, three commits no remote has, and one member nothing
+            // measured. Its `ASK` member is the lower-bound estimate, so
+            // `is_lower_bound` on the family comes from a member that
+            // actually contributes to a byte total.
+            WorkspaceWorktree {
+                root: PathBuf::from("/Users/dev/proj-feature"),
+                linked: true,
+                dirty: true,
+                untracked: false,
+                activity: ActivityState::Idle,
+                newest_member_modified_at: None,
+                branch: ProbeOutcome::Observed(WorktreeBranchState {
+                    branch: Some("feature/recovery-goal".to_string()),
+                    upstream: UpstreamState::Tracking {
+                        ahead: 3,
+                        behind: 0,
+                    },
+                    merged: MergedState::NotMerged {
+                        into: "origin/main".to_string(),
+                    },
+                }),
+                members: vec![
+                    WorkspaceMember {
+                        resource_id: "node_modules:/Users/dev/proj-feature/node_modules"
+                            .to_string(),
+                        reclaimable_bytes: Some(5_368_709_120),
+                        reclaimable_bytes_is_lower_bound: true,
+                        label: PolicyLabel::Ask,
+                    },
+                    WorkspaceMember {
+                        resource_id: "docker_build_cache:/Users/dev/proj-feature/.docker"
+                            .to_string(),
+                        reclaimable_bytes: None,
+                        reclaimable_bytes_is_lower_bound: false,
+                        label: PolicyLabel::UnknownIncomplete,
+                    },
+                ],
+            },
+            // In use, untracked files, and no branch answer at all: three
+            // separate reasons, and the `"unknown"` tags are what an unread
+            // branch produces rather than a tidied-up detached-HEAD guess.
+            WorkspaceWorktree {
+                root: PathBuf::from("/Users/dev/proj-hotfix"),
+                linked: true,
+                dirty: false,
+                untracked: true,
+                activity: ActivityState::InUse,
+                newest_member_modified_at: None,
+                branch: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
+                members: vec![WorkspaceMember {
+                    resource_id:
+                        "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-h"
+                            .to_string(),
+                    reclaimable_bytes: Some(1_073_741_824),
+                    reclaimable_bytes_is_lower_bound: false,
+                    label: PolicyLabel::Protected,
+                }],
+            },
+        ],
+    }
+}
+
+#[test]
+fn workspace_family_report_matches_golden_fixture() {
+    let report = WorkspaceFamilyReport::from_family(&one_repositorys_three_checkouts());
+    assert_matches_fixture(&report, "workspace_family_report.json");
+}
+
+/// The join AC 5 rests on: a family total a person can read beside the
+/// candidate lines that carry the actual action and refusal evidence.
+///
+/// Every `member_resource_ids` entry resolves to a candidate, and the
+/// candidate is where `executable`, `offered_actions` and `refusal_reason`
+/// are — the family report has none of the three. The fixture also carries
+/// one candidate belonging to no family (`homebrew_cache`, outside any git
+/// working tree), because "grouped" and "discovered" are different lists and
+/// a client must not assume the families account for everything.
+#[test]
+fn detect_report_with_workspaces_matches_golden_fixture() {
+    let report = DetectReport {
+        candidates: vec![
+            DetectCandidateReport {
+                resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                kind: "cargo_target_dir",
+                reclaimable_bytes: Some(2_147_483_648),
+                reclaimable_human: Some("2.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "AUTO_SAFE",
+                reasons: vec!["no_active_use_observed"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "cargo.clean.target_dir".to_string(),
+                    requires_confirmation: false,
+                }],
+                refusal_reason: None,
+            },
+            DetectCandidateReport {
+                resource_id: "node_modules:/Users/dev/proj-feature/node_modules".to_string(),
+                kind: "node_modules",
+                reclaimable_bytes: Some(5_368_709_120),
+                reclaimable_human: Some("5.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: true,
+                impact_tier: "notable",
+                policy_label: "ASK",
+                reasons: vec!["rebuild_cost_high"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "node.remove.node_modules".to_string(),
+                    requires_confirmation: true,
+                }],
+                refusal_reason: None,
+            },
+            DetectCandidateReport {
+                resource_id: "docker_build_cache:/Users/dev/proj-feature/.docker".to_string(),
+                kind: "docker_build_cache",
+                reclaimable_bytes: None,
+                reclaimable_human: None,
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "unknown",
+                policy_label: "UNKNOWN_INCOMPLETE",
+                reasons: vec!["evidence_incomplete"],
+                executable: false,
+                offered_actions: vec![],
+                refusal_reason: Some("size could not be measured".to_string()),
+            },
+            DetectCandidateReport {
+                resource_id:
+                    "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-h"
+                        .to_string(),
+                kind: "xcode_derived_data",
+                reclaimable_bytes: Some(1_073_741_824),
+                reclaimable_human: Some("1.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "PROTECTED",
+                reasons: vec!["active_process_using_path"],
+                executable: false,
+                offered_actions: vec![],
+                refusal_reason: Some("an active process is using this path".to_string()),
+            },
+            // Discovered, and in no family: not inside any git working tree.
+            DetectCandidateReport {
+                resource_id: "homebrew_cache:/Users/dev/Library/Caches/Homebrew".to_string(),
+                kind: "homebrew_cache",
+                reclaimable_bytes: Some(3_221_225_472),
+                reclaimable_human: Some("3.0 GB".to_string()),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "AUTO_SAFE",
+                reasons: vec!["no_active_use_observed"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "homebrew.cleanup.cache".to_string(),
+                    requires_confirmation: false,
+                }],
+                refusal_reason: None,
+            },
+        ],
+        detectors: vec![
+            DetectorHealthReport {
+                detector: "cargo_target_dir".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "node_modules".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "docker_build_cache".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "xcode_derived_data".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "homebrew_cache".to_string(),
+                status: "found",
+                candidates_found: 1,
+                reason: None,
+            },
+        ],
+        discovery_complete: true,
+        workspaces: vec![WorkspaceFamilyReport::from_family(
+            &one_repositorys_three_checkouts(),
+        )],
+    };
+    assert_matches_fixture(&report, "detect_report_with_workspaces.json");
+}
+
+/// Every id a family publishes has to name a candidate in the same report.
+///
+/// Not a fixture assertion — a statement about the two lists that the
+/// fixture above would still satisfy if someone renamed an id on one side
+/// only, because `assert_matches_fixture` compares each report against the
+/// JSON rather than against the other list.
+#[test]
+fn every_workspace_member_id_names_a_candidate_in_the_same_report() {
+    let fixture = read_fixture("detect_report_with_workspaces.json");
+    let value: serde_json::Value = serde_json::from_str(&fixture).expect("parse fixture");
+
+    let candidate_ids: Vec<&str> = value["candidates"]
+        .as_array()
+        .expect("candidates array")
+        .iter()
+        .map(|c| c["resource_id"].as_str().expect("resource_id string"))
+        .collect();
+
+    let mut grouped = 0usize;
+    for family in value["workspaces"].as_array().expect("workspaces array") {
+        for worktree in family["worktrees"].as_array().expect("worktrees array") {
+            // The aggregate explains; it must not be able to authorize. A
+            // worktree carries ids and no executability of its own.
+            for forbidden in ["executable", "offered_actions", "action_id"] {
+                assert!(
+                    worktree.get(forbidden).is_none(),
+                    "a worktree report must not carry `{forbidden}`"
+                );
+            }
+            for id in worktree["member_resource_ids"]
+                .as_array()
+                .expect("member_resource_ids array")
+            {
+                let id = id.as_str().expect("resource id string");
+                assert!(
+                    candidate_ids.contains(&id),
+                    "family member {id} names no candidate in the same report"
+                );
+                grouped += 1;
+            }
+        }
+    }
+
+    assert_eq!(grouped, 4, "the fixture's family has four members");
+    assert_eq!(
+        candidate_ids.len(),
+        5,
+        "one candidate belongs to no family, which is the case being pinned"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Recovery goal reports (HORO-1506)
 // ---------------------------------------------------------------------------
 //
@@ -763,6 +1077,10 @@ fn recovery_discovery_pass() -> DetectReport {
             },
         ],
         discovery_complete: false,
+        // The recovery previews are about a volume and a goal, not about
+        // where the bulk sits; grouping would add a second thing for those
+        // fixtures to pin. HORO-1511's own fixture covers it.
+        workspaces: vec![],
     }
 }
 

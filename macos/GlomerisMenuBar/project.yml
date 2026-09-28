@@ -111,6 +111,17 @@ targets:
       # card and the Clean button all read, asserted directly rather than
       # through whichever of the three views happens to render it.
       - path: Sources/CandidateActionability.swift
+      # HORO-1511: the developer-projects wording. Compiled in because this is
+      # the one file that holds a worktree family and a set of candidates at the
+      # same time, which makes it the place the aggregation could quietly start
+      # answering for its members — and the answer is a value, so a test can
+      # check it. What is asserted here is that a project's totals never become
+      # a member's verdict: a PROTECTED resource inside a merged, idle, clean
+      # worktree stays refused, with Rust's own reason. Its counterpart claim,
+      # that the card drawing this has nothing to act with, is source-shaped
+      # rather than runtime-shaped and lives in
+      # scripts/check-workspace-aggregation-has-no-authority.sh.
+      - path: Sources/WorkspaceFamilyRowViewModel.swift
       # HORO-1366: the Apply Plan preview/result vocabulary. Foundation-only
       # and view-free, so its classification and its aggregate honesty are
       # asserted against DTO fixtures directly rather than through the card

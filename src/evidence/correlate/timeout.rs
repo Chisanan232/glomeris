@@ -1,5 +1,8 @@
 //! Minimal subprocess timeout helper shared by every real correlation
-//! probe (both `lsof` invocations, `git`, `pgrep`).
+//! probe (both `lsof` invocations, `git`, `pgrep`) and, since HORO-1511,
+//! by the worktree branch probe in [`crate::workspace`] — which is
+//! outside this module on purpose (see that module's header) but has the
+//! same need to run `git` without hanging.
 //!
 //! Deliberately no async runtime or extra dependency — HORO-949's
 //! contract prefers tool-native, minimal-footprint execution. Approach:
@@ -17,7 +20,7 @@ use std::time::{Duration, Instant};
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Outcome of attempting to run one subprocess under a timeout.
-pub(super) enum CommandOutcome {
+pub(crate) enum CommandOutcome {
     /// The child ran to completion within the deadline.
     Completed(Output),
     /// The executable could not be found (`ErrorKind::NotFound` on spawn).
@@ -32,7 +35,7 @@ pub(super) enum CommandOutcome {
 
 /// Run `command` with piped stdout/stderr, waiting up to `timeout` for it
 /// to complete.
-pub(super) fn run_with_timeout(mut command: Command, timeout: Duration) -> CommandOutcome {
+pub(crate) fn run_with_timeout(mut command: Command, timeout: Duration) -> CommandOutcome {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child: Child = match command.spawn() {

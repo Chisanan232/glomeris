@@ -1,0 +1,63 @@
+{
+  "common_dir": "/Users/dev/proj/.git",
+  "worktree_count": 3,
+  "actionable_now_bytes": 2147483648,
+  "actionable_now_human": "2.0 GB",
+  "actionable_now_count": 1,
+  "requires_confirmation_bytes": 5368709120,
+  "requires_confirmation_human": "5.0 GB",
+  "requires_confirmation_count": 1,
+  "protected_count": 1,
+  "unknown_count": 1,
+  "unmeasured_count": 1,
+  "is_lower_bound": true,
+  "worktrees_holding_work_in_progress": 2,
+  "worktrees": [
+    {
+      "root": "/Users/dev/proj",
+      "linked_worktree": false,
+      "dirty": false,
+      "untracked": false,
+      "activity": "idle",
+      "upstream": "tracking",
+      "ahead": 0,
+      "behind": 12,
+      "branch": "main",
+      "merged": "merged",
+      "merged_into": "origin/main",
+      "holds_work_in_progress": false,
+      "member_resource_ids": ["cargo_target_dir:/Users/dev/proj/target"]
+    },
+    {
+      "root": "/Users/dev/proj-feature",
+      "linked_worktree": true,
+      "dirty": true,
+      "untracked": false,
+      "activity": "idle",
+      "upstream": "tracking",
+      "ahead": 3,
+      "behind": 0,
+      "branch": "feature/recovery-goal",
+      "merged": "not_merged",
+      "merged_into": "origin/main",
+      "holds_work_in_progress": true,
+      "member_resource_ids": [
+        "node_modules:/Users/dev/proj-feature/node_modules",
+        "docker_build_cache:/Users/dev/proj-feature/.docker"
+      ]
+    },
+    {
+      "root": "/Users/dev/proj-hotfix",
+      "linked_worktree": true,
+      "dirty": false,
+      "untracked": true,
+      "activity": "in_use",
+      "upstream": "unknown",
+      "merged": "unknown",
+      "holds_work_in_progress": true,
+      "member_resource_ids": [
+        "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-h"
+      ]
+    }
+  ]
+}

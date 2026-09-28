@@ -277,6 +277,13 @@ struct GlomerisPopoverView: View {
                     projectRootsStore: projectRootsStore,
                     onOpenDetail: { navigation.open($0) }
                 )
+                // HORO-1511, directly under the list it reorganises: it answers
+                // "what does this belong to" about the rows immediately above,
+                // and the two would stop being read together if anything sat
+                // between them. Below rather than above, because the list is
+                // what a user acts on and this is an explanation of it — and it
+                // draws nothing at all when no candidate lives in a checkout.
+                WorkspaceFamiliesSectionView(scan: scan)
                 AiPlanSectionView(
                     plan: plan,
                     client: client,

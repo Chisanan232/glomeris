@@ -92,6 +92,9 @@
 //    audit source    `src/monitor/persistence.rs`     AuditRecord::source
 //    alert answers   `src/monitor/episode.rs`          EpisodeResponse::as_str
 //    refused answers `src/monitor/episode.rs`          EpisodeRejection::as_str
+//    worktree activity `src/workspace/group.rs`      ActivityState::tag
+//    publish state   `src/workspace/branch.rs`        UpstreamState::tag
+//    merge state     `src/workspace/branch.rs`        MergedState::tag
 //
 
 import Foundation
@@ -1337,6 +1340,132 @@ enum GlomerisVocabulary {
                 token, episodeRejectionAxis, "Answer not recorded",
                 "The CLI would not record this answer, for a reason this app has no wording "
                     + "for. Disk monitoring is unaffected."
+            )
+        }
+    }
+
+    // MARK: - Developer-workspace state (HORO-1511)
+
+    /// The three worktree vocabularies below describe where a developer's work
+    /// stands, not what Glomeris may do about it — and they are deliberately
+    /// `prose`, with no symbol and no tone of their own, for that reason.
+    ///
+    /// "Already merged" is the single most persuasive thing this repository can
+    /// compute about a directory (`src/workspace/mod.rs` says so, and keeps
+    /// those facts out of `Evidence` on the strength of it). Rendered as a green
+    /// chip it would read as clearance, next to a resource whose own policy
+    /// class may well be PROTECTED. A sentence in the secondary line cannot do
+    /// that: the safety and actionability axes stay the only coloured things on
+    /// the surface, exactly as they are in the candidates list.
+    ///
+    /// All three fallbacks read as "not known" rather than as the reassuring
+    /// end of their scale, which matters more here than in most tables. Each of
+    /// these vocabularies has a real `unknown` token standing for "a probe
+    /// could not answer", and Rust counts every one of them as *possible*
+    /// outstanding work rather than as an absence of it
+    /// (`ActivityState::may_be_in_use`, `UpstreamState::may_hold_unpushed_work`,
+    /// `MergedState::Unknown`'s "deliberately not a guess"). Wording that drifts
+    /// towards "idle" or "merged" would undo that on the way to the screen.
+
+    static let worktreeActivityAxis = "Worktree activity"
+
+    /// `ActivityState` as the CLI tags it (`src/workspace/group.rs` —
+    /// `ActivityState::tag`, diffed by this project's vocabulary guard).
+    static func worktreeActivity(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "in_use":
+            return prose(
+                token, worktreeActivityAxis, "In use now",
+                "Something has a file open here, is working inside it, or the tool that owns "
+                    + "it is running."
+            )
+        case "idle":
+            return prose(
+                token, worktreeActivityAxis, "Idle",
+                "Every activity probe answered, and none of them found anything using this "
+                    + "worktree."
+            )
+        case "unknown":
+            return prose(
+                token, worktreeActivityAxis, "Activity not known",
+                "At least one activity probe could not answer, so this worktree is not known "
+                    + "to be idle."
+            )
+        default:
+            return unrecognised(
+                token, worktreeActivityAxis, "Unrecognised activity state",
+                "The CLI reported a worktree activity state this app has no wording for."
+            )
+        }
+    }
+
+    static let worktreeUpstreamAxis = "Published state"
+
+    /// `UpstreamState` as the CLI tags it (`src/workspace/branch.rs` —
+    /// `UpstreamState::tag`, diffed by this project's vocabulary guard).
+    ///
+    /// `untracked` is the one worth reading twice: it does not mean nothing is
+    /// unpushed, it means there is nothing published to compare against, which
+    /// is the more cautious of the two readings and not the more obvious one.
+    static func worktreeUpstream(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "untracked":
+            return prose(
+                token, worktreeUpstreamAxis, "No upstream branch",
+                "Nothing published to compare against, so commits here may exist only on this "
+                    + "Mac."
+            )
+        case "tracking":
+            return prose(
+                token, worktreeUpstreamAxis, "Tracks a remote branch",
+                "Counted against its upstream, so how far ahead and behind it is is known."
+            )
+        case "unknown":
+            return prose(
+                token, worktreeUpstreamAxis, "Publish state not known",
+                "The comparison against a remote could not be made, so unpushed work cannot "
+                    + "be ruled out."
+            )
+        default:
+            return unrecognised(
+                token, worktreeUpstreamAxis, "Unrecognised publish state",
+                "The CLI reported a branch publish state this app has no wording for."
+            )
+        }
+    }
+
+    static let worktreeMergedAxis = "Merge state"
+
+    /// `MergedState` as the CLI tags it (`src/workspace/branch.rs` —
+    /// `MergedState::tag`, diffed by this project's vocabulary guard).
+    ///
+    /// Neither of the two answers names the branch it is about: that is
+    /// `merged_into`, and the surface renders it beside this wording, because
+    /// "already merged" without saying what into is half a fact
+    /// (`MergedState::compared_against`).
+    static func worktreeMerged(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "merged":
+            return prose(
+                token, worktreeMergedAxis, "Already merged",
+                "Every commit on this branch is also on the branch it was compared against."
+            )
+        case "not_merged":
+            return prose(
+                token, worktreeMergedAxis, "Not merged",
+                "This branch has at least one commit the branch it was compared against does "
+                    + "not."
+            )
+        case "unknown":
+            return prose(
+                token, worktreeMergedAxis, "Merge state not known",
+                "No default branch was recorded to compare against, and Glomeris does not "
+                    + "guess at one."
+            )
+        default:
+            return unrecognised(
+                token, worktreeMergedAxis, "Unrecognised merge state",
+                "The CLI reported a branch merge state this app has no wording for."
             )
         }
     }

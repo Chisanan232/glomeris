@@ -297,6 +297,7 @@ mod tests {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         ev.git_state = ProbeOutcome::Observed(Some(GitState {
             repo_root: PathBuf::from("/tmp"),
+            common_dir: PathBuf::from("/tmp/.git"),
             dirty: true,
             untracked: false,
             worktree: false,
@@ -311,6 +312,7 @@ mod tests {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         ev.git_state = ProbeOutcome::Observed(Some(GitState {
             repo_root: PathBuf::from("/tmp"),
+            common_dir: PathBuf::from("/tmp/.git"),
             dirty: false,
             untracked: false,
             worktree: true,

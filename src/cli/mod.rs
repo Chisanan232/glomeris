@@ -44,11 +44,12 @@ use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
     DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport,
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    ProgressEvent, StatusReport,
+    ProgressEvent, StatusReport, WorkspaceFamilyReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
 use crate::reporting::ranking;
+use crate::workspace::{group_families, GitCliBranchProbe, WorkspaceFamily, WorkspaceSurvey};
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
 /// `executor::recovery_loop::CANDIDATE_CORRELATION_TIMEOUT`'s reasoning
@@ -453,11 +454,20 @@ pub fn find_candidate<'a>(
 /// [`DiscoveryPass::detectors`] — an empty slice yields
 /// `discovery_complete: true`, which is only honest for a caller that
 /// genuinely ran no detectors.
+///
+/// `workspaces` is the git-worktree-family grouping (HORO-1511), passed in
+/// already built rather than computed here: it needs a `git` subprocess per
+/// worktree root, and a caller that has not run one must be visible as such.
+/// Pass an empty slice to omit the grouping — which is honest, because the
+/// field is skipped from the JSON entirely when empty and so cannot read as
+/// "this machine has no worktree families". Build it with
+/// [`crate::workspace::group_families`].
 pub fn build_detect_report(
     candidates: &[(Evidence, PolicyDecision)],
     detectors: &[(DetectorId, DetectorOutcome)],
     actions: &ActionRegistry,
     impact: ImpactContext,
+    workspaces: &[WorkspaceFamily],
 ) -> DetectReport {
     let mut candidates: Vec<DetectCandidateReport> = candidates
         .iter()
@@ -488,7 +498,34 @@ pub fn build_detect_report(
             })
             .collect(),
         discovery_complete,
+        workspaces: workspaces
+            .iter()
+            .map(WorkspaceFamilyReport::from_family)
+            .collect(),
     }
+}
+
+/// Groups an already-discovered pass into git worktree families
+/// (HORO-1511), running the branch probe once per distinct worktree root.
+///
+/// Separate from [`build_detect_report`] on purpose: this runs `git`
+/// subprocesses, and a caller that cannot or should not pay for them passes
+/// an empty slice instead of getting a silently ungrouped report. Roots come
+/// from the candidates' own already-collected git state, so no resource is
+/// probed for a family it was not observed to be in.
+///
+/// Explanatory only. Nothing in the returned families may make anything
+/// executable — see the header of [`crate::workspace`].
+pub fn group_workspaces_now(candidates: &[(Evidence, PolicyDecision)]) -> Vec<WorkspaceFamily> {
+    let roots: Vec<PathBuf> = candidates
+        .iter()
+        .filter_map(|(ev, _)| match ev.git_state.observed() {
+            Some(Some(git)) => Some(git.repo_root.clone()),
+            _ => None,
+        })
+        .collect();
+    let survey = WorkspaceSurvey::survey(roots, &GitCliBranchProbe, CLI_CORRELATION_TIMEOUT);
+    group_families(candidates, &survey)
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
@@ -1983,7 +2020,7 @@ mod tests {
         ];
 
         let actions = ActionRegistry::builtin();
-        let report = build_detect_report(&candidates, &[], &actions, ImpactContext::default());
+        let report = build_detect_report(&candidates, &[], &actions, ImpactContext::default(), &[]);
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -2071,6 +2108,7 @@ mod tests {
             &[],
             &actions,
             ImpactContext::default(),
+            &[],
         );
         let candidate = &detect_report.candidates[0];
         assert!(candidate.reclaimable_bytes_is_lower_bound);
@@ -2125,6 +2163,7 @@ mod tests {
             &[],
             &actions,
             ImpactContext::default(),
+            &[],
         );
         let candidate = &detect_report.candidates[0];
         assert!(!candidate.reclaimable_bytes_is_lower_bound);

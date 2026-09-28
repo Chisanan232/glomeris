@@ -48,21 +48,25 @@ impl GitProbe for GitCliProbe {
         };
         let (dirty, untracked) = parse_status_porcelain(&status.stdout);
 
-        let worktree = match run_git(
+        let dirs = match run_git(
             &repo_root,
             &["rev-parse", "--git-dir", "--git-common-dir"],
             timeout,
         ) {
-            Ok(output) if output.status.success() => is_linked_worktree(&output.stdout),
+            Ok(output) if output.status.success() => output,
             Ok(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
             Err(outcome) => return outcome,
+        };
+        let Some(dirs) = parse_git_dirs(&dirs.stdout, &repo_root) else {
+            return ProbeOutcome::Unavailable(ProbeReason::Failed);
         };
 
         ProbeOutcome::Observed(Some(GitState {
             repo_root,
+            common_dir: dirs.common_dir,
             dirty,
             untracked,
-            worktree,
+            worktree: dirs.linked_worktree,
         }))
     }
 }
@@ -103,18 +107,49 @@ fn parse_status_porcelain(stdout: &[u8]) -> (bool, bool) {
     (dirty, untracked)
 }
 
+/// The two facts `git rev-parse --git-dir --git-common-dir` carries.
+struct GitDirs {
+    /// Absolute path to the git directory shared by the whole worktree
+    /// family. See [`GitState::common_dir`].
+    common_dir: PathBuf,
+    /// Whether `asked_from` is a `git worktree add` sibling rather than
+    /// the main checkout.
+    linked_worktree: bool,
+}
+
 /// `git rev-parse --git-dir --git-common-dir` prints one path per line.
 /// In the main working copy of a repo they are identical; in a linked
 /// worktree (`git worktree add`) `--git-dir` points at
 /// `<main-repo>/.git/worktrees/<name>` while `--git-common-dir` points
 /// at the shared `<main-repo>/.git` — so the two lines differing is the
-/// signal that `path` is a linked worktree, not the main checkout.
-fn is_linked_worktree(stdout: &[u8]) -> bool {
+/// signal that `asked_from` is a linked worktree, not the main checkout.
+///
+/// Both lines may be relative, and in practice the main-checkout case is:
+/// git answers a bare `.git` there and absolute paths in a linked
+/// worktree. They are relative to the directory git was *asked from*,
+/// which is `asked_from` — so `common_dir` is resolved against it. A
+/// relative `common_dir` kept as-is would be the string `.git` for every
+/// repository on the machine, and HORO-1511 groups worktrees by this
+/// value.
+///
+/// `None` when the output is not two non-empty lines. That is a probe
+/// that did not answer, reported as `Unavailable` rather than as a main
+/// checkout — "not a linked worktree" is a claim, and an unparsed answer
+/// does not support it.
+fn parse_git_dirs(stdout: &[u8], asked_from: &Path) -> Option<GitDirs> {
     let text = String::from_utf8_lossy(stdout);
     let mut lines = text.lines();
-    let git_dir = lines.next().unwrap_or("");
-    let common_dir = lines.next().unwrap_or("");
-    !git_dir.is_empty() && !common_dir.is_empty() && git_dir != common_dir
+    let git_dir = lines.next().unwrap_or("").trim();
+    let common_dir = lines.next().unwrap_or("").trim();
+    if git_dir.is_empty() || common_dir.is_empty() {
+        return None;
+    }
+    Some(GitDirs {
+        // `join` returns the argument unchanged when it is already
+        // absolute, so the linked-worktree case passes through.
+        common_dir: asked_from.join(common_dir),
+        linked_worktree: git_dir != common_dir,
+    })
 }
 
 #[cfg(test)]
@@ -133,21 +168,50 @@ mod tests {
     }
 
     #[test]
-    fn is_linked_worktree_true_when_git_dir_and_common_dir_differ() {
-        assert!(is_linked_worktree(
-            b"/repo/.git/worktrees/feature\n/repo/.git\n"
-        ));
+    fn a_linked_worktree_is_recognised_and_keeps_the_shared_git_dir() {
+        let dirs = parse_git_dirs(
+            b"/repo/.git/worktrees/feature\n/repo/.git\n",
+            Path::new("/repo-feature"),
+        )
+        .expect("two non-empty lines");
+
+        assert!(dirs.linked_worktree);
+        // Already absolute, so `asked_from` does not enter it.
+        assert_eq!(dirs.common_dir, PathBuf::from("/repo/.git"));
     }
 
     #[test]
-    fn is_linked_worktree_false_when_git_dir_and_common_dir_match() {
-        assert!(!is_linked_worktree(b".git\n.git\n"));
+    fn the_main_checkout_is_not_a_linked_worktree() {
+        let dirs =
+            parse_git_dirs(b".git\n.git\n", Path::new("/repo")).expect("two non-empty lines");
+
+        assert!(!dirs.linked_worktree);
     }
 
+    /// The load-bearing conversion. Git answers a bare `.git` in a main
+    /// checkout, so two unrelated repositories produce byte-identical
+    /// output here — and HORO-1511 groups worktrees by `common_dir`. Left
+    /// relative, every repository on the machine would look like one
+    /// family.
     #[test]
-    fn is_linked_worktree_false_on_malformed_output() {
-        assert!(!is_linked_worktree(b""));
-        assert!(!is_linked_worktree(b"only_one_line\n"));
+    fn a_relative_common_dir_is_resolved_against_the_repo_it_came_from() {
+        let one = parse_git_dirs(b".git\n.git\n", Path::new("/work/alpha")).expect("two lines");
+        let other = parse_git_dirs(b".git\n.git\n", Path::new("/work/beta")).expect("two lines");
+
+        assert_eq!(one.common_dir, PathBuf::from("/work/alpha/.git"));
+        assert_ne!(
+            one.common_dir, other.common_dir,
+            "two unrelated main checkouts must not share a family key"
+        );
+    }
+
+    /// Unparsed output is not an answer. Before HORO-1511 this returned
+    /// `false`, i.e. "a main checkout" — a claim the output does not
+    /// support.
+    #[test]
+    fn malformed_output_is_not_an_answer() {
+        assert!(parse_git_dirs(b"", Path::new("/repo")).is_none());
+        assert!(parse_git_dirs(b"only_one_line\n", Path::new("/repo")).is_none());
     }
 
     /// The one deliberate real-subprocess smoke test allowed by this
@@ -161,6 +225,11 @@ mod tests {
         match GitCliProbe.state_of(manifest_dir, Duration::from_secs(5)) {
             ProbeOutcome::Observed(Some(state)) => {
                 assert!(!state.repo_root.as_os_str().is_empty());
+                // Whether CI runs from a clone or from a worktree, the
+                // family key has to be a path something can be grouped
+                // by — which a bare `.git` is not.
+                assert!(state.common_dir.is_absolute(), "{:?}", state.common_dir);
+                assert!(state.common_dir.starts_with(&state.repo_root) || state.worktree);
             }
             other => panic!("expected Observed(Some(_)) against this repo, got {other:?}"),
         }
