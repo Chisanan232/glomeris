@@ -23,10 +23,46 @@
 //! on a real run) are now honoured, and the only thing that was keeping such an
 //! invocation harmless was the refusal.
 
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 fn glomeris_bin() -> &'static str {
     env!("CARGO_BIN_EXE_glomeris")
+}
+
+/// A `HOME` of this invocation's own, which is what keeps these tests from
+/// racing each other.
+///
+/// Four of the tests below take the execution lock for real — every `--target
+/// 0%` run does, before it discovers that the target is already met. The lock is
+/// `$HOME/Library/Application Support/Glomeris/execution.lock` and it is
+/// exclusive and non-blocking, so under `cargo test`'s default thread pool two
+/// of them will sooner or later overlap and the loser exits 75 `busy`. That is
+/// not flakiness to be retried away: the refusal is correct, and the test that
+/// saw it was asserting something else entirely.
+///
+/// Relocating `HOME` rather than serialising the tests is the precedent
+/// `execution_lock_wiring.rs` sets, and it is the better fix here for a second
+/// reason: it also detaches these runs from the developer's real config and
+/// history, so what the CLI does under test stops depending on whose machine it
+/// is running on.
+fn make_temp_home() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock before UNIX_EPOCH")
+        .as_nanos();
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "glomeris-recovery-goal-cli-{}-{}-{}",
+        std::process::id(),
+        nanos,
+        n
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp HOME dir");
+    dir
 }
 
 struct Run {
@@ -39,6 +75,7 @@ fn run_free(args: &[&str]) -> Run {
     let output = Command::new(glomeris_bin())
         .arg("free")
         .args(args)
+        .env("HOME", make_temp_home())
         .stdin(Stdio::null())
         .output()
         .expect("failed to spawn glomeris binary");
