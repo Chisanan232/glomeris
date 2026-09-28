@@ -27,7 +27,7 @@ use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
     cache_root_status, query_tool_single_line, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext, ToolQuery,
+    DiscoveryContext, RootAbsence, ToolQuery,
 };
 
 pub struct GoBuildCacheDetector;
@@ -79,6 +79,7 @@ fn go_env_cache_root(
                 regenerability,
                 recoverability,
                 &format!("path reported by `go env {var}`"),
+                RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
             ),
         },
         ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
@@ -214,6 +215,7 @@ mod tests {
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
             "path reported by `go env GOMODCACHE`",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
         );
         match status {
             DetectorStatus::Failed(msg) => assert!(msg.contains("absolute")),
@@ -234,6 +236,7 @@ mod tests {
             regenerability,
             recoverability,
             "test fixture",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
         ) {
             DetectorStatus::Found(mut evidence) if evidence.len() == 1 => evidence.remove(0),
             other => panic!("expected one Found evidence, got {other:?}"),

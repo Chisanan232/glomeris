@@ -11,6 +11,7 @@
 mod cargo;
 mod docker;
 mod go;
+mod gradle;
 mod homebrew;
 mod node;
 mod python;
@@ -501,23 +502,28 @@ pub(crate) fn cache_dir_evidence(
     CacheDirProbe::Found(Box::new(evidence))
 }
 
+/// What a missing cache root means, which depends entirely on how the
+/// detector learned the path.
+///
+/// The two are separate because `tool_absent` is documented, all the way
+/// out to `GlomerisDtos.swift`'s `DetectorHealthReportDto`, as "the tool
+/// that would produce candidates is not installed" — a claim that is
+/// evidence-backed in one case and knowably false in the other.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum RootAbsence {
+    /// The path came from running the tool, so the tool is installed: it
+    /// answered. A missing directory then means only that the tool has not
+    /// written its cache yet — `Found(vec![])`, never `ToolAbsent`.
+    ToolAnsweredWithAPathItHasNotWritten,
+    /// The path was inferred from `$HOME` or an environment variable and no
+    /// tool was ever run, so the directory's absence is the only evidence
+    /// available about the tool at all. This is the existing
+    /// `xcode`/`cargo`/`node` convention and maps to `ToolAbsent`.
+    NothingObservedAboutTheTool,
+}
+
 /// [`cache_dir_evidence`] for a detector whose whole answer is one cache
 /// root, recording where the path came from on the evidence itself.
-///
-/// `Absent` becomes `Found(vec![])`, NOT
-/// [`DetectorStatus::ToolAbsent`]. Every caller of this helper reached a
-/// path by asking the tool itself, so the tool answering at all is proof it
-/// is installed — and `tool_absent` is documented, all the way out to
-/// `GlomerisDtos.swift`'s `DetectorHealthReportDto`, as "the tool that
-/// would produce candidates is not installed". Reporting that about a tool
-/// we just successfully ran would be a statement we know to be false.
-/// `Found(vec![])` says what is actually true: the probe answered, and the
-/// cache root it named does not exist yet, so there is no resource.
-///
-/// This is deliberately not the convention in `xcode`/`cargo`/`node`, which
-/// infer a hardcoded path and never speak to a tool: for those, the
-/// directory's absence genuinely is the only evidence available about the
-/// tool, and their `ToolAbsent` stays correct.
 pub(crate) fn cache_root_status(
     detector: DetectorId,
     kind: ResourceKind,
@@ -525,13 +531,17 @@ pub(crate) fn cache_root_status(
     regenerability: Regenerability,
     recoverability: Recoverability,
     provenance: &str,
+    absence: RootAbsence,
 ) -> DetectorStatus {
     match cache_dir_evidence(kind, detector, path, regenerability, recoverability) {
         CacheDirProbe::Found(mut evidence) => {
             evidence.push_source(provenance.to_string());
             DetectorStatus::Found(vec![*evidence])
         }
-        CacheDirProbe::Absent => DetectorStatus::Found(Vec::new()),
+        CacheDirProbe::Absent => match absence {
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten => DetectorStatus::Found(Vec::new()),
+            RootAbsence::NothingObservedAboutTheTool => DetectorStatus::ToolAbsent,
+        },
         CacheDirProbe::Failed(msg) => DetectorStatus::Failed(msg),
     }
 }
@@ -560,6 +570,7 @@ impl DetectorRegistry {
                 Box::new(python::UvCacheDetector),
                 Box::new(go::GoBuildCacheDetector),
                 Box::new(go::GoModuleCacheDetector),
+                Box::new(gradle::GradleCacheDetector),
             ],
         }
     }
@@ -688,6 +699,7 @@ mod tests {
                 "uv_cache",
                 "go_build_cache",
                 "go_module_cache",
+                "gradle_cache",
             ]
         );
     }

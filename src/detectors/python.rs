@@ -25,7 +25,7 @@ use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
     cache_root_status, query_tool_single_line, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext, ToolQuery,
+    DiscoveryContext, RootAbsence, ToolQuery,
 };
 
 pub struct PipCacheDetector;
@@ -64,6 +64,7 @@ impl Detector for PipCacheDetector {
                         Regenerability::RegenerableByTool,
                         Recoverability::RegenerableByTool,
                         &format!("path reported by `{program} cache dir`"),
+                        RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
                     );
                 }
                 ToolQuery::ToolAbsent => continue,
@@ -102,6 +103,7 @@ impl Detector for UvCacheDetector {
                 Regenerability::RegenerableByTool,
                 Recoverability::RegenerableByTool,
                 "path reported by `uv cache dir`",
+                RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
             ),
             ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
             ToolQuery::Failed(msg) => DetectorStatus::Failed(msg),
@@ -138,6 +140,7 @@ mod tests {
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
             "path reported by `pip cache dir`",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
         );
 
         match status {
@@ -176,6 +179,7 @@ mod tests {
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
             "path reported by `uv cache dir`",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
         );
 
         assert_eq!(status, DetectorStatus::Found(Vec::new()));
@@ -194,6 +198,7 @@ mod tests {
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
             "path reported by `pip cache dir`",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
         );
 
         match status {
