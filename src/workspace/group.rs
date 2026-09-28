@@ -51,7 +51,12 @@ impl WorkspaceSurvey {
         Self { by_root }
     }
 
-    fn state_of(&self, root: &Path) -> ProbeOutcome<WorktreeBranchState> {
+    /// Visible to the rest of [`crate::workspace`] — [`super::graph`] needs
+    /// the same lookup — and to nothing outside it. A survey that answered
+    /// `NotAttempted` for a root it was never given is only safe because
+    /// every caller sits inside the no-authority zone; widening this to
+    /// `pub` would hand a deciding layer a branch fact.
+    pub(super) fn state_of(&self, root: &Path) -> ProbeOutcome<WorktreeBranchState> {
         self.by_root
             .get(root)
             .cloned()

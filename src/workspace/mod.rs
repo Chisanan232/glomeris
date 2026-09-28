@@ -44,9 +44,16 @@
 //! resource belongs to and nothing about whether the resource may go.
 
 pub mod branch;
+mod graph;
 mod group;
 
 pub use branch::{BranchProbe, GitCliBranchProbe, MergedState, UpstreamState, WorktreeBranchState};
+pub use graph::{
+    ActivityFacts, BranchLifecycle, ExternalContext, ExternalFact, ExternalSource,
+    GlobalResourceNode, HistoryConfidence, MachineContext, PullRequestState, RepositoryNode,
+    ResourceNode, TaskState, UniqueWork, UnplacedResourceNode, WorkflowHistorySummary,
+    WorkflowMode, WorkspaceEvidenceGraph, WorktreeNode, MIN_OBSERVATIONS_FOR_A_PATTERN,
+};
 pub use group::{
     group_families, ActivityState, WorkspaceFamily, WorkspaceMember, WorkspaceSurvey,
     WorkspaceWorktree,
