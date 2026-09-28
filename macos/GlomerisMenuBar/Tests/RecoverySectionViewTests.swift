@@ -630,4 +630,152 @@ final class RecoverySectionViewTests: XCTestCase {
         XCTAssertTrue(state.isRecovering, "clearing display state must not release the run guard")
         XCTAssertFalse(state.beginRecovering())
     }
+
+    // MARK: - The live progress stream (HORO-1509)
+
+    /// Decoding one line per phase, with the JSON written out here rather than
+    /// read from a fixture.
+    ///
+    /// That is deliberate and it is the opposite of this file's rule for
+    /// reports. A report DTO is pinned against `tests/fixtures/dto/`, which the
+    /// Rust builders produce, so a renamed field turns both sides red at once.
+    /// The progress stream has no such fixture — it is NDJSON on stderr, not a
+    /// report document — so the literals here *are* the contract, and they were
+    /// written by reading `RecoveryProgressEvent`'s `#[serde]` attributes in
+    /// `src/reporting/dto.rs`. The Rust side pins its own half:
+    /// `every_progress_phase_is_distinctly_named_and_carries_its_iteration`
+    /// asserts the seven phase tokens and their shape.
+    private func progressEvent(_ json: String) throws -> RecoveryProgressEventDto {
+        try JSONDecoder().decode(RecoveryProgressEventDto.self, from: Data(json.utf8))
+    }
+
+    func testEveryProgressPhaseDecodesAndCarriesItsIteration() throws {
+        let lines = [
+            #"{"phase":"measured","iteration":1,"total_bytes":500,"free_bytes":100,"#
+                + #""used_percent":80.0,"free_human":"100 B","bytes_freed_so_far":0,"#
+                + #""bytes_freed_so_far_human":"0 B"}"#,
+            #"{"phase":"discovering","iteration":2}"#,
+            #"{"phase":"discovered","iteration":3,"candidates":4,"detectors_failed":1}"#,
+            #"{"phase":"revalidating","iteration":4}"#,
+            #"{"phase":"action_started","iteration":5,"resource":"cargo:/p/target","#
+                + #""action":"cargo_clean","policy_label":"AUTO_SAFE"}"#,
+            #"{"phase":"action_finished","iteration":6,"resource":"cargo:/p/target","#
+                + #""action":"cargo_clean","outcome":"succeeded","bytes_freed_so_far":9,"#
+                + #""bytes_freed_so_far_human":"9 B"}"#,
+            #"{"phase":"stop_requested","iteration":7}"#,
+        ]
+
+        let decoded = try lines.map { try progressEvent($0) }
+        XCTAssertEqual(
+            decoded.map(\.iteration), [1, 2, 3, 4, 5, 6, 7],
+            "every variant carries the pass that produced it, so a display can "
+                + "always say which round it is on"
+        )
+    }
+
+    func testAMeasuredLineCarriesTheUsageItReadAndTheBytesAlreadyFreed() throws {
+        let event = try progressEvent(
+            #"{"phase":"measured","iteration":2,"total_bytes":500,"free_bytes":120,"#
+                + #""used_percent":76.0,"free_human":"120 B","bytes_freed_so_far":20,"#
+                + #""bytes_freed_so_far_human":"20 B"}"#
+        )
+        guard case .measured(let payload) = event else {
+            return XCTFail("expected a measured event, got \(event)")
+        }
+        XCTAssertEqual(payload.totalBytes, 500)
+        XCTAssertEqual(payload.freeBytes, 120)
+        XCTAssertEqual(payload.usedPercent, 76.0, accuracy: 0.001)
+        XCTAssertEqual(payload.freeHuman, "120 B")
+        // Re-measured free space, not a sum of estimates (campaign §9). This is
+        // the one figure in the stream a progress display may show as progress.
+        XCTAssertEqual(payload.bytesFreedSoFar, 20)
+        XCTAssertEqual(payload.bytesFreedSoFarHuman, "20 B")
+    }
+
+    /// Rust omits a byte count it could not measure rather than serializing
+    /// zero, and `nil` here has to keep meaning "nobody measured this". A
+    /// decoder that defaulted either field to `0` would let the card print
+    /// "0 B reclaimed" for an action whose size is simply unknown.
+    func testAnUnmeasuredByteCountDecodesAsAbsentRatherThanZero() throws {
+        let started = try progressEvent(
+            #"{"phase":"action_started","iteration":1,"resource":"brew:cache","#
+                + #""action":"brew_cleanup","policy_label":"ASK"}"#
+        )
+        guard case .actionStarted(let startedPayload) = started else {
+            return XCTFail("expected an action_started event, got \(started)")
+        }
+        XCTAssertNil(startedPayload.estimatedBytes)
+        XCTAssertNil(startedPayload.estimatedHuman)
+        XCTAssertEqual(startedPayload.policyLabel, "ASK")
+
+        let finished = try progressEvent(
+            #"{"phase":"action_finished","iteration":1,"resource":"brew:cache","#
+                + #""action":"brew_cleanup","outcome":"failed","bytes_freed_so_far":0,"#
+                + #""bytes_freed_so_far_human":"0 B"}"#
+        )
+        guard case .actionFinished(let finishedPayload) = finished else {
+            return XCTFail("expected an action_finished event, got \(finished)")
+        }
+        XCTAssertNil(
+            finishedPayload.reclaimedBytes,
+            "an action whose reclaim could not be measured must not report a measurement"
+        )
+        XCTAssertNil(finishedPayload.reclaimedHuman)
+        // The cumulative figure is always present, because it is always measured.
+        XCTAssertEqual(finishedPayload.bytesFreedSoFar, 0)
+    }
+
+    /// The estimate is decoded into a differently-named field from the
+    /// measurement, so no call site can reach for one and get the other.
+    func testAnEstimateAndAMeasurementAreSeparatelyNamedFields() throws {
+        let started = try progressEvent(
+            #"{"phase":"action_started","iteration":1,"resource":"cargo:/p/target","#
+                + #""action":"cargo_clean","policy_label":"AUTO_SAFE","#
+                + #""estimated_bytes":2048,"estimated_human":"2.0 KB"}"#
+        )
+        guard case .actionStarted(let payload) = started else {
+            return XCTFail("expected an action_started event, got \(started)")
+        }
+        XCTAssertEqual(payload.estimatedBytes, 2048)
+        XCTAssertEqual(payload.estimatedHuman, "2.0 KB")
+
+        let finished = try progressEvent(
+            #"{"phase":"action_finished","iteration":1,"resource":"cargo:/p/target","#
+                + #""action":"cargo_clean","outcome":"succeeded","reclaimed_bytes":1024,"#
+                + #""reclaimed_human":"1.0 KB","bytes_freed_so_far":1024,"#
+                + #""bytes_freed_so_far_human":"1.0 KB"}"#
+        )
+        guard case .actionFinished(let payload) = finished else {
+            return XCTFail("expected an action_finished event, got \(finished)")
+        }
+        // An estimate of 2 KB and a measured reclaim of 1 KB, on purpose: a
+        // decoder that read the estimate as the result would pass with equal
+        // values and fail here.
+        XCTAssertEqual(payload.reclaimedBytes, 1024)
+        XCTAssertEqual(payload.outcome, "succeeded")
+    }
+
+    /// An unknown phase throws, and `GlomerisClient` skips a line that throws —
+    /// so a CLI newer than this app costs one missed status update rather than a
+    /// failed run. Asserted here because the tolerance depends on the throw.
+    func testAnUnknownProgressPhaseIsRejectedRatherThanGuessedAt() {
+        XCTAssertThrowsError(try progressEvent(#"{"phase":"reticulating","iteration":1}"#))
+    }
+
+    /// The two NDJSON streams share the `phase` key and nothing else, which is
+    /// why they are separate types. Decoding either line as the other's type has
+    /// to fail rather than half-succeed: `detect`'s scan and a run that deletes
+    /// things are not interchangeable, and a display that took one for the other
+    /// would report a mutation as a search.
+    func testTheDiscoveryAndRecoveryStreamsCannotBeDecodedAsEachOther() {
+        let discovery = #"{"phase":"detector_started","detector":"cargo_target_dir"}"#
+        let recovery = #"{"phase":"discovering","iteration":1}"#
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(RecoveryProgressEventDto.self, from: Data(discovery.utf8))
+        )
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(ProgressEventDto.self, from: Data(recovery.utf8))
+        )
+    }
 }
