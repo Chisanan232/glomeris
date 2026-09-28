@@ -13,6 +13,7 @@ mod docker;
 mod go;
 mod gradle;
 mod homebrew;
+mod maven;
 mod node;
 mod python;
 mod xcode;
@@ -571,6 +572,7 @@ impl DetectorRegistry {
                 Box::new(go::GoBuildCacheDetector),
                 Box::new(go::GoModuleCacheDetector),
                 Box::new(gradle::GradleCacheDetector),
+                Box::new(maven::MavenLocalRepositoryDetector),
             ],
         }
     }
@@ -700,6 +702,7 @@ mod tests {
                 "go_build_cache",
                 "go_module_cache",
                 "gradle_cache",
+                "maven_local_repository",
             ]
         );
     }
