@@ -100,6 +100,9 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
         StopReason::NoProgress => "The run stopped before reaching the goal because recent \
              actions reclaimed no measurable space."
             .to_string(),
+        StopReason::StoppedByUser => "The run stopped before reaching the goal because you \
+             asked it to stop; the action that was already running finished first."
+            .to_string(),
         StopReason::Error(message) => {
             format!("The run could not continue: {message}")
         }
@@ -645,6 +648,7 @@ mod tests {
             StopReason::SafeExhausted,
             StopReason::BudgetExceeded,
             StopReason::NoProgress,
+            StopReason::StoppedByUser,
             StopReason::Error("statfs failed".to_string()),
         ] {
             let detail = stop_reason_detail(&reason);

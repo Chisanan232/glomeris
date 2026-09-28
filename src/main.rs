@@ -2864,7 +2864,7 @@ fn free_run(
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
-        run as run_recovery_loop, RecoveryConfig, RecoveryRunRequest, SilentObserver,
+        run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryRunRequest, SilentObserver,
         SystemWallClock,
     };
     use glomeris::monitor::{FsStat, SystemClock};
@@ -2936,6 +2936,9 @@ fn free_run(
     // Nobody is watching this run yet: `--progress-json` on a real run is
     // wired to a writing observer in a later commit.
     let observer = SilentObserver;
+    // Nothing can ask this run to stop yet either: `--stop-file` is wired to a
+    // real sentinel in a later commit.
+    let stop_signal = NeverStops;
 
     let audit_log_path = actions_jsonl_path();
     let report = run_recovery_loop(RecoveryRunRequest {
@@ -2951,6 +2954,7 @@ fn free_run(
         discovery_ctx: &discovery_ctx,
         audit_log_path: &audit_log_path,
         observer: &observer,
+        stop: &stop_signal,
     });
 
     if json {

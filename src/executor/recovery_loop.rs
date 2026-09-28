@@ -278,6 +278,12 @@ pub enum StopReason {
     /// executed actions each measured zero (or unmeasurable) actual
     /// reclaimed bytes.
     NoProgress,
+    /// The user asked the run to stop, and it stopped — after the action that
+    /// was in flight at the time finished, never in the middle of one
+    /// (HORO-1509). Distinct from every other reason on purpose: a run the
+    /// user ended has not failed, has not exhausted anything, and has not
+    /// reached the goal.
+    StoppedByUser,
     /// The initial or a subsequent disk-usage measurement itself failed.
     Error(String),
 }
@@ -997,6 +1003,9 @@ pub struct RecoveryRunRequest<'a> {
     /// Where per-iteration progress goes. Pass `&SilentObserver` for a run
     /// nobody is watching (HORO-1509).
     pub observer: &'a dyn RecoveryObserver,
+    /// How the run finds out the user asked it to stop. Pass `&NeverStops`
+    /// where nothing can ask (HORO-1509).
+    pub stop: &'a dyn StopSignal,
 }
 
 /// Runs one bounded closed-loop recovery pass against
@@ -1018,6 +1027,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         discovery_ctx,
         audit_log_path,
         observer,
+        stop,
     } = request;
 
     let start_instant = clock.now();
@@ -1084,6 +1094,33 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         if target_met(&usage, &config.target) {
             return build_report(
                 StopReason::TargetReached,
+                iterations_run,
+                actions_executed,
+                actions_declined_or_skipped,
+                total_bytes_freed,
+                started_free_bytes,
+                last_free_bytes,
+                &detector_failures,
+            );
+        }
+
+        // 2b. Did the user ask to stop? Asked once per iteration, which is
+        // also once after each completed action, because executing one is the
+        // last thing an iteration does. There is deliberately no check
+        // between `execute`'s revalidation and its mutation: "stop after the
+        // current action" is the whole contract, and a deletion abandoned
+        // halfway leaves state nobody can describe (HORO-1509).
+        //
+        // After the target check on purpose. A run that stopped having
+        // already reached the goal reached the goal; that is the more useful
+        // truth of the two, and the user gets the outcome they asked for
+        // either way.
+        if stop.stop_requested() {
+            observer.observe(RecoveryProgress::StopRequested {
+                iteration: iterations_run + 1,
+            });
+            return build_report(
+                StopReason::StoppedByUser,
                 iterations_run,
                 actions_executed,
                 actions_declined_or_skipped,
@@ -1577,6 +1614,38 @@ mod run_tests {
         }
     }
 
+    /// A stop signal that stays inert for its first `quiet_probes` answers and
+    /// asks for a stop from then on — the shape of a user pressing the button
+    /// while a run is already under way.
+    ///
+    /// Counting probes rather than wall time is what makes the test
+    /// deterministic: the loop asks exactly once per iteration, so
+    /// `quiet_probes: 1` means "stop is requested during iteration 1's action,
+    /// and the loop finds out when iteration 2 begins".
+    struct StopsAfterProbes {
+        quiet_probes: u64,
+        probes: AtomicU64,
+    }
+
+    impl StopsAfterProbes {
+        fn quiet_for(quiet_probes: u64) -> Self {
+            Self {
+                quiet_probes,
+                probes: AtomicU64::new(0),
+            }
+        }
+
+        fn probe_count(&self) -> u64 {
+            self.probes.load(Ordering::Relaxed)
+        }
+    }
+
+    impl StopSignal for StopsAfterProbes {
+        fn stop_requested(&self) -> bool {
+            self.probes.fetch_add(1, Ordering::Relaxed) >= self.quiet_probes
+        }
+    }
+
     /// This test module's own label for one event, used only to talk about
     /// ordering. It is NOT the wire tag — the JSON `phase` values belong to
     /// the reporting DTO and are pinned where that DTO lives.
@@ -1641,6 +1710,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -1673,6 +1743,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
@@ -1725,6 +1796,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
@@ -1783,6 +1855,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &dir.join("actions.jsonl"),
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert!(
@@ -1827,6 +1900,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::BudgetExceeded);
@@ -1855,6 +1929,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         match report.stop_reason {
@@ -1911,6 +1986,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::NoProgress);
@@ -1987,6 +2063,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
             observer: &SilentObserver,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2061,6 +2138,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
             observer: &observer,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.iterations_run, 2);
@@ -2164,6 +2242,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
             observer: &observer,
+            stop: &NeverStops,
         });
 
         let finished: Vec<(String, String, &'static str, Option<u64>)> = observer
@@ -2241,6 +2320,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
             observer: &observer,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2323,6 +2403,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
             observer: &observer,
+            stop: &NeverStops,
         });
 
         let totals: Vec<u64> = observer
@@ -2384,6 +2465,7 @@ mod run_tests {
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &observer,
+            stop: &NeverStops,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2397,6 +2479,186 @@ mod run_tests {
                 bytes_freed_so_far: 0,
             }],
         );
+    }
+
+    /// HORO-1509 AC4: "stop after the current action" means exactly that. The
+    /// action that was running when the user asked finishes, the next one
+    /// never starts, and the run says the user stopped it rather than
+    /// inventing a reason of its own.
+    ///
+    /// Two fixtures, one stop. The loop asks for a stop once per iteration, so
+    /// a signal that stays quiet for one probe is requested while iteration
+    /// 1's deletion is under way: the first directory must be gone, the second
+    /// must still be there.
+    #[test]
+    fn a_run_asked_to_stop_finishes_its_action_and_starts_no_other() {
+        let root_a = make_temp_dir("stop-after-current-a");
+        let root_b = make_temp_dir("stop-after-current-b");
+        let ev_a = empty_node_modules_evidence(&root_a);
+        let ev_b = empty_node_modules_evidence(&root_b);
+        let node_modules_a = root_a.join("node_modules");
+        let node_modules_b = root_b.join("node_modules");
+
+        let config = RecoveryConfig {
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev_a, ev_b]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root_a.join("actions.jsonl");
+        let observer = RecordingObserver::default();
+        let stop = StopsAfterProbes::quiet_for(1);
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(FsUsage::new(1_000_000_000, 100)),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &observer,
+            stop: &stop,
+        });
+
+        assert_eq!(report.stop_reason, StopReason::StoppedByUser);
+        assert_eq!(report.iterations_run, 1);
+        assert_eq!(report.actions_executed, 1);
+        assert_eq!(stop.probe_count(), 2, "asked once per iteration");
+        // Which of two equally-sized candidates the ranking picked first is
+        // not this test's business; that exactly one of them survived is.
+        let survivors = [&node_modules_a, &node_modules_b]
+            .iter()
+            .filter(|path| path.exists())
+            .count();
+        assert_eq!(
+            survivors, 1,
+            "the action already running when the stop arrived must have \
+             finished, and no further action may start"
+        );
+
+        // The stop is announced, and it is announced where it happened:
+        // after iteration 1's action, at the top of what would have been
+        // iteration 2.
+        assert_eq!(
+            observer.phases(),
+            vec![
+                "measured",
+                "discovering",
+                "discovered",
+                "revalidating",
+                "action_started",
+                "action_finished",
+                "measured",
+                "stop_requested",
+            ]
+        );
+        assert!(observer
+            .events()
+            .contains(&RecoveryProgress::StopRequested { iteration: 2 }));
+
+        // One executed action, one audit record: a stopped run's trail is as
+        // complete as any other run's.
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(audit_tail.len(), 1);
+        assert_eq!(audit_tail[0].outcome, "succeeded");
+
+        fs::remove_dir_all(&root_a).ok();
+        fs::remove_dir_all(&root_b).ok();
+    }
+
+    /// A stop that arrives before the run does anything ends it without
+    /// touching a single resource — and the run reports that honestly rather
+    /// than as an exhausted search (HORO-1509 AC4).
+    #[test]
+    fn a_stop_requested_before_any_action_reclaims_nothing() {
+        let root = make_temp_dir("stop-before-anything");
+        let ev = empty_node_modules_evidence(&root);
+        let node_modules = root.join("node_modules");
+
+        let config = RecoveryConfig {
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root.join("actions.jsonl");
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(FsUsage::new(1_000_000_000, 100)),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &observer,
+            stop: &StopsAfterProbes::quiet_for(0),
+        });
+
+        assert_eq!(report.stop_reason, StopReason::StoppedByUser);
+        assert_eq!(report.iterations_run, 0);
+        assert_eq!(report.actions_executed, 0);
+        assert_eq!(report.total_bytes_freed, 0);
+        assert!(node_modules.exists(), "nothing was deleted");
+        assert_eq!(observer.phases(), vec!["measured", "stop_requested"]);
+        assert!(
+            !audit_log_path.exists(),
+            "a run that executed nothing writes no audit record"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A stop and a reached goal in the same breath: the goal wins, because
+    /// that is the outcome the user actually asked for and got. The stop is
+    /// not discarded — there was simply nothing left for it to prevent.
+    #[test]
+    fn a_stop_does_not_mask_a_goal_that_was_already_reached() {
+        let config = RecoveryConfig {
+            target: FreeTarget::Percentage(90.0),
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(Vec::new());
+        let ctx = empty_discovery_ctx();
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(FsUsage::new(1_000, 990)), // 99% free
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &observer,
+            stop: &StopsAfterProbes::quiet_for(0),
+        });
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+        assert_eq!(observer.phases(), vec!["measured"]);
     }
 
     /// A candidate neither probe could size is reported as unknown, not as

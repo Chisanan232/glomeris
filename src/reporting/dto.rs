@@ -1464,6 +1464,7 @@ pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &
         StopReason::SafeExhausted => "safe_exhausted",
         StopReason::BudgetExceeded => "budget_exceeded",
         StopReason::NoProgress => "no_progress",
+        StopReason::StoppedByUser => "stopped_by_user",
         StopReason::Error(_) => "error",
     }
 }
