@@ -16,7 +16,10 @@
 # unpushed member swept along. So the rule is structural: the layers that
 # decide and the layer that explains do not meet.
 #
-# Three checks, each one a separate way the boundary could be crossed:
+# Five checks, each one a separate way the boundary could be crossed. The first
+# three are about the Rust module; the last two are about the macOS surface that
+# renders it, because a group with no authority shown by a card that can act is
+# the same defect one layer up:
 #
 #   1. No module under src/policy, src/executor, src/autopilot or src/actions
 #      may reference `crate::workspace` at all. Those four are, in order:
@@ -41,6 +44,23 @@
 #      spent. `crate::evidence` and `crate::reporting` are allowed — the
 #      first is where the resources and their git state come from, the second
 #      is what this metadata exists to be rendered by.
+#
+#   4. The macOS developer-projects card has nothing to act with: no `Button`,
+#      no `GlomerisClient`, no tap target, no `.disabled(...)`, no action id.
+#      This is the same argument as check 2 at the presentation layer. A card
+#      headed "this project accounts for 30 GB" with a control on it is an
+#      offer to clean a project, and a project is not a thing the executor has
+#      ever been asked to reason about — the members are, one at a time,
+#      through the policy class each one's own evidence earned.
+#
+#   5. That card still goes back to the member for its verdicts. Check 4 only
+#      proves the surface cannot act; this asks whether it is still showing
+#      whose decision it is, by requiring that the view model constructs a
+#      `CandidateActionability` from a candidate and that the view renders the
+#      not-permission sentence. A required substring is weak evidence about
+#      behaviour — `WorkspaceFamilyRowViewModelTests` is what pins the
+#      semantics — but it does catch the join being deleted, which is the
+#      change that would turn the card into a summary with nothing under it.
 #
 # Exit 0 = pass. Exit 1 = fail, with file:line detail on stdout.
 
@@ -164,6 +184,80 @@ for entry in "${FORBIDDEN_IN_WORKSPACE[@]}"; do
   done < <(find "$abs_workspace" -name '*.rs' -print0)
 done
 
+# ---------------------------------------------------------------------------
+# Check 4: the macOS surface that renders the aggregation cannot act.
+# ---------------------------------------------------------------------------
+
+SWIFT_SURFACE=(
+  "macos/GlomerisMenuBar/Sources/WorkspaceFamilyRowViewModel.swift"
+  "macos/GlomerisMenuBar/Sources/WorkspaceFamiliesSectionView.swift"
+)
+
+for rel_file in "${SWIFT_SURFACE[@]}"; do
+  if [[ ! -f "${REPO_ROOT}/${rel_file}" ]]; then
+    # Same reasoning as the missing-module case above: if the card moved, the
+    # guard has to move with it, and a silent skip would leave the strongest
+    # claim in the product — "this project accounts for 30 GB" — unwatched.
+    echo "FAIL: ${rel_file} is missing."
+    echo "HORO-1511's developer-projects card lives there. If it moved, update SWIFT_SURFACE."
+    exit 1
+  fi
+done
+
+FORBIDDEN_IN_SWIFT=(
+  '\bButton\b;;offers a control on a surface whose subject is a whole project'
+  '\bGlomerisClient\b;;could run the CLI from a surface that only explains'
+  '\bclient\b;;holds something to run, which this surface has no use for'
+  '\bProcess\b;;spawns a process'
+  '\bexecute\b;;names execution on a surface that must not reach it'
+  '(action_id|actionId);;constructs an action id, which only a detector may do'
+  '\.disabled\(;;gates a control, so there is a control to gate'
+  'onTapGesture;;makes something tappable, which is a control by another name'
+)
+
+for entry in "${FORBIDDEN_IN_SWIFT[@]}"; do
+  pattern="${entry%%;;*}"
+  why="${entry#*;;}"
+
+  compile_error="$(grep -E "$pattern" /dev/null 2>&1 || true)"
+  if [[ -n "$compile_error" ]]; then
+    echo "FAIL: forbidden-pattern regex does not compile: ${pattern}"
+    echo "    grep said: ${compile_error}"
+    exit 1
+  fi
+
+  for rel_file in "${SWIFT_SURFACE[@]}"; do
+    while IFS= read -r match; do
+      [[ -n "$match" ]] || continue
+      echo "VIOLATION: ${rel_file}:${match%%:*}: ${why}"
+      echo "    ${match#*:}"
+      violations=$((violations + 1))
+    done < <(grep -nE "$pattern" "${REPO_ROOT}/${rel_file}" | strip_comments)
+  done
+done
+
+# ---------------------------------------------------------------------------
+# Check 5: that surface still reads each member's own verdict.
+# ---------------------------------------------------------------------------
+
+REQUIRED_IN_SWIFT=(
+  'macos/GlomerisMenuBar/Sources/WorkspaceFamilyRowViewModel.swift;;CandidateActionability(;;the member rows must build their verdict from the candidate, not from the family'
+  'macos/GlomerisMenuBar/Sources/WorkspaceFamiliesSectionView.swift;;notAuthoritySentence;;the card must say that a project total is not permission'
+  'macos/GlomerisMenuBar/Sources/WorkspaceFamiliesSectionView.swift;;actionability.sentence;;the card must show each member what Glomeris will actually do about it'
+)
+
+for entry in "${REQUIRED_IN_SWIFT[@]}"; do
+  rel_file="${entry%%;;*}"
+  rest="${entry#*;;}"
+  needle="${rest%%;;*}"
+  why="${rest#*;;}"
+
+  if ! grep -nF "$needle" "${REPO_ROOT}/${rel_file}" | strip_comments | grep -q .; then
+    echo "VIOLATION: ${rel_file}: '${needle}' is gone — ${why}"
+    violations=$((violations + 1))
+  fi
+done
+
 if [[ "$violations" -gt 0 ]]; then
   echo ""
   echo "FAIL: found ${violations} line(s) breaking HORO-1511's no-authority boundary."
@@ -176,4 +270,5 @@ if [[ "$violations" -gt 0 ]]; then
 fi
 
 echo "PASS: crate::workspace is unreachable from ${DECIDING_PATHS[*]} and carries no permission-shaped field."
+echo "PASS: the developer-projects card has nothing to act with and still reads each member's own verdict."
 exit 0
