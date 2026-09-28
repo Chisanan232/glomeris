@@ -812,6 +812,12 @@ struct CandidatesSectionView: View {
             // (HORO-1484): the list and whether the search that produced it
             // completed must never be one scan out of step.
             scan.failedDetectors = result.output.failedDetectors
+            // Same turn again (HORO-1511), and here it is load-bearing rather
+            // than tidy: the families name their members by resource id and
+            // the developer-projects card resolves those ids against
+            // `scan.candidates`. Assigned a scan apart, the join would start
+            // missing members that the family's byte total was summed from.
+            scan.workspaces = result.output.workspaces
             scan.lastScannedAt = Date()
         } catch {
             scan.lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")

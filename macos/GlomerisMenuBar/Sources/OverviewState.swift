@@ -116,6 +116,23 @@ final class ScanState: ObservableObject {
     /// it goes.
     @Published var failedDetectors: [DetectorHealthReportDto] = []
 
+    /// The git worktree families the last scan's candidates belong to
+    /// (HORO-1511).
+    ///
+    /// Written in the same assignment as `candidates` for a stricter reason
+    /// than `failedDetectors` above: a family names its members by resource
+    /// id, and `WorkspaceFamilies.rows` joins each of those ids back to the
+    /// candidate that says what may be done about it. Two assignments would
+    /// let one scan's families be shown against the next scan's candidates,
+    /// where the join silently fails and a project reports fewer members than
+    /// its own byte total was summed from — a card whose headline figure and
+    /// whose evidence disagree.
+    ///
+    /// Empty is the ordinary case for a machine with no repository checkouts
+    /// among its candidates, and also what a CLI older than the field reports.
+    /// Neither is a failure, and the card draws nothing for either.
+    @Published var workspaces: [WorkspaceFamilyReportDto] = []
+
     /// HORO-1307 view controls. Both default to "show me everything, in the
     /// order Glomeris recommends", so the panel a user opens for the first
     /// time is never silently filtered.
