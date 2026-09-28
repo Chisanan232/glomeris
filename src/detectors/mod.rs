@@ -12,15 +12,17 @@ mod cargo;
 mod docker;
 mod homebrew;
 mod node;
+mod python;
 mod xcode;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use crate::evidence::{
     Evidence, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability, Regenerability,
-    ResourceFingerprint, ResourceId,
+    ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
 };
 use crate::scanner::{ScanBudget, StopReason};
 
@@ -337,6 +339,202 @@ pub(crate) fn discovery_evidence(
     }
 }
 
+/// Outcome of asking an installed tool where it keeps something.
+///
+/// Deliberately not a `Result` (same reasoning as [`ProbeOutcome`]): "the
+/// tool is not installed on this machine" is normal, expected state, and
+/// must never travel the same channel as "the tool is installed and the
+/// probe went wrong" — HORO-1543 AC 2. A caller that collapsed the two
+/// would report a broken probe as an absent ecosystem.
+pub(crate) enum ToolQuery {
+    /// stdout's non-empty, trimmed lines in the order the tool printed
+    /// them. Never empty — no-output is [`ToolQuery::Failed`], because a
+    /// tool that answered nothing has not told us where anything is.
+    Lines(Vec<String>),
+    ToolAbsent,
+    Failed(String),
+}
+
+/// Runs `program args...` and returns stdout's non-empty lines.
+///
+/// An argument array, never a shell string (HORO-1543 AC 7): there is no
+/// interpolation point here for a path, a detector input or anything a
+/// model could ever reach, and nothing in `args` is word-split by a shell
+/// because no shell is involved.
+///
+/// stdin is `/dev/null`. A discovery probe must never end up waiting on
+/// the user's terminal, so a tool that decides to prompt gets EOF and
+/// exits instead of hanging the scan.
+pub(crate) fn query_tool_lines(program: &str, args: &[&str]) -> ToolQuery {
+    let output = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ToolQuery::ToolAbsent,
+        Err(e) => return ToolQuery::Failed(format!("failed to spawn {program}: {e}")),
+    };
+
+    if !output.status.success() {
+        return ToolQuery::Failed(format!(
+            "{program} {} exited with status {}",
+            args.join(" "),
+            output.status
+        ));
+    }
+
+    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return ToolQuery::Failed(format!(
+            "{program} {} succeeded but printed nothing",
+            args.join(" ")
+        ));
+    }
+
+    ToolQuery::Lines(lines)
+}
+
+/// [`query_tool_lines`] for a tool asked for exactly one path.
+///
+/// More than one line is [`ToolQuery::Failed`] rather than a guess at
+/// which line is the path: picking the first or the last would turn an
+/// unexpected banner, warning or deprecation notice on stdout into a
+/// confidently wrong filesystem location.
+pub(crate) fn query_tool_single_line(program: &str, args: &[&str]) -> ToolQuery {
+    match query_tool_lines(program, args) {
+        ToolQuery::Lines(lines) if lines.len() == 1 => ToolQuery::Lines(lines),
+        ToolQuery::Lines(lines) => ToolQuery::Failed(format!(
+            "{program} {} printed {} lines where one path was expected",
+            args.join(" "),
+            lines.len()
+        )),
+        other => other,
+    }
+}
+
+/// Outcome of building discovery evidence for one directory-shaped,
+/// tool-owned cache root.
+pub(crate) enum CacheDirProbe {
+    /// Boxed only to keep the enum small: an `Evidence` is ~390 bytes and
+    /// the other two variants are a pointer's worth, so an unboxed payload
+    /// would make every `Absent`/`Failed` return move that much stack for
+    /// nothing.
+    Found(Box<Evidence>),
+    /// The directory is not there. For a tool-owned cache root that means
+    /// the tool has not populated it — which is emphatically NOT a
+    /// zero-byte resource (HORO-1543 AC 3), so this variant carries no
+    /// [`Evidence`] at all rather than evidence claiming 0 bytes.
+    Absent,
+    Failed(String),
+}
+
+/// Builds discovery evidence for `path` as one resource of `kind`.
+///
+/// Shared by every cache-root detector so the AC-3 rule — a probe failure
+/// can never surface as zero bytes or as "nothing found" — is implemented
+/// once instead of being re-derived per ecosystem. The three outcomes are
+/// kept structurally distinct: a missing directory is `Absent`, an
+/// unreadable one is `Failed`, and a readable one whose *size* could not
+/// be established is `Found` with `logical_bytes`/`reclaimable_bytes` set
+/// to `Unavailable(_)` (never `Observed(0)`) by
+/// [`estimate_logical_bytes`].
+///
+/// `reclaimable_bytes` equals `logical_bytes` here, matching the existing
+/// cargo/node/homebrew detectors: a tool-owned cache root has no
+/// partial-retention concept to model, so the two are an honest
+/// equivalence of meaning rather than a convenient reuse.
+pub(crate) fn cache_dir_evidence(
+    kind: ResourceKind,
+    detector: DetectorId,
+    path: &Path,
+    regenerability: Regenerability,
+    recoverability: Recoverability,
+) -> CacheDirProbe {
+    if !path.is_absolute() {
+        return CacheDirProbe::Failed(format!(
+            "{} is not an absolute path",
+            path.to_string_lossy()
+        ));
+    }
+
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return CacheDirProbe::Absent,
+        Err(e) => {
+            return CacheDirProbe::Failed(format!(
+                "failed to canonicalize {}: {e}",
+                path.to_string_lossy()
+            ));
+        }
+    };
+
+    let resource = ResourceId::new(kind, ResourceLocator::Path(canonical.clone()));
+    let estimate = estimate_logical_bytes(&canonical, size_estimate_budget());
+    let logical_bytes = estimate.bytes.clone();
+    let mut evidence = discovery_evidence(
+        resource,
+        detector,
+        &canonical,
+        logical_bytes.clone(),
+        logical_bytes,
+        estimate.is_lower_bound(),
+        probe_mtime(&canonical),
+        regenerability,
+        recoverability,
+        // Every kind added by HORO-1543 is detect-and-explain only. None
+        // of them has a structurally scoped cleanup contract yet, and the
+        // ticket is explicit that a resource may stay detect-only rather
+        // than have an action invented to satisfy completion.
+        NativeCleanup::Unsupported,
+    );
+    if let Some(note) = estimate.lower_bound_note() {
+        evidence.push_source(note);
+    }
+
+    CacheDirProbe::Found(Box::new(evidence))
+}
+
+/// [`cache_dir_evidence`] for a detector whose whole answer is one cache
+/// root, recording where the path came from on the evidence itself.
+///
+/// `Absent` becomes `Found(vec![])`, NOT
+/// [`DetectorStatus::ToolAbsent`]. Every caller of this helper reached a
+/// path by asking the tool itself, so the tool answering at all is proof it
+/// is installed — and `tool_absent` is documented, all the way out to
+/// `GlomerisDtos.swift`'s `DetectorHealthReportDto`, as "the tool that
+/// would produce candidates is not installed". Reporting that about a tool
+/// we just successfully ran would be a statement we know to be false.
+/// `Found(vec![])` says what is actually true: the probe answered, and the
+/// cache root it named does not exist yet, so there is no resource.
+///
+/// This is deliberately not the convention in `xcode`/`cargo`/`node`, which
+/// infer a hardcoded path and never speak to a tool: for those, the
+/// directory's absence genuinely is the only evidence available about the
+/// tool, and their `ToolAbsent` stays correct.
+pub(crate) fn cache_root_status(
+    detector: DetectorId,
+    kind: ResourceKind,
+    path: &Path,
+    regenerability: Regenerability,
+    recoverability: Recoverability,
+    provenance: &str,
+) -> DetectorStatus {
+    match cache_dir_evidence(kind, detector, path, regenerability, recoverability) {
+        CacheDirProbe::Found(mut evidence) => {
+            evidence.push_source(provenance.to_string());
+            DetectorStatus::Found(vec![*evidence])
+        }
+        CacheDirProbe::Absent => DetectorStatus::Found(Vec::new()),
+        CacheDirProbe::Failed(msg) => DetectorStatus::Failed(msg),
+    }
+}
+
 /// Plain compile-time list of the built-in detectors — deliberately NOT a
 /// plugin/inventory registration system. Five detectors don't earn that
 /// complexity.
@@ -345,8 +543,10 @@ pub struct DetectorRegistry {
 }
 
 impl DetectorRegistry {
-    /// Registers all five built-in detectors (xcode, homebrew, cargo,
-    /// node, docker).
+    /// Registers every built-in detector, in the order discovery runs
+    /// them. `builtin_registry_registers_every_builtin_detector` pins the
+    /// list by identity, so this doc comment deliberately does not repeat
+    /// it in prose where it could rot.
     pub fn builtin() -> Self {
         Self {
             detectors: vec![
@@ -355,6 +555,8 @@ impl DetectorRegistry {
                 Box::new(cargo::CargoDetector),
                 Box::new(node::NodeDetector),
                 Box::new(docker::DockerDetector),
+                Box::new(python::PipCacheDetector),
+                Box::new(python::UvCacheDetector),
             ],
         }
     }
@@ -421,14 +623,68 @@ pub enum DetectorProgress<'a> {
     Finished(&'a DetectorStatus),
 }
 
+/// Disposable-fixture helpers shared by the detector modules' tests.
+///
+/// Every detector added by HORO-1543 needs the same thing: a unique
+/// throwaway directory to stand in for a cache root, so its evidence path
+/// can be exercised on a machine where the real tool is absent. Kept in one
+/// place rather than copied per module — the two pre-HORO-1543 detectors
+/// that predate it keep their own local copies, which this deliberately
+/// does not go and rewrite.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    /// A fresh, empty directory under the system temp dir. Unique per
+    /// process, per call and per nanosecond, because the test harness runs
+    /// these concurrently.
+    pub(crate) fn make_temp_dir(prefix: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Pins the production wiring by identity and order rather than by a
+    /// bare count: a detector silently dropped from `builtin()`, or renamed
+    /// without its callers noticing, both fail here and both name the
+    /// detector involved. Only reads `id()` — never `discover()` — which is
+    /// why this test is allowlisted in
+    /// `no_unreviewed_test_code_wires_up_the_real_detector_registry` below.
     #[test]
-    fn builtin_registry_registers_all_five_detectors() {
+    fn builtin_registry_registers_every_builtin_detector() {
         let registry = DetectorRegistry::builtin();
-        assert_eq!(registry.detectors.len(), 5);
+        let ids: Vec<&str> = registry.detectors.iter().map(|d| d.id().0).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "xcode_derived_data",
+                "homebrew_cache",
+                "cargo_target_dir",
+                "node_modules",
+                "docker_build_cache",
+                "pip_cache",
+                "uv_cache",
+            ]
+        );
     }
 
     struct StubDetector(DetectorStatus);
