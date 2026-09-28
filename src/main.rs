@@ -2864,7 +2864,8 @@ fn free_run(
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
-        run as run_recovery_loop, RecoveryConfig, RecoveryRunRequest, SystemWallClock,
+        run as run_recovery_loop, RecoveryConfig, RecoveryRunRequest, SilentObserver,
+        SystemWallClock,
     };
     use glomeris::monitor::{FsStat, SystemClock};
     use glomeris::platform::macos::MacosFsStat;
@@ -2932,6 +2933,9 @@ fn free_run(
     let clock = SystemClock;
     let wall_clock = SystemWallClock;
     let policy_cfg = PolicyConfig::default();
+    // Nobody is watching this run yet: `--progress-json` on a real run is
+    // wired to a writing observer in a later commit.
+    let observer = SilentObserver;
 
     let audit_log_path = actions_jsonl_path();
     let report = run_recovery_loop(RecoveryRunRequest {
@@ -2946,6 +2950,7 @@ fn free_run(
         target_mount: std::path::Path::new(RECOVERY_TARGET_MOUNT),
         discovery_ctx: &discovery_ctx,
         audit_log_path: &audit_log_path,
+        observer: &observer,
     });
 
     if json {

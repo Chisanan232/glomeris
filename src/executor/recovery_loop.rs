@@ -366,11 +366,17 @@ pub fn target_met(usage: &FsUsage, target: &FreeTarget) -> bool {
 /// `AutoSafe` bucket with only unmeasured candidates — just not
 /// preferentially).
 fn candidate_size(ev: &Evidence) -> u64 {
+    candidate_bytes(ev).unwrap_or(0)
+}
+
+/// [`candidate_size`] without the `0` fallback: `None` means neither probe
+/// answered, which is not the same fact as "this candidate would free nothing"
+/// and must not be reported as though it were (HORO-1509).
+fn candidate_bytes(ev: &Evidence) -> Option<u64> {
     ev.reclaimable_bytes
         .observed()
         .or_else(|| ev.logical_bytes.observed())
         .copied()
-        .unwrap_or(0)
 }
 
 /// Resolves the [`ActionId`] to execute for `ev`, if any: prefers
@@ -894,13 +900,10 @@ fn append_recovery_audit_record(
     audit_log_path: &Path,
     now: SystemTime,
 ) {
-    let (outcome, abort_reason) = match &report.outcome {
-        ExecutionOutcome::Succeeded => ("succeeded", None),
-        ExecutionOutcome::Failed(_) => ("failed", None),
-        ExecutionOutcome::AbortedByRevalidation(reason) => {
-            ("aborted_by_revalidation", Some(format!("{reason:?}")))
-        }
-        ExecutionOutcome::DryRun => ("dry_run", None),
+    let outcome = execution_outcome_tag(&report.outcome);
+    let abort_reason = match &report.outcome {
+        ExecutionOutcome::AbortedByRevalidation(reason) => Some(format!("{reason:?}")),
+        _ => None,
     };
     let record = AuditRecord {
         timestamp: now
@@ -918,6 +921,21 @@ fn append_recovery_audit_record(
         model_rank: None,
     };
     let _ = append_audit_record(audit_log_path, &record);
+}
+
+/// The stable tag for one execution outcome.
+///
+/// One producer, used by both the audit record above and
+/// [`RecoveryProgress::ActionFinished`] — which is what makes HORO-1509 AC5
+/// ("final summary and local audit agree on actions/outcomes") a property of
+/// the code rather than a coincidence two `match` arms happen to share.
+fn execution_outcome_tag(outcome: &ExecutionOutcome) -> &'static str {
+    match outcome {
+        ExecutionOutcome::Succeeded => "succeeded",
+        ExecutionOutcome::Failed(_) => "failed",
+        ExecutionOutcome::AbortedByRevalidation(_) => "aborted_by_revalidation",
+        ExecutionOutcome::DryRun => "dry_run",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -976,6 +994,9 @@ pub struct RecoveryRunRequest<'a> {
     pub target_mount: &'a Path,
     pub discovery_ctx: &'a DiscoveryContext,
     pub audit_log_path: &'a Path,
+    /// Where per-iteration progress goes. Pass `&SilentObserver` for a run
+    /// nobody is watching (HORO-1509).
+    pub observer: &'a dyn RecoveryObserver,
 }
 
 /// Runs one bounded closed-loop recovery pass against
@@ -996,6 +1017,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         target_mount,
         discovery_ctx,
         audit_log_path,
+        observer,
     } = request;
 
     let start_instant = clock.now();
@@ -1049,6 +1071,14 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             }
         };
         last_free_bytes = usage.free_bytes;
+        // The one statement of fact about free space in the stream, emitted
+        // from the reading itself rather than derived from what was deleted
+        // (HORO-1509 AC2).
+        observer.observe(RecoveryProgress::Measured {
+            iteration: iterations_run + 1,
+            usage,
+            bytes_freed_so_far: total_bytes_freed,
+        });
 
         // 2. Target already met?
         if target_met(&usage, &config.target) {
@@ -1083,6 +1113,9 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         }
 
         // 4. Discover.
+        observer.observe(RecoveryProgress::Discovering {
+            iteration: iterations_run + 1,
+        });
         let statuses = detector_registry.discover_all(discovery_ctx);
         let (candidates, failures) = candidates_with_actions(statuses, action_registry);
         for failure in failures {
@@ -1090,8 +1123,16 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 detector_failures.push(failure);
             }
         }
+        observer.observe(RecoveryProgress::Discovered {
+            iteration: iterations_run + 1,
+            candidates: candidates.len() as u32,
+            detectors_failed: detector_failures.len() as u32,
+        });
 
         // 5-6. Refresh evidence, classify, select one candidate.
+        observer.observe(RecoveryProgress::Revalidating {
+            iteration: iterations_run + 1,
+        });
         let now = wall_clock.now();
         let (selected, ask_skipped) = select_candidate(
             candidates,
@@ -1123,6 +1164,12 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         let fingerprint = candidate.evidence.fingerprint.clone();
         let action_id = candidate.action_id;
         let decision_class = candidate.decision.class;
+        // The canonical Display form, which is also what the audit log records
+        // — so a progress line and an audit line name the same resource the
+        // same way (HORO-1509 AC5).
+        let resource_label = resource.to_string();
+        let action_label = action_id.0.to_string();
+        let estimated_bytes = candidate_bytes(&candidate.evidence);
         // Captured before `candidate.decision` is moved into `authorize`
         // below — HORO-1057's audit record needs the report-facing label
         // for whatever decision this candidate was actually authorized
@@ -1166,6 +1213,13 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
 
         // 8-9. Execute for real, reusing HORO-951's fully-hardened
         // revalidate-then-mutate path exactly as-is.
+        observer.observe(RecoveryProgress::ActionStarted {
+            iteration: iterations_run,
+            resource: resource_label.clone(),
+            action: action_label.clone(),
+            policy_label,
+            estimated_bytes,
+        });
         let report = execute(action, &approval, collector, policy_cfg, now);
 
         // HORO-1057: best-effort audit-log append, AFTER the real outcome
@@ -1175,16 +1229,34 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         // never influence this loop's own bookkeeping below.
         append_recovery_audit_record(&report, policy_label, audit_log_path, now);
 
+        // The running total is updated before the outcome is reported, so the
+        // figure in `ActionFinished` already includes this action — a UI that
+        // renders the stream never shows a completed deletion beside a total
+        // that has not caught up with it. `None` is what the executor could
+        // not measure, and only a `Succeeded` outcome's measured bytes count
+        // toward the total (HORO-1509 AC2).
+        let reclaimed_bytes = match report.actual_reclaimed_bytes {
+            ProbeOutcome::Observed(bytes) => Some(bytes),
+            ProbeOutcome::Unavailable(_) => None,
+        };
+        if matches!(report.outcome, ExecutionOutcome::Succeeded) {
+            if let Some(bytes) = reclaimed_bytes {
+                total_bytes_freed += bytes;
+            }
+        }
+        observer.observe(RecoveryProgress::ActionFinished {
+            iteration: iterations_run,
+            resource: resource_label,
+            action: action_label,
+            outcome: execution_outcome_tag(&report.outcome),
+            reclaimed_bytes,
+            bytes_freed_so_far: total_bytes_freed,
+        });
+
         match report.outcome {
             ExecutionOutcome::Succeeded => {
                 actions_executed += 1;
-                let progressed = match report.actual_reclaimed_bytes {
-                    ProbeOutcome::Observed(bytes) => {
-                        total_bytes_freed += bytes;
-                        bytes > 0
-                    }
-                    ProbeOutcome::Unavailable(_) => false,
-                };
+                let progressed = reclaimed_bytes.is_some_and(|bytes| bytes > 0);
 
                 // 10. No-progress guard: consecutive successful executions
                 // that freed nothing measurable.
@@ -1477,6 +1549,58 @@ mod run_tests {
         }
     }
 
+    /// Keeps every event the loop emits, in order, so a test can state what
+    /// a UI would have been able to render (HORO-1509).
+    ///
+    /// A `Mutex` rather than a `RefCell` because [`RecoveryObserver`] is the
+    /// trait a real writing observer will implement too, and that one is
+    /// shared across threads; a test fake that could not be is a fake of a
+    /// different trait.
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: std::sync::Mutex<Vec<RecoveryProgress>>,
+    }
+
+    impl RecordingObserver {
+        fn events(&self) -> Vec<RecoveryProgress> {
+            self.events
+                .lock()
+                .expect("no test panics while holding this")
+                .clone()
+        }
+
+        /// The stream's shape, which is what a progress UI's sequencing
+        /// depends on. Deliberately not `Debug` output: that carries paths and
+        /// byte counts, so a change to either would break a test about order.
+        fn phases(&self) -> Vec<&'static str> {
+            self.events().iter().map(stream_phase).collect()
+        }
+    }
+
+    /// This test module's own label for one event, used only to talk about
+    /// ordering. It is NOT the wire tag — the JSON `phase` values belong to
+    /// the reporting DTO and are pinned where that DTO lives.
+    fn stream_phase(event: &RecoveryProgress) -> &'static str {
+        match event {
+            RecoveryProgress::Measured { .. } => "measured",
+            RecoveryProgress::Discovering { .. } => "discovering",
+            RecoveryProgress::Discovered { .. } => "discovered",
+            RecoveryProgress::Revalidating { .. } => "revalidating",
+            RecoveryProgress::ActionStarted { .. } => "action_started",
+            RecoveryProgress::ActionFinished { .. } => "action_finished",
+            RecoveryProgress::StopRequested { .. } => "stop_requested",
+        }
+    }
+
+    impl RecoveryObserver for RecordingObserver {
+        fn observe(&self, event: RecoveryProgress) {
+            self.events
+                .lock()
+                .expect("no test panics while holding this")
+                .push(event);
+        }
+    }
+
     fn base_config() -> RecoveryConfig {
         RecoveryConfig {
             target: FreeTarget::AbsoluteBytes(999_999_999),
@@ -1516,6 +1640,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -1547,6 +1672,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
         });
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
@@ -1598,6 +1724,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
         });
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
@@ -1655,6 +1782,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: &dir.join("actions.jsonl"),
+            observer: &SilentObserver,
         });
 
         assert!(
@@ -1698,6 +1826,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
         });
 
         assert_eq!(report.stop_reason, StopReason::BudgetExceeded);
@@ -1725,6 +1854,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
         });
 
         match report.stop_reason {
@@ -1780,6 +1910,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
+            observer: &SilentObserver,
         });
 
         assert_eq!(report.stop_reason, StopReason::NoProgress);
@@ -1855,6 +1986,7 @@ mod run_tests {
             target_mount: Path::new("/"),
             discovery_ctx: &ctx,
             audit_log_path: &audit_log_path,
+            observer: &SilentObserver,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -1886,6 +2018,411 @@ mod run_tests {
             "the loop must measure again after mutating, not once at the start \
              (measured {} time(s))",
             fs_stat.call_count()
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1509 AC1: every iteration of a run can be reconstructed from what
+    /// the loop emitted, without reading the loop's own final summary.
+    ///
+    /// The fixture is the two-empty-`node_modules` no-progress run, chosen
+    /// because it executes twice — one iteration could not tell an ordinal
+    /// that is always `1` from one that counts.
+    #[test]
+    fn every_iteration_of_a_run_is_visible_in_the_event_stream() {
+        let root_a = make_temp_dir("stream-iterations-a");
+        let root_b = make_temp_dir("stream-iterations-b");
+        let ev_a = empty_node_modules_evidence(&root_a);
+        let ev_b = empty_node_modules_evidence(&root_b);
+
+        let config = RecoveryConfig {
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev_a, ev_b]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root_a.join("actions.jsonl");
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(FsUsage::new(1_000_000_000, 100)),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &observer,
+        });
+
+        assert_eq!(report.iterations_run, 2);
+        assert_eq!(
+            observer.phases(),
+            vec![
+                "measured",
+                "discovering",
+                "discovered",
+                "revalidating",
+                "action_started",
+                "action_finished",
+                "measured",
+                "discovering",
+                "discovered",
+                "revalidating",
+                "action_started",
+                "action_finished",
+            ],
+            "each iteration must report measuring, scanning, revalidating and \
+             its action, in that order"
+        );
+
+        // The ordinal a UI renders as "iteration N of at most M". Every event
+        // in the first six belongs to iteration 1 and every event in the
+        // second six to iteration 2 — including the measurement, which is
+        // taken *for* the iteration it opens.
+        let ordinals: Vec<u32> = observer
+            .events()
+            .iter()
+            .map(|event| match event {
+                RecoveryProgress::Measured { iteration, .. }
+                | RecoveryProgress::Discovering { iteration }
+                | RecoveryProgress::Discovered { iteration, .. }
+                | RecoveryProgress::Revalidating { iteration }
+                | RecoveryProgress::ActionStarted { iteration, .. }
+                | RecoveryProgress::ActionFinished { iteration, .. }
+                | RecoveryProgress::StopRequested { iteration } => *iteration,
+            })
+            .collect();
+        assert_eq!(ordinals, vec![1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2]);
+
+        // What a UI needs to name the work in flight, rather than a spinner.
+        let started: Vec<(String, String)> = observer
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                RecoveryProgress::ActionStarted {
+                    resource, action, ..
+                } => Some((resource.clone(), action.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started.len(), 2);
+        assert!(started
+            .iter()
+            .all(|(_, action)| action == "node.clean.node_modules"));
+        assert_ne!(
+            started[0].0, started[1].0,
+            "two iterations acted on two different resources, and the stream \
+             must say which"
+        );
+
+        fs::remove_dir_all(&root_a).ok();
+        fs::remove_dir_all(&root_b).ok();
+    }
+
+    /// HORO-1509 AC5: the progress stream and the local audit log describe the
+    /// same actions with the same words — which they do because
+    /// [`execution_outcome_tag`] and `ResourceId`'s `Display` each have one
+    /// producer, not because two `match` arms happen to agree.
+    #[test]
+    fn the_stream_and_the_audit_log_describe_the_same_actions() {
+        let root_a = make_temp_dir("stream-audit-agree-a");
+        let root_b = make_temp_dir("stream-audit-agree-b");
+        let ev_a = empty_node_modules_evidence(&root_a);
+        let ev_b = empty_node_modules_evidence(&root_b);
+
+        let config = RecoveryConfig {
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev_a, ev_b]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root_a.join("actions.jsonl");
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(FsUsage::new(1_000_000_000, 100)),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &observer,
+        });
+
+        let finished: Vec<(String, String, &'static str, Option<u64>)> = observer
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                RecoveryProgress::ActionFinished {
+                    resource,
+                    action,
+                    outcome,
+                    reclaimed_bytes,
+                    ..
+                } => Some((resource.clone(), action.clone(), *outcome, *reclaimed_bytes)),
+                _ => None,
+            })
+            .collect();
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+
+        assert_eq!(
+            finished.len(),
+            audit_tail.len(),
+            "one progress event per audit record"
+        );
+        assert_eq!(finished.len(), report.actions_executed as usize);
+        for (event, record) in finished.iter().zip(audit_tail.iter()) {
+            assert_eq!(event.0, record.resource_id);
+            assert_eq!(event.1, record.action_id);
+            assert_eq!(event.2, record.outcome);
+            assert_eq!(event.3, record.actual_reclaimed_bytes);
+        }
+
+        fs::remove_dir_all(&root_a).ok();
+        fs::remove_dir_all(&root_b).ok();
+    }
+
+    /// HORO-1509 AC2: the free-space figures in the stream are readings, not
+    /// arithmetic. The same scripted disagreement
+    /// `target_reached_comes_from_the_reading_taken_after_the_mutation` uses,
+    /// read through the stream this time: the loop deletes an empty directory
+    /// (measuring zero bytes reclaimed) and free space nevertheless jumps to
+    /// 950 MB, which no accumulator could have produced.
+    #[test]
+    fn free_space_in_the_stream_comes_from_readings_not_arithmetic() {
+        let root = make_temp_dir("stream-measured-not-predicted");
+        let ev = empty_node_modules_evidence(&root);
+
+        let fs_stat = ScriptedFsStat::new(vec![
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 950_000_000),
+        ]);
+        let config = RecoveryConfig {
+            target: FreeTarget::AbsoluteBytes(900_000_000),
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root.join("actions.jsonl");
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &fs_stat,
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &observer,
+        });
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+
+        let measurements: Vec<(u32, u64, u64)> = observer
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                RecoveryProgress::Measured {
+                    iteration,
+                    usage,
+                    bytes_freed_so_far,
+                } => Some((*iteration, usage.free_bytes, *bytes_freed_so_far)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            measurements,
+            vec![(1, 100, 0), (2, 950_000_000, 0)],
+            "the stream must carry the readings the loop took, and must not \
+             infer free space from a running total that stayed at zero"
+        );
+
+        // The same event carries both figures, and they are different facts:
+        // `bytes_freed_so_far` is what was measured as reclaimed (nothing),
+        // while free space moved for reasons outside this run. A UI that
+        // rendered one as the other would be wrong in both directions here.
+        let estimates: Vec<Option<u64>> = observer
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                RecoveryProgress::ActionStarted {
+                    estimated_bytes, ..
+                } => Some(*estimated_bytes),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            estimates,
+            vec![Some(0)],
+            "a plan-time estimate is reported as its own field, never folded \
+             into the measured total"
+        );
+        assert_eq!(report.total_bytes_freed, 0);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// The running total in the stream already includes the action being
+    /// reported, so a UI never renders a finished deletion beside a total that
+    /// has not caught up with it (HORO-1509 AC2), and the last figure the
+    /// stream carries is the one the final summary reports.
+    #[test]
+    fn the_running_total_never_lags_behind_the_action_it_reports() {
+        let root = make_temp_dir("stream-total-keeps-up");
+        let ev = empty_node_modules_evidence(&root);
+
+        let config = RecoveryConfig {
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root.join("actions.jsonl");
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(FsUsage::new(1_000_000_000, 100)),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &observer,
+        });
+
+        let totals: Vec<u64> = observer
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                RecoveryProgress::Measured {
+                    bytes_freed_so_far, ..
+                }
+                | RecoveryProgress::ActionFinished {
+                    bytes_freed_so_far, ..
+                } => Some(*bytes_freed_so_far),
+                _ => None,
+            })
+            .collect();
+
+        assert!(!totals.is_empty());
+        assert!(
+            totals.windows(2).all(|pair| pair[0] <= pair[1]),
+            "the reclaimed total can only grow: {totals:?}"
+        );
+        assert_eq!(
+            *totals.last().expect("at least one figure"),
+            report.total_bytes_freed,
+            "the last figure the stream carried and the figure the run reports \
+             must be the same number"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A run that stops before it scans anything still tells a UI the one
+    /// thing it knows: what the disk currently looks like. No phantom
+    /// discovery or action phase appears (HORO-1509 AC1).
+    #[test]
+    fn a_run_that_stops_before_scanning_still_reports_its_measurement() {
+        let usage = FsUsage::new(1_000, 990); // 99% free
+        let config = RecoveryConfig {
+            target: FreeTarget::Percentage(90.0),
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(Vec::new());
+        let ctx = empty_discovery_ctx();
+        let observer = RecordingObserver::default();
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &observer,
+        });
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+        assert_eq!(report.iterations_run, 0);
+        assert_eq!(observer.phases(), vec!["measured"]);
+        assert_eq!(
+            observer.events(),
+            vec![RecoveryProgress::Measured {
+                iteration: 1,
+                usage,
+                bytes_freed_so_far: 0,
+            }],
+        );
+    }
+
+    /// A candidate neither probe could size is reported as unknown, not as
+    /// zero: "this would free nothing" and "nobody could tell" are different
+    /// facts, and only one of them is an argument against acting
+    /// (HORO-1509 AC2).
+    #[test]
+    fn a_candidate_no_probe_could_size_reports_unknown_rather_than_zero() {
+        let root = make_temp_dir("unsized-candidate");
+        let mut ev = empty_node_modules_evidence(&root);
+
+        assert_eq!(
+            candidate_bytes(&ev),
+            Some(0),
+            "a candidate a probe measured at zero really is zero"
+        );
+
+        ev.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        ev.logical_bytes = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+
+        assert_eq!(candidate_bytes(&ev), None);
+        assert_eq!(
+            candidate_size(&ev),
+            0,
+            "the ranking helper still needs a number, and that is precisely \
+             why the reporting helper must not use it"
         );
 
         fs::remove_dir_all(&root).ok();
