@@ -145,6 +145,27 @@ final class GlomerisVocabularyTests: XCTestCase {
         "no_open_episode", "no_notification_due",
     ]
 
+    /// `src/workspace/group.rs` — `ActivityState::tag`, all three. HORO-1511.
+    private static let worktreeActivityTokens = ["in_use", "idle", "unknown"]
+
+    /// `src/workspace/branch.rs` — `UpstreamState::tag`, all three. HORO-1511.
+    private static let worktreeUpstreamTokens = ["untracked", "tracking", "unknown"]
+
+    /// `src/workspace/branch.rs` — `MergedState::tag`, all three. HORO-1511.
+    private static let worktreeMergedTokens = ["merged", "not_merged", "unknown"]
+
+    /// The three developer-workspace axes, which share a token (`unknown`)
+    /// and must not share a reading of it.
+    private static var worktreeAxes:
+        [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)]
+    {
+        [
+            ("worktreeActivity", worktreeActivityTokens, GlomerisVocabulary.worktreeActivity),
+            ("worktreeUpstream", worktreeUpstreamTokens, GlomerisVocabulary.worktreeUpstream),
+            ("worktreeMerged", worktreeMergedTokens, GlomerisVocabulary.worktreeMerged),
+        ]
+    }
+
     /// Every axis, as (name, tokens, lookup) so the shared invariants
     /// below can be asserted once rather than ten times.
     private static var allAxes: [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)] {
@@ -165,13 +186,19 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("episodeResponse", episodeResponseTokens, GlomerisVocabulary.episodeResponse),
             ("episodeRejection", episodeRejectionTokens, GlomerisVocabulary.episodeRejection),
             ("autopilotRefusal", autopilotRefusalTokens, GlomerisVocabulary.autopilotRefusal),
-        ]
+        ] + worktreeAxes
     }
 
-    /// The axes rendered as chips. `kind` and `reason` are prose and
-    /// deliberately carry no symbol — see their doc comments.
+    /// The axes rendered as chips. `kind`, `reason` and the three
+    /// developer-workspace vocabularies are prose and deliberately carry no
+    /// symbol — see their doc comments. For the worktree three the absence is
+    /// load-bearing rather than cosmetic, and
+    /// `testTheWorktreeAxesAreProseSoNoBranchStateCanRenderAsClearance` says why.
     private static var badgeAxes: [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)] {
-        allAxes.filter { $0.name != "kind" && $0.name != "reason" }
+        let prose: Set<String> = [
+            "kind", "reason", "worktreeActivity", "worktreeUpstream", "worktreeMerged",
+        ]
+        return allAxes.filter { !prose.contains($0.name) }
     }
 
     /// The fallback's marker symbol. A term carrying this is, by
@@ -345,6 +372,9 @@ final class GlomerisVocabularyTests: XCTestCase {
             GlomerisVocabulary.goalRejectionAxis,
             GlomerisVocabulary.episodeResponseAxis,
             GlomerisVocabulary.episodeRejectionAxis,
+            GlomerisVocabulary.worktreeActivityAxis,
+            GlomerisVocabulary.worktreeUpstreamAxis,
+            GlomerisVocabulary.worktreeMergedAxis,
         ]
         XCTAssertEqual(
             Set(axisNames).count,
@@ -371,6 +401,9 @@ final class GlomerisVocabularyTests: XCTestCase {
             "episodeResponse": GlomerisVocabulary.episodeResponseAxis,
             "episodeRejection": GlomerisVocabulary.episodeRejectionAxis,
             "autopilotRefusal": GlomerisVocabulary.autopilotRefusalAxis,
+            "worktreeActivity": GlomerisVocabulary.worktreeActivityAxis,
+            "worktreeUpstream": GlomerisVocabulary.worktreeUpstreamAxis,
+            "worktreeMerged": GlomerisVocabulary.worktreeMergedAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -1208,5 +1241,121 @@ final class GlomerisVocabularyTests: XCTestCase {
                 .explanation.lowercased().contains("monitoring is unaffected"),
             "even an unrecognised refusal must say the monitor is still watching"
         )
+    }
+
+    // MARK: - Developer-workspace state (HORO-1511)
+
+    /// The three worktree vocabularies carry no symbol, which is what keeps
+    /// them off the coloured axes.
+    ///
+    /// The one this protects is `merged`. `src/workspace/mod.rs` keeps the
+    /// merge facts out of `Evidence` precisely because "already merged" reads as
+    /// permission; a green chip saying it, beside a resource whose own policy
+    /// class is PROTECTED, would put that reading back on the screen in the one
+    /// form a user scans rather than reads. The assertion is `.neutral` AND no
+    /// symbol, because either alone would let it become a badge again.
+    func testTheWorktreeAxesAreProseSoNoBranchStateCanRenderAsClearance() {
+        for axis in Self.worktreeAxes {
+            for token in axis.tokens {
+                let term = axis.lookup(token)
+                XCTAssertNil(
+                    term.symbolName,
+                    "\(axis.name): \(token) must not render as a chip"
+                )
+                XCTAssertEqual(
+                    term.tone, .neutral,
+                    "\(axis.name): \(token) must not carry a tone of its own"
+                )
+            }
+        }
+    }
+
+    /// `unknown` appears in all three vocabularies and means a different thing
+    /// in each — a failed activity probe, an unmade remote comparison, an
+    /// unrecorded default branch. A listener hearing only the title would get
+    /// the same three words three times, so each one names its own subject.
+    func testTheSharedUnknownTokenReadsDifferentlyInEachWorktreeAxis() {
+        let titles = Self.worktreeAxes.map { $0.lookup("unknown").title }
+        XCTAssertEqual(
+            Set(titles).count, titles.count,
+            "the three unknowns are indistinguishable: \(titles)"
+        )
+        let explanations = Self.worktreeAxes.map { $0.lookup("unknown").explanation }
+        XCTAssertEqual(
+            Set(explanations).count, explanations.count,
+            "the three unknowns explain themselves identically: \(explanations)"
+        )
+    }
+
+    /// Rust counts every one of these three non-answers as *possible*
+    /// outstanding work rather than as an absence of it
+    /// (`ActivityState::may_be_in_use`, `UpstreamState::may_hold_unpushed_work`,
+    /// `MergedState::Unknown`'s "deliberately not a guess"). Wording that
+    /// drifted towards the reassuring end of each scale would undo that on the
+    /// way to the screen, and nothing else in this app would notice: the
+    /// `holds_work_in_progress` flag the wording sits beside is computed in
+    /// Rust and would still be right.
+    func testAnUnansweredProbeIsNeverWordedAsTheReassuringAnswer() {
+        XCTAssertFalse(
+            GlomerisVocabulary.worktreeActivity("unknown").title.lowercased().contains("idle"),
+            "an activity probe that could not answer must not be called idle"
+        )
+        XCTAssertTrue(
+            GlomerisVocabulary.worktreeActivity("unknown")
+                .explanation.lowercased().contains("not known to be idle"),
+            "the explanation must say what it cannot claim"
+        )
+        XCTAssertTrue(
+            GlomerisVocabulary.worktreeUpstream("unknown")
+                .explanation.lowercased().contains("cannot be ruled out"),
+            "an unmade remote comparison must not read as \"nothing is unpushed\""
+        )
+        XCTAssertTrue(
+            GlomerisVocabulary.worktreeMerged("unknown")
+                .explanation.lowercased().contains("does not guess"),
+            "an unrecorded default branch must say Glomeris declined to guess at one"
+        )
+    }
+
+    /// `untracked` is the token most easily misread, and the misreading is the
+    /// dangerous direction: it does not mean nothing is unpushed, it means there
+    /// is nothing published to compare against. Rust's own doc comment says
+    /// "**Not** \"nothing is unpushed\"", and this is that sentence, held to.
+    func testNoUpstreamBranchIsNotWordedAsNothingOutstanding() {
+        let term = GlomerisVocabulary.worktreeUpstream("untracked")
+        XCTAssertTrue(
+            term.explanation.lowercased().contains("may exist only on this mac"),
+            "untracked must say the commits may be local-only: \(term.explanation)"
+        )
+        for reassuring in ["nothing unpushed", "all pushed", "up to date", "published"] {
+            XCTAssertFalse(
+                term.title.lowercased().contains(reassuring),
+                "untracked's title claims the comparison it could not make: \(term.title)"
+            )
+        }
+    }
+
+    /// An unrecognised token in any of the three must read as "we do not know
+    /// what this is" and keep the raw token, the same rule every other table
+    /// follows — checked here per-axis because the fallback is the only arm
+    /// these three share and a copied `case` label would route a live token to
+    /// the wrong axis's wording without failing the guard script.
+    func testAnUnknownWorktreeTokenFallsBackWithinItsOwnAxis() {
+        for axis in Self.worktreeAxes {
+            let term = axis.lookup("a_state_from_a_newer_cli")
+            XCTAssertEqual(term.token, "a_state_from_a_newer_cli")
+            XCTAssertEqual(
+                term.symbolName, Self.unrecognisedSymbol,
+                "\(axis.name): an unrecognised token must be marked as such"
+            )
+            XCTAssertEqual(
+                term.tone, .unknown,
+                "\(axis.name): an unrecognised token must not be toned as fine"
+            )
+            XCTAssertEqual(
+                term.axis, axis.lookup("unknown").axis,
+                "\(axis.name): the fallback belongs to a different axis than the table"
+            )
+        }
     }
 }
