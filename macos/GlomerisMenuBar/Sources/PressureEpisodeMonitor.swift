@@ -28,7 +28,25 @@
 //  cannot be delegated, because the record that would answer it is only updated
 //  *after* the banner has been raised. See `PressureBannerKey`.
 //
-//  Nothing here deletes anything. A banner asks a question.
+//  ---------------------------------------------------------------------
+//  It can now start something that deletes (HORO-1510)
+//  ---------------------------------------------------------------------
+//  This header used to say "nothing here deletes anything", and that is no longer
+//  true, so it says this instead.
+//
+//  A grant that has opted in — `autopilot enable --respond-to-alerts`, off by
+//  default — lets this monitor start one bounded `free --autopilot --unattended`
+//  in answer to a banner it would otherwise raise. It adds no bound of its own:
+//  the allowlist, the action, byte and time budgets and the pressure floor are all
+//  in the envelope and all enforced in Rust, and `free` refuses the run outright
+//  if the grant does not cover it. What this file decides is *whether to start
+//  one*, and it decides that by reading `startsUnprompted` — which Rust computed.
+//
+//  Two bounds are this file's own, and neither is policy. One bounded run per
+//  poll, and one attempt per banner-worth of pressure: see
+//  `UnpromptedRecoveryPlan` and `attemptUnpromptedRecovery`. Without an opted-in
+//  grant, and in every test that does not pass a runner, nothing here deletes
+//  anything and a banner asks a question.
 //
 
 import Foundation
@@ -155,13 +173,29 @@ struct PressureBanner: Equatable {
     /// after the user pressed it.
     let responseTokens: [String]
 
-    init(key: PressureBannerKey, report: PressureStatusReportDto) {
+    /// What an automatic run already did for this episode, or `nil` if it never
+    /// had one (HORO-1510).
+    ///
+    /// Carried so the banner's last sentence can be true. A notification raised
+    /// after an unprompted run is raised *because that run did not resolve the
+    /// pressure* — exactly the case where "Nothing has been deleted" is wrong. No
+    /// default value, deliberately: a surface that forgets to pass this reassures
+    /// the user about a deletion that happened, and a `nil` default is how that
+    /// gets forgotten.
+    let automaticRun: UnpromptedRecoveryOutcome?
+
+    init(
+        key: PressureBannerKey,
+        report: PressureStatusReportDto,
+        automaticRun: UnpromptedRecoveryOutcome?
+    ) {
         self.key = key
         currentUsedPercent = report.current.usedPercent
         notifyAtDescription = report.notifyAtDescription
         freeHuman = report.current.freeHuman
         goalDescription = report.defaultGoal.description
         responseTokens = report.responses
+        self.automaticRun = automaticRun
     }
 }
 
@@ -265,14 +299,65 @@ final class PressureEpisodeMonitor: ObservableObject {
     /// either — it is the same non-reentrancy, one step earlier.
     private var isRaising = false
 
+    /// HORO-1510's optional half: where a bounded unprompted run comes from, or
+    /// `nil` when this monitor cannot start one at all.
+    ///
+    /// Optional so the notification-only behaviour — the default, and everything
+    /// HORO-1508 built — is reachable with no recovery runner in the picture. A
+    /// monitor constructed without one raises banners and nothing else, which is
+    /// the correct shape for every test that is not about this path: the
+    /// destructive capability is absent rather than switched off.
+    private let unpromptedRecovery: UnpromptedRecoveryRunning?
+
+    /// The last banner-worth of pressure an automatic run was attempted for.
+    ///
+    /// The same non-reentrancy `lastRaised` provides, for the other path. See
+    /// `UnpromptedRecoveryPlan.decide` for why it is keyed on the whole banner key
+    /// and not on the episode id.
+    private var lastAutomaticAttempt: PressureBannerKey?
+
+    /// Guards against a poll landing while a run is mid-flight. A recovery run can
+    /// last the whole of its time budget, which is longer than the poll interval by
+    /// default — so unlike `isRaising`, this one is load-bearing in the ordinary
+    /// case rather than in a race.
+    private var isRecovering = false
+
+    /// What the grant said at the last poll that read it, so the popover can say
+    /// which mode is in force without running `autopilot show` itself.
+    ///
+    /// `nil` until a poll has had reason to read it — which is only when a banner
+    /// is owed. A settings pane the user has never opened on a disk that has never
+    /// filled up has nothing to report here, and inventing `askedFirst` for that
+    /// case would be stating a grant nobody read.
+    @Published private(set) var unpromptedMode: AutopilotUnpromptedMode?
+
+    /// What an automatic run did for the episode it ran against, so a surface
+    /// speaking about *that* episode can account for it.
+    ///
+    /// Keyed on the episode rather than on the banner key, because the claim it
+    /// settles — whether anything has been deleted — is a fact about the episode: a
+    /// post-snooze reminder is a second banner for the same pressure, and the
+    /// deletion an earlier banner's run performed is still the reason the figures
+    /// moved. One slot rather than a set, because `pressure show` reports at most
+    /// one open episode, so there is never a second one to remember.
+    private var automaticRunByEpisode: (episodeId: UInt64, outcome: UnpromptedRecoveryOutcome)?
+
+    /// The last automatic run's outcome, so the in-app surface can account for a
+    /// run the user was not present for. Published for the same reason the banner
+    /// path publishes its episode: an action taken on someone's behalf that leaves
+    /// no trace they can find is worse than one they had to start.
+    @Published private(set) var lastUnpromptedOutcome: UnpromptedRecoveryOutcome?
+
     init(
         client: PressureEpisodeReading,
         banners: PressureBannerRaising,
-        deepLink: RecoveryDeepLinkOpening? = nil
+        deepLink: RecoveryDeepLinkOpening? = nil,
+        unpromptedRecovery: UnpromptedRecoveryRunning? = nil
     ) {
         self.client = client
         self.banners = banners
         self.deepLink = deepLink
+        self.unpromptedRecovery = unpromptedRecovery
         banners.onAnswer = { [weak self] token in
             // A button press arrives from the notification centre's own callback,
             // so it becomes an answer through the same path a poll does.
@@ -312,6 +397,15 @@ final class PressureEpisodeMonitor: ObservableObject {
     /// an acceptance scenario about a storm has to be able to poll five times in a
     /// row, and doing that through the timer would take two and a half minutes.
     func pollOnce() async {
+        await pollOnce(allowingUnpromptedRecovery: true)
+    }
+
+    /// `allowingUnpromptedRecovery` is `false` on the second pass of a poll that
+    /// already ran one, which is what bounds this to a single extra pass rather
+    /// than a loop that could keep starting runs for as long as the disk stayed
+    /// full. The envelope's budgets bound each run; this bounds how many runs one
+    /// poll may start, and the answer is one.
+    private func pollOnce(allowingUnpromptedRecovery: Bool) async {
         let outcome = await client.show()
         adopt(outcome)
 
@@ -320,11 +414,34 @@ final class PressureEpisodeMonitor: ObservableObject {
         let decision = PressureBannerPlan.decide(report: report, lastRaised: lastRaised)
         guard case .raise(let key) = decision, !isRaising else { return }
 
+        // HORO-1510 §10. Before the banner, and not instead of it. A grant that has
+        // not opted in returns `false` here immediately and the banner goes up as it
+        // always did.
+        if allowingUnpromptedRecovery, await attemptUnpromptedRecovery(owed: key, report: report) {
+            // Something was deleted, so every figure in `report` is now a claim
+            // about a volume that no longer exists — including `notification_due`.
+            // Ask again and decide on what is true now: if the run got the disk
+            // under its goal the episode has closed and nothing is owed, and if it
+            // could not, the banner the user was always going to get goes up in the
+            // same poll rather than thirty seconds later.
+            await pollOnce(allowingUnpromptedRecovery: false)
+            return
+        }
+
         isRaising = true
         defer { isRaising = false }
 
         banners.prepare(responseTokens: report.responses)
-        let reachedTheScreen = await banners.raise(PressureBanner(key: key, report: report))
+        let reachedTheScreen = await banners.raise(
+            PressureBanner(
+                key: key,
+                report: report,
+                // A banner raised after an unprompted run is raised *because* that
+                // run did not resolve the pressure, so this is the ordinary case
+                // for an opted-in Mac rather than an edge one.
+                automaticRun: automaticRun(forEpisodeIn: report)
+            )
+        )
 
         // Set only on the path where a banner actually appeared. A raise that
         // failed must not consume the episode's one chance to be shown: the flag
@@ -336,6 +453,91 @@ final class PressureEpisodeMonitor: ObservableObject {
         // not banners this app intended. That is the figure AC 5 is checked
         // against, and it is why this is reported rather than assumed.
         adopt(await client.markNotified())
+    }
+
+    // MARK: - The run nobody asked for (HORO-1510)
+
+    /// Starts one bounded unprompted run if the grant says it may, and reports
+    /// whether it did.
+    ///
+    /// `true` means the filesystem may have changed and the caller must re-read.
+    /// `false` means nothing was attempted — no runner, no grant, a grant that does
+    /// not cover it, this episode's attempt already spent, or no goal this app can
+    /// express — and in every one of those the banner path takes over unchanged.
+    private func attemptUnpromptedRecovery(
+        owed key: PressureBannerKey,
+        report: PressureStatusReportDto
+    ) async -> Bool {
+        guard let runner = unpromptedRecovery, !isRecovering else { return false }
+
+        // Read every poll that owes a banner rather than once at launch: `revoke`
+        // takes effect on the next run everywhere else in this product, and a
+        // cached grant here would be the one place it did not.
+        let grant = await runner.readGrant()
+        unpromptedMode = grant.map(AutopilotUnpromptedMode.make)
+
+        let decision = UnpromptedRecoveryPlan.decide(
+            owed: key,
+            startsUnprompted: grant?.startsUnprompted,
+            lastAttempted: lastAutomaticAttempt
+        )
+        guard case .run = decision else { return false }
+
+        // The Recovery card's own conversion, for the reason
+        // `RecoveryDeepLinkContext` gives: a second rounding rule would act on a
+        // goal the user's setting does not name. `nil` is not a goal, so there is
+        // nothing to run toward and the user is asked instead.
+        guard let goalUsedPercent = RecoverySectionView.storedDefaultGoal(
+            usedPercent: report.defaultGoal.usedPercent
+        ) else {
+            return false
+        }
+
+        isRecovering = true
+        defer { isRecovering = false }
+
+        // `Task {}` and then `.value`, which looks redundant and is not. This
+        // deletes things, and `GlomerisClient.runRaw` sends `SIGTERM` when its task
+        // is cancelled — so it must not run as a child of `pollTask`, which `stop()`
+        // and app teardown both cancel. An unstructured task inherits no
+        // cancellation, so awaiting its value here waits for the run to finish
+        // whatever happens to the loop around it. Pinned by
+        // `UnpromptedRecoveryTests.testTheUnpromptedRunIsNeverReachedFromACancellableTask`.
+        let outcome = await Task { @MainActor in
+            await runner.run(goalUsedPercent: goalUsedPercent)
+        }.value
+
+        // The outcome is the whole account, including of a run that failed —
+        // deliberately not copied into `lastErrorMessage`, which the next
+        // `pressure show` clears. An automatic run's report surviving exactly until
+        // the following poll would be worse than not keeping it.
+        lastUnpromptedOutcome = outcome
+        automaticRunByEpisode = (episodeId: key.episodeId, outcome: outcome)
+        if outcome.consumesTheAttempt {
+            lastAutomaticAttempt = key
+        }
+
+        // A busy lock mutated nothing, so there is nothing for the caller to
+        // re-read and no reason to delay the banner by a round trip.
+        return outcome.consumesTheAttempt
+    }
+
+    /// What an automatic run did for the episode `report` describes, if that
+    /// episode is the one a run was made for.
+    ///
+    /// The episode check is the whole function. Without it, an outcome from the
+    /// pressure event last Tuesday would be reported against today's — and in the
+    /// direction that matters: a surface telling someone that space was reclaimed
+    /// during an episode in which nothing was.
+    ///
+    /// `internal` so a test can ask the same question the surfaces do.
+    func automaticRun(forEpisodeIn report: PressureStatusReportDto) -> UnpromptedRecoveryOutcome? {
+        guard
+            let episodeId = report.episode?.episodeId,
+            let record = automaticRunByEpisode,
+            record.episodeId == episodeId
+        else { return nil }
+        return record.outcome
     }
 
     /// Sends the user's answer. One of the tokens the CLI published — this app
@@ -360,7 +562,14 @@ final class PressureEpisodeMonitor: ObservableObject {
         // suppressing the window: pressing this button and having nothing happen
         // is the one outcome worth avoiding at the cost of a sparser screen.
         guard RecoveryDeepLink.opensRecovery(responseToken) else { return }
-        deepLink?.openRecovery(lastReport.map(RecoveryDeepLinkContext.init(report:)))
+        deepLink?.openRecovery(
+            lastReport.map { report in
+                RecoveryDeepLinkContext(
+                    report: report,
+                    automaticRun: automaticRun(forEpisodeIn: report)
+                )
+            }
+        )
     }
 
     /// Takes on whatever an invocation turned out to be.

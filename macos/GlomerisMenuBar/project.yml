@@ -187,6 +187,28 @@ targets:
       - path: Sources/GlomerisLlmSettingsStore.swift
       - path: Sources/AiProviderPreferencesView.swift
       - path: Sources/AutopilotPreferencesView.swift
+      # HORO-1510: which mode is in force — asked first, or starting unasked.
+      # Compiled in for the claim the whole file exists to keep true: `make`
+      # decides the acting case on `startsUnprompted`, the value Rust computed,
+      # and consults `respondToAlerts` only to tell the two *inert* states apart.
+      # A test over all four `(enabled, respondToAlerts)` combinations is what
+      # stops a Swift-side `enabled && respondToAlerts` from creeping back in as
+      # a convenience — the no-policy-in-Swift guard reads labels and branches,
+      # and would not see this app composing its own permission out of two
+      # fields. It also pins the third state existing at all: a set-but-revoked
+      # grant must not read as off, or revoking looks like it cleared a choice it
+      # deliberately keeps on file.
+      - path: Sources/AutopilotUnpromptedMode.swift
+      # HORO-1510: the panel's standing statement of what Autopilot may do.
+      # Compiled in for one claim, which is the reason the file's error path is
+      # shaped the way it is: a grant that could not be read must not render as
+      # "off". "Off" means nothing on this Mac deletes anything unasked, and a
+      # failed read is precisely the case where that is unfounded — so the card
+      # has three states, not two, and only a test can tell the third from the
+      # first. `spokenState` is here for the neighbouring one: a listener told
+      # "Autopilot is on" and nothing else has not been told whether it starts by
+      # itself, which is the whole of AC 2 and is invisible on screen.
+      - path: Sources/AutopilotSectionView.swift
       # HORO-1507: the recovery settings pane. Compiled in because the two things
       # worth pinning are types, not pixels. `RecoverySettingsInterpretation` is
       # the only place in the app that has to tell a *refused pair* — a
@@ -214,6 +236,20 @@ targets:
       # on the id alone, "remind me later" would silently mean "never again"), and
       # a raise that failed must not consume the episode's one chance to be shown.
       - path: Sources/PressureEpisodeMonitor.swift
+      # HORO-1510: the optional half of §10 — whether a run may *begin* unasked.
+      # Compiled in because every claim here is one no other kind of test could
+      # reach: a real `free --autopilot --unattended` deletes from the machine the
+      # suite runs on, so the whole path is only checkable through this seam.
+      # `UnpromptedRecoveryPlan.decide` is pure, so "an unreadable grant is not
+      # consent", "one attempt per banner-worth of pressure" and "not opted in
+      # means ask" are assertions about values. `interpret` is where exit 3 and
+      # exit 75 stop being numbers: `busy` is the one outcome that provably
+      # mutated nothing and therefore the one that may be retried, and getting
+      # that pair the wrong way round is either a lost attempt or an unbounded
+      # retry loop. And `arguments` is the only place `--unattended` is spelled —
+      # the flag whose absence would make a run nobody started indistinguishable
+      # from one somebody typed.
+      - path: Sources/UnpromptedRecovery.swift
       # HORO-1508: the deep link. Compiled in for one test above all others —
       # `RecoveryDeepLink.reviewToken` is the single literal in this app that names
       # an answer in order to *act* on it rather than to word it, and

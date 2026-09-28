@@ -41,8 +41,18 @@
 //! max_bytes = 5368709120
 //! max_duration_secs = 60
 //! min_pressure = PRESSURED
+//! respond_to_alerts = true
 //! preauthorize_ask = cargo_target_dir:rebuild_cost_high
 //! ```
+//!
+//! `respond_to_alerts` is written only when it is `true` (HORO-1510). Every
+//! other key is always written, so the omission is deliberate and it buys one
+//! specific thing: a file from a build that does not know the key is
+//! byte-identical to before for everyone who did not opt in, and for everyone
+//! who did, an older build reading it hits rule 2 and refuses to load rather
+//! than dropping a fact about authority on the floor. Refusing is the right
+//! direction — an older build has no unprompted-run path to honour the key
+//! with, so the alternative is running under a grant it has misread.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -209,6 +219,7 @@ struct RawEnvelope {
     max_bytes: Option<(usize, u64)>,
     max_duration: Option<(usize, Duration)>,
     min_pressure: Option<(usize, Option<PressureState>)>,
+    respond_to_alerts: Option<(usize, bool)>,
     preauthorize_ask: Vec<(usize, ResourceKind, ReasonCode)>,
 }
 
@@ -263,6 +274,9 @@ fn parse_envelope(contents: &str) -> Result<AutopilotEnvelope, StoreError> {
     if let Some((_, min_pressure)) = raw.min_pressure {
         envelope.set_min_pressure(min_pressure);
     }
+    if let Some((_, respond_to_alerts)) = raw.respond_to_alerts {
+        envelope.set_respond_to_alerts(respond_to_alerts);
+    }
     if raw.enabled.is_some_and(|(_, enabled)| enabled) {
         envelope.enable();
     }
@@ -279,6 +293,7 @@ fn read_lines(contents: &str) -> Result<RawEnvelope, StoreError> {
         max_bytes: None,
         max_duration: None,
         min_pressure: None,
+        respond_to_alerts: None,
         preauthorize_ask: Vec::new(),
     };
 
@@ -296,7 +311,12 @@ fn read_lines(contents: &str) -> Result<RawEnvelope, StoreError> {
 
         match key {
             "version" => set_once(&mut raw.version, line, key, value.to_string())?,
-            "enabled" => set_once(&mut raw.enabled, line, key, parse_bool(line, value)?)?,
+            "enabled" => set_once(
+                &mut raw.enabled,
+                line,
+                key,
+                parse_bool(line, "enabled", value)?,
+            )?,
             "allowed_kinds" => {
                 set_once(&mut raw.allowed_kinds, line, key, parse_kinds(line, value)?)?
             }
@@ -323,6 +343,12 @@ fn read_lines(contents: &str) -> Result<RawEnvelope, StoreError> {
                 line,
                 key,
                 parse_pressure(line, value)?,
+            )?,
+            "respond_to_alerts" => set_once(
+                &mut raw.respond_to_alerts,
+                line,
+                key,
+                parse_bool(line, "respond_to_alerts", value)?,
             )?,
             "preauthorize_ask" => {
                 let (kind, reason) = parse_preauthorization(line, value)?;
@@ -374,13 +400,18 @@ fn quote_value(value: &str) -> String {
     format!("{head}…")
 }
 
-/// Exactly `true` or `false`. No `yes`/`1`/`on`, and no case folding: this
-/// is the bit that turns Autopilot on.
-fn parse_bool(line: usize, value: &str) -> Result<bool, StoreError> {
+/// Exactly `true` or `false`. No `yes`/`1`/`on`, and no case folding: these
+/// are the bits that turn Autopilot on and let it start unasked.
+///
+/// `key` is passed in rather than fixed, so a bad `respond_to_alerts` is not
+/// reported as a bad `enabled`. It is a `&'static str` for the same reason the
+/// rest of [`StoreError::InvalidValue`] is: the key names are this build's
+/// vocabulary, never the file's.
+fn parse_bool(line: usize, key: &'static str, value: &str) -> Result<bool, StoreError> {
     match value {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(invalid(line, "enabled", value)),
+        _ => Err(invalid(line, key, value)),
     }
 }
 
@@ -468,6 +499,13 @@ pub fn render_envelope(envelope: &AutopilotEnvelope) -> String {
             None => "none",
         }
     ));
+    // Written only when set, so that a build which knows this key produces a
+    // byte-identical file to one that does not for every envelope that did not
+    // opt in. See the module docs for what the omission is worth and what it
+    // costs.
+    if envelope.responds_to_alerts() {
+        out.push_str("respond_to_alerts = true\n");
+    }
     for preauthorization in envelope.ask_preauthorizations() {
         out.push_str(&format!(
             "preauthorize_ask = {}:{}\n",
@@ -537,6 +575,7 @@ mod tests {
             .set_max_duration(Duration::from_secs(30))
             .expect("below the ceiling");
         envelope.set_min_pressure(Some(PressureState::Warn));
+        envelope.set_respond_to_alerts(true);
         envelope
     }
 
@@ -891,6 +930,90 @@ mod tests {
             rendered.chars().count() < 120,
             "an error message must not echo an unbounded value: {rendered:?}"
         );
+    }
+
+    /// The upgrade path, and the reason the field defaults the way it does: an
+    /// envelope written before HORO-1510 existed granted authority over runs
+    /// its owner asked for, so it must keep meaning exactly that.
+    #[test]
+    fn an_envelope_without_the_key_never_starts_a_run_unasked() {
+        let envelope = load(
+            "version = 1\n\
+             enabled = true\n\
+             allowed_kinds = cargo_target_dir\n\
+             max_actions = 3\n\
+             max_bytes = 5368709120\n\
+             max_duration_secs = 60\n\
+             min_pressure = none\n",
+        )
+        .expect("parses");
+
+        assert!(envelope.is_enabled());
+        assert!(!envelope.responds_to_alerts());
+        assert!(!envelope.starts_unprompted());
+    }
+
+    /// The claim in this module's docs, checked rather than asserted in prose:
+    /// the key is absent unless it is on, so opting out leaves the file exactly
+    /// as an older build would have written it.
+    #[test]
+    fn the_key_is_written_only_when_it_is_set() {
+        let mut envelope = AutopilotEnvelope::revoked();
+        envelope.enable();
+        envelope.allow_kind(ResourceKind::CargoTargetDir).unwrap();
+
+        let without = render_envelope(&envelope);
+        assert!(
+            !without.contains("respond_to_alerts"),
+            "an envelope that did not opt in must not mention the key: {without}"
+        );
+
+        envelope.set_respond_to_alerts(true);
+        let with = render_envelope(&envelope);
+        assert!(with.contains("respond_to_alerts = true"), "{with}");
+        assert!(
+            load(&with).expect("parses").starts_unprompted(),
+            "the rendered file must grant what the envelope did"
+        );
+    }
+
+    #[test]
+    fn respond_to_alerts_accepts_exactly_true_and_false() {
+        assert!(load("version = 1\nrespond_to_alerts = true\n")
+            .expect("parses")
+            .responds_to_alerts());
+        assert!(!load("version = 1\nrespond_to_alerts = false\n")
+            .expect("parses")
+            .responds_to_alerts());
+        for not_a_bool in ["yes", "1", "on", "True", ""] {
+            // The key in the error is this key, not `enabled` — a message
+            // naming the wrong line's field sends the reader to the wrong line.
+            assert!(
+                matches!(
+                    load(&format!("version = 1\nrespond_to_alerts = {not_a_bool}\n")),
+                    Err(StoreError::InvalidValue {
+                        key: "respond_to_alerts",
+                        ..
+                    })
+                ),
+                "{not_a_bool:?} must not authorize an unprompted run"
+            );
+        }
+    }
+
+    /// A hand-edited `respond_to_alerts = true` on a revoked envelope grants
+    /// nothing. The file is not a second way in.
+    #[test]
+    fn a_hand_edited_setting_on_a_revoked_envelope_starts_nothing() {
+        let envelope = load(
+            "version = 1\n\
+             allowed_kinds = cargo_target_dir\n\
+             respond_to_alerts = true\n",
+        )
+        .expect("parses");
+
+        assert!(envelope.responds_to_alerts());
+        assert!(!envelope.starts_unprompted());
     }
 
     #[test]

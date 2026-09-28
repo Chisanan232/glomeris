@@ -515,6 +515,8 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.maxBytesHuman, "2.0 GB")
         XCTAssertEqual(dto.maxDurationSecs, 120)
         XCTAssertEqual(dto.minPressure, "PRESSURED")
+        XCTAssertTrue(dto.respondToAlerts)
+        XCTAssertTrue(dto.startsUnprompted)
         XCTAssertEqual(dto.storedAt, "/Users/dev/Library/Application Support/Glomeris/autopilot.conf")
 
         XCTAssertEqual(dto.askPreauthorizations.count, 1)
@@ -744,6 +746,62 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(remaining.requiresConfirmationCount, 2)
         XCTAssertEqual(remaining.protectedCount, 1)
         XCTAssertEqual(remaining.notExecutableCount, 3)
+
+        // HORO-1510: a run the user started has no Autopilot envelope, so
+        // nothing can have been refused by one. Zero here, and the envelope
+        // token absent entirely — not "unknown", not an empty string.
+        XCTAssertEqual(remaining.notPermittedByAutopilotCount, 0)
+        XCTAssertNil(
+            dto.envelopeRefusal,
+            "only an envelope_refused stop may name an Autopilot limit"
+        )
+    }
+
+    /// The Autopilot run that ran out of *authority* rather than of safe work
+    /// (HORO-1510).
+    ///
+    /// Paired with the raw-target fixture above on purpose: both stopped short
+    /// of the goal and both carry a `remaining` breakdown, so the only thing
+    /// separating "your disk has nothing safe left" from "Autopilot reached the
+    /// limit you set" is `stopReason` plus `envelopeRefusal`. A decoder that
+    /// dropped either, or that folded `notPermittedByAutopilotCount` into
+    /// `protectedCount`, would show the user the wrong one of two opposite
+    /// next steps — and must fail here instead.
+    func testDecodesRecoveryRunReportForAnEnvelopeRefusal() throws {
+        let dto = try decodeFixture(
+            "recovery_run_report_envelope_refused.json",
+            as: RecoveryRunReportDto.self
+        )
+
+        XCTAssertEqual(dto.stopReason, "envelope_refused")
+        XCTAssertEqual(dto.envelopeRefusal, "action_budget_exhausted")
+        XCTAssertNil(dto.error, "reaching an authorized limit is not an error")
+        XCTAssertFalse(dto.targetMet)
+        XCTAssertEqual(dto.iterationsRun, 4)
+        XCTAssertEqual(dto.actionsExecuted, 3)
+        XCTAssertEqual(dto.bytesFreedMeasured, 5_368_709_120)
+
+        let remaining = try XCTUnwrap(
+            dto.remaining,
+            "a refusal that came after a discovery pass must say what it left behind"
+        )
+        XCTAssertEqual(remaining.notPermittedByAutopilotCount, 4)
+        XCTAssertEqual(remaining.requiresConfirmationCount, 1)
+        XCTAssertEqual(remaining.protectedCount, 2)
+        XCTAssertEqual(remaining.notExecutableCount, 0)
+
+        // Both halves of the sentence the user is shown, and both come from the
+        // CLI rather than from wording this app invented.
+        XCTAssertTrue(
+            GlomerisVocabulary.stopReason(dto.stopReason).explanation.lowercased()
+                .contains("autopilot"),
+            "the stop must name whose limit it was"
+        )
+        XCTAssertNotEqual(
+            GlomerisVocabulary.autopilotRefusal(try XCTUnwrap(dto.envelopeRefusal)).symbolName,
+            "questionmark.diamond.fill",
+            "the app must have wording for a limit the CLI can really emit"
+        )
     }
 
     /// A stop short of the goal must be explained, and the explanation is

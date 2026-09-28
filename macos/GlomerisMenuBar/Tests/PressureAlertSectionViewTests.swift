@@ -37,6 +37,17 @@ final class PressureAlertSectionViewTests: XCTestCase {
         )
     }
 
+    /// A reported run that reclaimed 139.7 GB, for the clause that depends on what an
+    /// automatic run did (HORO-1510).
+    private func runReport() throws -> RecoveryRunReportDto {
+        try JSONDecoder().decode(
+            RecoveryRunReportDto.self,
+            from: try Data(
+                contentsOf: Self.fixturesDir.appendingPathComponent("recovery_run_report.json")
+            )
+        )
+    }
+
     // MARK: - When the card appears
 
     func testAnOpenEpisodeShowsTheCard() throws {
@@ -102,7 +113,7 @@ final class PressureAlertSectionViewTests: XCTestCase {
     /// speaks versus where a run stops.
     func testTheSpokenStateTellsTheThreeFiguresApart() throws {
         let dto = try report()
-        let spoken = PressureAlertPresentation.spokenState(report: dto)
+        let spoken = PressureAlertPresentation.spokenState(report: dto, automaticRun: nil)
 
         XCTAssertTrue(spoken.contains("Disk now: 91.0% used, 41.9 GB free."), spoken)
         XCTAssertTrue(spoken.contains("Alert threshold: 85% used."), spoken)
@@ -114,9 +125,61 @@ final class PressureAlertSectionViewTests: XCTestCase {
     /// before they decide anything.
     func testTheSpokenStateSaysNothingHasBeenDeleted() throws {
         XCTAssertTrue(
-            PressureAlertPresentation.spokenState(report: try report())
+            PressureAlertPresentation.spokenState(report: try report(), automaticRun: nil)
                 .hasSuffix("Nothing has been deleted.")
         )
+    }
+
+    /// And on an opted-in Mac it accounts for the run instead, because this card can
+    /// appear *after* a bounded run that did not reach the goal. A listener told that
+    /// nothing had been deleted would have been read a sentence the app knows to be
+    /// false (HORO-1510) — and a listener is the one reader who cannot check.
+    func testTheSpokenStateAccountsForAnAutomaticRunRatherThanDenyingIt() throws {
+        let spoken = PressureAlertPresentation.spokenState(
+            report: try report(),
+            automaticRun: .ran(try runReport())
+        )
+
+        XCTAssertFalse(spoken.contains("Nothing has been deleted"), spoken)
+        XCTAssertTrue(spoken.hasSuffix("Autopilot already reclaimed 139.7 GB."), spoken)
+        // The figures are still there, and still first: the account is the last clause
+        // so a listener reaches the three numbers without waiting through it.
+        XCTAssertTrue(spoken.hasPrefix("Disk now: 91.0% used, 41.9 GB free."), spoken)
+    }
+
+    /// AC 2's in-the-moment half, spoken. The mode's own `summary` answers a label, so
+    /// heard on its own — "You will be asked first" with no axis — it could be about
+    /// anything on the card. It is read with the axis attached, the way every other row
+    /// in this app is.
+    func testTheModeIsSpokenWithItsAxisAttached() {
+        for mode in [
+            AutopilotUnpromptedMode.askedFirst, .startsOnPressure, .dormantWhileRevoked,
+        ] {
+            let spoken = PressureAlertPresentation.spokenMode(mode)
+
+            XCTAssertEqual(
+                spoken,
+                SpokenLabel.compose([
+                    SpokenLabel.clause(PressureAlertPresentation.unpromptedModeLabel, mode.summary)
+                ])
+            )
+            XCTAssertTrue(spoken.contains(mode.summary), spoken)
+            XCTAssertTrue(
+                spoken.hasPrefix(PressureAlertPresentation.unpromptedModeLabel),
+                spoken
+            )
+        }
+    }
+
+    /// The three modes are told apart by what is *said*, not only by glyph and colour
+    /// (campaign §14). A listener who hears the same sentence whichever mode is in
+    /// force has not been told which one it is.
+    func testTheThreeModesAreSpokenDistinctly() {
+        let spoken = [
+            AutopilotUnpromptedMode.askedFirst, .startsOnPressure, .dormantWhileRevoked,
+        ].map(PressureAlertPresentation.spokenMode)
+
+        XCTAssertEqual(Set(spoken).count, 3, "\(spoken)")
     }
 
     /// Composed through the shared composer, so every spoken row in the app
@@ -126,7 +189,7 @@ final class PressureAlertSectionViewTests: XCTestCase {
         let dto = try report()
 
         XCTAssertEqual(
-            PressureAlertPresentation.spokenState(report: dto),
+            PressureAlertPresentation.spokenState(report: dto, automaticRun: nil),
             SpokenLabel.compose([
                 SpokenLabel.clause(
                     "Disk now",
@@ -135,7 +198,7 @@ final class PressureAlertSectionViewTests: XCTestCase {
                 ),
                 SpokenLabel.clause("Alert threshold", dto.notifyAtDescription),
                 SpokenLabel.clause("Recovery goal", dto.defaultGoal.description),
-                "Nothing has been deleted",
+                UnpromptedRecoveryAccount.nothingDeleted,
             ])
         )
     }

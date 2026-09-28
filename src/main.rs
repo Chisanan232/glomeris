@@ -1241,6 +1241,36 @@ fn run_history_command(args: &[String]) {
     }
 }
 
+/// How a `free` run came to be running, as the three combinations that exist
+/// (HORO-1510).
+///
+/// A pair of bools would have a fourth state — unattended, with no envelope —
+/// and that state is a run nobody asked for that nothing bounds, which is the
+/// single thing this must not be able to express. The flag parser refuses it
+/// once, at the boundary, and everything downstream is handed a value that
+/// cannot mean it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunAuthority {
+    /// Somebody ran this. The command line's own limits apply.
+    Asked,
+    /// Somebody ran this and asked for the standing grant's limits instead of
+    /// the command line's.
+    AskedWithinGrant,
+    /// Nobody asked: started in answer to a disk-pressure alert. Requires a
+    /// grant that authorizes starting unasked, not merely one that is enabled.
+    UnpromptedWithinGrant,
+}
+
+impl RunAuthority {
+    fn uses_envelope(self) -> bool {
+        !matches!(self, RunAuthority::Asked)
+    }
+
+    fn is_unprompted(self) -> bool {
+        matches!(self, RunAuthority::UnpromptedWithinGrant)
+    }
+}
+
 /// `glomeris free` — the closed recovery loop, reachable on either axis
 /// (HORO-1506).
 ///
@@ -1257,6 +1287,20 @@ fn run_history_command(args: &[String]) {
 ///
 /// Exactly one is required. Accepting both would mean choosing a precedence
 /// between two numbers that disagree about how much of a disk to delete.
+///
+/// `--autopilot` narrows the same loop with the stored Autopilot envelope
+/// instead of starting a second one (HORO-1510). It changes nothing about how
+/// the loop decides — it only withholds candidates the envelope does not cover
+/// — so what it adds is entirely subtractive, and a run that stops because the
+/// envelope ran out of allowance says so rather than reporting an exhausted
+/// disk.
+///
+/// `--unattended` says nobody pressed anything: this run is the answer to a
+/// disk-pressure alert. It is the caller's own statement about itself, and it
+/// is here so that the authority check for starting unasked lives in this
+/// binary rather than in whatever launched it. Without it, a client could start
+/// an `--autopilot` run on its own initiative and nothing in Rust would be able
+/// to tell that apart from a person typing the same command.
 fn run_free_command(args: &[String]) {
     use glomeris::executor::goal::RecoveryGoal;
 
@@ -1275,9 +1319,19 @@ fn run_free_command(args: &[String]) {
     let mut json = false;
     let mut progress_json = false;
     let mut stop_file: Option<&str> = None;
+    let mut autopilot = false;
+    let mut unattended = false;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
+            "--autopilot" => {
+                autopilot = true;
+                i += 1;
+            }
+            "--unattended" => {
+                unattended = true;
+                i += 1;
+            }
             "--target" => {
                 target_arg = remaining.get(i + 1).map(String::as_str);
                 i += 2;
@@ -1368,6 +1422,40 @@ fn run_free_command(args: &[String]) {
         std::process::exit(2);
     }
 
+    // Same reasoning as above, and the more important half of it: an envelope
+    // is authority to execute. A preview executes nothing, so accepting the
+    // flag here would produce a candidate list that looks envelope-filtered
+    // while being nothing of the kind — a user would read it as "this is what
+    // Autopilot would do" when it is the full list.
+    if autopilot && dry_run {
+        eprintln!(
+            "glomeris free: --autopilot bounds what a run may execute; --dry-run executes \
+             nothing, so the two cannot be combined. Use `glomeris autopilot show` to read \
+             the envelope without running anything."
+        );
+        std::process::exit(2);
+    }
+
+    // The fourth state, refused here so that [`RunAuthority`] cannot carry it.
+    // A run nobody asked for is exactly the one that must be bounded by a grant
+    // somebody read, so the useful error is this one rather than a later
+    // refusal by the envelope that would read as though the combination itself
+    // were fine.
+    if unattended && !autopilot {
+        eprintln!(
+            "glomeris free: --unattended says nobody asked for this run, so it may only run \
+             inside the standing grant. Pass --autopilot as well, or drop --unattended."
+        );
+        print_command_usage("free");
+        std::process::exit(2);
+    }
+
+    let authority = match (autopilot, unattended) {
+        (false, _) => RunAuthority::Asked,
+        (true, false) => RunAuthority::AskedWithinGrant,
+        (true, true) => RunAuthority::UnpromptedWithinGrant,
+    };
+
     if dry_run {
         free_preview(goal, target, project_roots, json, progress_json);
     } else {
@@ -1378,6 +1466,7 @@ fn run_free_command(args: &[String]) {
             json,
             progress_json,
             stop_file.map(PathBuf::from),
+            authority,
         );
     }
 }
@@ -1622,6 +1711,14 @@ fn autopilot_enable(args: &[String]) {
                     autopilot_usage_exit(&format!("--preauthorize-ask: {e}"));
                 }
                 i += 2;
+            }
+            // Its own flag rather than something `--min-pressure` implies,
+            // because "only act once the disk is this bad" and "act without
+            // being asked" are different grants and one of them is the one
+            // that deletes things while nobody is looking (HORO-1510).
+            "--respond-to-alerts" => {
+                envelope.set_respond_to_alerts(true);
+                i += 1;
             }
             other => autopilot_usage_exit(&format!("unrecognized argument '{other}'")),
         }
@@ -2894,6 +2991,7 @@ fn free_run(
     json: bool,
     progress_json: bool,
     stop_file: Option<PathBuf>,
+    authority: RunAuthority,
 ) {
     use glomeris::actions::ActionRegistry;
     use glomeris::cli::recovery::NdjsonProgressObserver;
@@ -2903,7 +3001,7 @@ fn free_run(
         run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryObserver, RecoveryRunRequest,
         SilentObserver, StopFile, StopSignal, SystemWallClock,
     };
-    use glomeris::monitor::{FsStat, SystemClock};
+    use glomeris::monitor::{FsStat, SystemClock, ThresholdConfig};
     use glomeris::platform::macos::MacosFsStat;
     use glomeris::policy::PolicyConfig;
     use std::time::Duration;
@@ -2940,6 +3038,74 @@ fn free_run(
         }
     }
 
+    // Read, and refused if it is not a grant, BEFORE the execution lock is
+    // taken: an unauthorized run has nothing to protect from a concurrent one,
+    // and blocking a real `free` in another terminal in order to print a
+    // refusal would be the wrong trade. Exit 3 matches `glomeris autopilot
+    // run`, so a caller distinguishes "not authorized" from a usage error (2)
+    // and from a failed run (1) without reading prose (HORO-1510).
+    let envelope = if authority.uses_envelope() {
+        let envelope = match glomeris::autopilot::load_envelope() {
+            Ok(envelope) => envelope,
+            Err(e) => autopilot_store_error_exit("read", e),
+        };
+        if !envelope.is_enabled() {
+            eprintln!(
+                "glomeris free: --autopilot runs only inside a grant you wrote, and Autopilot \
+                 is not enabled. Nothing was attempted."
+            );
+            eprintln!("Enable a narrow envelope first, e.g.");
+            eprintln!("  glomeris autopilot enable --kinds node_modules --max-actions 1");
+            std::process::exit(3);
+        }
+        // A grant that authorizes a run somebody asks for is not a grant to
+        // start one unasked, and this is where that distinction is enforced
+        // rather than trusted to the caller. Same exit code as above, because
+        // to a script both are the same fact: this run was not authorized.
+        if authority.is_unprompted() && !envelope.starts_unprompted() {
+            eprintln!(
+                "glomeris free: --unattended needs a grant that allows starting a run without \
+                 being asked, and this one does not. Nothing was attempted."
+            );
+            eprintln!("Add that permission explicitly, e.g.");
+            eprintln!(
+                "  glomeris autopilot enable --kinds node_modules --max-actions 1 \
+                 --respond-to-alerts"
+            );
+            std::process::exit(3);
+        }
+        // Printed before anything runs, for the same reason `autopilot run`
+        // prints it: the output of a run that deletes should open with the
+        // authority it acted under rather than asking the reader to go and look
+        // it up afterwards. To stderr, not stdout, because a `--json` caller's
+        // stdout carries exactly one report.
+        eprintln!("Autopilot envelope:");
+        for line in envelope.describe() {
+            eprintln!("  {line}");
+        }
+        eprintln!();
+        Some(envelope)
+    } else {
+        None
+    };
+
+    // Unobserved is not "fine": the gate fails a configured pressure floor
+    // closed against a missing observation. Read once, here, because a run that
+    // is working lowers the very pressure that admitted it.
+    let observed_pressure = envelope.as_ref().map(|_| {
+        match fs_stat.stat(std::path::Path::new(RECOVERY_TARGET_MOUNT)) {
+            Ok(usage) => {
+                Some(ThresholdConfig::default().classify(usage.used_percent(), usage.free_bytes))
+            }
+            Err(e) => {
+                eprintln!(
+                    "glomeris free: could not read disk usage ({e}) — pressure is unobserved"
+                );
+                None
+            }
+        }
+    });
+
     // HORO-1054: held for the duration of the real-execution portion
     // below, released automatically (via `Drop`) when this function
     // returns. `json` is threaded through so a busy lock answers a
@@ -2955,11 +3121,27 @@ fn free_run(
     let config = RecoveryConfig {
         target,
         max_iterations: 100,
-        max_actions: 100,
-        max_duration: Duration::from_secs(600),
+        // Under an envelope these come down to the envelope's own figures, so
+        // that the gate is always the stricter of the two and a stop is
+        // attributed to the limit the user actually wrote. Left as they were,
+        // the loop's 600-second ceiling could cut short a run the user had
+        // authorized for the full 15 minutes and report `budget_exceeded` — a
+        // true sentence about the wrong budget (HORO-1510).
+        max_actions: envelope
+            .as_ref()
+            .map_or(100, glomeris::autopilot::AutopilotEnvelope::max_actions),
+        max_duration: envelope.as_ref().map_or_else(
+            || Duration::from_secs(600),
+            glomeris::autopilot::AutopilotEnvelope::max_duration,
+        ),
         // No interactive prompt in this MVP — Ask candidates are
         // reported as declined/skipped rather than executed. See
         // RecoveryConfig::auto_approve_ask's doc comment.
+        //
+        // An envelope does not change this. What it can do is pre-authorize a
+        // *specific* Ask risk, recorded in the grant, which the gate honours
+        // per candidate — a blanket yes and a written-down yes are not the same
+        // consent.
         auto_approve_ask: false,
     };
 
@@ -3013,6 +3195,16 @@ fn free_run(
         audit_log_path: &audit_log_path,
         observer: observer.as_ref(),
         stop: stop_signal.as_ref(),
+        // Absent unless `--autopilot` was passed, in which case a human typed
+        // this command and the only limits are the ones above. Present, it is a
+        // second gate and never a second policy: it can only withhold
+        // candidates the loop would otherwise have taken (HORO-1510).
+        admission: envelope.as_ref().map(|envelope| {
+            glomeris::executor::recovery_loop::RecoveryAdmission {
+                envelope,
+                observed_pressure: observed_pressure.flatten(),
+            }
+        }),
     });
 
     if json {
@@ -3065,6 +3257,7 @@ fn free_run(
     _json: bool,
     _progress_json: bool,
     _stop_file: Option<PathBuf>,
+    _authority: RunAuthority,
 ) {
     eprintln!("glomeris free: only supported on macOS");
     std::process::exit(1);

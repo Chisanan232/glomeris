@@ -80,16 +80,22 @@ enum PressureNotificationContent {
     }
 
     /// The body, in the order a hurried reader needs it: what is true now, why
-    /// they are being told, where recovery would stop, and that nothing has
-    /// happened yet.
+    /// they are being told, where recovery would stop, and what has happened so
+    /// far.
     ///
     /// The threshold and the goal are named as two separate things. Collapsing
     /// them into one figure is the specific misreading this campaign exists to
     /// prevent: one is when to speak, the other is where a run stops.
+    ///
+    /// The last sentence used to be a constant, and HORO-1510 is why it is not.
+    /// On a Mac whose grant allows a run to start unasked, a banner is raised
+    /// *after* that run — because the run did not get the disk under its goal — so
+    /// "Nothing has been deleted" would be false in precisely the case the user
+    /// most needs to be told about. See `UnpromptedRecoveryAccount`.
     static func body(for banner: PressureBanner) -> String {
         "\(banner.freeHuman) free. You asked to be alerted at "
             + "\(banner.notifyAtDescription); your recovery goal is \(banner.goalDescription). "
-            + "Nothing has been deleted."
+            + UnpromptedRecoveryAccount.deletionClause(after: banner.automaticRun)
     }
 
     /// The buttons, built from the tokens the CLI published.
@@ -309,11 +315,24 @@ extension PressureEpisodeMonitor {
     /// It does not `start()`. Polling begins when the caller says so — the app
     /// starts it only after the single-instance guard has let this process live,
     /// and the preview never starts it at all.
+    /// The `unpromptedRecovery` runner is supplied here and only here (HORO-1510).
+    /// Nothing about that is a switch: it is the capability to start a bounded
+    /// unattended run, and whether one ever starts is the grant's answer, read
+    /// afresh on every poll that owes a banner. Passing it unconditionally is
+    /// right — the shipped app must be able to honour a grant the user wrote —
+    /// and every test builds a monitor without one, so no test can delete
+    /// anything through this path even by accident.
+    ///
+    /// It reads project roots from the same defaults every other surface does, so
+    /// an unattended run is scoped exactly as a run the user started would be.
     static func production() -> PressureEpisodeMonitor {
         PressureEpisodeMonitor(
             client: PressureEpisodeClient(),
             banners: PressureNotificationCenterBanner(center: .current()),
-            deepLink: RecoveryDeepLinkWindowPresenter()
+            deepLink: RecoveryDeepLinkWindowPresenter(),
+            unpromptedRecovery: UnpromptedRecoveryClient(
+                projectRootsStore: ProjectRootsStore()
+            )
         )
     }
 }

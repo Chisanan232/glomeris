@@ -234,8 +234,8 @@ struct GlomerisPopoverView: View {
 
     // MARK: - Body
 
-    /// Status → recovery goal → candidates → AI plan → history. Also the
-    /// VoiceOver reading order.
+    /// Status → recovery goal → candidates → AI plan → Autopilot → history. Also
+    /// the VoiceOver reading order.
     ///
     /// HORO-1506 puts the recovery goal second, directly under the disk reading
     /// it works from. The order is the product's own claim about itself: the disk
@@ -283,6 +283,12 @@ struct GlomerisPopoverView: View {
                     projectRootsStore: projectRootsStore,
                     onOpenDetail: { navigation.open($0) }
                 )
+                // HORO-1510, campaign §13's position: after the optional
+                // assistance, before the log. What standing authority this Mac
+                // has given Glomeris is not an action the user takes from here,
+                // so it sits below everything that is — and above History,
+                // because it describes what may happen rather than what did.
+                AutopilotSectionView(client: client)
                 HistoryAuditSectionView()
             }
             .padding(GlomerisDesign.outerPadding)
@@ -374,28 +380,14 @@ struct GlomerisPopoverView: View {
         .padding(.vertical, GlomerisDesign.cardPadding)
     }
 
-    @ViewBuilder private var settingsButton: some View {
-        if #available(macOS 14.0, *) {
-            // The supported way in: it opens the app's `Settings` scene
-            // without this view knowing anything about window management.
-            SettingsLink {
-                Text("Project roots…")
-            }
-            .buttonStyle(.borderless)
-            .font(GlomerisDesign.captionFont)
-            .accessibilityLabel("Open project roots settings")
-        } else {
-            // macOS 13 has no `SettingsLink`. The responder-chain action the
-            // standard Settings menu item sends is the documented route on
-            // that version; the deployment target is 13.0, so it has to be
-            // here even though 14+ takes the branch above.
-            Button("Project roots…") {
-                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-            }
-            .buttonStyle(.borderless)
-            .font(GlomerisDesign.captionFont)
-            .accessibilityLabel("Open project roots settings")
-        }
+    /// HORO-1510: the `#available` shim this used to hold inline now lives in
+    /// `GlomerisSettingsLink`, because a second surface needs the same route in
+    /// and a version check copied per surface is one that goes stale in one copy.
+    private var settingsButton: some View {
+        GlomerisSettingsLink(
+            title: "Project roots…",
+            accessibilityLabel: "Open project roots settings"
+        )
     }
 }
 

@@ -240,7 +240,8 @@ final class PressureEpisodeMonitorTests: XCTestCase {
         let report = try owed()
         let banner = PressureBanner(
             key: PressureBannerKey(episodeId: 1, notificationsRaised: 0),
-            report: report
+            report: report,
+            automaticRun: nil
         )
         XCTAssertEqual(banner.currentUsedPercent, 91.0)
         XCTAssertEqual(banner.notifyAtDescription, "85% used")
@@ -259,7 +260,8 @@ final class PressureEpisodeMonitorTests: XCTestCase {
         let report = try owed()
         let banner = PressureBanner(
             key: PressureBannerKey(episodeId: 1, notificationsRaised: 0),
-            report: report
+            report: report,
+            automaticRun: nil
         )
         XCTAssertEqual(banner.responseTokens, report.responses)
         XCTAssertEqual(banner.responseTokens.count, 3)

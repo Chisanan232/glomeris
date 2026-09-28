@@ -63,7 +63,7 @@
 # src/executor/lock.rs, which is why a repo-wide grep was never a
 # substitute for a producer here.
 #
-# Exit 0 = the eleven checked vocabularies match. Exit 1 = drift, or an
+# Exit 0 = the seventeen checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -150,12 +150,25 @@ VOCABULARIES=(
   # do about a disk that is nearly full.
   'episodeResponse;;src/monitor/episode.rs;;EpisodeResponse::as_str;;EpisodeResponse'
   'episodeRejection;;src/monitor/episode.rs;;EpisodeRejection::as_str;;EpisodeRejection'
+  # HORO-1510. The Autopilot gate's own refusals, which reach the wire for the
+  # first time as `RecoveryRunReport::envelope_refusal`. A different enum from
+  # the `refusal` row above despite the shared name — that one is
+  # `reporting::dto::RefusalReason` (why `execute` refused), this one is
+  # `autopilot::gate::RefusalReason` (why the envelope would not allow it) —
+  # which is why the row is scoped to its impl block and labelled distinctly.
+  #
+  # This is the vocabulary where the wrong wording does real harm: three of the
+  # ten are policy refusing on evidence and the other seven are the envelope
+  # running out of authority, and a user shown the fallback cannot tell those
+  # apart. "Nothing more can be done here" and "raise the limit you set" are
+  # opposite next steps.
+  'autopilotRefusal;;src/autopilot/gate.rs;;RefusalReason::as_str;;AutopilotRefusalReason'
 )
 
 # One more than the number of rows above: `outcome` has no producer to diff
 # against (see this script's header). Cross-checked against the rows actually
 # walked, at the end.
-TOTAL_VOCABULARIES=17
+TOTAL_VOCABULARIES=18
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent

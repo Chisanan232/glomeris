@@ -35,6 +35,7 @@
 //  broken every time it declines to delete their Terraform state.
 //
 
+import AppKit
 import SwiftUI
 
 // MARK: - Tokens
@@ -541,6 +542,45 @@ struct GlomerisStateMessageView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+}
+
+// MARK: - Chrome
+
+/// A borderless button that opens the app's `Settings` scene.
+///
+/// Shared rather than written per surface because of the `#available` branch
+/// inside it. `SettingsLink` is macOS 14, the deployment target is 13, and the
+/// documented route on 13 is the responder-chain action the standard Settings
+/// menu item sends. Written twice, one copy acquires the version check and the
+/// other quietly does nothing on the older system — a dead button, in the one
+/// place a user goes to change what this app is allowed to delete.
+///
+/// `title` and `accessibilityLabel` are separate because the button's own text
+/// is necessarily short ("Autopilot settings…") while a listener needs to be
+/// told it opens a window (HORO-1510).
+struct GlomerisSettingsLink: View {
+    let title: String
+    let accessibilityLabel: String
+
+    @ViewBuilder var body: some View {
+        if #available(macOS 14.0, *) {
+            // The supported way in: it opens the app's `Settings` scene without
+            // the caller knowing anything about window management.
+            SettingsLink {
+                Text(title)
+            }
+            .buttonStyle(.borderless)
+            .font(GlomerisDesign.captionFont)
+            .accessibilityLabel(accessibilityLabel)
+        } else {
+            Button(title) {
+                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            }
+            .buttonStyle(.borderless)
+            .font(GlomerisDesign.captionFont)
+            .accessibilityLabel(accessibilityLabel)
         }
     }
 }

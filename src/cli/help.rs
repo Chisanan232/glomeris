@@ -708,7 +708,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: &[
             "free (--goal-used-percent <N> | --target <N%|NB>)",
             "[--dry-run] [--json] [--progress-json] [--stop-file <path>]",
-            "[--project-root <path>]...",
+            "[--autopilot [--unattended]] [--project-root <path>]...",
         ],
         details: "Runs the recovery loop until the goal is reached, then stops. It \
                   only ever performs actions policy classified as needing no confirmation, so \
@@ -722,7 +722,14 @@ pub const COMMANDS: &[CommandSpec] = &[
                   product-facing form: target DISK USAGE, the number a person reads off a \
                   status bar. `--target` is a raw FREE-SPACE floor, which is what the loop \
                   itself works in. `--goal-used-percent 60` and `--target 40%` request the \
-                  same end state.",
+                  same end state. \
+                  \n\n`--autopilot` runs this same loop inside the standing grant \
+                  `autopilot enable` wrote, instead of the limits above. It is purely \
+                  subtractive: it can only withhold candidates the grant does not cover, never \
+                  reach further than a run you start yourself, and a run it cuts short says so \
+                  by name rather than reporting a disk with nothing safe left on it. A grant \
+                  covers runs you start; starting one nobody asked for is a second permission, \
+                  spelled `--unattended` here and `--respond-to-alerts` on the grant.",
         subcommands: &[],
         options: &[
             OptionSpec {
@@ -768,6 +775,29 @@ pub const COMMANDS: &[CommandSpec] = &[
                               no actions to stop.",
             },
             OptionSpec {
+                syntax: "--autopilot",
+                description: "Bound this run by the stored Autopilot envelope: its resource \
+                              kinds, its action count, its byte total, its wall-clock budget and \
+                              its disk-pressure floor, with ASK still refused unless that exact \
+                              kind and reason were pre-authorized. Exits 3 without attempting \
+                              anything if Autopilot is not enabled, since there is then no grant \
+                              to act under. Prints the envelope on stderr first. Not valid with \
+                              `--dry-run`: a preview executes nothing, so a grant on executing \
+                              has nothing to narrow and the candidate list would look filtered \
+                              while being the whole of it — read the grant with `autopilot show` \
+                              instead.",
+            },
+            OptionSpec {
+                syntax: "--unattended",
+                description: "Declare that nobody asked for this run: it is the answer to a \
+                              disk-pressure alert. Only valid with `--autopilot`, and refused \
+                              with exit 3 unless the grant says in as many words that it may \
+                              start a run unasked — `autopilot enable --respond-to-alerts`. An \
+                              enabled envelope alone is not that permission. Say it even when \
+                              the grant allows it, so that a run nobody started is never \
+                              indistinguishable from one somebody typed.",
+            },
+            OptionSpec {
                 syntax: "--project-root <path>",
                 description: "Same meaning as for `detect`. Repeatable.",
             },
@@ -792,6 +822,10 @@ pub const COMMANDS: &[CommandSpec] = &[
             ExampleSpec {
                 command: "glomeris free --target 20% --stop-file /tmp/g.stop",
                 purpose: "Reclaim, stopping after the current action once that path exists.",
+            },
+            ExampleSpec {
+                command: "glomeris free --goal-used-percent 60 --autopilot",
+                purpose: "Recover toward 60% used, but only as far as the standing grant allows.",
             },
         ],
         exit_codes: &[],
@@ -831,6 +865,7 @@ pub const COMMANDS: &[CommandSpec] = &[
             "[--max-duration <secs>]",
             "[--min-pressure <state|none>]",
             "[--preauthorize-ask <kind>:<reason>]",
+            "[--respond-to-alerts]",
             "[--json]",
             "[--dry-run]",
             "[--plan-file <path>]",
@@ -842,6 +877,9 @@ pub const COMMANDS: &[CommandSpec] = &[
                   a wall-clock budget and optionally a disk-pressure floor, and every \
                   candidate is still classified by policy and revalidated immediately before \
                   deletion. \
+                  \n\nA grant covers runs you start. Whether one may also *begin* without \
+                  being asked — the standing answer to a disk-pressure alert — is a separate \
+                  permission, off unless `enable --respond-to-alerts` says otherwise. \
                   \n\nDefaults grant nothing: with no envelope file, Autopilot is revoked \
                   and `run` executes nothing. AUTO_SAFE resources are the only ones a grant \
                   reaches by default; PROTECTED refuses unconditionally and no flag here can \
@@ -921,6 +959,15 @@ pub const COMMANDS: &[CommandSpec] = &[
                               here, so this cannot become a blanket consent.",
             },
             OptionSpec {
+                syntax: "--respond-to-alerts",
+                description: "For `enable`: also allow a run nobody asked for, started in \
+                              answer to a disk-pressure alert (`free --autopilot \
+                              --unattended`). Off by default, and not implied by enabling \
+                              Autopilot: a grant you wrote for runs you start is not consent to \
+                              act while you are away. Changes nothing about what a run may do \
+                              once it starts. `revoke` suspends it with everything else.",
+            },
+            OptionSpec {
                 syntax: "--json",
                 description: "For `show`, `enable` and `revoke`: print the envelope as JSON — \
                               the grant, the hard ceilings, every choice `enable` would accept, \
@@ -952,6 +999,11 @@ pub const COMMANDS: &[CommandSpec] = &[
                 command: "glomeris autopilot enable --kinds node_modules \\\n    \
                           --max-actions 1 --max-bytes 1073741824",
                 purpose: "Grant one narrow thing, and nothing else.",
+            },
+            ExampleSpec {
+                command: "glomeris autopilot enable --kinds node_modules \\\n    \
+                          --min-pressure pressured --respond-to-alerts",
+                purpose: "Also let it act on a pressure alert without being asked.",
             },
             ExampleSpec {
                 command: "glomeris autopilot run --dry-run",

@@ -12,6 +12,8 @@
   "max_bytes_human": "2.0 GB",
   "max_duration_secs": 120,
   "min_pressure": "PRESSURED",
+  "respond_to_alerts": true,
+  "starts_unprompted": true,
   "ceilings": {
     "max_actions": 25,
     "max_bytes": 68719476736,

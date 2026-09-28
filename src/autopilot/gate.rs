@@ -111,6 +111,51 @@ impl RefusalReason {
             | RefusalReason::ByteBudgetExhausted { .. } => false,
         }
     }
+
+    /// Whether what refused was one of the envelope's run-wide *budgets*
+    /// (action, time, byte) or one of its run-wide *preconditions* (Autopilot
+    /// being enabled at all, the machine being under enough disk pressure) —
+    /// as opposed to something about the candidate in front of it.
+    ///
+    /// This exists so that a caller which found nothing to do can say which of
+    /// two very different things happened (HORO-1510). "Autopilot has spent its
+    /// budget" and "nothing here is safe for Autopilot to touch" are both
+    /// reachable by refusing every candidate in a pass, and a report that
+    /// collapsed them would tell a user their machine is out of safe
+    /// opportunities when in fact the next run has plenty.
+    ///
+    /// The allowlist is deliberately *not* in here even though it is part of
+    /// the envelope: `KindNotAllowed` is decided per candidate, so a pass that
+    /// saw it also saw the resource it was about, and the resource is the more
+    /// useful half of that answer. It belongs with the other
+    /// this-candidate-is-not-for-Autopilot refusals, which a caller counts
+    /// rather than reports as a reason to stop.
+    ///
+    /// Distinct from [`RefusalReason::is_safety_refusal`], which answers when
+    /// the refusal will recur rather than what did the refusing. The two cut
+    /// across each other: `AutopilotRevoked` is both a safety refusal and a
+    /// precondition, `ReclaimSizeUnknown` is a safety refusal and neither.
+    ///
+    /// [`RefusalReason::ByteBudgetExhausted`] is in here even though its
+    /// verdict depends on the candidate's size, because what it reports is
+    /// still the state of a run-wide budget. A caller must not read it as "no
+    /// candidate could be admitted" — a smaller one still can, so a pass has to
+    /// keep looking and may only fall back on this to *explain* having found
+    /// nothing.
+    pub fn is_budget_or_precondition_refusal(&self) -> bool {
+        match self {
+            RefusalReason::AutopilotRevoked
+            | RefusalReason::DiskPressureTooLow { .. }
+            | RefusalReason::ActionBudgetExhausted { .. }
+            | RefusalReason::TimeBudgetExhausted { .. }
+            | RefusalReason::ByteBudgetExhausted { .. } => true,
+            RefusalReason::KindNotAllowed(_)
+            | RefusalReason::ProtectedRefused
+            | RefusalReason::UnknownIncompleteRefused
+            | RefusalReason::AskNotPreauthorized
+            | RefusalReason::ReclaimSizeUnknown => false,
+        }
+    }
 }
 
 impl std::fmt::Display for RefusalReason {
@@ -885,6 +930,70 @@ mod tests {
                 safety.is_safety_refusal(),
                 "{} is a safety refusal",
                 safety.as_str()
+            );
+        }
+    }
+
+    /// The property that makes the new predicate worth having: it is not a
+    /// rename of `is_safety_refusal`. Both of its arms have to be non-empty
+    /// inside each of the other predicate's arms, or one of the two is
+    /// redundant and the caller could have used the other.
+    #[test]
+    fn a_budget_refusal_is_not_the_same_question_as_a_safety_refusal() {
+        // Safety, and a run-wide precondition.
+        assert!(RefusalReason::AutopilotRevoked.is_safety_refusal());
+        assert!(RefusalReason::AutopilotRevoked.is_budget_or_precondition_refusal());
+        // Safety, and about the candidate.
+        assert!(RefusalReason::ReclaimSizeUnknown.is_safety_refusal());
+        assert!(!RefusalReason::ReclaimSizeUnknown.is_budget_or_precondition_refusal());
+        // Transient, and a run-wide budget.
+        let spent = RefusalReason::ActionBudgetExhausted { max_actions: 1 };
+        assert!(!spent.is_safety_refusal());
+        assert!(spent.is_budget_or_precondition_refusal());
+    }
+
+    /// Every reason has to land on one side, and the split has to be the one
+    /// HORO-1510's stop-reason choice is built on: a refusal naming a run-wide
+    /// budget or precondition explains why a whole run found nothing, and
+    /// anything else is a statement about one resource that the caller counts
+    /// instead.
+    #[test]
+    fn exactly_the_run_wide_budgets_and_preconditions_are_reportable_as_stops() {
+        for run_wide in [
+            RefusalReason::AutopilotRevoked,
+            RefusalReason::DiskPressureTooLow {
+                required: PressureState::Warn,
+                observed: Some(PressureState::Healthy),
+            },
+            RefusalReason::ActionBudgetExhausted { max_actions: 3 },
+            RefusalReason::TimeBudgetExhausted {
+                max_duration: Duration::from_secs(60),
+                elapsed: Duration::from_secs(61),
+            },
+            RefusalReason::ByteBudgetExhausted {
+                would_reclaim: 2,
+                remaining: 1,
+            },
+        ] {
+            assert!(
+                run_wide.is_budget_or_precondition_refusal(),
+                "{} is a fact about the run, not about a candidate",
+                run_wide.as_str()
+            );
+        }
+
+        for per_candidate in [
+            RefusalReason::KindNotAllowed(ResourceKind::NodeModules),
+            RefusalReason::ProtectedRefused,
+            RefusalReason::UnknownIncompleteRefused,
+            RefusalReason::AskNotPreauthorized,
+            RefusalReason::ReclaimSizeUnknown,
+        ] {
+            assert!(
+                !per_candidate.is_budget_or_precondition_refusal(),
+                "{} is about the candidate in front of the gate, so it explains \
+                 one skip rather than a whole run",
+                per_candidate.as_str()
             );
         }
     }

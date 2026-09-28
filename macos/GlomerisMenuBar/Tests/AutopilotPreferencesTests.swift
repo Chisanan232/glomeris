@@ -583,7 +583,143 @@ final class AutopilotPreferencesTests: XCTestCase {
         }
     }
 
+    // MARK: - Runs nobody asked for (HORO-1510)
+
+    /// All four combinations the grant can report, read as the three states that
+    /// exist. The pairing that has no fourth state is the point: `enabled` off
+    /// with the preference set is *not* the same as the preference being off, and
+    /// collapsing them would make revoking look like it cleared a choice the CLI
+    /// deliberately keeps on file.
+    func testTheFourReportedCombinationsAreTheThreeStates() throws {
+        let cases: [(Bool, Bool, AutopilotUnpromptedMode)] = [
+            (false, false, .askedFirst),
+            (true, false, .askedFirst),
+            (false, true, .dormantWhileRevoked),
+            (true, true, .startsOnPressure),
+        ]
+
+        for (enabled, respondToAlerts, expected) in cases {
+            let report = try unpromptedReport(enabled: enabled, respondToAlerts: respondToAlerts)
+
+            XCTAssertEqual(
+                AutopilotUnpromptedMode.make(report), expected,
+                "enabled=\(enabled) respondToAlerts=\(respondToAlerts)"
+            )
+        }
+    }
+
+    /// The claim that keeps policy out of this app: `make` reads
+    /// `startsUnprompted`, the value Rust computed, and does not recompute
+    /// `enabled && respondToAlerts` for itself.
+    ///
+    /// Shown with a report no CLI would emit — the conjunction says yes while one
+    /// of its operands says no — because that is the only input the two
+    /// implementations disagree on. A `make` that did its own `&&` would answer
+    /// `.askedFirst` here and pass every test above.
+    func testTheActingCaseIsDecidedByRustsConjunctionAndNotRecomputed() throws {
+        let contradictory = try unpromptedReport(
+            enabled: true,
+            respondToAlerts: false,
+            startsUnprompted: true
+        )
+
+        XCTAssertEqual(AutopilotUnpromptedMode.make(contradictory), .startsOnPressure)
+        XCTAssertTrue(AutopilotUnpromptedMode.make(contradictory).startsRunsUnprompted)
+    }
+
+    /// Three distinct titles, three distinct details, three distinct symbols —
+    /// and the symbols differ as *shapes*, not only as colours, because two of
+    /// the three tones here are the same neutral (campaign §14: never colour
+    /// alone).
+    func testEachStateIsDistinguishableWithoutColour() {
+        let modes: [AutopilotUnpromptedMode] = [
+            .askedFirst, .startsOnPressure, .dormantWhileRevoked,
+        ]
+
+        XCTAssertEqual(Set(modes.map(\.title)).count, 3)
+        XCTAssertEqual(Set(modes.map(\.detail)).count, 3)
+        XCTAssertEqual(Set(modes.map(\.symbolName)).count, 3)
+        XCTAssertEqual(Set(modes.map(\.summary)).count, 3)
+        // Exactly one of the three acts, and it is the only one worded as such.
+        XCTAssertEqual(modes.filter(\.startsRunsUnprompted), [.startsOnPressure])
+        // Opted in is not the same question as acting: the dormant grant was
+        // opted in to and still does nothing.
+        XCTAssertEqual(modes.filter(\.isOptedIn).count, 2)
+    }
+
+    func testTheSpokenLabelIsASentencePairAndNotACommaSplice() {
+        for mode in [AutopilotUnpromptedMode.askedFirst, .startsOnPressure, .dormantWhileRevoked] {
+            XCTAssertEqual(mode.accessibilityLabel, SpokenLabel.compose([mode.title, mode.detail]))
+            XCTAssertFalse(mode.accessibilityLabel.contains(", A "), "\(mode)")
+        }
+    }
+
+    /// The form is seeded from the preference, not from the conjunction.
+    ///
+    /// Opening this pane under a revoked grant and pressing Enable must not
+    /// silently withdraw a permission nobody touched — and `enable` composes the
+    /// whole envelope from this screen, so a toggle seeded `false` there would do
+    /// exactly that.
+    func testTheDraftIsSeededFromThePreferenceAndNotFromWhatIsInForce() throws {
+        let dormant = try unpromptedReport(enabled: false, respondToAlerts: true)
+        XCTAssertFalse(dormant.startsUnprompted, "fixture is not the state under test")
+
+        XCTAssertTrue(AutopilotDraft.from(dormant).respondToAlerts)
+    }
+
+    /// The flag is emitted only when asked for, and omitting it is how "no" is
+    /// said — which is the right way round for a permission to act unattended:
+    /// the argument vector that forgets it grants less, not more.
+    func testTheGrantAsksForAnUnpromptedRunOnlyWhenTheToggleIsOn() throws {
+        var draft = AutopilotDraft.from(try enabledReport())
+
+        draft.respondToAlerts = true
+        XCTAssertTrue(draft.commandArguments.contains("--respond-to-alerts"))
+
+        draft.respondToAlerts = false
+        let off = draft.commandArguments
+        XCTAssertFalse(off.contains("--respond-to-alerts"))
+        // No "off" spelling either, in any form — there is none in the CLI, and a
+        // client inventing one would be rejected as a usage error.
+        XCTAssertFalse(off.contains { $0.contains("respond-to-alerts") })
+    }
+
     // MARK: - Helpers
+
+    /// The fixture with the two HORO-1510 fields replaced.
+    ///
+    /// `startsUnprompted` defaults to the conjunction Rust would have computed,
+    /// so a caller that does not pass it gets a report the CLI could really
+    /// produce; the parameter exists for the one test that needs an input the two
+    /// implementations would answer differently.
+    private func unpromptedReport(
+        enabled: Bool,
+        respondToAlerts: Bool,
+        startsUnprompted: Bool? = nil
+    ) throws -> AutopilotEnvelopeDto {
+        let base = try enabledReport()
+        return AutopilotEnvelopeDto(
+            enabled: enabled,
+            allowedKinds: base.allowedKinds,
+            askPreauthorizations: base.askPreauthorizations,
+            maxActions: base.maxActions,
+            maxBytes: base.maxBytes,
+            maxBytesHuman: base.maxBytesHuman,
+            maxDurationSecs: base.maxDurationSecs,
+            minPressure: base.minPressure,
+            respondToAlerts: respondToAlerts,
+            startsUnprompted: startsUnprompted ?? (enabled && respondToAlerts),
+            ceilings: base.ceilings,
+            allowlistableKinds: base.allowlistableKinds,
+            neverAllowlistableKinds: base.neverAllowlistableKinds,
+            preauthorizableReasons: base.preauthorizableReasons,
+            neverPreauthorizableReasons: base.neverPreauthorizableReasons,
+            pressureStates: base.pressureStates,
+            neverExecutableLabels: base.neverExecutableLabels,
+            aiAuthority: base.aiAuthority,
+            storedAt: base.storedAt
+        )
+    }
 
     private func value(of flag: String, in arguments: [String]) -> String? {
         guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else {
@@ -611,6 +747,14 @@ final class AutopilotPreferencesTests: XCTestCase {
             maxBytesHuman: enabled.maxBytesHuman,
             maxDurationSecs: enabled.maxDurationSecs,
             minPressure: nil,
+            // Kept, and not cleared: revoking keeps the preference on file, so a
+            // revoked report is the *third* state — set but dormant — and not the
+            // same thing as never having asked for it (HORO-1510).
+            respondToAlerts: enabled.respondToAlerts,
+            // False, because it is the conjunction Rust computed and this report
+            // is revoked. Writing `enabled.startsUnprompted` here would let a
+            // fixture assert a state the CLI cannot produce.
+            startsUnprompted: false,
             ceilings: enabled.ceilings,
             allowlistableKinds: enabled.allowlistableKinds,
             neverAllowlistableKinds: enabled.neverAllowlistableKinds,

@@ -8,7 +8,8 @@
   "remaining": {
     "requires_confirmation_count": 2,
     "protected_count": 1,
-    "not_executable_count": 3
+    "not_executable_count": 3,
+    "not_permitted_by_autopilot_count": 0
   },
   "bytes_freed_measured": 2147483648,
   "bytes_freed_measured_human": "2.0 GB",

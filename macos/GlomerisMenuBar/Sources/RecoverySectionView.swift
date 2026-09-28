@@ -1111,7 +1111,12 @@ struct RecoverySectionView: View {
     /// literal has to equal that label, and a test pins the two together — so a
     /// rename cannot land as a silent behaviour change here, but the red appears
     /// in the vocabulary first.
-    static let executionLockBusyReason = "busy"
+    ///
+    /// `nonisolated`, like `unreadableOutcomeMessage` below, because
+    /// `UnpromptedRecoveryClient.interpret` reads it off the main actor — it is a
+    /// string constant, and the isolation this type carries for its `body` has
+    /// nothing to say about one (HORO-1510).
+    nonisolated static let executionLockBusyReason = "busy"
 
     /// One sentence for an invocation that produced no report this app could
     /// read.
@@ -1124,7 +1129,10 @@ struct RecoverySectionView: View {
     /// capacity-read errors are prose on stderr. Only when both streams are
     /// unreadable does this name the exit code, which is the honest floor: a
     /// number, rather than a cause invented for it.
-    static func unreadableOutcomeMessage(
+    /// `nonisolated` because it is a function of its arguments and nothing else,
+    /// and because `UnpromptedRecoveryClient.interpret` — which is itself
+    /// `nonisolated`, for the same reason — calls it (HORO-1510).
+    nonisolated static func unreadableOutcomeMessage(
         subject: String,
         exitCode: Int32,
         stdout: Data,

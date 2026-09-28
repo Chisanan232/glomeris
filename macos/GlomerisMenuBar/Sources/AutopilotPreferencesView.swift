@@ -178,6 +178,15 @@ struct AutopilotDraft: Equatable {
     /// act whatever the disk is doing.
     var minPressure: String?
 
+    /// Whether a run may *begin* without being asked (HORO-1510).
+    ///
+    /// Seeded from `respondToAlerts` and not from `startsUnprompted`, which is
+    /// the difference between a form and a report: this is the preference the
+    /// user set, which a revoked grant keeps on file, and seeding the control
+    /// from the conjunction would mean opening this pane while revoked and
+    /// pressing Enable silently withdrew a choice nobody touched.
+    var respondToAlerts: Bool
+
     let ceilings: AutopilotCeilingsDto
 
     /// Byte budgets are chosen in whole gigabytes because a stepper over
@@ -210,6 +219,7 @@ struct AutopilotDraft: Equatable {
             maxGigabytes: Self.gigabytesRoundingUp(report.maxBytes),
             maxDurationSeconds: Int(report.maxDurationSecs),
             minPressure: report.minPressure,
+            respondToAlerts: report.respondToAlerts,
             ceilings: report.ceilings
         )
     }
@@ -280,6 +290,14 @@ struct AutopilotDraft: Equatable {
         // `none` is the CLI's own spelling for "not gated on pressure", so the
         // threshold is stated either way rather than being left to a default.
         arguments += ["--min-pressure", minPressure ?? AutopilotCommands.noPressureThreshold]
+        // The one flag here with no "off" spelling, because the CLI's default is
+        // off and `enable` builds from a revoked envelope plus this command line.
+        // Omitting it is therefore how "no" is said, which is the right way round
+        // for a permission to act unattended: the vector that forgets it grants
+        // less, not more.
+        if respondToAlerts {
+            arguments.append(AutopilotCommands.respondToAlertsFlag)
+        }
         for ask in effectiveAsks {
             arguments += ["--preauthorize-ask", ask]
         }
@@ -301,6 +319,13 @@ enum AutopilotCommands {
 
     /// The CLI's spelling for an ungated threshold.
     static let noPressureThreshold = "none"
+
+    /// `autopilot enable`'s flag for "may start a run nobody asked for"
+    /// (HORO-1510). A constant rather than a literal in the builder for the
+    /// reason this whole type exists: it is asserted against, and a flag this
+    /// app spelled wrong would be an unrecognized argument the user only met
+    /// after pressing Enable.
+    static let respondToAlertsFlag = "--respond-to-alerts"
 
     static func enable(_ draft: AutopilotDraft) -> [String] { draft.commandArguments }
 
@@ -379,6 +404,33 @@ enum AutopilotWording {
     static func pressureExplanation(_ term: GlomerisTerm) -> String {
         "Only act once the disk reaches \(term.title). \(term.explanation)"
     }
+
+    /// HORO-1510. The distinction the whole card exists to draw: everything else
+    /// on this pane bounds what a run may *do*, and this is the one question
+    /// about whether a run may *begin* with nobody present.
+    static let unpromptedExplanation = """
+        Everything above bounds what a run may do once it starts. This is the \
+        separate question of whether one may start without you: the standing \
+        answer to a disk-pressure alert.
+        """
+
+    static let respondToAlertsTitle = "Let a disk-pressure alert start a run unasked"
+
+    /// Deliberately says what stays true as well as what changes. The limits are
+    /// the reason this is a bounded grant and not an "auto clean" switch, and a
+    /// reader deciding whether to turn it on is owed that in the same breath.
+    static let respondToAlertsOnExplanation = """
+        Glomeris will start a recovery run on its own when the disk reaches the \
+        threshold above, within every limit on this screen. You will not be \
+        asked first. Revoking stops it, and turning it off again means you are \
+        asked every time.
+        """
+
+    static let respondToAlertsOffExplanation = """
+        Off: a disk-pressure alert puts a notification on screen and waits for \
+        you. Nothing is reclaimed until you choose Review & recover. Enabling \
+        Autopilot on its own does not change this.
+        """
 }
 
 /// How the status card reads, as values.
@@ -577,6 +629,7 @@ struct AutopilotPreferencesView: View {
                     kindsCard(report, draft)
                     limitsCard(draft)
                     pressureCard(report, draft)
+                    unpromptedCard(report, draft)
                     preauthorizationCard(report, draft)
                     grantCard(report)
                     authorityCard(report)
@@ -723,6 +776,11 @@ struct AutopilotPreferencesView: View {
                     .font(GlomerisDesign.secondaryFont)
                     .foregroundStyle(.secondary)
             }
+        }
+        GlomerisDetailRow(label: "Starting a run") {
+            Text(AutopilotUnpromptedMode.make(report).summary)
+                .font(GlomerisDesign.secondaryFont)
+                .fixedSize(horizontal: false, vertical: true)
         }
         if let storedAt = report.storedAt {
             GlomerisDetailRow(label: "Stored at") {
@@ -929,6 +987,76 @@ struct AutopilotPreferencesView: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    // MARK: Who starts the run
+
+    /// HORO-1510 AC 2. Its own card rather than a fourth row in "When It May
+    /// Act", because that card is about the *conditions* a run needs and this is
+    /// about whether anybody is present — and one of the two is the difference
+    /// between a notification and a deletion.
+    ///
+    /// The card is shown whatever the grant says, so that "you are asked first"
+    /// is a statement on screen rather than the absence of one. A surface that
+    /// only mentioned automatic mode when it was on would leave every other Mac
+    /// with no answer to the question.
+    private func unpromptedCard(
+        _ report: AutopilotEnvelopeDto,
+        _ draft: AutopilotDraft
+    ) -> some View {
+        // From the report, so it describes what is in force — the toggle below
+        // is the draft, which is what is about to be asked for. Both are shown:
+        // on this pane those are different things and the user is mid-edit.
+        let mode = AutopilotUnpromptedMode.make(report)
+
+        return GlomerisCard(title: "Who Starts It") {
+            Text(AutopilotWording.unpromptedExplanation)
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
+                Image(systemName: mode.symbolName)
+                    .foregroundStyle(mode.tone.color)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.title)
+                        .font(GlomerisDesign.primaryFont)
+                    Text(mode.detail)
+                        .font(GlomerisDesign.captionFont)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(mode.accessibilityLabel)
+
+            Toggle(AutopilotWording.respondToAlertsTitle, isOn: respondToAlertsBinding)
+                .disabled(isApplying)
+                // The label is a sentence a listener can act on without having
+                // heard the card's own title first, which is what a toggle in a
+                // scroll view needs — VoiceOver reaches it directly.
+                .accessibilityLabel("Let a disk-pressure alert start a recovery run unasked")
+
+            Text(
+                draft.respondToAlerts
+                    ? AutopilotWording.respondToAlertsOnExplanation
+                    : AutopilotWording.respondToAlertsOffExplanation
+            )
+            .font(GlomerisDesign.captionFont)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var respondToAlertsBinding: Binding<Bool> {
+        Binding(
+            get: { draft?.respondToAlerts ?? false },
+            set: { newValue in
+                guard var updated = draft else { return }
+                updated.respondToAlerts = newValue
+                draft = updated
+            }
+        )
     }
 
     private var pressureBinding: Binding<String?> {

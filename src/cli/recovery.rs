@@ -106,6 +106,15 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
         StopReason::NoProgress => "The run stopped before reaching the goal because recent \
              actions reclaimed no measurable space."
             .to_string(),
+        // Says whose limit it was, because that is the whole point of the
+        // variant (HORO-1510): this sentence is read by someone who may
+        // otherwise conclude their disk has nothing safe left on it.
+        StopReason::EnvelopeRefused { refusal, .. } => format!(
+            "The run stopped before reaching the goal because Autopilot reached the end of \
+             what you authorized it to do: {refusal}. That is a limit on Autopilot, not a \
+             finding about this disk — a recovery you start yourself is bounded only by what \
+             you ask for."
+        ),
         StopReason::StoppedByUser => "The run stopped before reaching the goal because you \
              asked it to stop; the action that was already running finished first."
             .to_string(),
@@ -305,11 +314,24 @@ pub fn build_recovery_run_report(
     // own policy classes, the wire names what a user does next, and that is
     // the same vocabulary `RecoveryOpportunityReport` already uses.
     let remaining = match &report.stop_reason {
-        StopReason::SafeExhausted(left_behind) => Some(RecoveryRemainingReport {
-            requires_confirmation_count: left_behind.requires_confirmation,
-            protected_count: left_behind.protected,
-            not_executable_count: left_behind.not_executable,
-        }),
+        StopReason::SafeExhausted(left_behind) => Some(left_behind),
+        // Only when the envelope refused after looking. A pre-discovery refusal
+        // carries `None`, and it stays absent on the wire rather than becoming a
+        // breakdown of zeros that would read as a completed search (HORO-1510).
+        StopReason::EnvelopeRefused { remaining, .. } => remaining.as_ref(),
+        _ => None,
+    }
+    .map(|left_behind| RecoveryRemainingReport {
+        requires_confirmation_count: left_behind.requires_confirmation,
+        protected_count: left_behind.protected,
+        not_executable_count: left_behind.not_executable,
+        not_permitted_by_autopilot_count: left_behind.not_permitted_by_autopilot,
+    });
+
+    // The gate's own token, so a client switches on the specific limit rather
+    // than substring-matching `stop_reason_detail` (HORO-1510).
+    let envelope_refusal = match &report.stop_reason {
+        StopReason::EnvelopeRefused { refusal, .. } => Some(refusal.as_str()),
         _ => None,
     };
 
@@ -319,6 +341,7 @@ pub fn build_recovery_run_report(
         stop_reason: stop_reason_tag(&report.stop_reason),
         stop_reason_detail: stop_reason_detail(&report.stop_reason),
         error,
+        envelope_refusal,
         remaining,
         iterations_run: report.iterations_run,
         actions_executed: report.actions_executed,
@@ -820,6 +843,7 @@ mod tests {
                     requires_confirmation: 2,
                     protected: 3,
                     not_executable: 1,
+                    not_permitted_by_autopilot: 0,
                 }),
                 60,
                 0,

@@ -902,11 +902,12 @@ enum GlomerisVocabulary {
     ///
     /// A recovery run either reached the goal or did not, and the product
     /// rule is that a run which did not must say so rather than collapsing
-    /// into "Done". Five of these six stops leave the disk short of what the
+    /// into "Done". Six of these seven stops leave the disk short of what the
     /// user asked for, and each leaves them a different next step: wait for
-    /// the tools to release what they are holding, raise a limit, look at
-    /// what needs confirming, start it again, or read an error. A single
-    /// "Finished" would be true of all five and useful for none.
+    /// the tools to release what they are holding, raise a limit, widen what
+    /// Autopilot may do or start the run yourself, look at what needs
+    /// confirming, start it again, or read an error. A single "Finished" would
+    /// be true of all six and useful for none.
     ///
     /// `stopped_by_user` is the one stop that is nobody's problem: the run did
     /// what it was told twice over — it ran, and then it stopped. It is toned
@@ -919,6 +920,15 @@ enum GlomerisVocabulary {
     /// be worded as one. Anything that needed confirmation, belonged to work
     /// in progress, or was protected is still there, and saying "nothing left
     /// to clean" would be false in the ordinary case rather than a rare one.
+    ///
+    /// `envelope_refused` is the one that exists so `safe_exhausted` stays
+    /// true (HORO-1510). An Autopilot run that spends its action, byte or time
+    /// budget, or meets a candidate of a kind it was not allowed, has refused
+    /// everything it saw — which looks identical from the loop's side and means
+    /// something completely different to the user. Worded as "nothing safe
+    /// left" it would tell someone their disk is out of safe opportunities when
+    /// a run they start themselves would find plenty, so it gets its own words
+    /// and names whose limit it was.
     ///
     /// # Why tone is used here
     ///
@@ -960,6 +970,15 @@ enum GlomerisVocabulary {
                     + "something is putting it back as fast as it is removed.",
                 "arrow.triangle.2.circlepath", .caution
             )
+        case "envelope_refused":
+            return term(
+                "envelope_refused", stopReasonAxis, "Autopilot reached its authority",
+                "The run stopped short of the goal because Autopilot came to the end of what "
+                    + "you authorized it to do on its own. That is a limit on Autopilot, not a "
+                    + "finding about this disk — a recovery you start yourself is bounded only "
+                    + "by what you ask for.",
+                "lock.shield.fill", .caution
+            )
         case "stopped_by_user":
             return term(
                 "stopped_by_user", stopReasonAxis, "You stopped it",
@@ -981,6 +1000,117 @@ enum GlomerisVocabulary {
                 token, stopReasonAxis, "Unrecognised stop",
                 "The CLI reported a reason for stopping this app has no wording for. The "
                     + "measured before and after figures beside it are still what the disk says."
+            )
+        }
+    }
+
+    // MARK: - Which Autopilot limit refused (HORO-1510)
+
+    static let autopilotRefusalAxis = "Autopilot authority"
+
+    /// The gate's `RefusalReason` as the CLI tags it (`src/autopilot/gate.rs` —
+    /// `as_str`, diffed by this project's vocabulary guard).
+    ///
+    /// # Why these are worded as facts about Autopilot, not about the disk
+    ///
+    /// Every one of these means the same thing to the loop — "not this
+    /// candidate" — and something different to the user, and the difference is
+    /// entirely about whose decision it was. Three of them (`protected_refused`,
+    /// `unknown_incomplete_refused`, `reclaim_size_unknown`) are policy
+    /// refusing on evidence, and a run the user starts refuses them again.
+    /// The rest are the envelope: a kind not on the allowlist, a budget spent, a
+    /// pressure floor not met, Autopilot switched off. Those are one click from
+    /// being available, and wording them like the first three would tell a user
+    /// something is off limits when it is not.
+    ///
+    /// Read from `RecoveryRunReportDto.envelopeRefusal`, and only when
+    /// `stopReason == "envelope_refused"` — this is the *specific* limit behind
+    /// that stop, so the two are shown together rather than one standing in for
+    /// the other.
+    ///
+    /// # Why tone is used here
+    ///
+    /// Same reasoning as `stopReason`: this renders in the result of one run,
+    /// never in a candidate row, where tint belongs to the safety axis. The
+    /// words carry it alone in greyscale and under VoiceOver.
+    static func autopilotRefusal(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "autopilot_revoked":
+            return term(
+                "autopilot_revoked", autopilotRefusalAxis, "Autopilot is switched off",
+                "Autopilot is not enabled, so it did nothing. Nothing was examined and "
+                    + "nothing was removed. You can still start a recovery yourself.",
+                "power", .neutral
+            )
+        case "kind_not_allowed":
+            return term(
+                "kind_not_allowed", autopilotRefusalAxis, "Not a kind you allowed",
+                "This kind of storage is not on the list Autopilot may act on. It is still "
+                    + "there, and a recovery you start yourself can take it.",
+                "list.bullet.rectangle", .caution
+            )
+        case "protected_refused":
+            return term(
+                "protected_refused", autopilotRefusalAxis, "Protected by policy",
+                "Policy refuses this on the evidence, not Autopilot — a recovery you start "
+                    + "yourself refuses it too. Nothing you can authorize changes that.",
+                "lock.fill", .warning
+            )
+        case "unknown_incomplete_refused":
+            return term(
+                "unknown_incomplete_refused", autopilotRefusalAxis, "Evidence is incomplete",
+                "What is known about this resource is incomplete or out of date, so nothing "
+                    + "acts on it unattended. This is policy refusing, not Autopilot.",
+                "questionmark.folder.fill", .warning
+            )
+        case "ask_not_preauthorized":
+            return term(
+                "ask_not_preauthorized", autopilotRefusalAxis, "Needs your confirmation",
+                "This one would ask before acting, and you have not pre-authorized that risk "
+                    + "for Autopilot. It is waiting for you, not gone.",
+                "hand.raised.fill", .caution
+            )
+        case "action_budget_exhausted":
+            return term(
+                "action_budget_exhausted", autopilotRefusalAxis, "Used up its action budget",
+                "Autopilot performed every action you allowed it in one run. Whatever it "
+                    + "freed stays freed; raise the limit or continue the recovery yourself.",
+                "number.circle.fill", .caution
+            )
+        case "time_budget_exhausted":
+            return term(
+                "time_budget_exhausted", autopilotRefusalAxis, "Ran out of its time budget",
+                "Autopilot reached the time you allowed it for one run and stopped between "
+                    + "actions rather than mid-way through one.",
+                "clock.fill", .caution
+            )
+        case "byte_budget_exhausted":
+            return term(
+                "byte_budget_exhausted", autopilotRefusalAxis, "Reached its size budget",
+                "Taking this would pass the total amount you allowed Autopilot to reclaim in "
+                    + "one run. Nothing is wrong with the candidate — the budget is spent.",
+                "externaldrive.fill", .caution
+            )
+        case "reclaim_size_unknown":
+            return term(
+                "reclaim_size_unknown", autopilotRefusalAxis, "Size could not be measured",
+                "How much this would reclaim could not be measured, so it cannot be charged "
+                    + "against a size budget and is not taken unattended. Policy's rule, not "
+                    + "the envelope's.",
+                "ruler.fill", .warning
+            )
+        case "disk_pressure_too_low":
+            return term(
+                "disk_pressure_too_low", autopilotRefusalAxis, "Disk is not under enough pressure",
+                "Autopilot is set to act only from a given pressure level upwards, and this "
+                    + "disk is below it. Nothing was examined or removed.",
+                "gauge.with.dots.needle.33percent", .neutral
+            )
+        default:
+            return unrecognised(
+                token, autopilotRefusalAxis, "Unrecognised Autopilot limit",
+                "The CLI named a limit this app has no wording for. Autopilot stopped short "
+                    + "of the goal, and nothing beyond what it reported was removed."
             )
         }
     }

@@ -167,6 +167,41 @@ final class GlomerisPopoverViewTests: XCTestCase {
         )
     }
 
+    /// HORO-1510, campaign §13: the recovery goal is the product capability and
+    /// the AI plan is optional assistance, so the goal stays above the list the
+    /// plan reorders and the Autopilot card sits below both.
+    ///
+    /// Below, and not above, for a reason worth pinning: everything ahead of it
+    /// in this column is something the user can act on from here, and the
+    /// Autopilot card is a statement about standing authority with no control on
+    /// it. Above History because it says what may happen; History says what did.
+    /// Hoisting it would put the panel's one read-only card ahead of every
+    /// actionable one — including for a listener, who reaches it by tabbing.
+    func testTheAutopilotCardSitsAfterAssistanceAndBeforeTheLog() throws {
+        let recovery = try XCTUnwrap(code.range(of: "RecoverySectionView("))
+        let candidates = try XCTUnwrap(code.range(of: "CandidatesSectionView("))
+        let plan = try XCTUnwrap(code.range(of: "AiPlanSectionView("))
+        let autopilot = try XCTUnwrap(code.range(of: "AutopilotSectionView("))
+        let history = try XCTUnwrap(code.range(of: "HistoryAuditSectionView()"))
+
+        XCTAssertLessThan(
+            recovery.lowerBound, candidates.lowerBound,
+            "the recovery goal is the capability; the candidates list is what it draws on"
+        )
+        XCTAssertLessThan(
+            candidates.lowerBound, plan.lowerBound,
+            "Glomeris's own ranking is the default answer and the provider's is a second opinion"
+        )
+        XCTAssertLessThan(
+            plan.lowerBound, autopilot.lowerBound,
+            "what the user can do from here comes before what this Mac has standing authority to do"
+        )
+        XCTAssertLessThan(
+            autopilot.lowerBound, history.lowerBound,
+            "what may happen comes before what already has"
+        )
+    }
+
     /// Every section is a `GlomerisCard` now, so spacing does the grouping.
     /// The only dividers left are the two structural ones marking where the
     /// fixed header and footer stop and the scrolling body begins — a third
@@ -184,16 +219,29 @@ final class GlomerisPopoverViewTests: XCTestCase {
     /// only surface. Without these two it is a dead end: no route to the
     /// project roots that decide what `detect` looks at, and no way to quit
     /// short of Activity Monitor.
-    func testThePanelIsNotADeadEnd() {
+    ///
+    /// HORO-1510 moved the `#available` branch itself into
+    /// `GlomerisSettingsLink`, because a second surface — the Autopilot card —
+    /// needs the same route in. So this follows it there rather than relaxing:
+    /// both versions' routes are still asserted, in the one file that now has
+    /// them, and a shim that lost its macOS 13 branch would fail here even
+    /// though this panel no longer contains the branch itself.
+    func testThePanelIsNotADeadEnd() throws {
         XCTAssertTrue(
-            code.contains("SettingsLink"),
+            code.contains("GlomerisSettingsLink("),
+            "the panel has no route into the Settings scene"
+        )
+        XCTAssertTrue(code.contains("NSApplication.shared.terminate"))
+
+        let shim = Self.strippedOfComments(try Self.readSource("GlomerisDesignSystem.swift"))
+        XCTAssertTrue(
+            shim.contains("SettingsLink {"),
             "macOS 14+ must use the supported route into the Settings scene"
         )
         XCTAssertTrue(
-            code.contains("showPreferencesWindow:"),
+            shim.contains("showPreferencesWindow:"),
             "the deployment target is macOS 13, which has no SettingsLink"
         )
-        XCTAssertTrue(code.contains("NSApplication.shared.terminate"))
     }
 
     /// The mark is drawn as a template image so it follows the label colour

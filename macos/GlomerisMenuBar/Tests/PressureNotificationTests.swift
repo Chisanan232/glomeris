@@ -43,10 +43,25 @@ final class PressureNotificationTests: XCTestCase {
         )
     }
 
-    private func banner(notificationsRaised: UInt32 = 0) throws -> PressureBanner {
+    /// A reported run that reclaimed 139.7 GB, for the one sentence in the body that
+    /// depends on what an automatic run did (HORO-1510).
+    private func runReport() throws -> RecoveryRunReportDto {
+        try JSONDecoder().decode(
+            RecoveryRunReportDto.self,
+            from: try Data(
+                contentsOf: Self.fixturesDir.appendingPathComponent("recovery_run_report.json")
+            )
+        )
+    }
+
+    private func banner(
+        notificationsRaised: UInt32 = 0,
+        automaticRun: UnpromptedRecoveryOutcome? = nil
+    ) throws -> PressureBanner {
         PressureBanner(
             key: PressureBannerKey(episodeId: 1, notificationsRaised: notificationsRaised),
-            report: try report()
+            report: try report(),
+            automaticRun: automaticRun
         )
     }
 
@@ -126,6 +141,24 @@ final class PressureNotificationTests: XCTestCase {
         XCTAssertTrue(
             PressureNotificationContent.body(for: try banner()).contains("Nothing has been deleted")
         )
+    }
+
+    /// And on the one Mac where that sentence would be false, it is not said.
+    ///
+    /// A banner raised after an unprompted run is raised *because* that run did not get
+    /// the disk under its goal (HORO-1510) — so for an opted-in Mac this is the
+    /// ordinary case, not an exotic one. The amount is named, from the figure the
+    /// volume was re-measured for, and the two percentages still appear: the account is
+    /// added to the body rather than put in place of it.
+    func testTheBodyAccountsForAnAutomaticRunRatherThanDenyingIt() throws {
+        let body = PressureNotificationContent.body(
+            for: try banner(automaticRun: .ran(try runReport()))
+        )
+
+        XCTAssertFalse(body.contains("Nothing has been deleted"), body)
+        XCTAssertTrue(body.contains("Autopilot already reclaimed 139.7 GB"), body)
+        XCTAssertTrue(body.contains("alerted at 85% used"), body)
+        XCTAssertTrue(body.contains("recovery goal is 60% used (40% free)"), body)
     }
 
     // MARK: - The buttons
