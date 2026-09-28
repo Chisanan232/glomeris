@@ -881,7 +881,7 @@ glomeris actions history --json --limit 2
 }
 ```
 
-## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--project-root <path>]...`
+## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--stop-file <path>] [--project-root <path>]...`
 
 macOS only (exits 1 with an error message on other platforms). Exactly one of
 the two goal flags is required; any other argument is rejected (usage printed
@@ -938,13 +938,59 @@ exceed is a legitimate no-op probe.
   `RecoveryGoalRejectionReport` (`reason`, `message`, `goal_used_percent`,
   `current_used_percent`) and still exits 2. A busy execution lock prints the
   same `{"reason": "busy", ...}` refusal `execute --json` does, and exits 75.
-- `--progress-json` streams the discovery scan's NDJSON progress on stderr,
-  the same shape `detect` emits. It describes discovery, so it currently
-  requires `--dry-run` and exits 2 otherwise rather than accepting a
-  subscription it would never fulfil.
+- `--progress-json` streams NDJSON progress on stderr — one complete object per
+  line, never on stdout, so a `--json` report stays parseable as exactly one
+  document. With `--dry-run` it is the discovery-scan stream `detect` emits.
+  Without it, it reports the recovery loop itself; see
+  [Watching a run](#watching-a-run) below.
+- `--stop-file <path>` asks the loop to stop **after the action it is currently
+  running**, once `path` exists. See [Stopping a run](#stopping-a-run).
 - `--project-root <path>` is optional and repeatable, same meaning as
   `detect`'s flag above — it feeds the same `DiscoveryContext` the recovery
   loop discovers candidates from.
+
+### Watching a run
+
+With `--progress-json`, a real run emits one JSON object per line on stderr as
+it proceeds. Every line carries a `phase` and the 1-based `iteration` it belongs
+to:
+
+| `phase` | When | Also carries |
+|---|---|---|
+| `measured` | The volume was read (loop step 1). The only statement of fact about free space in the stream. | `total_bytes`, `free_bytes`, `used_percent`, `free_human`, `bytes_freed_so_far` |
+| `discovering` | Detectors are being asked what exists now. Re-entered every iteration — no pass reuses an earlier one's list. | — |
+| `discovered` | That pass finished. | `candidates` (how many have a resolvable action), `detectors_failed` |
+| `revalidating` | Evidence is being re-collected and reclassified before anything is chosen. | — |
+| `action_started` | A real mutation is about to run. | `resource`, `action`, `policy_label`, `estimated_bytes` |
+| `action_finished` | It finished. | `resource`, `action`, `outcome`, `reclaimed_bytes`, `bytes_freed_so_far` |
+| `stop_requested` | A stop was observed, between actions. | — |
+
+Two rules hold across every line:
+
+- **`estimated_bytes` is the only estimate.** `reclaimed_bytes` and
+  `bytes_freed_so_far` are measured from the filesystem. Never accumulate the
+  estimate as progress — it is what the candidate claimed, not what happened.
+- **A count that could not be measured is absent, not zero.** An
+  `action_finished` line with no `reclaimed_bytes` means the size was not
+  determinable; `"0 B"` there would be a measurement nobody took.
+
+These phase names never collide with `detect`'s discovery stream, so a client
+reading both cannot mistake a scan for a run.
+
+### Stopping a run
+
+`--stop-file <path>` is a sentinel: create the file and the loop stops after the
+action it is currently running, finishing with
+`stop_reason: "stopped_by_user"` and a complete report.
+
+- **The path must not exist yet** (exit 2 otherwise). A sentinel left behind by
+  an earlier run would stop the next one before it did anything, and the report
+  would truthfully say the user stopped it while the user had done nothing.
+- **Cooperative, deliberately.** Nothing here can interrupt a deletion
+  mid-flight. A signal delivered partway through one would leave the filesystem
+  in a state neither the loop nor the audit log could describe, so the loop asks
+  between actions instead.
+- Not valid with `--dry-run`, which performs no actions to stop.
 
 ### Reported figures
 
@@ -959,6 +1005,17 @@ The prose output prints a `RecoveryReport`: the goal or target, stop reason
 (as both a token and a sentence — a run that stopped because nothing safe
 remained says so rather than printing a success word), iterations run, actions
 executed, actions declined/skipped, bytes freed, and free space before/after.
+
+A run that stopped because nothing safe remained also reports **what is still
+there**, as three separate counts rather than one total: candidates awaiting
+your confirmation, candidates whose action cannot run against the resource as it
+currently stands (a live tool, work in progress), and protected resources. Each
+is a different next step, so they are never summed — and they are counts of
+candidates, not bytes, because space the run was not permitted to take is not an
+opportunity. Under `--json` this is the `remaining` object, present only for
+`stop_reason: "safe_exhausted"`: no other stop concluded anything about the
+candidates it never reached, so zeros there would be a claim the run did not
+make.
 See [Safety Model](safety_model.md) and
 [Known Limitations](known_limitations.md) for what this loop can and cannot
 currently do end to end.
