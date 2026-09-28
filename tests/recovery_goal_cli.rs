@@ -72,10 +72,20 @@ struct Run {
 }
 
 fn run_free(args: &[&str]) -> Run {
+    run_free_in(&make_temp_home(), args)
+}
+
+/// As above, but reusing a `HOME` the caller owns — needed by the `--autopilot`
+/// tests, where the envelope one invocation writes is the input to the next.
+fn run_free_in(home: &PathBuf, args: &[&str]) -> Run {
+    run_in(home, "free", args)
+}
+
+fn run_in(home: &PathBuf, command: &str, args: &[&str]) -> Run {
     let output = Command::new(glomeris_bin())
-        .arg("free")
+        .arg(command)
         .args(args)
-        .env("HOME", make_temp_home())
+        .env("HOME", home)
         .stdin(Stdio::null())
         .output()
         .expect("failed to spawn glomeris binary");
@@ -407,5 +417,163 @@ fn dry_run_on_a_raw_target_still_states_the_used_axis() {
     assert_eq!(
         parsed["goal"]["description"], "60% used (40% free)",
         "a 40%-free floor is a 60%-used goal: {parsed}"
+    );
+}
+
+// HORO-1510. `--autopilot` narrows this same loop with the stored envelope.
+//
+// Every invocation below is safe for the same two reasons the rest of this file
+// relies on: the refusals happen before the execution lock and before discovery,
+// and the one run that proceeds uses `--target 0%`, which is already met and so
+// stops at step 2 having deleted nothing. The envelope each test writes lives in
+// its own temporary `HOME`, so none of them can read or alter the real grant on
+// the machine running the suite.
+
+/// Defaults grant nothing, so `--autopilot` with no stored envelope is a request
+/// to act under an authority that does not exist. Refused, by exit code, without
+/// attempting anything — the same 3 `autopilot run` uses, so a script can tell
+/// "not authorized" from a usage error and from a failed run.
+#[test]
+fn autopilot_without_a_grant_refuses_rather_than_running_unbounded() {
+    let home = make_temp_home();
+    let run = run_free_in(&home, &["--target", "0%", "--autopilot"]);
+    assert_eq!(run.code, Some(3), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("not enabled") && run.stderr.contains("Nothing was attempted"),
+        "the refusal must say both that there is no grant and that nothing ran: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "an unauthorized run must print no recovery report: {}",
+        run.stdout
+    );
+}
+
+/// The important half of the assertion above, proven by contrast rather than
+/// assumed: the identical invocation without the flag succeeds. Were the exit 3
+/// coming from something other than the missing grant, this would fail too.
+#[test]
+fn the_same_invocation_without_autopilot_is_unaffected_by_a_missing_grant() {
+    let home = make_temp_home();
+    let run = run_free_in(&home, &["--target", "0%"]);
+    assert_eq!(
+        run.code,
+        Some(0),
+        "a run the user started needs no grant: {}",
+        run.stderr
+    );
+}
+
+/// An envelope is authority to execute. A preview executes nothing, so accepting
+/// the flag would hand back the full candidate list looking envelope-filtered —
+/// read as "this is what Autopilot would do" when it is everything.
+#[test]
+fn autopilot_is_refused_together_with_dry_run() {
+    let run = run_free(&["--target", "0%", "--autopilot", "--dry-run"]);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("--dry-run") && run.stderr.contains("--autopilot"),
+        "the refusal must name both flags: {}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("autopilot show"),
+        "a user who wanted to read the grant must be told how: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "a refused combination must print no pre-flight: {}",
+        run.stdout
+    );
+}
+
+/// With a grant in place the run proceeds, and opens by stating the authority it
+/// is acting under — on stderr, so that a `--json` caller's stdout stays exactly
+/// one document.
+#[test]
+fn a_granted_autopilot_run_states_its_envelope_and_keeps_stdout_one_document() {
+    let home = make_temp_home();
+    let enable = run_in(
+        &home,
+        "autopilot",
+        &[
+            "enable",
+            "--kinds",
+            "node_modules",
+            "--max-actions",
+            "1",
+            "--max-duration",
+            "30",
+        ],
+    );
+    assert_eq!(enable.code, Some(0), "stderr: {}", enable.stderr);
+
+    let run = run_free_in(&home, &["--target", "0%", "--autopilot", "--json"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("Autopilot envelope:"),
+        "a run that may delete must open with the grant it acts under: {}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("node_modules"),
+        "the printed envelope must be the stored one, not a generic sentence: {}",
+        run.stderr
+    );
+
+    let parsed: serde_json::Value = serde_json::from_str(&run.stdout).unwrap_or_else(|e| {
+        panic!(
+            "the envelope description leaked into the report stream ({e}); stdout: {}",
+            run.stdout
+        )
+    });
+    // Already met, so the loop stopped at step 2. The envelope narrows what may
+    // be executed; it has no opinion about whether a target was reached, and a
+    // run that stops for a reason the envelope had nothing to do with must not
+    // be attributed to it.
+    assert_eq!(parsed["stop_reason"], "target_reached", "got: {parsed}");
+    assert!(
+        parsed.get("envelope_refusal").is_none(),
+        "only an envelope-refused stop may name an Autopilot limit: {parsed}"
+    );
+}
+
+/// A revoked grant is not a weaker grant. `revoke` keeps the limits on file so a
+/// later `enable` cannot return with limits nobody read — which is exactly why
+/// this needs proving: the envelope still exists and still has generous numbers
+/// in it, and only `is_enabled()` stands between it and a run.
+#[test]
+fn revoking_the_grant_stops_a_later_autopilot_run() {
+    let home = make_temp_home();
+    let enable = run_in(
+        &home,
+        "autopilot",
+        &["enable", "--kinds", "node_modules", "--max-actions", "5"],
+    );
+    assert_eq!(enable.code, Some(0), "stderr: {}", enable.stderr);
+    let granted = run_free_in(&home, &["--target", "0%", "--autopilot"]);
+    assert_eq!(
+        granted.code,
+        Some(0),
+        "the grant must admit the run before revoke can be shown to stop it: {}",
+        granted.stderr
+    );
+
+    let revoke = run_in(&home, "autopilot", &["revoke"]);
+    assert_eq!(revoke.code, Some(0), "stderr: {}", revoke.stderr);
+
+    let run = run_free_in(&home, &["--target", "0%", "--autopilot"]);
+    assert_eq!(
+        run.code,
+        Some(3),
+        "a revoked grant must refuse exactly as an absent one does: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "a revoked run must print no report: {}",
+        run.stdout
     );
 }

@@ -129,6 +129,28 @@ count is exhausted for everything.
 A run that finds nothing it is allowed to do exits 0. "Allowed nothing" is a
 successful outcome, not an error.
 
+## The other consumer of the grant: `free --autopilot`
+
+The envelope is not `autopilot run`'s private property. `glomeris free
+--autopilot` bounds the goal-driven recovery loop by the same stored grant, using
+the same admission gate above as one more narrowing stage between selection and
+authorization — so a goal-driven run can never reach further than a grant allows,
+and the grant remains the single place that authority is written down.
+
+Two consequences worth stating, because they are what makes the second consumer
+safe rather than merely convenient:
+
+- **The grant cannot widen anything.** It has no power to add a candidate, choose
+  an action, supply a path or raise a limit — only to withhold. Everything an
+  `--autopilot` run does, the same command without the flag would also have done.
+- **A stop the grant caused is reported as such**, never as an exhausted disk:
+  `stop_reason: "envelope_refused"` plus the refusal token. `revoke` therefore
+  stops a `free --autopilot` run exactly as it stops `autopilot run` — both
+  re-read the file, and neither has a cached copy.
+
+See [CLI Reference](cli_reference.md) for the flag's exit codes and its refusal
+alongside `--dry-run`.
+
 ## The audit trail
 
 Every *executed* attempt appends one JSON line to

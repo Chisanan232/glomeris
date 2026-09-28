@@ -708,7 +708,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: &[
             "free (--goal-used-percent <N> | --target <N%|NB>)",
             "[--dry-run] [--json] [--progress-json] [--stop-file <path>]",
-            "[--project-root <path>]...",
+            "[--autopilot] [--project-root <path>]...",
         ],
         details: "Runs the recovery loop until the goal is reached, then stops. It \
                   only ever performs actions policy classified as needing no confirmation, so \
@@ -722,7 +722,12 @@ pub const COMMANDS: &[CommandSpec] = &[
                   product-facing form: target DISK USAGE, the number a person reads off a \
                   status bar. `--target` is a raw FREE-SPACE floor, which is what the loop \
                   itself works in. `--goal-used-percent 60` and `--target 40%` request the \
-                  same end state.",
+                  same end state. \
+                  \n\n`--autopilot` runs this same loop inside the standing grant \
+                  `autopilot enable` wrote, instead of the limits above. It is purely \
+                  subtractive: it can only withhold candidates the grant does not cover, never \
+                  reach further than a run you start yourself, and a run it cuts short says so \
+                  by name rather than reporting a disk with nothing safe left on it.",
         subcommands: &[],
         options: &[
             OptionSpec {
@@ -768,6 +773,19 @@ pub const COMMANDS: &[CommandSpec] = &[
                               no actions to stop.",
             },
             OptionSpec {
+                syntax: "--autopilot",
+                description: "Bound this run by the stored Autopilot envelope: its resource \
+                              kinds, its action count, its byte total, its wall-clock budget and \
+                              its disk-pressure floor, with ASK still refused unless that exact \
+                              kind and reason were pre-authorized. Exits 3 without attempting \
+                              anything if Autopilot is not enabled, since there is then no grant \
+                              to act under. Prints the envelope on stderr first. Not valid with \
+                              `--dry-run`: a preview executes nothing, so a grant on executing \
+                              has nothing to narrow and the candidate list would look filtered \
+                              while being the whole of it — read the grant with `autopilot show` \
+                              instead.",
+            },
+            OptionSpec {
                 syntax: "--project-root <path>",
                 description: "Same meaning as for `detect`. Repeatable.",
             },
@@ -792,6 +810,10 @@ pub const COMMANDS: &[CommandSpec] = &[
             ExampleSpec {
                 command: "glomeris free --target 20% --stop-file /tmp/g.stop",
                 purpose: "Reclaim, stopping after the current action once that path exists.",
+            },
+            ExampleSpec {
+                command: "glomeris free --goal-used-percent 60 --autopilot",
+                purpose: "Recover toward 60% used, but only as far as the standing grant allows.",
             },
         ],
         exit_codes: &[],

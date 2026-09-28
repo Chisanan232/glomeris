@@ -881,7 +881,7 @@ glomeris actions history --json --limit 2
 }
 ```
 
-## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--stop-file <path>] [--project-root <path>]...`
+## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--stop-file <path>] [--autopilot] [--project-root <path>]...`
 
 macOS only (exits 1 with an error message on other platforms). Exactly one of
 the two goal flags is required; any other argument is rejected (usage printed
@@ -945,6 +945,9 @@ exceed is a legitimate no-op probe.
   [Watching a run](#watching-a-run) below.
 - `--stop-file <path>` asks the loop to stop **after the action it is currently
   running**, once `path` exists. See [Stopping a run](#stopping-a-run).
+- `--autopilot` bounds the run by the stored Autopilot envelope instead of by
+  this command's own limits. See [Running inside the
+  grant](#running-inside-the-grant).
 - `--project-root <path>` is optional and repeatable, same meaning as
   `detect`'s flag above — it feeds the same `DiscoveryContext` the recovery
   loop discovers candidates from.
@@ -992,6 +995,43 @@ action it is currently running, finishing with
   between actions instead.
 - Not valid with `--dry-run`, which performs no actions to stop.
 
+### Running inside the grant
+
+`--autopilot` runs this same loop under the standing grant
+`glomeris autopilot enable` wrote. It starts no second loop and introduces no
+second policy: every candidate is still classified, revalidated and executed
+exactly as it would be otherwise, and the envelope can only **withhold** one.
+
+- **Purely subtractive.** Anything an `--autopilot` run does, a run you started
+  yourself would also have done. Nothing the envelope says can make a `PROTECTED`
+  resource executable, admit an `ASK` whose exact kind and reason were not
+  pre-authorized, or reach past a scoped-path or revalidation check.
+- **No grant, no run.** Defaults grant nothing, so with Autopilot revoked or
+  never enabled the command exits **3** having attempted nothing — the same code
+  `autopilot run` uses, so a script can tell "not authorized" apart from a usage
+  error (2) and from a failed run (1). A revoked envelope refuses exactly as an
+  absent one does; `revoke` keeps the limits on file, and only `enabled` stands
+  between them and a run.
+- **Its limits replace this command's, and are the stricter of the two.** The
+  run-level action count and wall-clock budget come down to the envelope's own
+  figures. Left at their defaults, the loop's 600-second ceiling could cut short
+  a run the grant had authorized for the full 15 minutes and report
+  `budget_exceeded` — a true sentence about the wrong budget.
+- **The envelope is printed first**, on stderr, before anything is discovered.
+  Output that may end in deletions opens with the authority it acted under
+  rather than asking you to go and look it up afterwards. stdout still carries
+  exactly one report.
+- **A stop the envelope caused says so.** `stop_reason: "envelope_refused"` with
+  an `envelope_refusal` token naming which limit it was — an exhausted action,
+  byte or time budget, a kind outside the grant, a pressure floor not met, a
+  grant revoked mid-run. That is deliberately *not* `safe_exhausted`: "this disk
+  has nothing safe left" and "Autopilot reached the limit you set" call for
+  opposite next steps, and only one of them is a finding about the disk.
+- **Not valid with `--dry-run`** (exit 2). An envelope is authority to execute; a
+  preview executes nothing, so the flag would have nothing to narrow and the
+  candidate list would look envelope-filtered while being the whole of it. Read
+  the grant with `glomeris autopilot show`.
+
 ### Reported figures
 
 Every percentage in the output names its axis (`60% used (40% free)`,
@@ -1007,15 +1047,24 @@ remained says so rather than printing a success word), iterations run, actions
 executed, actions declined/skipped, bytes freed, and free space before/after.
 
 A run that stopped because nothing safe remained also reports **what is still
-there**, as three separate counts rather than one total: candidates awaiting
-your confirmation, candidates whose action cannot run against the resource as it
-currently stands (a live tool, work in progress), and protected resources. Each
-is a different next step, so they are never summed — and they are counts of
-candidates, not bytes, because space the run was not permitted to take is not an
-opportunity. Under `--json` this is the `remaining` object, present only for
-`stop_reason: "safe_exhausted"`: no other stop concluded anything about the
+there**, as four separate counts rather than one total: candidates awaiting your
+confirmation, candidates whose action cannot run against the resource as it
+currently stands (a live tool, work in progress), protected resources, and — for
+an `--autopilot` run — candidates this grant was not authorized to take. Each is
+a different next step, so they are never summed, and the fourth is kept apart
+from the other three for a further reason: those are facts about what is on the
+disk, and that one is a fact about the run's authority. Folded into the protected
+count it would tell you something is off limits when it is one setting away. They
+are counts of candidates, not bytes, because space the run was not permitted to
+take is not an opportunity.
+
+Under `--json` this is the `remaining` object, present only for
+`stop_reason: "safe_exhausted"` and for an `envelope_refused` stop that had
+already discovered candidates: no other stop concluded anything about the
 candidates it never reached, so zeros there would be a claim the run did not
-make.
+make. An envelope refused before discovery — revoked, or a pressure floor not
+met — omits the object entirely for exactly that reason, rather than publishing a
+breakdown of zeros that would read as a completed search.
 See [Safety Model](safety_model.md) and
 [Known Limitations](known_limitations.md) for what this loop can and cannot
 currently do end to end.

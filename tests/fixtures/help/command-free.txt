@@ -2,7 +2,7 @@ glomeris free — Reclaim space until a recovery goal is reached.
 
 usage: glomeris free (--goal-used-percent <N> | --target <N%|NB>)
                 [--dry-run] [--json] [--progress-json] [--stop-file <path>]
-                [--project-root <path>]...
+                [--autopilot] [--project-root <path>]...
 
 Can delete data — every deletion is policy-gated.
 
@@ -18,6 +18,12 @@ interchangeable wordings of one thing. `--goal-used-percent` is the
 product-facing form: target DISK USAGE, the number a person reads off a status
 bar. `--target` is a raw FREE-SPACE floor, which is what the loop itself works
 in. `--goal-used-percent 60` and `--target 40%` request the same end state.
+
+`--autopilot` runs this same loop inside the standing grant `autopilot enable`
+wrote, instead of the limits above. It is purely subtractive: it can only
+withhold candidates the grant does not cover, never reach further than a run
+you start yourself, and a run it cuts short says so by name rather than
+reporting a disk with nothing safe left on it.
 
 Options
   --goal-used-percent <N>
@@ -50,6 +56,17 @@ Options
       interrupt a deletion mid-flight, so a stopped run still ends with a
       complete report. Not valid with `--dry-run`, which performs no
       actions to stop.
+  --autopilot
+      Bound this run by the stored Autopilot envelope: its resource kinds,
+      its action count, its byte total, its wall-clock budget and its
+      disk-pressure floor, with ASK still refused unless that exact kind
+      and reason were pre-authorized. Exits 3 without attempting anything
+      if Autopilot is not enabled, since there is then no grant to act
+      under. Prints the envelope on stderr first. Not valid with
+      `--dry-run`: a preview executes nothing, so a grant on executing has
+      nothing to narrow and the candidate list would look filtered while
+      being the whole of it — read the grant with `autopilot show`
+      instead.
   --project-root <path>
       Same meaning as for `detect`. Repeatable.
 
@@ -64,5 +81,7 @@ Examples
       Reclaim toward 60% used, streaming live progress on stderr.
   glomeris free --target 20% --stop-file /tmp/g.stop
       Reclaim, stopping after the current action once that path exists.
+  glomeris free --goal-used-percent 60 --autopilot
+      Recover toward 60% used, but only as far as the standing grant allows.
 
 See also: clean, execute, emergency
