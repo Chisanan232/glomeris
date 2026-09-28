@@ -14,6 +14,7 @@ pub mod emergency;
 pub mod evidence;
 pub mod executor;
 pub mod monitor;
+pub mod planner;
 pub mod platform;
 pub mod policy;
 pub mod reporting;
