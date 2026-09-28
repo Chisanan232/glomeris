@@ -179,12 +179,17 @@ fi
 # `resetGoalProgress()` contains the same line: a file-wide grep would stay green
 # with the reset deleted from exactly the place it matters. `func beginRecovering`
 # to the next declaration at the same indentation.
+#
+# `|| true` so that the emptiness check below is reachable — HORO-1479's rule,
+# enforced by scripts/check-failure-diagnostics-are-reachable.sh. Without it a
+# failed substitution ends the script here under `set -e` and the FAIL message
+# written for exactly that case could never print.
 begin_body="$(
   awk '
     /func beginRecovering/ { inside = 1; print; next }
     inside && /^    (@|\/\/\/|func |var |let |private|public|static)/ { inside = 0 }
     inside { print }
-  ' "$abs_state"
+  ' "$abs_state" || true
 )"
 if [[ -z "$begin_body" ]]; then
   echo "FAIL: could not find beginRecovering()'s body in ${STATE_FILE}."
