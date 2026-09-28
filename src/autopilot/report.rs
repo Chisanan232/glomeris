@@ -91,6 +91,8 @@ pub fn envelope_report(
         max_bytes_human: human_bytes(envelope.max_bytes()),
         max_duration_secs: envelope.max_duration().as_secs(),
         min_pressure: envelope.min_pressure().map(|state| state.as_str()),
+        respond_to_alerts: envelope.responds_to_alerts(),
+        starts_unprompted: envelope.starts_unprompted(),
         ceilings: AutopilotCeilingsReport {
             max_actions: ACTIONS_CEILING,
             max_bytes: BYTES_CEILING,
@@ -193,7 +195,33 @@ mod tests {
         assert!(report.allowed_kinds.is_empty());
         assert!(report.ask_preauthorizations.is_empty());
         assert_eq!(report.min_pressure, None);
+        assert!(!report.respond_to_alerts);
+        assert!(!report.starts_unprompted);
         assert_eq!(report.stored_at, None);
+    }
+
+    /// The pair a client branches on, over all four combinations. The
+    /// interesting row is the third: the setting is reported as the user left
+    /// it, and the authority is reported as revoked, so a toggle can stay on
+    /// while nothing can start.
+    #[test]
+    fn the_two_unprompted_fields_are_reported_independently() {
+        for (enabled, respond) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut envelope = AutopilotEnvelope::revoked();
+            if enabled {
+                envelope.enable();
+            }
+            envelope.set_respond_to_alerts(respond);
+
+            let report = envelope_report(&envelope, None);
+
+            assert_eq!(report.respond_to_alerts, respond);
+            assert_eq!(
+                report.starts_unprompted,
+                enabled && respond,
+                "enabled={enabled} respond_to_alerts={respond}"
+            );
+        }
     }
 
     #[test]

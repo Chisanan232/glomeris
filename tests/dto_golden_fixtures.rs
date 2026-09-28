@@ -585,6 +585,8 @@ fn autopilot_envelope_report_matches_golden_fixture() {
         max_bytes_human: "2.0 GB".to_string(),
         max_duration_secs: 120,
         min_pressure: Some("PRESSURED"),
+        respond_to_alerts: true,
+        starts_unprompted: true,
         ceilings: AutopilotCeilingsReport {
             max_actions: 25,
             max_bytes: 68_719_476_736,

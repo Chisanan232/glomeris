@@ -677,6 +677,19 @@ struct AutopilotEnvelopeDto: Decodable, Equatable {
     /// permissive of the two, so the screen must say which one is in force
     /// rather than leaving a blank row.
     let minPressure: String?
+    /// Whether the grant says Autopilot may start a run in answer to a
+    /// disk-pressure alert — the setting as the user left it, in force or not
+    /// (HORO-1510). This is the one to bind a toggle to, so that revoking
+    /// Autopilot does not read as having silently cleared the preference.
+    let respondToAlerts: Bool
+    /// Whether an unprompted run is authorized right now. The one to branch on.
+    ///
+    /// Two fields rather than one `&&` in Swift, and the reason is the standing
+    /// rule at the top of `GlomerisMenuBarApp.swift`: composing `enabled` with
+    /// `respondToAlerts` here would make this app the place that decides when it
+    /// may delete things without being asked. Rust computes it in
+    /// `AutopilotEnvelope::starts_unprompted`; this is a quotation.
+    let startsUnprompted: Bool
     let ceilings: AutopilotCeilingsDto
     let allowlistableKinds: [String]
     /// Kinds that can never be allowlisted, whatever is asked for.
@@ -707,6 +720,8 @@ struct AutopilotEnvelopeDto: Decodable, Equatable {
         case maxBytesHuman = "max_bytes_human"
         case maxDurationSecs = "max_duration_secs"
         case minPressure = "min_pressure"
+        case respondToAlerts = "respond_to_alerts"
+        case startsUnprompted = "starts_unprompted"
         case ceilings
         case allowlistableKinds = "allowlistable_kinds"
         case neverAllowlistableKinds = "never_allowlistable_kinds"

@@ -515,6 +515,8 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.maxBytesHuman, "2.0 GB")
         XCTAssertEqual(dto.maxDurationSecs, 120)
         XCTAssertEqual(dto.minPressure, "PRESSURED")
+        XCTAssertTrue(dto.respondToAlerts)
+        XCTAssertTrue(dto.startsUnprompted)
         XCTAssertEqual(dto.storedAt, "/Users/dev/Library/Application Support/Glomeris/autopilot.conf")
 
         XCTAssertEqual(dto.askPreauthorizations.count, 1)

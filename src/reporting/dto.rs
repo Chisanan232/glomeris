@@ -1015,6 +1015,22 @@ pub struct AutopilotEnvelopeReport {
     /// not gated on disk pressure at all. A [`crate::monitor::PressureState`]
     /// token, upper case, as `as_str` produces it.
     pub min_pressure: Option<&'static str>,
+    /// Whether the grant says Autopilot may start a run in answer to a
+    /// disk-pressure alert — the setting as the user left it, in force or not
+    /// (HORO-1510). For a control's on/off state.
+    pub respond_to_alerts: bool,
+    /// Whether an unprompted run is authorized **right now**: this grant is in
+    /// force and it says so. The field to branch on.
+    ///
+    /// Both are reported because they answer different questions and a client
+    /// needs each for a different job. A settings toggle has to show what the
+    /// user chose even while Autopilot is revoked — otherwise revoking would
+    /// look like it had silently cleared the preference. Anything that *acts*
+    /// has to consult the conjunction, and must not be the thing that computes
+    /// it: `enabled && respond_to_alerts` evaluated in Swift would be the
+    /// client deciding its own authority. Here it is a quotation of
+    /// [`AutopilotEnvelope::starts_unprompted`](crate::autopilot::AutopilotEnvelope::starts_unprompted).
+    pub starts_unprompted: bool,
     pub ceilings: AutopilotCeilingsReport,
     /// Every resource kind that may be allowlisted, in
     /// [`crate::evidence::ResourceKind::ALL`] order.
