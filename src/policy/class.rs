@@ -36,6 +36,17 @@ pub enum ReasonCode {
     ResourceInActiveUse,
     GitWorktreeDirty,
     RebuildCostHigh,
+    /// The detector could not establish that this resource can be
+    /// reproduced (HORO-1553). Distinct from [`Self::RebuildCostHigh`],
+    /// which is a statement about cost by something that *does* know the
+    /// resource is reproducible: this one is an absence of knowledge, and
+    /// must never be reported as a rebuild-cost judgment.
+    RegenerabilityUnknown,
+    /// Deleting this resource would be permanent: neither the owning tool
+    /// nor a rebuild can recreate it (HORO-1553). A human may still consent
+    /// — this is `Ask`, not `Protected` — but the consent has to be given
+    /// for this specific resource, each time.
+    RecoverabilityIrreversible,
     OwningToolLive,
     // -> AutoSafe
     EvidenceFreshAndComplete,
@@ -62,6 +73,8 @@ impl ReasonCode {
             ReasonCode::ResourceInActiveUse => "resource_in_active_use",
             ReasonCode::GitWorktreeDirty => "git_worktree_dirty",
             ReasonCode::RebuildCostHigh => "rebuild_cost_high",
+            ReasonCode::RegenerabilityUnknown => "regenerability_unknown",
+            ReasonCode::RecoverabilityIrreversible => "recoverability_irreversible",
             ReasonCode::OwningToolLive => "owning_tool_live",
             ReasonCode::EvidenceFreshAndComplete => "evidence_fresh_and_complete",
             ReasonCode::RegenerableByTool => "regenerable_by_tool",
@@ -87,6 +100,8 @@ impl ReasonCode {
         ReasonCode::ResourceInActiveUse,
         ReasonCode::GitWorktreeDirty,
         ReasonCode::RebuildCostHigh,
+        ReasonCode::RegenerabilityUnknown,
+        ReasonCode::RecoverabilityIrreversible,
         ReasonCode::OwningToolLive,
         ReasonCode::EvidenceFreshAndComplete,
         ReasonCode::RegenerableByTool,
@@ -150,10 +165,12 @@ mod tests {
                 ReasonCode::ResourceInActiveUse => 11,
                 ReasonCode::GitWorktreeDirty => 12,
                 ReasonCode::RebuildCostHigh => 13,
-                ReasonCode::OwningToolLive => 14,
-                ReasonCode::EvidenceFreshAndComplete => 15,
-                ReasonCode::RegenerableByTool => 16,
-                ReasonCode::NoActiveUseObserved => 17,
+                ReasonCode::RegenerabilityUnknown => 14,
+                ReasonCode::RecoverabilityIrreversible => 15,
+                ReasonCode::OwningToolLive => 16,
+                ReasonCode::EvidenceFreshAndComplete => 17,
+                ReasonCode::RegenerableByTool => 18,
+                ReasonCode::NoActiveUseObserved => 19,
             };
             assert_eq!(
                 index,
@@ -164,7 +181,7 @@ mod tests {
         }
         assert_eq!(
             ReasonCode::ALL.len(),
-            18,
+            20,
             "ReasonCode::ALL has gained, lost, or duplicated an entry"
         );
     }
