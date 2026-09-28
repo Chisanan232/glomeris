@@ -29,6 +29,38 @@ pub enum ResourceKind {
     NodePackageManagerCache,
     DockerBuildCache,
     DockerImageCache,
+    /// `pip`'s HTTP/wheel download cache, as reported by `pip cache dir`.
+    PipCache,
+    /// `uv`'s cache, as reported by `uv cache dir`.
+    UvCache,
+    /// Go's compiled-object build cache (`go env GOCACHE`).
+    GoBuildCache,
+    /// Go's downloaded module cache (`go env GOMODCACHE`). Refetchable from
+    /// the module proxy, but note that its contents are written read-only,
+    /// which is why cleanup is `go clean -modcache`'s job rather than a
+    /// directory removal — see [`NativeCleanup`].
+    GoModuleCache,
+    /// Gradle's shared cache directory — `$GRADLE_USER_HOME/caches`, NOT
+    /// `$GRADLE_USER_HOME` itself, which also holds `gradle.properties`
+    /// (commonly containing signing keys and repository credentials) and
+    /// `init.d` scripts.
+    GradleCache,
+    /// The Maven local repository (`~/.m2/repository` by default).
+    ///
+    /// Deliberately NOT modelled as a disposable cache (HORO-1543). A local
+    /// repository is where `mvn install` puts locally built artifacts, so it
+    /// can hold the only copy of something no remote registry has. Nothing
+    /// observable from the directory alone distinguishes that from a
+    /// re-downloadable dependency, so evidence for this kind carries
+    /// [`Regenerability::Unknown`] and policy sends it to `ASK`.
+    MavenLocalRepository,
+    /// Swift Package Manager's shared cache of fetched package
+    /// dependencies (`~/Library/Caches/org.swift.swiftpm`). Distinct from
+    /// [`Self::XcodeDerivedData`]: this is SwiftPM's own, used by
+    /// `swift build` with no Xcode involved.
+    SwiftPackageManagerCache,
+    /// A per-project SwiftPM `.build` directory.
+    SwiftPackageManagerBuildDir,
     /// Fail-closed sink: a resource kind that cannot be classified. Policy
     /// (later ticket) maps this to PROTECTED unconditionally.
     Unknown,
@@ -44,6 +76,14 @@ impl ResourceKind {
             ResourceKind::CargoTargetDir | ResourceKind::CargoRegistryCache => OwningTool::Cargo,
             ResourceKind::NodeModules | ResourceKind::NodePackageManagerCache => OwningTool::Npm,
             ResourceKind::DockerBuildCache | ResourceKind::DockerImageCache => OwningTool::Docker,
+            ResourceKind::PipCache => OwningTool::Pip,
+            ResourceKind::UvCache => OwningTool::Uv,
+            ResourceKind::GoBuildCache | ResourceKind::GoModuleCache => OwningTool::Go,
+            ResourceKind::GradleCache => OwningTool::Gradle,
+            ResourceKind::MavenLocalRepository => OwningTool::Maven,
+            ResourceKind::SwiftPackageManagerCache | ResourceKind::SwiftPackageManagerBuildDir => {
+                OwningTool::SwiftPm
+            }
             ResourceKind::Unknown => OwningTool::None,
         }
     }
@@ -60,6 +100,17 @@ impl ResourceKind {
             ResourceKind::NodePackageManagerCache => Regenerability::RegenerableByTool,
             ResourceKind::DockerBuildCache => Regenerability::RegenerableByTool,
             ResourceKind::DockerImageCache => Regenerability::RegenerableByTool,
+            ResourceKind::PipCache => Regenerability::RegenerableByTool,
+            ResourceKind::UvCache => Regenerability::RegenerableByTool,
+            ResourceKind::GoBuildCache => Regenerability::RegenerableByRebuild,
+            ResourceKind::GoModuleCache => Regenerability::RegenerableByTool,
+            ResourceKind::GradleCache => Regenerability::RegenerableByTool,
+            // Not RegenerableByTool: `mvn install` writes locally built
+            // artifacts here, and no remote registry is guaranteed to have
+            // them. See the variant's own doc comment.
+            ResourceKind::MavenLocalRepository => Regenerability::Unknown,
+            ResourceKind::SwiftPackageManagerCache => Regenerability::RegenerableByTool,
+            ResourceKind::SwiftPackageManagerBuildDir => Regenerability::RegenerableByRebuild,
             ResourceKind::Unknown => Regenerability::Unknown,
         }
     }
@@ -71,7 +122,9 @@ impl ResourceKind {
     ///
     /// `ToolLiveness` is only required for kinds whose owning tool has a
     /// real running-process signal to observe (Xcode.app, the Docker
-    /// daemon). For `Cargo`/`Npm`/`Pnpm`/`Yarn`/`Homebrew`, `tool_liveness`
+    /// daemon). For every other tool — `Cargo`/`Npm`/`Pnpm`/`Yarn`/
+    /// `Homebrew`, and the `Pip`/`Uv`/`Go`/`Gradle`/`Maven`/`SwiftPm` group
+    /// added by HORO-1543 — `tool_liveness`
     /// is structurally always `Unavailable(ToolNotRunning)` — see
     /// [`crate::evidence::correlate::PgrepToolLivenessProbe`]
     /// — so requiring it here would make [`Completeness::Complete`]
@@ -103,6 +156,14 @@ impl ResourceKind {
             | ResourceKind::CargoRegistryCache
             | ResourceKind::NodeModules
             | ResourceKind::NodePackageManagerCache
+            | ResourceKind::PipCache
+            | ResourceKind::UvCache
+            | ResourceKind::GoBuildCache
+            | ResourceKind::GoModuleCache
+            | ResourceKind::GradleCache
+            | ResourceKind::MavenLocalRepository
+            | ResourceKind::SwiftPackageManagerCache
+            | ResourceKind::SwiftPackageManagerBuildDir
             | ResourceKind::Unknown => WITHOUT_TOOL_LIVENESS,
         }
     }
@@ -122,6 +183,14 @@ impl ResourceKind {
             ResourceKind::NodePackageManagerCache => "node_package_manager_cache",
             ResourceKind::DockerBuildCache => "docker_build_cache",
             ResourceKind::DockerImageCache => "docker_image_cache",
+            ResourceKind::PipCache => "pip_cache",
+            ResourceKind::UvCache => "uv_cache",
+            ResourceKind::GoBuildCache => "go_build_cache",
+            ResourceKind::GoModuleCache => "go_module_cache",
+            ResourceKind::GradleCache => "gradle_cache",
+            ResourceKind::MavenLocalRepository => "maven_local_repository",
+            ResourceKind::SwiftPackageManagerCache => "swiftpm_cache",
+            ResourceKind::SwiftPackageManagerBuildDir => "swiftpm_build_dir",
             ResourceKind::Unknown => "unknown",
         }
     }
@@ -140,6 +209,14 @@ impl ResourceKind {
         ResourceKind::NodePackageManagerCache,
         ResourceKind::DockerBuildCache,
         ResourceKind::DockerImageCache,
+        ResourceKind::PipCache,
+        ResourceKind::UvCache,
+        ResourceKind::GoBuildCache,
+        ResourceKind::GoModuleCache,
+        ResourceKind::GradleCache,
+        ResourceKind::MavenLocalRepository,
+        ResourceKind::SwiftPackageManagerCache,
+        ResourceKind::SwiftPackageManagerBuildDir,
         ResourceKind::Unknown,
     ];
 
@@ -788,7 +865,15 @@ mod tests {
                 ResourceKind::NodePackageManagerCache => 5,
                 ResourceKind::DockerBuildCache => 6,
                 ResourceKind::DockerImageCache => 7,
-                ResourceKind::Unknown => 8,
+                ResourceKind::PipCache => 8,
+                ResourceKind::UvCache => 9,
+                ResourceKind::GoBuildCache => 10,
+                ResourceKind::GoModuleCache => 11,
+                ResourceKind::GradleCache => 12,
+                ResourceKind::MavenLocalRepository => 13,
+                ResourceKind::SwiftPackageManagerCache => 14,
+                ResourceKind::SwiftPackageManagerBuildDir => 15,
+                ResourceKind::Unknown => 16,
             };
             assert_eq!(
                 index,
@@ -799,7 +884,7 @@ mod tests {
         }
         assert_eq!(
             ResourceKind::ALL.len(),
-            9,
+            17,
             "ResourceKind::ALL has gained, lost, or duplicated an entry"
         );
     }

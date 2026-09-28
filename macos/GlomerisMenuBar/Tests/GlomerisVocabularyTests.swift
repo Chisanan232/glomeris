@@ -87,7 +87,9 @@ final class GlomerisVocabularyTests: XCTestCase {
     private static let kindTokens = [
         "xcode_derived_data", "homebrew_cache", "cargo_target_dir", "cargo_registry_cache",
         "node_modules", "node_package_manager_cache", "docker_build_cache",
-        "docker_image_cache", "unknown",
+        "docker_image_cache", "pip_cache", "uv_cache", "go_build_cache", "go_module_cache",
+        "gradle_cache", "maven_local_repository", "swiftpm_cache", "swiftpm_build_dir",
+        "unknown",
     ]
 
     /// `src/actions/llm.rs` — `llm_check_outcome`, all five. HORO-1309.

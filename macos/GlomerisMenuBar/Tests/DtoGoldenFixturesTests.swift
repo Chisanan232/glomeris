@@ -670,7 +670,7 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.ceilings.maxBytesHuman, "64.0 GB")
         XCTAssertEqual(dto.ceilings.maxDurationSecs, 900)
 
-        XCTAssertEqual(dto.allowlistableKinds.count, 8)
+        XCTAssertEqual(dto.allowlistableKinds.count, 16)
         XCTAssertEqual(dto.neverAllowlistableKinds, ["unknown"])
         XCTAssertEqual(dto.preauthorizableReasons, ["rebuild_cost_high"])
         XCTAssertEqual(dto.neverPreauthorizableReasons.count, 16)
