@@ -23,12 +23,14 @@
 //! the campaign's "filesystem reality wins" rule stated as code.
 
 use crate::executor::goal::{GoalRejection, RecoveryGoal};
-use crate::executor::recovery_loop::{target_met, FreeTarget, RecoveryReport, StopReason};
+use crate::executor::recovery_loop::{
+    target_met, FreeTarget, RecoveryProgress, RecoveryReport, StopReason,
+};
 use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::reporting::dto::{
     stop_reason_tag, DetectCandidateReport, DetectReport, RecoveryGoalRejectionReport,
-    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryRemainingReport,
-    RecoveryRunReport,
+    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryProgressEvent,
+    RecoveryRemainingReport, RecoveryRunReport,
 };
 use crate::reporting::human_bytes;
 
@@ -328,6 +330,85 @@ pub fn build_recovery_run_report(
         detector_failures: report.detector_failures.clone(),
         discovery_complete: report.detector_failures.is_empty(),
         caveats: build_run_caveats(report),
+    }
+}
+
+/// Project one live [`RecoveryProgress`] event onto the wire (HORO-1509).
+///
+/// A one-for-one mapping with no judgment in it, and that is deliberate: this
+/// function may not decide anything, summarise anything, or add a number the
+/// loop did not measure. Its only additions are the `human_bytes` renderings,
+/// so a client never formats a byte count that could disagree with the final
+/// report's — the same reason every report DTO in this module carries its
+/// `*_human` twin.
+///
+/// The optional human strings are built with `map`, so "not measured" stays
+/// absent on both fields rather than becoming `"0 B"` — a string that would
+/// read as a measurement of zero.
+pub fn build_recovery_progress_event(progress: &RecoveryProgress) -> RecoveryProgressEvent {
+    match progress {
+        RecoveryProgress::Measured {
+            iteration,
+            usage,
+            bytes_freed_so_far,
+        } => RecoveryProgressEvent::Measured {
+            iteration: *iteration,
+            total_bytes: usage.total_bytes,
+            free_bytes: usage.free_bytes,
+            used_percent: usage.used_percent(),
+            free_human: human_bytes(usage.free_bytes),
+            bytes_freed_so_far: *bytes_freed_so_far,
+            bytes_freed_so_far_human: human_bytes(*bytes_freed_so_far),
+        },
+        RecoveryProgress::Discovering { iteration } => RecoveryProgressEvent::Discovering {
+            iteration: *iteration,
+        },
+        RecoveryProgress::Discovered {
+            iteration,
+            candidates,
+            detectors_failed,
+        } => RecoveryProgressEvent::Discovered {
+            iteration: *iteration,
+            candidates: *candidates,
+            detectors_failed: *detectors_failed,
+        },
+        RecoveryProgress::Revalidating { iteration } => RecoveryProgressEvent::Revalidating {
+            iteration: *iteration,
+        },
+        RecoveryProgress::ActionStarted {
+            iteration,
+            resource,
+            action,
+            policy_label,
+            estimated_bytes,
+        } => RecoveryProgressEvent::ActionStarted {
+            iteration: *iteration,
+            resource: resource.clone(),
+            action: action.clone(),
+            policy_label,
+            estimated_bytes: *estimated_bytes,
+            estimated_human: estimated_bytes.map(human_bytes),
+        },
+        RecoveryProgress::ActionFinished {
+            iteration,
+            resource,
+            action,
+            outcome,
+            reclaimed_bytes,
+            bytes_freed_so_far,
+        } => RecoveryProgressEvent::ActionFinished {
+            iteration: *iteration,
+            resource: resource.clone(),
+            action: action.clone(),
+            outcome,
+            reclaimed_bytes: *reclaimed_bytes,
+            reclaimed_human: reclaimed_bytes.map(human_bytes),
+            bytes_freed_so_far: *bytes_freed_so_far,
+            bytes_freed_so_far_human: human_bytes(*bytes_freed_so_far),
+        },
+        RecoveryProgress::StopRequested { iteration } => RecoveryProgressEvent::StopRequested {
+            iteration: *iteration,
+        },
     }
 }
 
@@ -893,6 +974,216 @@ mod tests {
         ] {
             let json = serde_json::to_string(&build_goal_rejection_report(&rejection)).unwrap();
             assert!(!json.contains("free"), "{json}");
+        }
+    }
+
+    /// Every [`RecoveryProgress`] the loop can emit, in the order a run emits
+    /// them. Written out exhaustively on purpose: a new variant added to the
+    /// domain enum fails `build_recovery_progress_event`'s `match` at compile
+    /// time, and the tests below make sure it also has to be *named* on the
+    /// wire before it can ship.
+    fn every_progress_event() -> Vec<RecoveryProgress> {
+        vec![
+            RecoveryProgress::Measured {
+                iteration: 1,
+                usage: FsUsage::new(1_000, 250),
+                bytes_freed_so_far: 0,
+            },
+            RecoveryProgress::Discovering { iteration: 1 },
+            RecoveryProgress::Discovered {
+                iteration: 1,
+                candidates: 4,
+                detectors_failed: 1,
+            },
+            RecoveryProgress::Revalidating { iteration: 1 },
+            RecoveryProgress::ActionStarted {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                policy_label: "AUTO_SAFE",
+                estimated_bytes: Some(2048),
+            },
+            RecoveryProgress::ActionFinished {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                outcome: "success",
+                reclaimed_bytes: Some(2000),
+                bytes_freed_so_far: 2000,
+            },
+            RecoveryProgress::StopRequested { iteration: 2 },
+        ]
+    }
+
+    /// HORO-1509 AC: the loop is watchable, which means a client can tell one
+    /// phase from another and always knows which iteration it is looking at.
+    ///
+    /// The distinctness assertion is the load-bearing one. Two phases sharing a
+    /// tag would leave a UI unable to tell "we are scanning" from "we are
+    /// deleting" — and `#[serde(tag = "phase")]` would serialize that happily.
+    #[test]
+    fn every_progress_phase_is_distinctly_named_and_carries_its_iteration() {
+        let mut phases = std::collections::BTreeSet::new();
+        for progress in every_progress_event() {
+            let json = serde_json::to_string(&build_recovery_progress_event(&progress)).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let phase = parsed["phase"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no phase tag: {json}"))
+                .to_string();
+            assert!(
+                phase.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "a phase tag is a stable token, not a Rust variant name: {phase}"
+            );
+            assert!(
+                parsed["iteration"].is_u64(),
+                "a progress line with no iteration cannot be placed in the run: {json}"
+            );
+            assert!(phases.insert(phase.clone()), "duplicate phase tag {phase}");
+            // NDJSON: one event per line means no event may contain one.
+            assert!(
+                !json.contains('\n'),
+                "an embedded newline splits the stream: {json}"
+            );
+        }
+        assert_eq!(phases.len(), 7, "got: {phases:?}");
+    }
+
+    /// The measured reading is the one place a client learns current usage, so
+    /// it must arrive on both axes and pre-rendered.
+    #[test]
+    fn a_measured_event_carries_the_usage_it_read_and_the_bytes_it_has_freed() {
+        let event = build_recovery_progress_event(&RecoveryProgress::Measured {
+            iteration: 3,
+            usage: FsUsage::new(1_000, 250),
+            bytes_freed_so_far: 4096,
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["phase"], "measured");
+        assert_eq!(json["iteration"], 3);
+        assert_eq!(json["total_bytes"], 1_000);
+        assert_eq!(json["free_bytes"], 250);
+        assert_eq!(json["used_percent"], 75.0);
+        assert_eq!(json["bytes_freed_so_far"], 4096);
+        // Rendered by Rust so a 1000-based client formatter cannot disagree
+        // with the final report about the same number.
+        assert_eq!(json["free_human"], human_bytes(250));
+        assert_eq!(json["bytes_freed_so_far_human"], human_bytes(4096));
+    }
+
+    /// HORO-1509 / campaign section 9: an unmeasurable byte count is absent,
+    /// never `0`.
+    ///
+    /// `"0 B"` on an action whose size could not be determined is a measurement
+    /// nobody took, and a progress card showing it would be telling the user the
+    /// deletion achieved nothing. Both halves of the pair have to disappear
+    /// together — a `reclaimed_human` with no `reclaimed_bytes` beside it would
+    /// be a number with no provenance.
+    #[test]
+    fn unmeasured_byte_counts_are_omitted_rather_than_reported_as_zero() {
+        let started = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionStarted {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                policy_label: "ASK",
+                estimated_bytes: None,
+            },
+        ))
+        .unwrap();
+        assert!(!started.contains("estimated_bytes"), "{started}");
+        assert!(!started.contains("estimated_human"), "{started}");
+        assert!(!started.contains("0 B"), "{started}");
+
+        let finished = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionFinished {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                outcome: "success",
+                reclaimed_bytes: None,
+                bytes_freed_so_far: 0,
+            },
+        ))
+        .unwrap();
+        assert!(!finished.contains("reclaimed_bytes"), "{finished}");
+        assert!(!finished.contains("reclaimed_human"), "{finished}");
+        // `bytes_freed_so_far` is a different claim: the run really has freed
+        // nothing measurable yet, and saying so is honest.
+        assert!(finished.contains("\"bytes_freed_so_far\":0"), "{finished}");
+    }
+
+    /// An estimate must be legible as an estimate, and progress must be legible
+    /// as measured. The two live in the same stream, so the names are the only
+    /// thing keeping a client from accumulating the wrong one.
+    #[test]
+    fn an_estimate_is_named_as_one_and_progress_is_named_as_measured() {
+        let started = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionStarted {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                policy_label: "AUTO_SAFE",
+                estimated_bytes: Some(2048),
+            },
+        ))
+        .unwrap();
+        assert!(started.contains("\"estimated_bytes\":2048"), "{started}");
+        assert!(
+            !started.contains("bytes_freed_so_far"),
+            "an action that has not run yet has freed nothing, and must claim nothing: {started}"
+        );
+
+        let finished = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionFinished {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                outcome: "success",
+                reclaimed_bytes: Some(2000),
+                bytes_freed_so_far: 2000,
+            },
+        ))
+        .unwrap();
+        assert!(!finished.contains("estimated"), "{finished}");
+        assert!(finished.contains("\"reclaimed_bytes\":2000"), "{finished}");
+    }
+
+    /// The two NDJSON streams share the `phase` key, so a client reading both
+    /// (the GUI runs `detect` and `free`) must never mistake one for the other.
+    #[test]
+    fn recovery_phases_never_collide_with_discovery_phases() {
+        use crate::reporting::dto::ProgressEvent;
+
+        let discovery = [
+            ProgressEvent::DetectorStarted { detector: "cargo" },
+            ProgressEvent::DetectorFinished {
+                detector: "cargo",
+                candidates_found: 1,
+                outcome: "found",
+                reason: None,
+            },
+        ];
+        let discovery_phases: Vec<String> = discovery
+            .iter()
+            .map(|e| {
+                serde_json::to_value(e).unwrap()["phase"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+
+        for progress in every_progress_event() {
+            let phase = serde_json::to_value(build_recovery_progress_event(&progress)).unwrap()
+                ["phase"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                !discovery_phases.contains(&phase),
+                "{phase} means one thing in a discovery scan and another in a run"
+            );
         }
     }
 }

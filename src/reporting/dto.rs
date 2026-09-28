@@ -1147,6 +1147,98 @@ pub struct RecoveryPreviewReport {
     pub candidates: Vec<DetectCandidateReport>,
 }
 
+/// One line of the `--progress-json` NDJSON stream a recovery run emits on
+/// stderr (HORO-1509) — the projection of
+/// [`crate::executor::recovery_loop::RecoveryProgress`].
+///
+/// This is what makes the closed loop watchable: which iteration is running,
+/// what it is doing right now, and how many bytes have *actually* been
+/// reclaimed. A client that had only the final [`RecoveryRunReport`] could show
+/// nothing but a spinner for a phase the v0.2.0 dogfood measured in minutes.
+///
+/// Same internally-tagged shape and same reasoning as [`ProgressEvent`], whose
+/// doc comment explains why this module's one NDJSON family uses
+/// `#[serde(tag = "phase")]` while every report field gets a `&'static str` tag
+/// from a free function. The two streams share the `phase` key and nothing else:
+/// `ProgressEvent` describes a discovery scan, this describes a run that
+/// mutates the filesystem, and no phase name appears in both.
+///
+/// Two rules hold across every variant, and both exist so a progress line can
+/// never overstate what happened:
+///
+/// - **Measured bytes only.** `bytes_freed_so_far` is re-measured free space,
+///   never a sum of candidate estimates (campaign section 9). The one estimate
+///   in the stream is [`RecoveryProgressEvent::ActionStarted::estimated_bytes`],
+///   named so it cannot be read as progress.
+/// - **Absent, not zero.** Every optional byte count is omitted rather than
+///   serialized as `0`/`null` when it could not be measured, because a client
+///   showing "0 bytes reclaimed" for an action whose size is unknown is
+///   reporting a measurement nobody took.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum RecoveryProgressEvent {
+    /// Loop step 1: the filesystem was measured. The only statement of fact
+    /// about free space in this stream, and therefore the only event a client
+    /// may update its "current usage" display from.
+    Measured {
+        iteration: u32,
+        total_bytes: u64,
+        free_bytes: u64,
+        used_percent: f64,
+        free_human: String,
+        bytes_freed_so_far: u64,
+        bytes_freed_so_far_human: String,
+    },
+    /// Loop step 4 is starting: detectors are being asked what exists *now*.
+    /// The "rescanning" state HORO-1509 asks to be visible. Re-entered every
+    /// iteration by design — the loop never reuses an earlier pass's list.
+    Discovering { iteration: u32 },
+    /// Loop step 4 finished. `candidates` counts what has a resolvable action
+    /// rather than what a detector saw, and a non-zero `detectors_failed` is
+    /// what withdraws a later `safe_exhausted`'s usual meaning: part of the
+    /// disk was never looked at.
+    Discovered {
+        iteration: u32,
+        candidates: u32,
+        detectors_failed: u32,
+    },
+    /// Loop steps 5-6: evidence is being re-collected and reclassified before
+    /// anything is chosen. A client must not offer a "confirm" affordance from
+    /// a stale earlier pass while this is in flight.
+    Revalidating { iteration: u32 },
+    /// Loop step 8: a real mutation is about to run.
+    ActionStarted {
+        iteration: u32,
+        resource: String,
+        action: String,
+        policy_label: &'static str,
+        /// An estimate, named as one. Never accumulated into progress.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_human: Option<String>,
+    },
+    /// Loop step 9: the mutation finished. `reclaimed_bytes` is what the
+    /// executor measured for this one action; absent means it could not be
+    /// measured.
+    ActionFinished {
+        iteration: u32,
+        resource: String,
+        action: String,
+        outcome: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reclaimed_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reclaimed_human: Option<String>,
+        bytes_freed_so_far: u64,
+        bytes_freed_so_far_human: String,
+    },
+    /// The user's cooperative stop was observed — between actions, never
+    /// during one. The run finishes with `stop_reason: "stopped_by_user"`; this
+    /// event is what lets a UI stop offering the button before that arrives.
+    StopRequested { iteration: u32 },
+}
+
 /// What a run that ran out of safe work left behind (HORO-1509).
 ///
 /// Present on [`RecoveryRunReport`] only for `stop_reason == "safe_exhausted"`,

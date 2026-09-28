@@ -162,7 +162,8 @@ fn a_raw_target_run_still_succeeds_and_names_the_free_axis() {
     // `a_raw_target_run_reports_structured_json_with_an_explicit_stop_reason`),
     // because a stop reason that is spelled two ways is two things to learn.
     assert!(
-        run.stdout.contains("stop reason:            target_reached"),
+        run.stdout
+            .contains("stop reason:            target_reached"),
         "expected the unchanged target-reached report: {}",
         run.stdout
     );
