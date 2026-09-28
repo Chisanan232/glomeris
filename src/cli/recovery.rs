@@ -23,8 +23,11 @@
 //! the campaign's "filesystem reality wins" rule stated as code.
 
 use crate::executor::goal::{GoalRejection, RecoveryGoal};
+use std::io::Write;
+use std::sync::Mutex;
+
 use crate::executor::recovery_loop::{
-    target_met, FreeTarget, RecoveryProgress, RecoveryReport, StopReason,
+    target_met, FreeTarget, RecoveryObserver, RecoveryProgress, RecoveryReport, StopReason,
 };
 use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::reporting::dto::{
@@ -409,6 +412,57 @@ pub fn build_recovery_progress_event(progress: &RecoveryProgress) -> RecoveryPro
         RecoveryProgress::StopRequested { iteration } => RecoveryProgressEvent::StopRequested {
             iteration: *iteration,
         },
+    }
+}
+
+/// A [`RecoveryObserver`] that writes each event to a sink as one NDJSON line
+/// (HORO-1509) — what `glomeris free --progress-json` gives the GUI.
+///
+/// Generic over the sink so tests can read back exactly what a consumer would
+/// receive; production passes `std::io::stderr()`, keeping the progress stream
+/// off the stdout a `--json` report owns.
+///
+/// The [`Mutex`] is what makes "one event per line" true rather than intended:
+/// [`RecoveryObserver::observe`] takes `&self`, so without it two events could
+/// interleave halfway through a line and hand the consumer invalid JSON.
+pub struct NdjsonProgressObserver<W> {
+    sink: Mutex<W>,
+}
+
+impl<W: Write> NdjsonProgressObserver<W> {
+    pub fn new(sink: W) -> Self {
+        Self {
+            sink: Mutex::new(sink),
+        }
+    }
+}
+
+impl<W: Write> RecoveryObserver for NdjsonProgressObserver<W> {
+    /// Drops the line on any failure, and that is a safety decision rather
+    /// than laziness.
+    ///
+    /// This is called from inside a loop that deletes things. The most likely
+    /// failure by far is `EPIPE` — the GUI watching the run quit — and a run
+    /// that aborted, panicked or exited there would be a run interrupted
+    /// partway through a mutation because *nobody was watching*, which is
+    /// precisely the ambiguous filesystem state the cooperative
+    /// [`crate::executor::recovery_loop::StopSignal`] exists to avoid.
+    ///
+    /// Nothing is lost that decides anything: progress is advisory, and the
+    /// authority on what happened is the audit log plus the final
+    /// [`RecoveryRunReport`], neither of which goes through here. Writing a
+    /// diagnostic instead would put a non-JSON line into the stream and break
+    /// the one consumer still reading it.
+    fn observe(&self, event: RecoveryProgress) {
+        let Ok(line) = serde_json::to_string(&build_recovery_progress_event(&event)) else {
+            return;
+        };
+        if let Ok(mut sink) = self.sink.lock() {
+            // One `write_all` for line and terminator together, so a partial
+            // write cannot leave a line without its newline.
+            let _ = sink.write_all(format!("{line}\n").as_bytes());
+            let _ = sink.flush();
+        }
     }
 }
 
@@ -1147,6 +1201,113 @@ mod tests {
         .unwrap();
         assert!(!finished.contains("estimated"), "{finished}");
         assert!(finished.contains("\"reclaimed_bytes\":2000"), "{finished}");
+    }
+
+    /// A sink whose bytes stay readable while the observer still owns it —
+    /// `NdjsonProgressObserver` takes the writer by value, and a test needs to
+    /// see what a consumer would have seen *during* the run, not afterwards.
+    #[derive(Clone, Default)]
+    struct SharedSink(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl SharedSink {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sink that refuses everything, standing in for the overwhelmingly
+    /// likely real failure: the GUI watching a run quit and the pipe closed.
+    struct BrokenSink;
+
+    impl Write for BrokenSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "nobody is listening",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "nobody is listening",
+            ))
+        }
+    }
+
+    /// HORO-1509 AC: the stream is NDJSON — one complete, independently
+    /// parseable object per line, arriving as the run proceeds.
+    ///
+    /// Parsing each line separately is the whole assertion: a consumer reads
+    /// this incrementally and cannot wait for a closing bracket that a run still
+    /// deleting things has not written.
+    #[test]
+    fn the_observer_writes_one_parseable_json_object_per_line() {
+        let sink = SharedSink::default();
+        let observer = NdjsonProgressObserver::new(sink.clone());
+        let events = every_progress_event();
+        for event in events.iter().cloned() {
+            observer.observe(event);
+        }
+
+        let text = sink.text();
+        assert!(
+            text.ends_with('\n'),
+            "a line without its terminator: {text:?}"
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), events.len(), "one line per event: {text:?}");
+        for line in lines {
+            let parsed: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line is not standalone JSON ({e}): {line}"));
+            assert!(parsed["phase"].is_string(), "{line}");
+        }
+    }
+
+    /// Progress must be visible while the run is still running, so each line is
+    /// written the moment its event happens rather than at drop.
+    ///
+    /// A buffered observer would pass the test above and still leave a UI
+    /// showing a spinner for the whole run — the exact failure HORO-1509 exists
+    /// to fix.
+    #[test]
+    fn each_event_reaches_the_sink_before_the_next_one_happens() {
+        let sink = SharedSink::default();
+        let observer = NdjsonProgressObserver::new(sink.clone());
+
+        observer.observe(RecoveryProgress::Discovering { iteration: 1 });
+        assert_eq!(
+            sink.text().lines().count(),
+            1,
+            "the first event was still buffered when the second was emitted"
+        );
+        observer.observe(RecoveryProgress::Revalidating { iteration: 1 });
+        assert_eq!(sink.text().lines().count(), 2);
+    }
+
+    /// A closed pipe must not disturb a run that is deleting things.
+    ///
+    /// The GUI quitting is the likely cause, and a run that aborted there would
+    /// be a mutation interrupted because nobody was watching — the ambiguous
+    /// state the cooperative stop signal exists to avoid. Progress decides
+    /// nothing; the audit log and the final report are the authority.
+    #[test]
+    fn a_sink_that_refuses_every_write_does_not_disturb_the_run() {
+        let observer = NdjsonProgressObserver::new(BrokenSink);
+        for event in every_progress_event() {
+            observer.observe(event);
+        }
     }
 
     /// The two NDJSON streams share the `phase` key, so a client reading both

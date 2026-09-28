@@ -707,7 +707,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         summary: "Reclaim space until a recovery goal is reached.",
         usage: &[
             "free (--goal-used-percent <N> | --target <N%|NB>)",
-            "[--dry-run] [--json] [--progress-json]",
+            "[--dry-run] [--json] [--progress-json] [--stop-file <path>]",
             "[--project-root <path>]...",
         ],
         details: "Runs the recovery loop until the goal is reached, then stops. It \
@@ -751,9 +751,21 @@ pub const COMMANDS: &[CommandSpec] = &[
             },
             OptionSpec {
                 syntax: "--progress-json",
-                description: "Same NDJSON discovery-progress stream as `detect`, on stderr. \
-                              Reports the discovery scan, so it currently requires `--dry-run`; \
-                              a real run does not emit progress events yet.",
+                description: "NDJSON progress on stderr, one object per line, never on stdout. \
+                              With `--dry-run` this is the same discovery-scan stream `detect` \
+                              emits. On a real run it reports the recovery loop itself: which \
+                              iteration, which resource and action, and how many bytes have \
+                              actually been reclaimed so far. Byte counts that could not be \
+                              measured are absent rather than reported as zero.",
+            },
+            OptionSpec {
+                syntax: "--stop-file <path>",
+                description: "Stop after the action currently running, once PATH exists. The \
+                              path must not exist yet — a leftover sentinel would stop the next \
+                              run before it did anything. Cooperative by design: nothing here \
+                              can interrupt a deletion mid-flight, so a stopped run still ends \
+                              with a complete report. Not valid with `--dry-run`, which performs \
+                              no actions to stop.",
             },
             OptionSpec {
                 syntax: "--project-root <path>",
@@ -772,6 +784,14 @@ pub const COMMANDS: &[CommandSpec] = &[
             ExampleSpec {
                 command: "glomeris free --target 20%",
                 purpose: "Reclaim until a fifth of the disk is free.",
+            },
+            ExampleSpec {
+                command: "glomeris free --goal-used-percent 60 --progress-json",
+                purpose: "Reclaim toward 60% used, streaming live progress on stderr.",
+            },
+            ExampleSpec {
+                command: "glomeris free --target 20% --stop-file /tmp/g.stop",
+                purpose: "Reclaim, stopping after the current action once that path exists.",
             },
         ],
         exit_codes: &[],

@@ -1274,6 +1274,7 @@ fn run_free_command(args: &[String]) {
     let mut dry_run = false;
     let mut json = false;
     let mut progress_json = false;
+    let mut stop_file: Option<&str> = None;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
@@ -1296,6 +1297,10 @@ fn run_free_command(args: &[String]) {
             "--progress-json" => {
                 progress_json = true;
                 i += 1;
+            }
+            "--stop-file" => {
+                stop_file = remaining.get(i + 1).map(String::as_str);
+                i += 2;
             }
             other => {
                 eprintln!("glomeris free: unrecognized argument '{other}'");
@@ -1351,15 +1356,14 @@ fn run_free_command(args: &[String]) {
         }
     };
 
-    // `--progress-json` streams the *discovery scan's* progress, which only
-    // the `--dry-run` path performs as a visible step. The recovery loop has
-    // no progress sink yet (HORO-1509 adds one), so accepting the flag here
-    // and quietly doing nothing would let a caller believe it had subscribed
-    // to progress it will never receive. Refuse instead of no-op.
-    if progress_json && !dry_run {
+    // A dry run performs no actions, so there is nothing for a stop request to
+    // stop. Accepting the flag and ignoring it would leave a caller believing it
+    // had a handle on a run it does not — the same reason `--progress-json` was
+    // refused on a real run until this one could honour it.
+    if stop_file.is_some() && dry_run {
         eprintln!(
-            "glomeris free: --progress-json reports discovery progress and currently requires \
-             --dry-run; a real run does not emit progress events yet"
+            "glomeris free: --stop-file asks a running loop to stop after its current \
+             action; --dry-run performs no actions, so the two cannot be combined"
         );
         std::process::exit(2);
     }
@@ -1367,7 +1371,14 @@ fn run_free_command(args: &[String]) {
     if dry_run {
         free_preview(goal, target, project_roots, json, progress_json);
     } else {
-        free_run(goal, target, project_roots, json);
+        free_run(
+            goal,
+            target,
+            project_roots,
+            json,
+            progress_json,
+            stop_file.map(PathBuf::from),
+        );
     }
 }
 
@@ -2881,13 +2892,16 @@ fn free_run(
     target: glomeris::executor::recovery_loop::FreeTarget,
     project_roots: Vec<PathBuf>,
     json: bool,
+    progress_json: bool,
+    stop_file: Option<PathBuf>,
 ) {
     use glomeris::actions::ActionRegistry;
+    use glomeris::cli::recovery::NdjsonProgressObserver;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
-        run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryRunRequest, SilentObserver,
-        SystemWallClock,
+        run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryObserver, RecoveryRunRequest,
+        SilentObserver, StopFile, StopSignal, SystemWallClock,
     };
     use glomeris::monitor::{FsStat, SystemClock};
     use glomeris::platform::macos::MacosFsStat;
@@ -2955,12 +2969,34 @@ fn free_run(
     let clock = SystemClock;
     let wall_clock = SystemWallClock;
     let policy_cfg = PolicyConfig::default();
-    // Nobody is watching this run yet: `--progress-json` on a real run is
-    // wired to a writing observer in a later commit.
-    let observer = SilentObserver;
-    // Nothing can ask this run to stop yet either: `--stop-file` is wired to a
-    // real sentinel in a later commit.
-    let stop_signal = NeverStops;
+    // Progress goes to stderr, never stdout: a `--json` caller's stdout carries
+    // exactly one report, and a stream mixed into it would stop being parseable
+    // as one document. Without the flag the run is observed by nobody, and
+    // stdout and stderr stay byte-identical to a pre-HORO-1509 run.
+    let observer: Box<dyn RecoveryObserver> = if progress_json {
+        Box::new(NdjsonProgressObserver::new(std::io::stderr()))
+    } else {
+        Box::new(SilentObserver)
+    };
+    // A sentinel path the caller creates when the user presses "Stop after
+    // current action". `StopFile::watching` refuses a path that already exists,
+    // and that refusal happens here — before the lock is used to delete
+    // anything — because a stale sentinel from an earlier run would stop this
+    // one immediately and the report would truthfully say the user stopped it
+    // while the user had done nothing at all.
+    let stop_signal: Box<dyn StopSignal> = match &stop_file {
+        Some(path) => match StopFile::watching(path) {
+            Ok(watcher) => Box::new(watcher),
+            Err(e) => {
+                eprintln!(
+                    "glomeris free: cannot watch stop file {}: {e}",
+                    path.display()
+                );
+                std::process::exit(2);
+            }
+        },
+        None => Box::new(NeverStops),
+    };
 
     let audit_log_path = actions_jsonl_path();
     let report = run_recovery_loop(RecoveryRunRequest {
@@ -2975,8 +3011,8 @@ fn free_run(
         target_mount: std::path::Path::new(RECOVERY_TARGET_MOUNT),
         discovery_ctx: &discovery_ctx,
         audit_log_path: &audit_log_path,
-        observer: &observer,
-        stop: &stop_signal,
+        observer: observer.as_ref(),
+        stop: stop_signal.as_ref(),
     });
 
     if json {
@@ -3027,6 +3063,8 @@ fn free_run(
     _target: glomeris::executor::recovery_loop::FreeTarget,
     _project_roots: Vec<PathBuf>,
     _json: bool,
+    _progress_json: bool,
+    _stop_file: Option<PathBuf>,
 ) {
     eprintln!("glomeris free: only supported on macOS");
     std::process::exit(1);

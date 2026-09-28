@@ -17,7 +17,11 @@
 //!
 //! A value like `--goal-used-percent 0` must never appear in this file: it
 //! *would* be an improvement on any real disk, so it would start a real
-//! destructive run against the machine running the tests.
+//! destructive run against the machine running the tests. Since HORO-1509 the
+//! same warning covers any *plausible* used-percent goal — `60`, say — because
+//! the flag combinations that used to be refused at parse time (`--progress-json`
+//! on a real run) are now honoured, and the only thing that was keeping such an
+//! invocation harmless was the refusal.
 
 use std::process::{Command, Stdio};
 
@@ -133,17 +137,137 @@ fn a_refused_goal_is_machine_readable_under_json() {
     );
 }
 
-/// `--progress-json` currently describes the discovery scan only. Accepting it
-/// on a real run and emitting nothing would let a caller believe it had
-/// subscribed to progress it will never receive.
+/// HORO-1509, end to end: a real run streams its own progress as NDJSON on
+/// stderr while leaving stdout a single report.
+///
+/// `--target 0%` is what makes this safe to run for real — it is already met, so
+/// the loop measures the volume, finds the target satisfied at step 2 and stops
+/// without discovering or deleting anything. That also makes it the sharpest
+/// possible assertion: exactly one event can be emitted, so a stream that
+/// carried more would mean the loop had gone further than it said it did.
+///
+/// This test replaces a refusal (`--progress-json` used to require `--dry-run`).
+/// It deliberately does *not* use a used-percent goal: see the module header.
 #[test]
-fn progress_json_on_a_real_run_is_refused_rather_than_silently_ignored() {
-    let run = run_free(&["--goal-used-percent", "60", "--progress-json"]);
+fn progress_json_on_a_real_run_streams_the_loop_on_stderr() {
+    let run = run_free(&["--target", "0%", "--progress-json"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+
+    let lines: Vec<&str> = run.stderr.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "an already-met target stops at step 2, so exactly one measurement is \
+         reportable; got: {}",
+        run.stderr
+    );
+    let event: serde_json::Value = serde_json::from_str(lines[0])
+        .unwrap_or_else(|e| panic!("progress must be NDJSON ({e}): {}", lines[0]));
+    assert_eq!(event["phase"], "measured", "got: {event}");
+    assert_eq!(event["iteration"], 1, "got: {event}");
+    assert_eq!(
+        event["bytes_freed_so_far"], 0,
+        "nothing ran, so nothing may be claimed as reclaimed: {event}"
+    );
+    assert!(
+        event["free_bytes"].is_u64() && event["total_bytes"].is_u64(),
+        "the one measured event is where a client learns current usage: {event}"
+    );
+
+    // The progress stream may never contaminate the report stream: a `--json`
+    // caller's stdout has to stay parseable as exactly one document.
+    assert!(
+        !run.stdout.contains("\"phase\""),
+        "progress leaked onto stdout: {}",
+        run.stdout
+    );
+}
+
+/// Without the flag, a run is observed by nobody — proven by the absence rather
+/// than assumed, because an observer that wrote unconditionally would still pass
+/// every assertion in the test above.
+#[test]
+fn a_run_without_progress_json_emits_no_progress_at_all() {
+    let run = run_free(&["--target", "0%"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.is_empty(),
+        "stderr must stay byte-identical to a pre-HORO-1509 run: {}",
+        run.stderr
+    );
+}
+
+/// A sentinel left behind by an earlier run would stop the next one before it
+/// did anything, and the report would truthfully say the user stopped it while
+/// the user had done nothing at all. Refused, and refused before the run.
+#[test]
+fn a_stop_file_that_already_exists_is_refused_before_anything_runs() {
+    let existing = std::env::temp_dir().join(format!(
+        "glomeris-stop-file-exists-{}-{}.stop",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::write(&existing, b"").expect("create the stale sentinel");
+
+    let run = run_free(&["--target", "0%", "--stop-file", existing.to_str().unwrap()]);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("already exists"),
+        "the refusal must say what is wrong with the path: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "a refused run must print no report: {}",
+        run.stdout
+    );
+
+    std::fs::remove_file(&existing).ok();
+}
+
+/// A dry run performs no actions, so there is nothing for a stop request to
+/// stop. Accepting the flag and ignoring it would hand a caller a handle on a
+/// run it does not have.
+#[test]
+fn a_stop_file_is_refused_together_with_dry_run() {
+    let run = run_free(&[
+        "--target",
+        "0%",
+        "--dry-run",
+        "--stop-file",
+        "/tmp/unused.stop",
+    ]);
     assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
     assert!(
         run.stderr.contains("--dry-run"),
-        "the refusal must say what to do instead: {}",
+        "the refusal must name the conflicting flag: {}",
         run.stderr
+    );
+}
+
+/// Watching for a stop request must not itself create the sentinel — a loop that
+/// created the file it watches would stop immediately, every time.
+#[test]
+fn watching_for_a_stop_request_does_not_create_the_sentinel() {
+    let sentinel = std::env::temp_dir().join(format!(
+        "glomeris-stop-file-unused-{}-{}.stop",
+        std::process::id(),
+        line!()
+    ));
+    std::fs::remove_file(&sentinel).ok();
+
+    let run = run_free(&["--target", "0%", "--stop-file", sentinel.to_str().unwrap()]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("stop reason:            target_reached"),
+        "an unrequested stop must not change why the run ended: {}",
+        run.stdout
+    );
+    assert!(
+        !sentinel.exists(),
+        "the loop created the sentinel it was watching: {}",
+        sentinel.display()
     );
 }
 
