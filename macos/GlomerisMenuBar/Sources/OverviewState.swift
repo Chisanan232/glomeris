@@ -371,11 +371,43 @@ final class RecoveryState: ObservableObject {
     /// goal — that is `.refused`, and it is a report rather than an error.
     @Published var lastErrorMessage: String?
 
-    /// Discovery progress from the pre-flight's `--progress-json` stream. A real
-    /// run emits no progress events yet; `free` refuses `--progress-json`
-    /// outside `--dry-run` rather than accepting it and streaming nothing, and
-    /// HORO-1509 is where that changes.
+    /// Discovery progress from the pre-flight's `--progress-json` stream.
+    ///
+    /// Only the pre-flight's. A real run streams its own progress since
+    /// HORO-1509, but it is a different stream describing a different thing — a
+    /// loop that mutates the filesystem rather than a scan that reads it — and it
+    /// accumulates into ``liveProgress`` below. One `String?` shared by both
+    /// would mean a run's state and a scan's state overwriting each other.
     @Published var progressStatusText: String?
+
+    /// The live state of the run in flight, folded from its `--progress-json`
+    /// stream (HORO-1509).
+    ///
+    /// Reset by ``beginRecovering()`` rather than by the phase change, for the
+    /// same reason ``isRecovering`` is: this describes a process, and a stale
+    /// round number left over from the previous run would be the most
+    /// convincing-looking wrong figure in the panel.
+    @Published private(set) var liveProgress = RecoveryLiveProgress()
+
+    /// The sentinel path the run in flight is watching, or `nil` when no run is
+    /// in flight.
+    ///
+    /// Held here rather than captured in the button's closure because the card is
+    /// rebuilt on every publish and the value has to outlive that. `private(set)`
+    /// with ``requestStop()`` as the only way to act on it: a caller holding the
+    /// URL could create the file at a moment when no run is watching it, and the
+    /// next run would refuse to start.
+    @Published private(set) var stopRequest: RecoveryStopRequest?
+
+    /// `true` once the user has asked this run to stop.
+    ///
+    /// Separate from `liveProgress.stopRequested`, which is set when the *loop*
+    /// reports it noticed. Both exist because the gap between them is real — the
+    /// loop checks between actions, so a request made during a long deletion is
+    /// not acknowledged for as long as that deletion takes — and a button that
+    /// stayed enabled across that gap would invite a second press that changes
+    /// nothing.
+    @Published private(set) var hasRequestedStop = false
 
     /// The pre-flight, held so the user can stop a slow one.
     ///
@@ -392,9 +424,13 @@ final class RecoveryState: ObservableObject {
     /// a state neither this app nor the audit log could describe. A stored
     /// handle is what a Stop button would reach for, and a long closed loop is
     /// precisely the surface on which one looks reasonable — so the handle does
-    /// not exist, and the campaign's "Stop after current action" is a
-    /// cooperative stop inside the Rust loop (HORO-1509) rather than a signal
-    /// from here.
+    /// not exist.
+    ///
+    /// HORO-1509 added the Stop button *without* adding the handle, which is the
+    /// point: "Stop after current action" writes ``stopRequest``'s sentinel file
+    /// and the Rust loop stops itself between actions. The absence above is
+    /// therefore not a limitation the button works around — it is why the button
+    /// can exist at all.
 
     /// `true` from the moment a real run's child starts until it ends.
     ///
@@ -411,14 +447,61 @@ final class RecoveryState: ObservableObject {
     /// non-blocking, so the second child is refused `busy` — a true sentence
     /// whose cause would be us. Both calls are on the main actor, so the read
     /// and the write cannot interleave.
+    /// Claims the right to run and arms the stop request for it.
+    ///
+    /// The sentinel path is generated here rather than by the caller so that
+    /// there is no window in which a run is in flight with nothing to stop it —
+    /// the claim and the handle are one assignment.
     func beginRecovering() -> Bool {
         if isRecovering { return false }
         isRecovering = true
+        liveProgress = RecoveryLiveProgress()
+        stopRequest = .forNewRun()
+        hasRequestedStop = false
         return true
     }
 
+    /// Releases the right to run and removes the sentinel.
+    ///
+    /// Cleanup happens here, on every path out of a run, because the alternative
+    /// is a zero-byte file per run in the temporary directory. It cannot break
+    /// the next run either way — each gets a fresh name — but a directory that
+    /// fills up with evidence of stops nobody asked for is its own small lie.
+    ///
+    /// ``liveProgress`` is deliberately *not* cleared: the run has just finished
+    /// and the numbers describe what it did. The result card replaces them, and
+    /// ``resetGoalProgress()`` clears them when the user dismisses it.
     func endRecovering() {
         isRecovering = false
+        stopRequest?.clear()
+        stopRequest = nil
+    }
+
+    /// Asks the run in flight to stop after the action it is on.
+    ///
+    /// Returns `nil` on success, or one sentence for the caller to show. Returns
+    /// `nil` unchanged when there is no run — the button is not offered then, and
+    /// a state with nothing to stop is not an error to report.
+    ///
+    /// The flag is set before the write is attempted and stays set if the write
+    /// fails, which is the conservative order: a failed request that left the
+    /// button enabled would invite presses against a filesystem that has already
+    /// refused once, and the returned sentence is what tells the user it did not
+    /// take.
+    @discardableResult
+    func requestStop() -> String? {
+        guard let stopRequest else { return nil }
+        hasRequestedStop = true
+        return stopRequest.requestStop()
+    }
+
+    /// Folds one of the run's progress lines in.
+    ///
+    /// A method rather than a settable property so that the accumulation rules
+    /// stay in ``RecoveryLiveProgress`` — a caller that could assign the whole
+    /// value could also assign a figure the CLI never reported.
+    func absorbRunProgress(_ event: RecoveryProgressEventDto) {
+        liveProgress.absorb(event)
     }
 
     /// Clears the pre-flight, the refusal or the result and cancels a running
@@ -429,13 +512,16 @@ final class RecoveryState: ObservableObject {
     /// sitting under a control that now reads 50 would be describing a run the
     /// button would no longer start.
     ///
-    /// It does **not** stop a running recovery, because nothing can: see the
-    /// absent handle above.
+    /// It does **not** stop a running recovery. Nothing here can: the handle does
+    /// not exist, and a user who wants a run to stop presses the button that
+    /// writes the sentinel. Clearing display state while a run continues in the
+    /// background is safe precisely because this method cannot reach it.
     func resetGoalProgress() {
         previewTask?.cancel()
         previewTask = nil
         phase = .idle
         progressStatusText = nil
+        liveProgress = RecoveryLiveProgress()
         lastErrorMessage = nil
     }
 }

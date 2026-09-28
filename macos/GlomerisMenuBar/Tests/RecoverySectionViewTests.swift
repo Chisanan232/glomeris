@@ -1128,4 +1128,169 @@ final class RecoverySectionViewTests: XCTestCase {
     func testAnUnstartedRunSpeaksNothing() {
         XCTAssertEqual(RecoveryLiveProgress().spokenState, "")
     }
+
+    // MARK: - The stop sentinel (HORO-1509)
+
+    /// A fresh path per run, which is the property that keeps a crashed run from
+    /// breaking the next one: `free` refuses a `--stop-file` that already exists,
+    /// and would truthfully report that the user stopped a run they never touched.
+    func testEachRunGetsItsOwnStopPath() {
+        let first = RecoveryStopRequest.forNewRun()
+        let second = RecoveryStopRequest.forNewRun()
+
+        XCTAssertNotEqual(first.url, second.url)
+        for request in [first, second] {
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: request.url.path),
+                "minting a path must not create the file — free refuses one that exists"
+            )
+        }
+    }
+
+    /// Asking creates the file the loop watches, and asking twice is not an
+    /// error: the button can be pressed again before the loop has looked, and the
+    /// second press asks for something already true.
+    func testAskingToStopCreatesTheSentinelAndIsIdempotent() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glomeris-stop-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let request = RecoveryStopRequest.forNewRun(directory: directory)
+        XCTAssertNil(request.requestStop())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: request.url.path))
+        XCTAssertNil(request.requestStop(), "a second press is not a failure")
+
+        request.clear()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: request.url.path))
+    }
+
+    /// The name says which run and which tool, because it is a file in a shared
+    /// temporary directory that a human may well find.
+    func testTheStopPathNamesItsToolAndItsRun() {
+        let id = UUID()
+        let request = RecoveryStopRequest.forNewRun(
+            id: id,
+            directory: URL(fileURLWithPath: "/tmp")
+        )
+        XCTAssertEqual(
+            request.url.lastPathComponent,
+            "glomeris-recovery-stop-\(id.uuidString).stop"
+        )
+    }
+
+    // MARK: - The run's lifecycle in state (HORO-1509)
+
+    /// Starting a run arms the stop request and clears the previous run's
+    /// figures. The order matters in one direction only: a run in flight with no
+    /// stop path is a Stop button that does nothing, so the path is minted by the
+    /// same call that claims the run.
+    func testStartingARunArmsTheStopRequestAndClearsTheLastRunsFigures() throws {
+        let state = RecoveryState()
+        state.absorbRunProgress(try progressEvent(
+            measuredLine(
+                iteration: 3, usedPercent: 70.0, freeHuman: "10 GB",
+                freedSoFar: 99, freedSoFarHuman: "99 B"
+            )
+        ))
+        XCTAssertEqual(state.liveProgress.iteration, 3, "precondition")
+
+        XCTAssertTrue(state.beginRecovering())
+        XCTAssertEqual(state.liveProgress, RecoveryLiveProgress())
+        XCTAssertNotNil(state.stopRequest)
+        XCTAssertFalse(state.hasRequestedStop)
+    }
+
+    /// The second caller is refused and takes nothing from the first: a
+    /// `beginRecovering()` that reset progress before returning `false` would
+    /// blank the running card of the run that is actually in flight.
+    func testARefusedSecondStartLeavesTheRunningOneUntouched() throws {
+        let state = RecoveryState()
+        XCTAssertTrue(state.beginRecovering())
+        let armed = state.stopRequest
+        state.absorbRunProgress(try progressEvent(
+            measuredLine(
+                iteration: 1, usedPercent: 70.0, freeHuman: "10 GB",
+                freedSoFar: 99, freedSoFarHuman: "99 B"
+            )
+        ))
+
+        XCTAssertFalse(state.beginRecovering())
+        XCTAssertEqual(state.stopRequest, armed)
+        XCTAssertEqual(state.liveProgress.iteration, 1)
+    }
+
+    /// Pressing Stop records that it was asked for and creates the file. The flag
+    /// is about the *button* — the card only says "stopping" once the loop's own
+    /// `stop_requested` event arrives, which is a different fact.
+    func testRequestingAStopWritesTheFileAndDisablesTheButton() {
+        let state = RecoveryState()
+        XCTAssertTrue(state.beginRecovering())
+        let path = state.stopRequest?.url.path
+
+        XCTAssertNil(state.requestStop())
+        XCTAssertTrue(state.hasRequestedStop)
+        XCTAssertEqual(FileManager.default.fileExists(atPath: path ?? ""), true)
+        XCTAssertFalse(
+            state.liveProgress.stopRequested,
+            "the loop has not seen it yet, so the card must not claim it is stopping"
+        )
+
+        state.endRecovering()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path ?? ""))
+        XCTAssertNil(state.stopRequest)
+        XCTAssertFalse(state.isRecovering)
+    }
+
+    /// With no run there is nothing to ask, and asking is a no-op rather than an
+    /// error. The button is not rendered outside a run; this is the guard that
+    /// keeps a stray call from writing a file nothing will ever read or delete.
+    func testAskingToStopWithNoRunDoesNothing() {
+        let state = RecoveryState()
+        XCTAssertNil(state.requestStop())
+        XCTAssertFalse(state.hasRequestedStop)
+    }
+
+    /// Dismissing a finished run clears its figures, so the next run does not
+    /// open on the last one's numbers. It cannot happen mid-run: the goal control
+    /// is disabled while recovering and no button that calls this is rendered in
+    /// the running phase.
+    func testDismissingAResultClearsTheFiguresItWasShowing() throws {
+        let state = RecoveryState()
+        state.absorbRunProgress(try progressEvent(
+            actionFinishedLine(
+                iteration: 1, resource: "cargo:/a/target", outcome: "succeeded",
+                freedSoFar: 1_000, freedSoFarHuman: "1.0 kB"
+            )
+        ))
+        XCTAssertTrue(state.liveProgress.hasCompletedWork, "precondition")
+
+        state.resetGoalProgress()
+        XCTAssertEqual(state.liveProgress, RecoveryLiveProgress())
+    }
+
+    /// AC6: nothing persists a run. A GUI restarted mid-run must not reopen
+    /// showing a run that is no longer there — and it cannot, because the live
+    /// state is a value on an `ObservableObject` with no store behind it.
+    /// Asserted as a fact about the source, since what is being claimed is the
+    /// absence of a write.
+    func testNoRunProgressIsPersistedAnywhere() throws {
+        let source = try String(
+            contentsOf: URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Sources/OverviewState.swift"),
+            encoding: .utf8
+        )
+        // Windowed on the class rather than the file so this stays a claim about
+        // the recovery run in particular — a settings store appearing above it
+        // later must not turn this test red, and a defaults write appearing
+        // inside it must.
+        let recoveryState = try XCTUnwrap(source.range(of: "final class RecoveryState"))
+        let tail = source[recoveryState.lowerBound...]
+        XCTAssertFalse(
+            tail.contains("UserDefaults"),
+            "a persisted run phase is one a restart could show as still running"
+        )
+    }
 }

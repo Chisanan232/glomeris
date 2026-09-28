@@ -163,6 +163,13 @@ targets:
       # assertions against driven event sequences here. Its counterpart in the
       # card can only be grepped; this can be run.
       - path: Sources/RecoveryLiveProgress.swift
+      # HORO-1509: the stop sentinel. Compiled in because the property that makes
+      # the Stop button safe is a filesystem fact, not a rendering: the path is
+      # fresh per run, so a sentinel left behind by a crashed run cannot make the
+      # next one report that the user stopped it. That, and "pressing Stop twice is
+      # not an error", are assertions against real files in a temporary directory
+      # here — no recovery run has to be started to check either.
+      - path: Sources/RecoveryStopRequest.swift
       # HORO-1366: the batch itself — the only place in the target that turns a
       # provider's suggestion set into `execute` invocations. Here so its two
       # call sites can be driven against a fixture binary, and so the guards
