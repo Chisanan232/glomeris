@@ -2864,7 +2864,7 @@ fn free_run(
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
-        run as run_recovery_loop, RecoveryConfig, SystemWallClock,
+        run as run_recovery_loop, RecoveryConfig, RecoveryRunRequest, SystemWallClock,
     };
     use glomeris::monitor::{FsStat, SystemClock};
     use glomeris::platform::macos::MacosFsStat;
@@ -2934,19 +2934,19 @@ fn free_run(
     let policy_cfg = PolicyConfig::default();
 
     let audit_log_path = actions_jsonl_path();
-    let report = run_recovery_loop(
-        &config,
-        &fs_stat,
-        &collector,
-        &detector_registry,
-        &action_registry,
-        &clock,
-        &wall_clock,
-        &policy_cfg,
-        std::path::Path::new(RECOVERY_TARGET_MOUNT),
-        &discovery_ctx,
-        &audit_log_path,
-    );
+    let report = run_recovery_loop(RecoveryRunRequest {
+        config: &config,
+        fs_stat: &fs_stat,
+        collector: &collector,
+        detector_registry: &detector_registry,
+        action_registry: &action_registry,
+        clock: &clock,
+        wall_clock: &wall_clock,
+        policy_cfg: &policy_cfg,
+        target_mount: std::path::Path::new(RECOVERY_TARGET_MOUNT),
+        discovery_ctx: &discovery_ctx,
+        audit_log_path: &audit_log_path,
+    });
 
     if json {
         // `total_bytes` is re-read rather than remembered from the

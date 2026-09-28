@@ -943,39 +943,61 @@ fn build_report(
     }
 }
 
-/// Runs one bounded closed-loop recovery pass against `target_mount`,
-/// stopping for exactly one of the [`StopReason`]s. See the module docs
-/// for the safety invariant this never bypasses, and the ticket's loop
-/// steps 1-12 for the per-iteration shape this implements.
+/// Everything one recovery run needs.
 ///
-/// Every I/O-touching dependency is injected so this function itself is
-/// fully unit-testable with fakes: `fs_stat` (disk measurement),
-/// `collector` (correlation refresh, reused by `execute`'s own
-/// revalidation), `detector_registry` (discovery — production callers
-/// pass `DetectorRegistry::builtin()`, but this must be a parameter
-/// rather than constructed internally here: several built-in detectors,
-/// e.g. `HomebrewDetector`, shell out to a real already-installed system
-/// tool regardless of `discovery_ctx`, which would make this function
-/// touch genuine machine state during a test no matter what `fs_stat`/
-/// `collector` fakes it was given), `clock` (the `max_duration` budget
-/// check), and `wall_clock` (the `SystemTime` `classify`/`authorize`
-/// need). `action_registry` and `discovery_ctx` are plain data, not I/O
-/// seams, but are still parameters rather than constructed internally so
-/// a caller controls exactly what's registered/discoverable.
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    config: &RecoveryConfig,
-    fs_stat: &dyn FsStat,
-    collector: &dyn EvidenceCollector,
-    detector_registry: &DetectorRegistry,
-    action_registry: &ActionRegistry,
-    clock: &dyn Clock,
-    wall_clock: &dyn WallClock,
-    policy_cfg: &PolicyConfig,
-    target_mount: &Path,
-    discovery_ctx: &DiscoveryContext,
-    audit_log_path: &Path,
-) -> RecoveryReport {
+/// Every I/O-touching dependency is injected so [`run`] is fully unit-testable
+/// with fakes: `fs_stat` (disk measurement), `collector` (correlation refresh,
+/// reused by `execute`'s own revalidation), `detector_registry` (discovery —
+/// production callers pass `DetectorRegistry::builtin()`, but this must be a
+/// parameter rather than constructed internally: several built-in detectors,
+/// e.g. `HomebrewDetector`, shell out to a real already-installed system tool
+/// regardless of `discovery_ctx`, which would make [`run`] touch genuine
+/// machine state during a test no matter what `fs_stat`/`collector` fakes it
+/// was given), `clock` (the `max_duration` budget check), and `wall_clock`
+/// (the `SystemTime` `classify`/`authorize` need). `action_registry` and
+/// `discovery_ctx` are plain data, not I/O seams, but are still fields rather
+/// than constructed internally so a caller controls exactly what is
+/// registered/discoverable.
+///
+/// A struct rather than a parameter list for the reason
+/// [`crate::autopilot::run::AutopilotRunRequest`] already gives: eleven
+/// independently fakeable seams read as eleven anonymous `&dyn` arguments at a
+/// call site, and `#[allow(clippy::too_many_arguments)]` hid that rather than
+/// fixing it.
+pub struct RecoveryRunRequest<'a> {
+    pub config: &'a RecoveryConfig,
+    pub fs_stat: &'a dyn FsStat,
+    pub collector: &'a dyn EvidenceCollector,
+    pub detector_registry: &'a DetectorRegistry,
+    pub action_registry: &'a ActionRegistry,
+    pub clock: &'a dyn Clock,
+    pub wall_clock: &'a dyn WallClock,
+    pub policy_cfg: &'a PolicyConfig,
+    pub target_mount: &'a Path,
+    pub discovery_ctx: &'a DiscoveryContext,
+    pub audit_log_path: &'a Path,
+}
+
+/// Runs one bounded closed-loop recovery pass against
+/// [`RecoveryRunRequest::target_mount`], stopping for exactly one of the
+/// [`StopReason`]s. See the module docs for the safety invariant this never
+/// bypasses, and the ticket's loop steps 1-12 for the per-iteration shape this
+/// implements.
+pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
+    let RecoveryRunRequest {
+        config,
+        fs_stat,
+        collector,
+        detector_registry,
+        action_registry,
+        clock,
+        wall_clock,
+        policy_cfg,
+        target_mount,
+        discovery_ctx,
+        audit_log_path,
+    } = request;
+
     let start_instant = clock.now();
 
     let started_usage = match fs_stat.stat(target_mount) {
@@ -1482,19 +1504,19 @@ mod run_tests {
         let ctx = empty_discovery_ctx();
 
         let detector_registry = fake_registry(Vec::new());
-        let report = run(
-            &config,
-            &FixedFsStat(usage),
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+        });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
         assert_eq!(report.iterations_run, 0);
@@ -1513,19 +1535,19 @@ mod run_tests {
         let ctx = empty_discovery_ctx();
 
         let detector_registry = fake_registry(Vec::new());
-        let report = run(
-            &config,
-            &FixedFsStat(usage),
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+        });
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
         assert_eq!(report.iterations_run, 0);
@@ -1564,19 +1586,19 @@ mod run_tests {
             Box::new(FailingDetector),
             Box::new(FakeDetector::none()),
         ]);
-        let report = run(
-            &config,
-            &FixedFsStat(usage),
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+        });
 
         assert_eq!(report.stop_reason, StopReason::SafeExhausted);
         assert_eq!(
@@ -1621,19 +1643,19 @@ mod run_tests {
             Box::new(FailingDetector),
             Box::new(FakeDetector::found(vec![evidence])),
         ]);
-        let report = run(
-            &config,
-            &FixedFsStat(usage),
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            &dir.join("actions.jsonl"),
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+        });
 
         assert!(
             report.iterations_run >= 1,
@@ -1664,19 +1686,19 @@ mod run_tests {
         let ctx = empty_discovery_ctx();
 
         let detector_registry = fake_registry(Vec::new());
-        let report = run(
-            &config,
-            &FixedFsStat(usage),
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+        });
 
         assert_eq!(report.stop_reason, StopReason::BudgetExceeded);
         assert_eq!(report.iterations_run, 0);
@@ -1691,19 +1713,19 @@ mod run_tests {
         let ctx = empty_discovery_ctx();
 
         let detector_registry = fake_registry(Vec::new());
-        let report = run(
-            &config,
-            &FailingFsStat,
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FailingFsStat,
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+        });
 
         match report.stop_reason {
             StopReason::Error(_) => {}
@@ -1746,19 +1768,19 @@ mod run_tests {
         let ctx = empty_discovery_ctx();
         let audit_log_path = root_a.join("actions.jsonl");
 
-        let report = run(
-            &config,
-            &FixedFsStat(usage),
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            &audit_log_path,
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+        });
 
         assert_eq!(report.stop_reason, StopReason::NoProgress);
         assert_eq!(report.iterations_run, 2);
@@ -1821,19 +1843,19 @@ mod run_tests {
         let ctx = empty_discovery_ctx();
         let audit_log_path = root.join("actions.jsonl");
 
-        let report = run(
-            &config,
-            &fs_stat,
-            &CleanCollector,
-            &detector_registry,
-            &action_registry,
-            &clock,
-            &wall_clock,
-            &PolicyConfig::default(),
-            Path::new("/"),
-            &ctx,
-            &audit_log_path,
-        );
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &fs_stat,
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+        });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
         assert_eq!(report.iterations_run, 1);
