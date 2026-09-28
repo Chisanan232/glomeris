@@ -187,6 +187,18 @@ targets:
       - path: Sources/GlomerisLlmSettingsStore.swift
       - path: Sources/AiProviderPreferencesView.swift
       - path: Sources/AutopilotPreferencesView.swift
+      # HORO-1510: which mode is in force — asked first, or starting unasked.
+      # Compiled in for the claim the whole file exists to keep true: `make`
+      # decides the acting case on `startsUnprompted`, the value Rust computed,
+      # and consults `respondToAlerts` only to tell the two *inert* states apart.
+      # A test over all four `(enabled, respondToAlerts)` combinations is what
+      # stops a Swift-side `enabled && respondToAlerts` from creeping back in as
+      # a convenience — the no-policy-in-Swift guard reads labels and branches,
+      # and would not see this app composing its own permission out of two
+      # fields. It also pins the third state existing at all: a set-but-revoked
+      # grant must not read as off, or revoking looks like it cleared a choice it
+      # deliberately keeps on file.
+      - path: Sources/AutopilotUnpromptedMode.swift
       # HORO-1507: the recovery settings pane. Compiled in because the two things
       # worth pinning are types, not pixels. `RecoverySettingsInterpretation` is
       # the only place in the app that has to tell a *refused pair* — a
