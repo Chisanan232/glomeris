@@ -52,7 +52,9 @@ use glomeris::cli::recovery::{
 };
 use glomeris::cli::settings::{build_settings_rejection_report, build_settings_report};
 use glomeris::executor::goal::RecoveryGoal;
-use glomeris::executor::recovery_loop::{FreeTarget, RecoveryReport, StopReason};
+use glomeris::executor::recovery_loop::{
+    FreeTarget, RecoveryReport, RemainingCandidates, StopReason,
+};
 use glomeris::monitor::config::ThresholdConfig;
 use glomeris::monitor::episode::{EpisodeConfig, EpisodeResponse, EpisodeTracker};
 use glomeris::monitor::fs_stat::FsUsage;
@@ -835,11 +837,21 @@ fn recovery_run_report_matches_golden_fixture() {
 /// this run did not fail. A client that treated either absence as a zero or a
 /// blank would be inventing a fact, so both are pinned here rather than left to
 /// whichever fixture happened to have them.
+///
+/// It is also the one fixture carrying `remaining` (HORO-1509), because it is
+/// the one that stopped for want of safe work. Three different counts, so a
+/// client that decoded them in the wrong order fails here rather than telling a
+/// user to confirm something protected. `recovery_run_report.json` reached its
+/// goal and omits the key entirely — the pair pins both halves of that rule.
 #[test]
 fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
     let target = FreeTarget::AbsoluteBytes(250_000_000_000);
     let inner = RecoveryReport {
-        stop_reason: StopReason::SafeExhausted,
+        stop_reason: StopReason::SafeExhausted(RemainingCandidates {
+            requires_confirmation: 2,
+            protected: 1,
+            not_executable: 3,
+        }),
         iterations_run: 2,
         actions_executed: 1,
         actions_declined_or_skipped: 3,

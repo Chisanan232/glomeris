@@ -106,9 +106,11 @@ final class GlomerisVocabularyTests: XCTestCase {
         "no_active_use_observed",
     ]
 
-    /// `src/reporting/dto.rs` — `stop_reason_tag`, all five. HORO-1506.
+    /// `src/reporting/dto.rs` — `stop_reason_tag`, all six. HORO-1506, plus
+    /// `stopped_by_user` from HORO-1509's cooperative stop.
     private static let stopReasonTokens = [
-        "target_reached", "safe_exhausted", "budget_exceeded", "no_progress", "error",
+        "target_reached", "safe_exhausted", "budget_exceeded", "no_progress", "stopped_by_user",
+        "error",
     ]
 
     /// `src/executor/goal.rs` — `GoalRejection::as_str`, all three. HORO-1506.

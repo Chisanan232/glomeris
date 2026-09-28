@@ -1274,6 +1274,7 @@ fn run_free_command(args: &[String]) {
     let mut dry_run = false;
     let mut json = false;
     let mut progress_json = false;
+    let mut stop_file: Option<&str> = None;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
@@ -1296,6 +1297,10 @@ fn run_free_command(args: &[String]) {
             "--progress-json" => {
                 progress_json = true;
                 i += 1;
+            }
+            "--stop-file" => {
+                stop_file = remaining.get(i + 1).map(String::as_str);
+                i += 2;
             }
             other => {
                 eprintln!("glomeris free: unrecognized argument '{other}'");
@@ -1351,15 +1356,14 @@ fn run_free_command(args: &[String]) {
         }
     };
 
-    // `--progress-json` streams the *discovery scan's* progress, which only
-    // the `--dry-run` path performs as a visible step. The recovery loop has
-    // no progress sink yet (HORO-1509 adds one), so accepting the flag here
-    // and quietly doing nothing would let a caller believe it had subscribed
-    // to progress it will never receive. Refuse instead of no-op.
-    if progress_json && !dry_run {
+    // A dry run performs no actions, so there is nothing for a stop request to
+    // stop. Accepting the flag and ignoring it would leave a caller believing it
+    // had a handle on a run it does not — the same reason `--progress-json` was
+    // refused on a real run until this one could honour it.
+    if stop_file.is_some() && dry_run {
         eprintln!(
-            "glomeris free: --progress-json reports discovery progress and currently requires \
-             --dry-run; a real run does not emit progress events yet"
+            "glomeris free: --stop-file asks a running loop to stop after its current \
+             action; --dry-run performs no actions, so the two cannot be combined"
         );
         std::process::exit(2);
     }
@@ -1367,7 +1371,14 @@ fn run_free_command(args: &[String]) {
     if dry_run {
         free_preview(goal, target, project_roots, json, progress_json);
     } else {
-        free_run(goal, target, project_roots, json);
+        free_run(
+            goal,
+            target,
+            project_roots,
+            json,
+            progress_json,
+            stop_file.map(PathBuf::from),
+        );
     }
 }
 
@@ -1866,25 +1877,47 @@ fn autopilot_run(_args: &[String]) {
 /// `goal`/`target` are printed because the report alone does not say what the
 /// run was aiming at, and a free-space figure with no stated goal is the
 /// ambiguity HORO-1506 exists to remove. The stop reason is printed as a
-/// sentence from `stop_reason_detail` as well as its `Debug` token: a bare
-/// `SafeExhausted` does not tell a user that the goal was *not* reached.
+/// sentence from `stop_reason_detail` as well as its stable tag: a bare
+/// `safe_exhausted` does not tell a user that the goal was *not* reached.
+///
+/// The tag comes from `stop_reason_tag` rather than `Debug`, so this prints the
+/// same word the JSON does; `SafeExhausted`'s own breakdown gets a line of its
+/// own below instead of arriving as a derived struct dump (HORO-1509).
 fn print_recovery_report(
     goal: Option<&glomeris::executor::goal::RecoveryGoal>,
     target: &glomeris::executor::recovery_loop::FreeTarget,
     report: &glomeris::executor::recovery_loop::RecoveryReport,
 ) {
     use glomeris::cli::recovery::{describe_free_target, stop_reason_detail};
+    use glomeris::executor::recovery_loop::StopReason;
+    use glomeris::reporting::dto::stop_reason_tag;
     use glomeris::reporting::human_bytes;
 
     match goal {
         Some(goal) => println!("recovery goal:          {}", goal.describe()),
         None => println!("free-space target:      {}", describe_free_target(target)),
     }
-    println!("stop reason:            {:?}", report.stop_reason);
+    println!(
+        "stop reason:            {}",
+        stop_reason_tag(&report.stop_reason)
+    );
     println!(
         "                        {}",
         stop_reason_detail(&report.stop_reason)
     );
+    // Printed only for the one stop reason that concluded something about what
+    // it left alone. Each count is a different next step for the user — say
+    // yes, wait for the tool to finish, or nothing at all — so they are listed
+    // separately rather than summed, and they are counts of candidates rather
+    // than bytes: space this run was not permitted to take is not an
+    // opportunity (HORO-1509).
+    if let StopReason::SafeExhausted(remaining) = &report.stop_reason {
+        println!(
+            "still there:            {} awaiting your confirmation, {} not runnable now, \
+             {} protected",
+            remaining.requires_confirmation, remaining.not_executable, remaining.protected
+        );
+    }
     println!("iterations run:         {}", report.iterations_run);
     println!("actions executed:       {}", report.actions_executed);
     println!(
@@ -2859,12 +2892,16 @@ fn free_run(
     target: glomeris::executor::recovery_loop::FreeTarget,
     project_roots: Vec<PathBuf>,
     json: bool,
+    progress_json: bool,
+    stop_file: Option<PathBuf>,
 ) {
     use glomeris::actions::ActionRegistry;
+    use glomeris::cli::recovery::NdjsonProgressObserver;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
-        run as run_recovery_loop, RecoveryConfig, SystemWallClock,
+        run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryObserver, RecoveryRunRequest,
+        SilentObserver, StopFile, StopSignal, SystemWallClock,
     };
     use glomeris::monitor::{FsStat, SystemClock};
     use glomeris::platform::macos::MacosFsStat;
@@ -2932,21 +2969,51 @@ fn free_run(
     let clock = SystemClock;
     let wall_clock = SystemWallClock;
     let policy_cfg = PolicyConfig::default();
+    // Progress goes to stderr, never stdout: a `--json` caller's stdout carries
+    // exactly one report, and a stream mixed into it would stop being parseable
+    // as one document. Without the flag the run is observed by nobody, and
+    // stdout and stderr stay byte-identical to a pre-HORO-1509 run.
+    let observer: Box<dyn RecoveryObserver> = if progress_json {
+        Box::new(NdjsonProgressObserver::new(std::io::stderr()))
+    } else {
+        Box::new(SilentObserver)
+    };
+    // A sentinel path the caller creates when the user presses "Stop after
+    // current action". `StopFile::watching` refuses a path that already exists,
+    // and that refusal happens here — before the lock is used to delete
+    // anything — because a stale sentinel from an earlier run would stop this
+    // one immediately and the report would truthfully say the user stopped it
+    // while the user had done nothing at all.
+    let stop_signal: Box<dyn StopSignal> = match &stop_file {
+        Some(path) => match StopFile::watching(path) {
+            Ok(watcher) => Box::new(watcher),
+            Err(e) => {
+                eprintln!(
+                    "glomeris free: cannot watch stop file {}: {e}",
+                    path.display()
+                );
+                std::process::exit(2);
+            }
+        },
+        None => Box::new(NeverStops),
+    };
 
     let audit_log_path = actions_jsonl_path();
-    let report = run_recovery_loop(
-        &config,
-        &fs_stat,
-        &collector,
-        &detector_registry,
-        &action_registry,
-        &clock,
-        &wall_clock,
-        &policy_cfg,
-        std::path::Path::new(RECOVERY_TARGET_MOUNT),
-        &discovery_ctx,
-        &audit_log_path,
-    );
+    let report = run_recovery_loop(RecoveryRunRequest {
+        config: &config,
+        fs_stat: &fs_stat,
+        collector: &collector,
+        detector_registry: &detector_registry,
+        action_registry: &action_registry,
+        clock: &clock,
+        wall_clock: &wall_clock,
+        policy_cfg: &policy_cfg,
+        target_mount: std::path::Path::new(RECOVERY_TARGET_MOUNT),
+        discovery_ctx: &discovery_ctx,
+        audit_log_path: &audit_log_path,
+        observer: observer.as_ref(),
+        stop: stop_signal.as_ref(),
+    });
 
     if json {
         // `total_bytes` is re-read rather than remembered from the
@@ -2996,6 +3063,8 @@ fn free_run(
     _target: glomeris::executor::recovery_loop::FreeTarget,
     _project_roots: Vec<PathBuf>,
     _json: bool,
+    _progress_json: bool,
+    _stop_file: Option<PathBuf>,
 ) {
     eprintln!("glomeris free: only supported on macOS");
     std::process::exit(1);

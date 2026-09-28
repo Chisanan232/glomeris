@@ -902,11 +902,16 @@ enum GlomerisVocabulary {
     ///
     /// A recovery run either reached the goal or did not, and the product
     /// rule is that a run which did not must say so rather than collapsing
-    /// into "Done". Four of these five stops leave the disk short of what the
+    /// into "Done". Five of these six stops leave the disk short of what the
     /// user asked for, and each leaves them a different next step: wait for
     /// the tools to release what they are holding, raise a limit, look at
-    /// what needs confirming, or read an error. A single "Finished" would be
-    /// true of all four and useful for none.
+    /// what needs confirming, start it again, or read an error. A single
+    /// "Finished" would be true of all five and useful for none.
+    ///
+    /// `stopped_by_user` is the one stop that is nobody's problem: the run did
+    /// what it was told twice over — it ran, and then it stopped. It is toned
+    /// `neutral` rather than `caution` for that reason, and it still says the
+    /// goal was not reached.
     ///
     /// `safe_exhausted` is the one with teeth. It means nothing safe remained
     /// *among the resources this run could see and was allowed to take* —
@@ -954,6 +959,14 @@ enum GlomerisVocabulary {
                     + "repeat itself. What the detectors offered is no longer there, or "
                     + "something is putting it back as fast as it is removed.",
                 "arrow.triangle.2.circlepath", .caution
+            )
+        case "stopped_by_user":
+            return term(
+                "stopped_by_user", stopReasonAxis, "You stopped it",
+                "The run stopped because you asked it to. The action that was already "
+                    + "running finished first — nothing was left half-done — and whatever it "
+                    + "freed stays freed.",
+                "stop.circle.fill", .neutral
             )
         case "error":
             return term(

@@ -1147,6 +1147,125 @@ pub struct RecoveryPreviewReport {
     pub candidates: Vec<DetectCandidateReport>,
 }
 
+/// One line of the `--progress-json` NDJSON stream a recovery run emits on
+/// stderr (HORO-1509) — the projection of
+/// [`crate::executor::recovery_loop::RecoveryProgress`].
+///
+/// This is what makes the closed loop watchable: which iteration is running,
+/// what it is doing right now, and how many bytes have *actually* been
+/// reclaimed. A client that had only the final [`RecoveryRunReport`] could show
+/// nothing but a spinner for a phase the v0.2.0 dogfood measured in minutes.
+///
+/// Same internally-tagged shape and same reasoning as [`ProgressEvent`], whose
+/// doc comment explains why this module's one NDJSON family uses
+/// `#[serde(tag = "phase")]` while every report field gets a `&'static str` tag
+/// from a free function. The two streams share the `phase` key and nothing else:
+/// `ProgressEvent` describes a discovery scan, this describes a run that
+/// mutates the filesystem, and no phase name appears in both.
+///
+/// Two rules hold across every variant, and both exist so a progress line can
+/// never overstate what happened:
+///
+/// - **Measured bytes only.** `bytes_freed_so_far` is re-measured free space,
+///   never a sum of candidate estimates (campaign section 9). The one estimate
+///   in the stream is [`RecoveryProgressEvent::ActionStarted::estimated_bytes`],
+///   named so it cannot be read as progress.
+/// - **Absent, not zero.** Every optional byte count is omitted rather than
+///   serialized as `0`/`null` when it could not be measured, because a client
+///   showing "0 bytes reclaimed" for an action whose size is unknown is
+///   reporting a measurement nobody took.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum RecoveryProgressEvent {
+    /// Loop step 1: the filesystem was measured. The only statement of fact
+    /// about free space in this stream, and therefore the only event a client
+    /// may update its "current usage" display from.
+    Measured {
+        iteration: u32,
+        total_bytes: u64,
+        free_bytes: u64,
+        used_percent: f64,
+        free_human: String,
+        bytes_freed_so_far: u64,
+        bytes_freed_so_far_human: String,
+    },
+    /// Loop step 4 is starting: detectors are being asked what exists *now*.
+    /// The "rescanning" state HORO-1509 asks to be visible. Re-entered every
+    /// iteration by design — the loop never reuses an earlier pass's list.
+    Discovering { iteration: u32 },
+    /// Loop step 4 finished. `candidates` counts what has a resolvable action
+    /// rather than what a detector saw, and a non-zero `detectors_failed` is
+    /// what withdraws a later `safe_exhausted`'s usual meaning: part of the
+    /// disk was never looked at.
+    Discovered {
+        iteration: u32,
+        candidates: u32,
+        detectors_failed: u32,
+    },
+    /// Loop steps 5-6: evidence is being re-collected and reclassified before
+    /// anything is chosen. A client must not offer a "confirm" affordance from
+    /// a stale earlier pass while this is in flight.
+    Revalidating { iteration: u32 },
+    /// Loop step 8: a real mutation is about to run.
+    ActionStarted {
+        iteration: u32,
+        resource: String,
+        action: String,
+        policy_label: &'static str,
+        /// An estimate, named as one. Never accumulated into progress.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_human: Option<String>,
+    },
+    /// Loop step 9: the mutation finished. `reclaimed_bytes` is what the
+    /// executor measured for this one action; absent means it could not be
+    /// measured.
+    ActionFinished {
+        iteration: u32,
+        resource: String,
+        action: String,
+        outcome: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reclaimed_bytes: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reclaimed_human: Option<String>,
+        bytes_freed_so_far: u64,
+        bytes_freed_so_far_human: String,
+    },
+    /// The user's cooperative stop was observed — between actions, never
+    /// during one. The run finishes with `stop_reason: "stopped_by_user"`; this
+    /// event is what lets a UI stop offering the button before that arrives.
+    StopRequested { iteration: u32 },
+}
+
+/// What a run that ran out of safe work left behind (HORO-1509).
+///
+/// Present on [`RecoveryRunReport`] only for `stop_reason == "safe_exhausted"`,
+/// because that is the one stop for which "what is still there" is part of the
+/// answer. A run that reached its goal, hit a budget, or was stopped by the
+/// user concluded nothing about the candidates it never got to, and reporting
+/// zeros for those would be a claim it did not make.
+///
+/// Counts of candidates, never bytes. Summing space a run is not permitted to
+/// take would present unreachable space as an opportunity — the same misread
+/// [`RecoveryOpportunityReport`] splits its own totals to prevent. The field
+/// names match that report's deliberately: a client learns one vocabulary for
+/// "needs confirmation / protected / not executable" and uses it before and
+/// after a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RecoveryRemainingReport {
+    /// Reachable, real, and waiting for the user to say yes.
+    pub requires_confirmation_count: u32,
+    /// Refused by policy on evidence. Not a queue: a later run refuses these
+    /// again on the same evidence.
+    pub protected_count: u32,
+    /// Past the policy gate, but the offered action refuses to run against the
+    /// resource as it currently stands — a live tool, work in progress. This
+    /// one may well be available tomorrow.
+    pub not_executable_count: u32,
+}
+
 /// The outcome of a real recovery run, machine-readable (HORO-1506).
 ///
 /// `glomeris free` printed prose only, which left a GUI with nothing to
@@ -1172,6 +1291,12 @@ pub struct RecoveryRunReport {
     /// Present only for `stop_reason == "error"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the run's last discovery pass looked at and left alone. Present
+    /// only for `stop_reason == "safe_exhausted"` — see
+    /// [`RecoveryRemainingReport`], which explains why it is absent otherwise
+    /// rather than zeroed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<RecoveryRemainingReport>,
     pub iterations_run: u32,
     pub actions_executed: u32,
     pub actions_declined_or_skipped: u32,
@@ -1461,9 +1586,10 @@ pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &
     use crate::executor::recovery_loop::StopReason;
     match reason {
         StopReason::TargetReached => "target_reached",
-        StopReason::SafeExhausted => "safe_exhausted",
+        StopReason::SafeExhausted(_) => "safe_exhausted",
         StopReason::BudgetExceeded => "budget_exceeded",
         StopReason::NoProgress => "no_progress",
+        StopReason::StoppedByUser => "stopped_by_user",
         StopReason::Error(_) => "error",
     }
 }

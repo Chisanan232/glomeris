@@ -702,6 +702,12 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertTrue(dto.detectorFailures.isEmpty)
         XCTAssertTrue(dto.discoveryComplete)
         XCTAssertTrue(dto.caveats.isEmpty)
+
+        // A run that reached its goal stopped on purpose, with candidates it
+        // never got to. Zeros here would read as "we looked and nothing is
+        // left" — a claim it never made — so the key is absent and the app has
+        // nothing to show (HORO-1509).
+        XCTAssertNil(dto.remaining, "only a safe_exhausted run may state what is left behind")
     }
 
     /// Two absences are this fixture's whole point. A raw `--target` floor is
@@ -724,6 +730,20 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.bytesFreedMeasuredHuman, "2.0 GB")
         XCTAssertEqual(dto.detectorFailures, ["homebrew_cache: brew --cache exited 1"])
         XCTAssertFalse(dto.discoveryComplete)
+
+        // HORO-1509: "no safe candidate remained" is only actionable with what
+        // *is* still there, so this fixture carries the breakdown its
+        // counterpart above omits. Three different counts on purpose: each is a
+        // different next step — say yes, wait for a tool to finish, or nothing
+        // at all — so a decoder that transposed the keys would tell a user to
+        // confirm something protected, and must fail here instead.
+        let remaining = try XCTUnwrap(
+            dto.remaining,
+            "a safe_exhausted run must say what it left behind"
+        )
+        XCTAssertEqual(remaining.requiresConfirmationCount, 2)
+        XCTAssertEqual(remaining.protectedCount, 1)
+        XCTAssertEqual(remaining.notExecutableCount, 3)
     }
 
     /// A stop short of the goal must be explained, and the explanation is

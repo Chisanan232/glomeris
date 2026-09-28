@@ -23,11 +23,17 @@
 //! the campaign's "filesystem reality wins" rule stated as code.
 
 use crate::executor::goal::{GoalRejection, RecoveryGoal};
-use crate::executor::recovery_loop::{target_met, FreeTarget, RecoveryReport, StopReason};
+use std::io::Write;
+use std::sync::Mutex;
+
+use crate::executor::recovery_loop::{
+    target_met, FreeTarget, RecoveryObserver, RecoveryProgress, RecoveryReport, StopReason,
+};
 use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::reporting::dto::{
     stop_reason_tag, DetectCandidateReport, DetectReport, RecoveryGoalRejectionReport,
-    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryRunReport,
+    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryProgressEvent,
+    RecoveryRemainingReport, RecoveryRunReport,
 };
 use crate::reporting::human_bytes;
 
@@ -91,7 +97,7 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
         StopReason::TargetReached => {
             "The recovery goal was reached: re-measured free space satisfies it.".to_string()
         }
-        StopReason::SafeExhausted => "The run stopped before reaching the goal because no \
+        StopReason::SafeExhausted(_) => "The run stopped before reaching the goal because no \
              safe candidate remained among the detectors that answered."
             .to_string(),
         StopReason::BudgetExceeded => "The run stopped before reaching the goal because a run \
@@ -99,6 +105,9 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
             .to_string(),
         StopReason::NoProgress => "The run stopped before reaching the goal because recent \
              actions reclaimed no measurable space."
+            .to_string(),
+        StopReason::StoppedByUser => "The run stopped before reaching the goal because you \
+             asked it to stop; the action that was already running finished first."
             .to_string(),
         StopReason::Error(message) => {
             format!("The run could not continue: {message}")
@@ -261,7 +270,7 @@ fn build_run_caveats(report: &RecoveryReport) -> Vec<String> {
          found is unknown and the real opportunity may be larger.",
         report.detector_failures.len()
     )];
-    if report.stop_reason == StopReason::SafeExhausted {
+    if matches!(report.stop_reason, StopReason::SafeExhausted(_)) {
         caveats.push(
             "This run stopped because no safe candidate remained among the detectors \
              that answered. That is not a finding that nothing safe is left."
@@ -290,6 +299,19 @@ pub fn build_recovery_run_report(
         StopReason::Error(message) => Some(message.clone()),
         _ => None,
     };
+    // Projected from the variant that carries it, so the breakdown cannot
+    // appear beside a stop reason that concluded nothing about what is left
+    // (HORO-1509). The field names change here on purpose: the loop names its
+    // own policy classes, the wire names what a user does next, and that is
+    // the same vocabulary `RecoveryOpportunityReport` already uses.
+    let remaining = match &report.stop_reason {
+        StopReason::SafeExhausted(left_behind) => Some(RecoveryRemainingReport {
+            requires_confirmation_count: left_behind.requires_confirmation,
+            protected_count: left_behind.protected,
+            not_executable_count: left_behind.not_executable,
+        }),
+        _ => None,
+    };
 
     RecoveryRunReport {
         goal: goal.map(build_recovery_goal_report),
@@ -297,6 +319,7 @@ pub fn build_recovery_run_report(
         stop_reason: stop_reason_tag(&report.stop_reason),
         stop_reason_detail: stop_reason_detail(&report.stop_reason),
         error,
+        remaining,
         iterations_run: report.iterations_run,
         actions_executed: report.actions_executed,
         actions_declined_or_skipped: report.actions_declined_or_skipped,
@@ -310,6 +333,136 @@ pub fn build_recovery_run_report(
         detector_failures: report.detector_failures.clone(),
         discovery_complete: report.detector_failures.is_empty(),
         caveats: build_run_caveats(report),
+    }
+}
+
+/// Project one live [`RecoveryProgress`] event onto the wire (HORO-1509).
+///
+/// A one-for-one mapping with no judgment in it, and that is deliberate: this
+/// function may not decide anything, summarise anything, or add a number the
+/// loop did not measure. Its only additions are the `human_bytes` renderings,
+/// so a client never formats a byte count that could disagree with the final
+/// report's — the same reason every report DTO in this module carries its
+/// `*_human` twin.
+///
+/// The optional human strings are built with `map`, so "not measured" stays
+/// absent on both fields rather than becoming `"0 B"` — a string that would
+/// read as a measurement of zero.
+pub fn build_recovery_progress_event(progress: &RecoveryProgress) -> RecoveryProgressEvent {
+    match progress {
+        RecoveryProgress::Measured {
+            iteration,
+            usage,
+            bytes_freed_so_far,
+        } => RecoveryProgressEvent::Measured {
+            iteration: *iteration,
+            total_bytes: usage.total_bytes,
+            free_bytes: usage.free_bytes,
+            used_percent: usage.used_percent(),
+            free_human: human_bytes(usage.free_bytes),
+            bytes_freed_so_far: *bytes_freed_so_far,
+            bytes_freed_so_far_human: human_bytes(*bytes_freed_so_far),
+        },
+        RecoveryProgress::Discovering { iteration } => RecoveryProgressEvent::Discovering {
+            iteration: *iteration,
+        },
+        RecoveryProgress::Discovered {
+            iteration,
+            candidates,
+            detectors_failed,
+        } => RecoveryProgressEvent::Discovered {
+            iteration: *iteration,
+            candidates: *candidates,
+            detectors_failed: *detectors_failed,
+        },
+        RecoveryProgress::Revalidating { iteration } => RecoveryProgressEvent::Revalidating {
+            iteration: *iteration,
+        },
+        RecoveryProgress::ActionStarted {
+            iteration,
+            resource,
+            action,
+            policy_label,
+            estimated_bytes,
+        } => RecoveryProgressEvent::ActionStarted {
+            iteration: *iteration,
+            resource: resource.clone(),
+            action: action.clone(),
+            policy_label,
+            estimated_bytes: *estimated_bytes,
+            estimated_human: estimated_bytes.map(human_bytes),
+        },
+        RecoveryProgress::ActionFinished {
+            iteration,
+            resource,
+            action,
+            outcome,
+            reclaimed_bytes,
+            bytes_freed_so_far,
+        } => RecoveryProgressEvent::ActionFinished {
+            iteration: *iteration,
+            resource: resource.clone(),
+            action: action.clone(),
+            outcome,
+            reclaimed_bytes: *reclaimed_bytes,
+            reclaimed_human: reclaimed_bytes.map(human_bytes),
+            bytes_freed_so_far: *bytes_freed_so_far,
+            bytes_freed_so_far_human: human_bytes(*bytes_freed_so_far),
+        },
+        RecoveryProgress::StopRequested { iteration } => RecoveryProgressEvent::StopRequested {
+            iteration: *iteration,
+        },
+    }
+}
+
+/// A [`RecoveryObserver`] that writes each event to a sink as one NDJSON line
+/// (HORO-1509) — what `glomeris free --progress-json` gives the GUI.
+///
+/// Generic over the sink so tests can read back exactly what a consumer would
+/// receive; production passes `std::io::stderr()`, keeping the progress stream
+/// off the stdout a `--json` report owns.
+///
+/// The [`Mutex`] is what makes "one event per line" true rather than intended:
+/// [`RecoveryObserver::observe`] takes `&self`, so without it two events could
+/// interleave halfway through a line and hand the consumer invalid JSON.
+pub struct NdjsonProgressObserver<W> {
+    sink: Mutex<W>,
+}
+
+impl<W: Write> NdjsonProgressObserver<W> {
+    pub fn new(sink: W) -> Self {
+        Self {
+            sink: Mutex::new(sink),
+        }
+    }
+}
+
+impl<W: Write> RecoveryObserver for NdjsonProgressObserver<W> {
+    /// Drops the line on any failure, and that is a safety decision rather
+    /// than laziness.
+    ///
+    /// This is called from inside a loop that deletes things. The most likely
+    /// failure by far is `EPIPE` — the GUI watching the run quit — and a run
+    /// that aborted, panicked or exited there would be a run interrupted
+    /// partway through a mutation because *nobody was watching*, which is
+    /// precisely the ambiguous filesystem state the cooperative
+    /// [`crate::executor::recovery_loop::StopSignal`] exists to avoid.
+    ///
+    /// Nothing is lost that decides anything: progress is advisory, and the
+    /// authority on what happened is the audit log plus the final
+    /// [`RecoveryRunReport`], neither of which goes through here. Writing a
+    /// diagnostic instead would put a non-JSON line into the stream and break
+    /// the one consumer still reading it.
+    fn observe(&self, event: RecoveryProgress) {
+        let Ok(line) = serde_json::to_string(&build_recovery_progress_event(&event)) else {
+            return;
+        };
+        if let Ok(mut sink) = self.sink.lock() {
+            // One `write_all` for line and terminator together, so a partial
+            // write cannot leave a line without its newline.
+            let _ = sink.write_all(format!("{line}\n").as_bytes());
+            let _ = sink.flush();
+        }
     }
 }
 
@@ -351,7 +504,16 @@ pub fn print_recovery_preview_report(report: &RecoveryPreviewReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::recovery_loop::RemainingCandidates;
     use crate::reporting::dto::{DetectorHealthReport, OfferedAction};
+
+    /// `SafeExhausted` having left nothing behind — the right fixture wherever
+    /// a test is about something other than the breakdown itself. The
+    /// breakdown's own projection is pinned by
+    /// `safe_exhausted_projects_what_the_run_left_behind`.
+    fn safe_exhausted() -> StopReason {
+        StopReason::SafeExhausted(RemainingCandidates::default())
+    }
 
     fn candidate(
         id: &str,
@@ -631,20 +793,69 @@ mod tests {
             &target,
             1000,
             // Freed 290 bytes, ending at 350 free — still 65% used.
-            &run_report(StopReason::SafeExhausted, 350, 290),
+            &run_report(safe_exhausted(), 350, 290),
         );
         assert!(!report.target_met);
         assert_eq!(report.bytes_freed_measured, 290);
         assert_eq!(report.stop_reason, "safe_exhausted");
     }
 
+    /// HORO-1509: a client told "no safe candidate remained" must be able to
+    /// tell the user what to do next, which means the counts reach the wire.
+    ///
+    /// The second half is the load-bearing half. Zeros on a `target_reached`
+    /// run would read as "we looked and found nothing left", a claim that run
+    /// never made, so the field is absent rather than defaulted — and a
+    /// `Serialize` DTO makes absence the client's problem to handle only if it
+    /// is genuinely absent.
+    #[test]
+    fn safe_exhausted_projects_what_the_run_left_behind() {
+        let target = FreeTarget::Percentage(20.0);
+        let exhausted = build_recovery_run_report(
+            None,
+            &target,
+            1000,
+            &run_report(
+                StopReason::SafeExhausted(RemainingCandidates {
+                    requires_confirmation: 2,
+                    protected: 3,
+                    not_executable: 1,
+                }),
+                60,
+                0,
+            ),
+        );
+        let remaining = exhausted
+            .remaining
+            .expect("a safe_exhausted run must say what is still there");
+        assert_eq!(remaining.requires_confirmation_count, 2);
+        assert_eq!(remaining.protected_count, 3);
+        assert_eq!(remaining.not_executable_count, 1);
+
+        for reason in [
+            StopReason::TargetReached,
+            StopReason::BudgetExceeded,
+            StopReason::NoProgress,
+            StopReason::StoppedByUser,
+            StopReason::Error("statfs failed".to_string()),
+        ] {
+            let other = build_recovery_run_report(None, &target, 1000, &run_report(reason, 60, 0));
+            assert!(
+                other.remaining.is_none(),
+                "{} concluded nothing about what is left, so it must claim nothing",
+                other.stop_reason
+            );
+        }
+    }
+
     #[test]
     fn no_stop_reason_detail_collapses_into_a_bare_success_word() {
         for reason in [
             StopReason::TargetReached,
-            StopReason::SafeExhausted,
+            safe_exhausted(),
             StopReason::BudgetExceeded,
             StopReason::NoProgress,
+            StopReason::StoppedByUser,
             StopReason::Error("statfs failed".to_string()),
         ] {
             let detail = stop_reason_detail(&reason);
@@ -692,7 +903,7 @@ mod tests {
 
     #[test]
     fn detector_failures_make_the_run_report_say_discovery_was_incomplete() {
-        let mut inner = run_report(StopReason::SafeExhausted, 60, 0);
+        let mut inner = run_report(safe_exhausted(), 60, 0);
         inner.detector_failures = vec!["cargo_target_dir: probe exploded".to_string()];
         let report = build_recovery_run_report(None, &FreeTarget::Percentage(20.0), 1000, &inner);
         assert!(!report.discovery_complete);
@@ -722,7 +933,7 @@ mod tests {
     /// formatting.
     #[test]
     fn run_caveats_carry_no_terminal_formatting() {
-        let mut inner = run_report(StopReason::SafeExhausted, 60, 0);
+        let mut inner = run_report(safe_exhausted(), 60, 0);
         inner.detector_failures = vec![
             "cargo_target_dir: probe exploded".to_string(),
             "homebrew_cache: brew --cache exited 1".to_string(),
@@ -817,6 +1028,323 @@ mod tests {
         ] {
             let json = serde_json::to_string(&build_goal_rejection_report(&rejection)).unwrap();
             assert!(!json.contains("free"), "{json}");
+        }
+    }
+
+    /// Every [`RecoveryProgress`] the loop can emit, in the order a run emits
+    /// them. Written out exhaustively on purpose: a new variant added to the
+    /// domain enum fails `build_recovery_progress_event`'s `match` at compile
+    /// time, and the tests below make sure it also has to be *named* on the
+    /// wire before it can ship.
+    fn every_progress_event() -> Vec<RecoveryProgress> {
+        vec![
+            RecoveryProgress::Measured {
+                iteration: 1,
+                usage: FsUsage::new(1_000, 250),
+                bytes_freed_so_far: 0,
+            },
+            RecoveryProgress::Discovering { iteration: 1 },
+            RecoveryProgress::Discovered {
+                iteration: 1,
+                candidates: 4,
+                detectors_failed: 1,
+            },
+            RecoveryProgress::Revalidating { iteration: 1 },
+            RecoveryProgress::ActionStarted {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                policy_label: "AUTO_SAFE",
+                estimated_bytes: Some(2048),
+            },
+            RecoveryProgress::ActionFinished {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                outcome: "success",
+                reclaimed_bytes: Some(2000),
+                bytes_freed_so_far: 2000,
+            },
+            RecoveryProgress::StopRequested { iteration: 2 },
+        ]
+    }
+
+    /// HORO-1509 AC: the loop is watchable, which means a client can tell one
+    /// phase from another and always knows which iteration it is looking at.
+    ///
+    /// The distinctness assertion is the load-bearing one. Two phases sharing a
+    /// tag would leave a UI unable to tell "we are scanning" from "we are
+    /// deleting" — and `#[serde(tag = "phase")]` would serialize that happily.
+    #[test]
+    fn every_progress_phase_is_distinctly_named_and_carries_its_iteration() {
+        let mut phases = std::collections::BTreeSet::new();
+        for progress in every_progress_event() {
+            let json = serde_json::to_string(&build_recovery_progress_event(&progress)).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let phase = parsed["phase"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no phase tag: {json}"))
+                .to_string();
+            assert!(
+                phase.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "a phase tag is a stable token, not a Rust variant name: {phase}"
+            );
+            assert!(
+                parsed["iteration"].is_u64(),
+                "a progress line with no iteration cannot be placed in the run: {json}"
+            );
+            assert!(phases.insert(phase.clone()), "duplicate phase tag {phase}");
+            // NDJSON: one event per line means no event may contain one.
+            assert!(
+                !json.contains('\n'),
+                "an embedded newline splits the stream: {json}"
+            );
+        }
+        assert_eq!(phases.len(), 7, "got: {phases:?}");
+    }
+
+    /// The measured reading is the one place a client learns current usage, so
+    /// it must arrive on both axes and pre-rendered.
+    #[test]
+    fn a_measured_event_carries_the_usage_it_read_and_the_bytes_it_has_freed() {
+        let event = build_recovery_progress_event(&RecoveryProgress::Measured {
+            iteration: 3,
+            usage: FsUsage::new(1_000, 250),
+            bytes_freed_so_far: 4096,
+        });
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["phase"], "measured");
+        assert_eq!(json["iteration"], 3);
+        assert_eq!(json["total_bytes"], 1_000);
+        assert_eq!(json["free_bytes"], 250);
+        assert_eq!(json["used_percent"], 75.0);
+        assert_eq!(json["bytes_freed_so_far"], 4096);
+        // Rendered by Rust so a 1000-based client formatter cannot disagree
+        // with the final report about the same number.
+        assert_eq!(json["free_human"], human_bytes(250));
+        assert_eq!(json["bytes_freed_so_far_human"], human_bytes(4096));
+    }
+
+    /// HORO-1509 / campaign section 9: an unmeasurable byte count is absent,
+    /// never `0`.
+    ///
+    /// `"0 B"` on an action whose size could not be determined is a measurement
+    /// nobody took, and a progress card showing it would be telling the user the
+    /// deletion achieved nothing. Both halves of the pair have to disappear
+    /// together — a `reclaimed_human` with no `reclaimed_bytes` beside it would
+    /// be a number with no provenance.
+    #[test]
+    fn unmeasured_byte_counts_are_omitted_rather_than_reported_as_zero() {
+        let started = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionStarted {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                policy_label: "ASK",
+                estimated_bytes: None,
+            },
+        ))
+        .unwrap();
+        assert!(!started.contains("estimated_bytes"), "{started}");
+        assert!(!started.contains("estimated_human"), "{started}");
+        assert!(!started.contains("0 B"), "{started}");
+
+        let finished = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionFinished {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                outcome: "success",
+                reclaimed_bytes: None,
+                bytes_freed_so_far: 0,
+            },
+        ))
+        .unwrap();
+        assert!(!finished.contains("reclaimed_bytes"), "{finished}");
+        assert!(!finished.contains("reclaimed_human"), "{finished}");
+        // `bytes_freed_so_far` is a different claim: the run really has freed
+        // nothing measurable yet, and saying so is honest.
+        assert!(finished.contains("\"bytes_freed_so_far\":0"), "{finished}");
+    }
+
+    /// An estimate must be legible as an estimate, and progress must be legible
+    /// as measured. The two live in the same stream, so the names are the only
+    /// thing keeping a client from accumulating the wrong one.
+    #[test]
+    fn an_estimate_is_named_as_one_and_progress_is_named_as_measured() {
+        let started = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionStarted {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                policy_label: "AUTO_SAFE",
+                estimated_bytes: Some(2048),
+            },
+        ))
+        .unwrap();
+        assert!(started.contains("\"estimated_bytes\":2048"), "{started}");
+        assert!(
+            !started.contains("bytes_freed_so_far"),
+            "an action that has not run yet has freed nothing, and must claim nothing: {started}"
+        );
+
+        let finished = serde_json::to_string(&build_recovery_progress_event(
+            &RecoveryProgress::ActionFinished {
+                iteration: 1,
+                resource: "/tmp/p/node_modules".to_string(),
+                action: "node.clean.node_modules".to_string(),
+                outcome: "success",
+                reclaimed_bytes: Some(2000),
+                bytes_freed_so_far: 2000,
+            },
+        ))
+        .unwrap();
+        assert!(!finished.contains("estimated"), "{finished}");
+        assert!(finished.contains("\"reclaimed_bytes\":2000"), "{finished}");
+    }
+
+    /// A sink whose bytes stay readable while the observer still owns it —
+    /// `NdjsonProgressObserver` takes the writer by value, and a test needs to
+    /// see what a consumer would have seen *during* the run, not afterwards.
+    #[derive(Clone, Default)]
+    struct SharedSink(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl SharedSink {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A sink that refuses everything, standing in for the overwhelmingly
+    /// likely real failure: the GUI watching a run quit and the pipe closed.
+    struct BrokenSink;
+
+    impl Write for BrokenSink {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "nobody is listening",
+            ))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "nobody is listening",
+            ))
+        }
+    }
+
+    /// HORO-1509 AC: the stream is NDJSON — one complete, independently
+    /// parseable object per line, arriving as the run proceeds.
+    ///
+    /// Parsing each line separately is the whole assertion: a consumer reads
+    /// this incrementally and cannot wait for a closing bracket that a run still
+    /// deleting things has not written.
+    #[test]
+    fn the_observer_writes_one_parseable_json_object_per_line() {
+        let sink = SharedSink::default();
+        let observer = NdjsonProgressObserver::new(sink.clone());
+        let events = every_progress_event();
+        for event in events.iter().cloned() {
+            observer.observe(event);
+        }
+
+        let text = sink.text();
+        assert!(
+            text.ends_with('\n'),
+            "a line without its terminator: {text:?}"
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), events.len(), "one line per event: {text:?}");
+        for line in lines {
+            let parsed: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("line is not standalone JSON ({e}): {line}"));
+            assert!(parsed["phase"].is_string(), "{line}");
+        }
+    }
+
+    /// Progress must be visible while the run is still running, so each line is
+    /// written the moment its event happens rather than at drop.
+    ///
+    /// A buffered observer would pass the test above and still leave a UI
+    /// showing a spinner for the whole run — the exact failure HORO-1509 exists
+    /// to fix.
+    #[test]
+    fn each_event_reaches_the_sink_before_the_next_one_happens() {
+        let sink = SharedSink::default();
+        let observer = NdjsonProgressObserver::new(sink.clone());
+
+        observer.observe(RecoveryProgress::Discovering { iteration: 1 });
+        assert_eq!(
+            sink.text().lines().count(),
+            1,
+            "the first event was still buffered when the second was emitted"
+        );
+        observer.observe(RecoveryProgress::Revalidating { iteration: 1 });
+        assert_eq!(sink.text().lines().count(), 2);
+    }
+
+    /// A closed pipe must not disturb a run that is deleting things.
+    ///
+    /// The GUI quitting is the likely cause, and a run that aborted there would
+    /// be a mutation interrupted because nobody was watching — the ambiguous
+    /// state the cooperative stop signal exists to avoid. Progress decides
+    /// nothing; the audit log and the final report are the authority.
+    #[test]
+    fn a_sink_that_refuses_every_write_does_not_disturb_the_run() {
+        let observer = NdjsonProgressObserver::new(BrokenSink);
+        for event in every_progress_event() {
+            observer.observe(event);
+        }
+    }
+
+    /// The two NDJSON streams share the `phase` key, so a client reading both
+    /// (the GUI runs `detect` and `free`) must never mistake one for the other.
+    #[test]
+    fn recovery_phases_never_collide_with_discovery_phases() {
+        use crate::reporting::dto::ProgressEvent;
+
+        let discovery = [
+            ProgressEvent::DetectorStarted { detector: "cargo" },
+            ProgressEvent::DetectorFinished {
+                detector: "cargo",
+                candidates_found: 1,
+                outcome: "found",
+                reason: None,
+            },
+        ];
+        let discovery_phases: Vec<String> = discovery
+            .iter()
+            .map(|e| {
+                serde_json::to_value(e).unwrap()["phase"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+
+        for progress in every_progress_event() {
+            let phase = serde_json::to_value(build_recovery_progress_event(&progress)).unwrap()
+                ["phase"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                !discovery_phases.contains(&phase),
+                "{phase} means one thing in a discovery scan and another in a run"
+            );
         }
     }
 }

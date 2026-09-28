@@ -69,9 +69,12 @@ fn free_with_target_already_met_behaves_identically_when_uncontended() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    // The token, not the Rust variant name: since HORO-1509 the prose report
+    // prints `stop_reason_tag`, so a reader comparing a terminal run against a
+    // `--json` run sees one spelling of the stop reason rather than two.
     assert!(
-        stdout.contains("stop reason:            TargetReached"),
-        "expected the same TargetReached report as before HORO-1054, got: {stdout}"
+        stdout.contains("stop reason:            target_reached"),
+        "expected the same target-reached report as before HORO-1054, got: {stdout}"
     );
     assert!(
         stdout.contains("iterations run:         0"),

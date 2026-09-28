@@ -853,6 +853,225 @@ struct RecoveryPreviewReportDto: Decodable, Equatable {
     }
 }
 
+/// One `measured` progress line's payload (HORO-1509).
+///
+/// The only statement of fact about free space in the recovery progress stream,
+/// and therefore the only event a live display may update its "current usage"
+/// from. `bytesFreedSoFar` is re-measured free space rather than a sum of
+/// candidate estimates (campaign §9), which is what makes it safe to show as
+/// progress.
+struct RecoveryMeasuredProgressDto: Decodable, Equatable {
+    let iteration: UInt32
+    let totalBytes: UInt64
+    let freeBytes: UInt64
+    let usedPercent: Double
+    let freeHuman: String
+    let bytesFreedSoFar: UInt64
+    let bytesFreedSoFarHuman: String
+
+    enum CodingKeys: String, CodingKey {
+        case iteration
+        case totalBytes = "total_bytes"
+        case freeBytes = "free_bytes"
+        case usedPercent = "used_percent"
+        case freeHuman = "free_human"
+        case bytesFreedSoFar = "bytes_freed_so_far"
+        case bytesFreedSoFarHuman = "bytes_freed_so_far_human"
+    }
+}
+
+/// One `discovered` progress line's payload (HORO-1509).
+///
+/// `candidates` counts what has a resolvable action rather than what a detector
+/// saw, and a non-zero `detectorsFailed` is what withdraws a later
+/// `safe_exhausted`'s usual meaning: part of the disk was never looked at.
+struct RecoveryDiscoveredProgressDto: Decodable, Equatable {
+    let iteration: UInt32
+    let candidates: UInt32
+    let detectorsFailed: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case iteration
+        case candidates
+        case detectorsFailed = "detectors_failed"
+    }
+}
+
+/// One `action_started` progress line's payload (HORO-1509).
+struct RecoveryActionStartedProgressDto: Decodable, Equatable {
+    let iteration: UInt32
+    let resource: String
+    let action: String
+    /// The policy class the action was admitted under. Carried for display
+    /// only — this app branches on no policy token, per the standing project
+    /// rule in GlomerisMenuBarApp.swift.
+    let policyLabel: String
+    /// An estimate, named as one in Rust and named as one here. Absent when the
+    /// detector could not size the resource, and absent means *not measured* —
+    /// never zero. Must never be accumulated into a progress figure.
+    let estimatedBytes: UInt64?
+    let estimatedHuman: String?
+
+    enum CodingKeys: String, CodingKey {
+        case iteration
+        case resource
+        case action
+        case policyLabel = "policy_label"
+        case estimatedBytes = "estimated_bytes"
+        case estimatedHuman = "estimated_human"
+    }
+}
+
+/// One `action_finished` progress line's payload (HORO-1509).
+struct RecoveryActionFinishedProgressDto: Decodable, Equatable {
+    let iteration: UInt32
+    let resource: String
+    let action: String
+    /// `succeeded`/`failed`/`aborted_by_revalidation`/`dry_run`, from
+    /// `execution_outcome_tag` — the same producer the local audit log uses,
+    /// which is what makes HORO-1509 AC5 (the run summary and the audit log
+    /// agree on actions and outcomes) a property of the code. Worded by
+    /// `GlomerisVocabulary.outcome`.
+    let outcome: String
+    /// What the executor measured for this one action. Absent when it could not
+    /// be measured; a client showing "0 B" for it would be reporting a
+    /// measurement nobody took.
+    let reclaimedBytes: UInt64?
+    let reclaimedHuman: String?
+    /// Re-measured, cumulative, and the figure a progress display belongs on.
+    let bytesFreedSoFar: UInt64
+    let bytesFreedSoFarHuman: String
+
+    enum CodingKeys: String, CodingKey {
+        case iteration
+        case resource
+        case action
+        case outcome
+        case reclaimedBytes = "reclaimed_bytes"
+        case reclaimedHuman = "reclaimed_human"
+        case bytesFreedSoFar = "bytes_freed_so_far"
+        case bytesFreedSoFarHuman = "bytes_freed_so_far_human"
+    }
+}
+
+/// Mirrors `reporting::dto::RecoveryProgressEvent` (HORO-1509) — one line of
+/// the NDJSON stream `glomeris free --progress-json` writes to stderr while a
+/// real recovery run is in flight.
+///
+/// Internally tagged on `phase`, like ``ProgressEventDto``, so this needs a
+/// hand-written `init(from:)`. The two streams share that key and nothing else:
+/// `ProgressEventDto` describes a discovery scan, this describes a run that
+/// mutates the filesystem, and no phase name appears in both — which is why
+/// they are separate types rather than one enum with both sets of cases.
+///
+/// Each payload is decoded from the *same* keyed container as the tag, since
+/// Rust flattens the variant's fields alongside `phase`. A payload struct
+/// ignores the extra `phase` key, so `try Payload(from: decoder)` is the whole
+/// of it.
+///
+/// An unrecognised phase throws, and the throw is the tolerant outcome here
+/// rather than the strict one: `GlomerisClient.readAllWithLiveProgress` skips a
+/// line it cannot decode, so a CLI newer than this app emitting an extra phase
+/// costs one missed status update and nothing else. That is the opposite of the
+/// rule for report tokens like `stopReason`, which stay `String` precisely
+/// because failing their decode would leave the user with no result at all.
+enum RecoveryProgressEventDto: Decodable, Equatable {
+    /// Loop step 1: the filesystem was measured.
+    case measured(RecoveryMeasuredProgressDto)
+    /// Loop step 4 starting: detectors are being asked what exists *now*. The
+    /// "rescanning" state, re-entered every iteration by design — the loop
+    /// never reuses an earlier pass's list.
+    case discovering(iteration: UInt32)
+    /// Loop step 4 finished.
+    case discovered(RecoveryDiscoveredProgressDto)
+    /// Loop steps 5-6: evidence is being re-collected and reclassified before
+    /// anything is chosen. A display must not offer a confirmation affordance
+    /// from a stale earlier pass while this is in flight.
+    case revalidating(iteration: UInt32)
+    /// Loop step 8: a real mutation is about to run.
+    case actionStarted(RecoveryActionStartedProgressDto)
+    /// Loop step 9: the mutation finished.
+    case actionFinished(RecoveryActionFinishedProgressDto)
+    /// The user's cooperative stop was observed — between actions, never during
+    /// one. The run finishes with `stop_reason: "stopped_by_user"`; this event
+    /// is what lets the UI stop offering the button before that arrives.
+    case stopRequested(iteration: UInt32)
+
+    private enum CodingKeys: String, CodingKey {
+        case phase
+        case iteration
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let phase = try container.decode(String.self, forKey: .phase)
+        switch phase {
+        case "measured":
+            self = .measured(try RecoveryMeasuredProgressDto(from: decoder))
+        case "discovering":
+            self = .discovering(iteration: try container.decode(UInt32.self, forKey: .iteration))
+        case "discovered":
+            self = .discovered(try RecoveryDiscoveredProgressDto(from: decoder))
+        case "revalidating":
+            self = .revalidating(iteration: try container.decode(UInt32.self, forKey: .iteration))
+        case "action_started":
+            self = .actionStarted(try RecoveryActionStartedProgressDto(from: decoder))
+        case "action_finished":
+            self = .actionFinished(try RecoveryActionFinishedProgressDto(from: decoder))
+        case "stop_requested":
+            self = .stopRequested(iteration: try container.decode(UInt32.self, forKey: .iteration))
+        default:
+            throw DecodingError.dataCorruptedError(
+                forKey: .phase,
+                in: container,
+                debugDescription: "Unknown RecoveryProgressEvent phase: \(phase)"
+            )
+        }
+    }
+
+    /// Which pass of the loop produced this event.
+    ///
+    /// Every variant carries it — Rust's own tests assert that — so this is a
+    /// total function rather than an optional, and a live display can show the
+    /// iteration without knowing which phase it is in.
+    var iteration: UInt32 {
+        switch self {
+        case .measured(let payload): return payload.iteration
+        case .discovering(let iteration): return iteration
+        case .discovered(let payload): return payload.iteration
+        case .revalidating(let iteration): return iteration
+        case .actionStarted(let payload): return payload.iteration
+        case .actionFinished(let payload): return payload.iteration
+        case .stopRequested(let iteration): return iteration
+        }
+    }
+}
+
+/// Mirrors `reporting::dto::RecoveryRemainingReport` — what a run that ran out
+/// of safe work left behind (HORO-1509).
+///
+/// Three counts rather than one total, because each is a different next step:
+/// the user can say yes to the first, can only wait for the second, and will
+/// never be offered the third. Counts of candidates, never bytes — space the
+/// run was not permitted to take is not an opportunity, which is the same rule
+/// `RecoveryOpportunityReportDto` splits its own totals for.
+struct RecoveryRemainingReportDto: Decodable, Equatable {
+    /// Reachable, real, and waiting for the user to say yes.
+    let requiresConfirmationCount: UInt32
+    /// Refused by policy on evidence. A later run refuses these again.
+    let protectedCount: UInt32
+    /// Past policy, but the offered action refuses to run against the resource
+    /// as it currently stands — a live tool, work in progress. This one may
+    /// well be available tomorrow.
+    let notExecutableCount: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case requiresConfirmationCount = "requires_confirmation_count"
+        case protectedCount = "protected_count"
+        case notExecutableCount = "not_executable_count"
+    }
+}
+
 /// Mirrors `reporting::dto::RecoveryRunReport` — the outcome of a real
 /// recovery run, from `glomeris free --json`.
 ///
@@ -883,6 +1102,12 @@ struct RecoveryRunReportDto: Decodable, Equatable {
     /// because nothing safe was left has to say so.
     let stopReasonDetail: String
     let error: String?
+    /// What the run's last discovery pass looked at and left alone. Present
+    /// only when `stopReason == "safe_exhausted"`: no other stop concluded
+    /// anything about the candidates it never reached, so zeros there would be
+    /// a claim the run did not make. `nil` means "not stated", never "none
+    /// left" (HORO-1509).
+    let remaining: RecoveryRemainingReportDto?
     let iterationsRun: UInt32
     let actionsExecuted: UInt32
     let actionsDeclinedOrSkipped: UInt32
@@ -905,6 +1130,7 @@ struct RecoveryRunReportDto: Decodable, Equatable {
         case stopReason = "stop_reason"
         case stopReasonDetail = "stop_reason_detail"
         case error
+        case remaining
         case iterationsRun = "iterations_run"
         case actionsExecuted = "actions_executed"
         case actionsDeclinedOrSkipped = "actions_declined_or_skipped"
