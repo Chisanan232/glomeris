@@ -198,6 +198,151 @@ struct DetectorHealthReportDto: Decodable, Equatable, Identifiable {
     var didFail: Bool { status == "failed" }
 }
 
+/// Mirrors `reporting::dto::WorkspaceWorktreeReport` (HORO-1511) — one git
+/// working tree inside a family, and what is outstanding in it.
+///
+/// ## Nothing here is permission
+///
+/// There is deliberately no `executable` field, no action id and no offered
+/// action. A surface that wants to know what may be done with this
+/// worktree's resources looks `memberResourceIds` up in
+/// `DetectReportDto.candidates` and reads the candidate's own `executable`,
+/// `offeredActions` and `refusalReason` — the same single enablement path
+/// `LlmPlanItemReportDto.candidate` documents, for the same reason. "That
+/// branch is already merged" and "nothing has touched this in four months"
+/// are the most persuasive things this app can say about a directory, and
+/// persuasive is not the same as authorized.
+struct WorkspaceWorktreeReportDto: Decodable, Equatable, Identifiable {
+    let root: String
+    /// `true` for a `git worktree add` sibling, `false` for the
+    /// repository's main checkout.
+    let linkedWorktree: Bool
+    let dirty: Bool
+    let untracked: Bool
+    /// `"in_use"`, `"idle"` or `"unknown"`. `"unknown"` is NOT `"idle"`: a
+    /// correlation probe that could not answer lands here, and
+    /// `holdsWorkInProgress` counts it as possible use.
+    let activity: String
+    /// `"untracked"`, `"tracking"` or `"unknown"`. `"untracked"` means there
+    /// is no published counterpart to compare against — not that nothing is
+    /// unpushed.
+    let upstream: String
+    /// Both `nil` unless `upstream` is `"tracking"`.
+    let ahead: UInt32?
+    let behind: UInt32?
+    /// `nil` for a detached HEAD, and also for a branch state no probe could
+    /// read — `upstream` and `merged` are `"unknown"` in that case, which is
+    /// what tells the two apart.
+    let branch: String?
+    /// `"merged"`, `"not_merged"` or `"unknown"`. `"unknown"` is what a
+    /// repository with no recorded default branch gets: Rust never guesses
+    /// at `main`, so neither may a surface.
+    let merged: String
+    let mergedInto: String?
+    /// Whether this worktree holds something that should stop a person
+    /// treating it as spent: uncommitted work, untracked files, something
+    /// using it, or commits no remote has.
+    ///
+    /// A sentence to show, never a gate. `false` does not make anything
+    /// deletable — the resource still goes through the policy class its own
+    /// evidence earned and through deletion-time revalidation.
+    let holdsWorkInProgress: Bool
+    /// The resource ids of this worktree's discovered candidates, in
+    /// `DetectReportDto.candidates`' own order. Ids only: the aggregate
+    /// explains, the candidate list authorizes.
+    let memberResourceIds: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case root
+        case linkedWorktree = "linked_worktree"
+        case dirty
+        case untracked
+        case activity
+        case upstream
+        case ahead
+        case behind
+        case branch
+        case merged
+        case mergedInto = "merged_into"
+        case holdsWorkInProgress = "holds_work_in_progress"
+        case memberResourceIds = "member_resource_ids"
+    }
+
+    var id: String { root }
+}
+
+/// Mirrors `reporting::dto::WorkspaceFamilyReport` (HORO-1511) — every
+/// worktree sharing one git directory, i.e. one repository's checkouts, and
+/// what they add up to.
+///
+/// This exists so a person can be told "this project accounts for 7.5 GB
+/// across three worktrees" instead of reading thirty unrelated-looking
+/// lines. That figure is an attention figure and nothing else: it is summed
+/// from detector *estimates*, so it may not be what a run actually reclaims,
+/// and `worktreesHoldingWorkInProgress` is published beside it precisely
+/// because the bulk and the outstanding work are in the same group.
+///
+/// `protectedCount` is a count and there is no `protectedBytes`, by design:
+/// presenting bytes a run can never take as part of a project's reclaimable
+/// total is the exact misread the split prevents.
+struct WorkspaceFamilyReportDto: Decodable, Equatable, Identifiable {
+    /// The shared git directory that identifies this family.
+    let commonDir: String
+    let worktreeCount: UInt64
+    /// Estimated space a recovery run could take from this family without
+    /// asking — members the policy engine labelled `AUTO_SAFE`.
+    let actionableNowBytes: UInt64
+    let actionableNowHuman: String
+    let actionableNowCount: UInt64
+    /// Members labelled `ASK`: real bulk, but not automatic.
+    let requiresConfirmationBytes: UInt64
+    let requiresConfirmationHuman: String
+    let requiresConfirmationCount: UInt64
+    /// Counted, not summed. See this type's doc comment.
+    let protectedCount: UInt64
+    /// Members whose evidence was too thin to classify, which policy treats
+    /// as protected.
+    let unknownCount: UInt64
+    /// Members no probe measured. Distinct from a zero-byte member, and the
+    /// reason the totals above are not the whole story.
+    let unmeasuredCount: UInt64
+    /// `true` when a member inside one of the byte totals reported its
+    /// estimate as a lower bound, so the real figure may be larger.
+    let isLowerBound: Bool
+    /// How many worktrees hold work in progress. `> 0` is why a family total
+    /// must never read as "delete this project".
+    let worktreesHoldingWorkInProgress: UInt64
+    /// Sorted by root path on the Rust side, so two runs over one disk state
+    /// agree and a surface does not need to re-sort.
+    let worktrees: [WorkspaceWorktreeReportDto]
+
+    enum CodingKeys: String, CodingKey {
+        case commonDir = "common_dir"
+        case worktreeCount = "worktree_count"
+        case actionableNowBytes = "actionable_now_bytes"
+        case actionableNowHuman = "actionable_now_human"
+        case actionableNowCount = "actionable_now_count"
+        case requiresConfirmationBytes = "requires_confirmation_bytes"
+        case requiresConfirmationHuman = "requires_confirmation_human"
+        case requiresConfirmationCount = "requires_confirmation_count"
+        case protectedCount = "protected_count"
+        case unknownCount = "unknown_count"
+        case unmeasuredCount = "unmeasured_count"
+        case isLowerBound = "is_lower_bound"
+        case worktreesHoldingWorkInProgress = "worktrees_holding_work_in_progress"
+        case worktrees
+    }
+
+    var id: String { commonDir }
+
+    /// Members this family knows of, across every worktree. Not a byte
+    /// figure and not a permission — the number of candidate rows a person
+    /// would find if they went looking.
+    var memberCount: UInt64 {
+        actionableNowCount + requiresConfirmationCount + protectedCount + unknownCount
+    }
+}
+
 /// Mirrors `reporting::dto::DetectReport`.
 struct DetectReportDto: Decodable, Equatable {
     let candidates: [DetectCandidateReportDto]
@@ -237,10 +382,23 @@ struct DetectReportDto: Decodable, Equatable {
         detectors.filter(\.didFail)
     }
 
+    /// Discovered resources grouped by the git worktree family they belong
+    /// to (HORO-1511) — explanatory metadata for "where did my disk go",
+    /// never an authorization.
+    ///
+    /// Empty when the CLI did not group, which includes a binary that
+    /// predates the field: Rust omits the key entirely rather than emitting
+    /// `[]`, and both read as "no grouping was done here" rather than as
+    /// "this machine has no worktree families". A resource outside any git
+    /// working tree, or one whose git probe failed, appears in `candidates`
+    /// and in no family, so the families never account for the whole list.
+    let workspaces: [WorkspaceFamilyReportDto]
+
     enum CodingKeys: String, CodingKey {
         case candidates
         case detectors
         case discoveryComplete = "discovery_complete"
+        case workspaces
     }
 
     init(from decoder: Decoder) throws {
@@ -250,17 +408,22 @@ struct DetectReportDto: Decodable, Equatable {
             try container.decodeIfPresent([DetectorHealthReportDto].self, forKey: .detectors) ?? []
         discoveryComplete =
             try container.decodeIfPresent(Bool.self, forKey: .discoveryComplete) ?? true
+        workspaces =
+            try container.decodeIfPresent([WorkspaceFamilyReportDto].self, forKey: .workspaces)
+            ?? []
     }
 
     /// Non-decoding initializer for tests and previews.
     init(
         candidates: [DetectCandidateReportDto],
         detectors: [DetectorHealthReportDto] = [],
-        discoveryComplete: Bool = true
+        discoveryComplete: Bool = true,
+        workspaces: [WorkspaceFamilyReportDto] = []
     ) {
         self.candidates = candidates
         self.detectors = detectors
         self.discoveryComplete = discoveryComplete
+        self.workspaces = workspaces
     }
 }
 
