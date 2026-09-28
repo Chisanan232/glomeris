@@ -439,7 +439,8 @@ final class RecoveryState: ObservableObject {
     /// the guard that no second run can start has to outlive that.
     @Published private(set) var isRecovering = false
 
-    /// Claims the right to run, or reports that a run already holds it.
+    /// Claims the right to run and arms the stop request for it, or reports that
+    /// a run already holds it.
     ///
     /// A compare-and-set for the same reason as
     /// ``PlanState/beginApplyingBatch()``: two concurrent runs would take turns
@@ -447,11 +448,12 @@ final class RecoveryState: ObservableObject {
     /// non-blocking, so the second child is refused `busy` — a true sentence
     /// whose cause would be us. Both calls are on the main actor, so the read
     /// and the write cannot interleave.
-    /// Claims the right to run and arms the stop request for it.
     ///
-    /// The sentinel path is generated here rather than by the caller so that
-    /// there is no window in which a run is in flight with nothing to stop it —
-    /// the claim and the handle are one assignment.
+    /// The sentinel path is generated here rather than by the caller (HORO-1509)
+    /// so that there is no window in which a run is in flight with nothing able
+    /// to stop it — the claim and the handle are one call. The refusal path
+    /// touches neither, because blanking the live figures before returning
+    /// `false` would clear the card of the run that is actually running.
     func beginRecovering() -> Bool {
         if isRecovering { return false }
         isRecovering = true

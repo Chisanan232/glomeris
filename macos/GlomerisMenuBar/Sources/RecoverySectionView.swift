@@ -267,7 +267,13 @@ struct RecoveryRunSummary: Equatable {
             parts.append("\(remaining.protectedCount) protected")
         }
         if remaining.notExecutableCount > 0 {
-            parts.append("\(remaining.notExecutableCount) in use right now")
+            // "right now" rather than a cause. Rust's own doc says the action
+            // refuses against the resource *as it currently stands*, and only
+            // that this is "typically" because the owning tool is live — so
+            // wording it as "in use" would state a reason the CLI offers as a
+            // likelihood, and would read as wrong in the cases where it is not
+            // the reason.
+            parts.append("\(remaining.notExecutableCount) nothing can act on right now")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }

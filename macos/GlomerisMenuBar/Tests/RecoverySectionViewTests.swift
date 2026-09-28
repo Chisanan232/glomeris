@@ -1246,7 +1246,7 @@ final class RecoverySectionViewTests: XCTestCase {
         let remaining = try XCTUnwrap(summary.remainingText)
         XCTAssertTrue(remaining.contains("2 need your confirmation"), "got: \(remaining)")
         XCTAssertTrue(remaining.contains("1 protected"), "got: \(remaining)")
-        XCTAssertTrue(remaining.contains("3 in use right now"), "got: \(remaining)")
+        XCTAssertTrue(remaining.contains("3 nothing can act on right now"), "got: \(remaining)")
         XCTAssertFalse(
             remaining.contains("6"),
             "one total would say 6 things are waiting for the user, when 2 are: \(remaining)"
