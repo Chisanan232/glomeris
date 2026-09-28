@@ -1241,11 +1241,12 @@ pub enum RecoveryProgressEvent {
 
 /// What a run that ran out of safe work left behind (HORO-1509).
 ///
-/// Present on [`RecoveryRunReport`] only for `stop_reason == "safe_exhausted"`,
-/// because that is the one stop for which "what is still there" is part of the
-/// answer. A run that reached its goal, hit a budget, or was stopped by the
-/// user concluded nothing about the candidates it never got to, and reporting
-/// zeros for those would be a claim it did not make.
+/// Present on [`RecoveryRunReport`] for the two stops for which "what is still
+/// there" is part of the answer: `safe_exhausted`, and `envelope_refused` where
+/// the envelope refused after a discovery pass (HORO-1510). A run that reached
+/// its goal, hit a run budget, was stopped by the user, or was refused by its
+/// envelope *before* looking concluded nothing about the candidates it never got
+/// to, and reporting zeros for those would be a claim it did not make.
 ///
 /// Counts of candidates, never bytes. Summing space a run is not permitted to
 /// take would present unreachable space as an opportunity — the same misread
@@ -1264,6 +1265,17 @@ pub struct RecoveryRemainingReport {
     /// resource as it currently stands — a live tool, work in progress. This
     /// one may well be available tomorrow.
     pub not_executable_count: u32,
+    /// Executable and safe, and refused by the *Autopilot envelope* instead:
+    /// a resource kind the user did not allowlist, an `Ask` risk they did not
+    /// pre-authorize, or a size the remaining byte budget cannot cover
+    /// (HORO-1510).
+    ///
+    /// Always `0` for a run the user started themselves. Kept apart from the
+    /// three above because it is the only one of the four that says nothing
+    /// about the resource: a recovery the user starts can take all of these,
+    /// today, and a client that folded this into `protected_count` would tell
+    /// them the opposite.
+    pub not_permitted_by_autopilot_count: u32,
 }
 
 /// The outcome of a real recovery run, machine-readable (HORO-1506).
@@ -1291,8 +1303,22 @@ pub struct RecoveryRunReport {
     /// Present only for `stop_reason == "error"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Which envelope limit refused, as a stable snake_case token from
+    /// [`crate::autopilot::RefusalReason::as_str`]. Present only for
+    /// `stop_reason == "envelope_refused"` (HORO-1510).
+    ///
+    /// A separate field rather than a second stop-reason tag per refusal, so
+    /// `stop_reason` stays a small closed set a client can exhaustively handle,
+    /// and so the token here is the *same* vocabulary `glomeris execute` and
+    /// `glomeris autopilot` already publish for the same refusals — a client
+    /// that has wording for `action_budget_exhausted` does not need new wording
+    /// because the refusal arrived at the end of a recovery run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope_refusal: Option<&'static str>,
     /// What the run's last discovery pass looked at and left alone. Present
-    /// only for `stop_reason == "safe_exhausted"` — see
+    /// for `stop_reason == "safe_exhausted"`, and for
+    /// `stop_reason == "envelope_refused"` when the envelope refused *after* a
+    /// discovery pass rather than before one — see
     /// [`RecoveryRemainingReport`], which explains why it is absent otherwise
     /// rather than zeroed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1590,7 +1616,7 @@ pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &
         StopReason::BudgetExceeded => "budget_exceeded",
         StopReason::NoProgress => "no_progress",
         StopReason::StoppedByUser => "stopped_by_user",
-        StopReason::EnvelopeRefused(_) => "envelope_refused",
+        StopReason::EnvelopeRefused { .. } => "envelope_refused",
         StopReason::Error(_) => "error",
     }
 }

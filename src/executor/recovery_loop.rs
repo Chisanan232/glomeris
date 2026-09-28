@@ -368,7 +368,19 @@ pub enum StopReason {
     /// plenty still there for a run they start themselves (§7).
     ///
     /// Unreachable for a run with no `RecoveryAdmission`.
-    EnvelopeRefused(RefusalReason),
+    EnvelopeRefused {
+        refusal: RefusalReason,
+        /// What the selection pass that refused everything left behind, or
+        /// `None` when the envelope refused the run *before* it looked —
+        /// Autopilot revoked, or the machine below the pressure floor.
+        ///
+        /// `Option` rather than zeros for the HORO-1484 reason: a breakdown of
+        /// zeros reads as "we looked everywhere and found nothing", and a run
+        /// that never ran discovery has not earned that sentence. `Some` here
+        /// is the useful case for a UI — it is how many candidates are sitting
+        /// there for a recovery the user starts themselves.
+        remaining: Option<RemainingCandidates>,
+    },
     /// The last `NO_PROGRESS_STREAK_THRESHOLD` consecutive successfully
     /// executed actions each measured zero (or unmeasurable) actual
     /// reclaimed bytes.
@@ -1759,7 +1771,12 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             // under it.
             if !envelope.is_enabled() {
                 return build_report(
-                    StopReason::EnvelopeRefused(RefusalReason::AutopilotRevoked),
+                    StopReason::EnvelopeRefused {
+                        refusal: RefusalReason::AutopilotRevoked,
+                        // Nothing was discovered, so there is nothing this run
+                        // may claim about what is left.
+                        remaining: None,
+                    },
                     iterations_run,
                     actions_executed,
                     actions_declined_or_skipped,
@@ -1781,7 +1798,10 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 let observed = admission.as_ref().and_then(|a| a.observed_pressure);
                 if let Err(reason) = admits_pressure(envelope, observed) {
                     return build_report(
-                        StopReason::EnvelopeRefused(reason),
+                        StopReason::EnvelopeRefused {
+                            refusal: reason,
+                            remaining: None,
+                        },
                         iterations_run,
                         actions_executed,
                         actions_declined_or_skipped,
@@ -1857,7 +1877,13 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             // discovered that the disk holds nothing safe, and must not be
             // reported as though it had.
             let stop_reason = match selection.budget_refusal {
-                Some(reason) => StopReason::EnvelopeRefused(reason),
+                // This pass did look, so it can say what it saw — and for an
+                // envelope refusal that breakdown is the actionable part: those
+                // candidates are still there for a run the user starts.
+                Some(refusal) => StopReason::EnvelopeRefused {
+                    refusal,
+                    remaining: Some(remaining),
+                },
                 None => StopReason::SafeExhausted(remaining),
             };
             return build_report(
@@ -3615,7 +3641,10 @@ mod run_tests {
 
         assert_eq!(
             report.stop_reason,
-            StopReason::EnvelopeRefused(RefusalReason::AutopilotRevoked)
+            StopReason::EnvelopeRefused {
+                refusal: RefusalReason::AutopilotRevoked,
+                remaining: None,
+            }
         );
         assert_eq!(report.iterations_run, 0);
         assert_eq!(report.actions_executed, 0);
@@ -3673,10 +3702,13 @@ mod run_tests {
 
         assert_eq!(
             report.stop_reason,
-            StopReason::EnvelopeRefused(RefusalReason::DiskPressureTooLow {
-                required: PressureState::Critical,
-                observed: Some(PressureState::Warn),
-            })
+            StopReason::EnvelopeRefused {
+                refusal: RefusalReason::DiskPressureTooLow {
+                    required: PressureState::Critical,
+                    observed: Some(PressureState::Warn),
+                },
+                remaining: None,
+            }
         );
         assert_eq!(
             observer.phases(),
@@ -3729,10 +3761,13 @@ mod run_tests {
 
         assert_eq!(
             report.stop_reason,
-            StopReason::EnvelopeRefused(RefusalReason::DiskPressureTooLow {
-                required: PressureState::Warn,
-                observed: None,
-            })
+            StopReason::EnvelopeRefused {
+                refusal: RefusalReason::DiskPressureTooLow {
+                    required: PressureState::Warn,
+                    observed: None,
+                },
+                remaining: None,
+            }
         );
         assert!(survivor.exists());
 
@@ -3872,7 +3907,18 @@ mod run_tests {
 
         assert_eq!(
             report.stop_reason,
-            StopReason::EnvelopeRefused(RefusalReason::ActionBudgetExhausted { max_actions: 1 })
+            StopReason::EnvelopeRefused {
+                refusal: RefusalReason::ActionBudgetExhausted { max_actions: 1 },
+                // The pass that refused did look, so it reports what it saw —
+                // and this is the number that tells a user the disk is fine:
+                // one safe candidate is sitting there for them.
+                remaining: Some(RemainingCandidates {
+                    requires_confirmation: 0,
+                    protected: 0,
+                    not_executable: 0,
+                    not_permitted_by_autopilot: 1,
+                }),
+            }
         );
         // Stated separately and negatively, because this is the specific
         // wrong answer the variant exists to prevent — a user told

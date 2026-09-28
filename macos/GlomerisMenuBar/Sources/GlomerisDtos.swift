@@ -1050,9 +1050,10 @@ enum RecoveryProgressEventDto: Decodable, Equatable {
 /// Mirrors `reporting::dto::RecoveryRemainingReport` — what a run that ran out
 /// of safe work left behind (HORO-1509).
 ///
-/// Three counts rather than one total, because each is a different next step:
-/// the user can say yes to the first, can only wait for the second, and will
-/// never be offered the third. Counts of candidates, never bytes — space the
+/// Four counts rather than one total, because each is a different next step:
+/// the user can say yes to the first, can only wait for the second, will
+/// never be offered the third, and can have the fourth simply by starting the
+/// run themselves. Counts of candidates, never bytes — space the
 /// run was not permitted to take is not an opportunity, which is the same rule
 /// `RecoveryOpportunityReportDto` splits its own totals for.
 struct RecoveryRemainingReportDto: Decodable, Equatable {
@@ -1064,11 +1065,22 @@ struct RecoveryRemainingReportDto: Decodable, Equatable {
     /// as it currently stands — a live tool, work in progress. This one may
     /// well be available tomorrow.
     let notExecutableCount: UInt32
+    /// Left alone only because *this* Autopilot run was not authorized to take
+    /// it — an unallowed resource kind, or a budget already spent (HORO-1510).
+    /// Always `0` for a run the user started, which has no Autopilot envelope
+    /// to refuse anything.
+    ///
+    /// Kept apart from the three above because it says nothing about the
+    /// resource: the other three are facts about what is on the disk, and this
+    /// one is a fact about the run's authority. Folded into `protectedCount` it
+    /// would tell a user something is off limits when it is one click away.
+    let notPermittedByAutopilotCount: UInt32
 
     enum CodingKeys: String, CodingKey {
         case requiresConfirmationCount = "requires_confirmation_count"
         case protectedCount = "protected_count"
         case notExecutableCount = "not_executable_count"
+        case notPermittedByAutopilotCount = "not_permitted_by_autopilot_count"
     }
 }
 
@@ -1102,11 +1114,25 @@ struct RecoveryRunReportDto: Decodable, Equatable {
     /// because nothing safe was left has to say so.
     let stopReasonDetail: String
     let error: String?
+    /// Which Autopilot limit ended the run, as the gate's own snake_case token
+    /// (`action_budget_exhausted`, `byte_budget_exhausted`,
+    /// `disk_pressure_too_low`, …). Present only when
+    /// `stopReason == "envelope_refused"` (HORO-1510).
+    ///
+    /// A separate field from `stopReason` so that stop reason stays a small
+    /// closed set, and read from here rather than by matching words out of
+    /// `stopReasonDetail`, which is prose and will be reworded. Turned into
+    /// words by `GlomerisVocabulary.autopilotRefusal`, which already covers
+    /// these tokens for `glomeris autopilot`.
+    let envelopeRefusal: String?
     /// What the run's last discovery pass looked at and left alone. Present
-    /// only when `stopReason == "safe_exhausted"`: no other stop concluded
-    /// anything about the candidates it never reached, so zeros there would be
-    /// a claim the run did not make. `nil` means "not stated", never "none
-    /// left" (HORO-1509).
+    /// when `stopReason == "safe_exhausted"`, and when
+    /// `stopReason == "envelope_refused"` *after* a pass that did look: no
+    /// other stop concluded anything about the candidates it never reached, so
+    /// zeros there would be a claim the run did not make. An Autopilot run
+    /// refused before discovery — revoked, or the machine below its pressure
+    /// floor — omits it for the same reason. `nil` means "not stated", never
+    /// "none left" (HORO-1509, HORO-1510).
     let remaining: RecoveryRemainingReportDto?
     let iterationsRun: UInt32
     let actionsExecuted: UInt32
@@ -1130,6 +1156,7 @@ struct RecoveryRunReportDto: Decodable, Equatable {
         case stopReason = "stop_reason"
         case stopReasonDetail = "stop_reason_detail"
         case error
+        case envelopeRefusal = "envelope_refusal"
         case remaining
         case iterationsRun = "iterations_run"
         case actionsExecuted = "actions_executed"

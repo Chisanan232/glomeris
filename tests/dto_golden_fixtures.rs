@@ -46,6 +46,7 @@
 use std::path::PathBuf;
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
+use glomeris::autopilot::RefusalReason;
 use glomeris::cli::pressure::{build_pressure_rejection_report, build_pressure_status_report};
 use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
@@ -865,6 +866,98 @@ fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
     };
     let report = build_recovery_run_report(None, &target, 500_000_000_000, &inner);
     assert_matches_fixture(&report, "recovery_run_report_raw_target.json");
+}
+
+/// The automatic run that ran out of *authorization*, not of safe work
+/// (HORO-1510).
+///
+/// The pair with `recovery_run_report_raw_target.json` is the point. Both
+/// stopped without reaching the goal and both carry a `remaining` breakdown, so
+/// the only thing telling a client which sentence to show is `stop_reason` plus
+/// the `envelope_refusal` token — and a client that ignored the difference would
+/// tell a user their disk has nothing safe left on it when four candidates are
+/// sitting there waiting for a run the user starts themselves. That is why
+/// `not_permitted_by_autopilot_count` is the largest count here and `0` there:
+/// decoded in the wrong order, or folded into `protected_count`, it fails here.
+///
+/// `envelope_refusal` carries the gate's own snake_case token rather than
+/// leaving a client to substring-match `stop_reason_detail`, whose wording is
+/// prose and will be reworded.
+#[test]
+fn recovery_run_report_for_an_envelope_refusal_matches_golden_fixture() {
+    let goal = RecoveryGoal::from_used_percent(60.0).expect("60% used is a valid goal");
+    let inner = RecoveryReport {
+        stop_reason: StopReason::EnvelopeRefused {
+            refusal: RefusalReason::ActionBudgetExhausted { max_actions: 3 },
+            // `Some`, because this refusal came from a pass that did look. The
+            // pre-discovery refusals carry `None` and drop the key entirely —
+            // see the companion fixture.
+            remaining: Some(RemainingCandidates {
+                requires_confirmation: 1,
+                protected: 2,
+                not_executable: 0,
+                not_permitted_by_autopilot: 4,
+            }),
+        },
+        iterations_run: 4,
+        actions_executed: 3,
+        actions_declined_or_skipped: 7,
+        total_bytes_freed: 5_368_709_120,
+        started_free_bytes: 60_000_000_000,
+        final_free_bytes: 65_368_709_120,
+        detector_failures: vec![],
+    };
+    // 65.4 GB free of 500 GB is 13% free, well short of the goal's 40% floor:
+    // the run really did stop early, and `target_met` says so from the
+    // re-measured reading rather than from the 5 GB it did free.
+    let report =
+        build_recovery_run_report(Some(&goal), &goal.to_free_target(), 500_000_000_000, &inner);
+    assert_matches_fixture(&report, "recovery_run_report_envelope_refused.json");
+}
+
+/// The envelope that refused *before* discovery ran (HORO-1510).
+///
+/// Asserted structurally rather than against a fixture file, because the whole
+/// claim is about a key that must not be there: a run stopped by a revoked
+/// Autopilot switch never looked at the disk, so it has no breakdown to report,
+/// and emitting one made of zeros would read as "we searched and found
+/// nothing" — the HORO-1484 failure this contract exists to avoid. The token
+/// still ships, so a client can explain the stop without a breakdown.
+#[test]
+fn a_pre_discovery_envelope_refusal_omits_the_remaining_breakdown() {
+    let inner = RecoveryReport {
+        stop_reason: StopReason::EnvelopeRefused {
+            refusal: RefusalReason::AutopilotRevoked,
+            remaining: None,
+        },
+        iterations_run: 1,
+        actions_executed: 0,
+        actions_declined_or_skipped: 0,
+        total_bytes_freed: 0,
+        started_free_bytes: 60_000_000_000,
+        final_free_bytes: 60_000_000_000,
+        detector_failures: vec![],
+    };
+    let report = build_recovery_run_report(
+        None,
+        &FreeTarget::AbsoluteBytes(250_000_000_000),
+        500_000_000_000,
+        &inner,
+    );
+    let json = serde_json::to_value(&report).expect("the report serializes");
+    assert_eq!(
+        json.get("stop_reason").and_then(|v| v.as_str()),
+        Some("envelope_refused")
+    );
+    assert_eq!(
+        json.get("envelope_refusal").and_then(|v| v.as_str()),
+        Some("autopilot_revoked"),
+        "the refusal token ships even with no breakdown to attach it to"
+    );
+    assert!(
+        json.get("remaining").is_none(),
+        "a run that never reached discovery must not publish a breakdown, not even one of zeros: {json:#}"
+    );
 }
 
 #[test]

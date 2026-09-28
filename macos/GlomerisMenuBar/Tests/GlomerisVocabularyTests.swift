@@ -106,11 +106,24 @@ final class GlomerisVocabularyTests: XCTestCase {
         "no_active_use_observed",
     ]
 
-    /// `src/reporting/dto.rs` — `stop_reason_tag`, all six. HORO-1506, plus
-    /// `stopped_by_user` from HORO-1509's cooperative stop.
+    /// `src/reporting/dto.rs` — `stop_reason_tag`, all seven. HORO-1506, plus
+    /// `stopped_by_user` from HORO-1509's cooperative stop and
+    /// `envelope_refused` from HORO-1510's bounded Autopilot.
     private static let stopReasonTokens = [
         "target_reached", "safe_exhausted", "budget_exceeded", "no_progress", "stopped_by_user",
-        "error",
+        "envelope_refused", "error",
+    ]
+
+    /// `src/autopilot/gate.rs` — `RefusalReason::as_str`, all ten. HORO-1510.
+    ///
+    /// A different enum from `refusalTokens` above despite the shared Rust
+    /// name: that one is why `execute` refused, this one is why the Autopilot
+    /// envelope would not allow a candidate.
+    private static let autopilotRefusalTokens = [
+        "autopilot_revoked", "kind_not_allowed", "protected_refused",
+        "unknown_incomplete_refused", "ask_not_preauthorized", "action_budget_exhausted",
+        "time_budget_exhausted", "byte_budget_exhausted", "reclaim_size_unknown",
+        "disk_pressure_too_low",
     ]
 
     /// `src/executor/goal.rs` — `GoalRejection::as_str`, all three. HORO-1506.
@@ -151,6 +164,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("goalRejection", goalRejectionTokens, GlomerisVocabulary.goalRejection),
             ("episodeResponse", episodeResponseTokens, GlomerisVocabulary.episodeResponse),
             ("episodeRejection", episodeRejectionTokens, GlomerisVocabulary.episodeRejection),
+            ("autopilotRefusal", autopilotRefusalTokens, GlomerisVocabulary.autopilotRefusal),
         ]
     }
 
@@ -356,6 +370,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             "goalRejection": GlomerisVocabulary.goalRejectionAxis,
             "episodeResponse": GlomerisVocabulary.episodeResponseAxis,
             "episodeRejection": GlomerisVocabulary.episodeRejectionAxis,
+            "autopilotRefusal": GlomerisVocabulary.autopilotRefusalAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -899,7 +914,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     // MARK: - Why a recovery run stopped (HORO-1506)
 
     /// The product rule this axis exists to enforce: a run that stopped short
-    /// of the goal must say so. Four of the five stops did not reach it, and a
+    /// of the goal must say so. Six of the seven stops did not reach it, and a
     /// success word on any of them would tell the user their disk is where
     /// they asked it to be when it is not.
     func testOnlyReachingTheGoalReadsAsSuccess() {
@@ -946,8 +961,8 @@ final class GlomerisVocabularyTests: XCTestCase {
         )
     }
 
-    /// The five stops leave five different next steps, so each explanation has
-    /// to be its own. Two stops sharing wording would make the report
+    /// The seven stops leave seven different next steps, so each explanation
+    /// has to be its own. Two stops sharing wording would make the report
     /// decorative.
     func testEveryStopReasonExplainsSomethingDifferent() {
         let explanations = Self.stopReasonTokens.map { GlomerisVocabulary.stopReason($0).explanation }
@@ -957,6 +972,96 @@ final class GlomerisVocabularyTests: XCTestCase {
         )
         let titles = Self.stopReasonTokens.map { GlomerisVocabulary.stopReason($0).title }
         XCTAssertEqual(Set(titles).count, titles.count, "two stop reasons share a title")
+    }
+
+    // MARK: - Which Autopilot limit refused (HORO-1510)
+
+    /// The whole reason `envelope_refused` is not `safe_exhausted`: an
+    /// Autopilot run that spends a budget refused every candidate it saw, which
+    /// is indistinguishable from an empty disk unless the wording says whose
+    /// limit it was. Shown as "nothing safe left", it would tell a user their
+    /// disk is out of opportunities when a run they start themselves has
+    /// plenty.
+    func testTheEnvelopeStopSaysItIsAutopilotsLimitAndNotTheDisks() {
+        let term = GlomerisVocabulary.stopReason("envelope_refused")
+        let explanation = term.explanation.lowercased()
+
+        XCTAssertTrue(
+            explanation.contains("autopilot"),
+            "must name whose limit stopped the run: \(term.explanation)"
+        )
+        XCTAssertTrue(
+            explanation.contains("not a finding about this disk")
+                || explanation.contains("yourself"),
+            "must point at the recovery the user can still start: \(term.explanation)"
+        )
+        XCTAssertNotEqual(
+            term.explanation, GlomerisVocabulary.stopReason("safe_exhausted").explanation,
+            "the two stops it is most important to tell apart must not share wording"
+        )
+    }
+
+    /// The distinction this axis carries. Three of the ten refusals are policy
+    /// deciding on evidence and survive any envelope a user can write; the
+    /// other seven are the envelope itself, and are one setting away from
+    /// being allowed. Wording the second group like the first tells a user
+    /// something is off limits when it is not — and wording the first group
+    /// like the second invites them to go looking for a setting that does not
+    /// exist.
+    func testAutopilotRefusalsSeparatePolicyFromTheEnvelope() {
+        // `reclaim_size_unknown` belongs with the policy group: it is the
+        // fail-closed rule about unmeasurable evidence, not a budget that was
+        // set too low, even though it is reached while charging a budget.
+        let decidedByPolicy = [
+            "protected_refused", "unknown_incomplete_refused", "reclaim_size_unknown",
+        ]
+        for token in decidedByPolicy {
+            let explanation = GlomerisVocabulary.autopilotRefusal(token).explanation.lowercased()
+            XCTAssertTrue(
+                explanation.contains("policy"),
+                "\(token) is policy refusing on evidence and must say so: \(explanation)"
+            )
+        }
+
+        for token in Self.autopilotRefusalTokens where !decidedByPolicy.contains(token) {
+            let term = GlomerisVocabulary.autopilotRefusal(token)
+            XCTAssertTrue(
+                term.explanation.lowercased().contains("autopilot")
+                    || term.explanation.lowercased().contains("you"),
+                "\(token) is a limit on this run, not on the resource: \(term.explanation)"
+            )
+            XCTAssertNotEqual(
+                term.tone, .warning,
+                """
+                \(token) is one setting away from being allowed, so it must not \
+                read as gravely as a policy refusal
+                """
+            )
+        }
+    }
+
+    /// No refusal may read as a completed search, for the same reason
+    /// `safe_exhausted` may not: Autopilot declining to take something is not a
+    /// finding that there was nothing to take.
+    func testNoAutopilotRefusalClaimsTheDiskIsEmptyOrTheRunSucceeded() {
+        for token in Self.autopilotRefusalTokens {
+            let term = GlomerisVocabulary.autopilotRefusal(token)
+            XCTAssertNotEqual(
+                term.tone, .positive,
+                "\(token) stopped short of the goal and must not read as success"
+            )
+            let explanation = term.explanation.lowercased()
+            for claim in ["nothing is left", "nothing remains", "nothing left", "disk is clean"] {
+                XCTAssertFalse(
+                    explanation.contains(claim),
+                    "\(token) claims an empty disk it did not establish: \(term.explanation)"
+                )
+            }
+        }
+        XCTAssertNotEqual(
+            GlomerisVocabulary.autopilotRefusal("a_limit_from_a_newer_cli").tone, .positive,
+            "even an unrecognised limit stopped the run short of the goal"
+        )
     }
 
     // MARK: - A refused recovery goal (HORO-1506)
