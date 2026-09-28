@@ -673,7 +673,7 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.allowlistableKinds.count, 8)
         XCTAssertEqual(dto.neverAllowlistableKinds, ["unknown"])
         XCTAssertEqual(dto.preauthorizableReasons, ["rebuild_cost_high"])
-        XCTAssertEqual(dto.neverPreauthorizableReasons.count, 14)
+        XCTAssertEqual(dto.neverPreauthorizableReasons.count, 16)
         XCTAssertEqual(dto.pressureStates, ["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"])
         XCTAssertEqual(dto.neverExecutableLabels, ["PROTECTED", "UNKNOWN_INCOMPLETE"])
         XCTAssertEqual(dto.aiAuthority.count, 2)

@@ -46,6 +46,8 @@
     "evidence_probe_failed",
     "resource_in_active_use",
     "git_worktree_dirty",
+    "regenerability_unknown",
+    "recoverability_irreversible",
     "owning_tool_live"
   ],
   "pressure_states": ["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"],

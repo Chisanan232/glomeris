@@ -632,6 +632,8 @@ fn autopilot_envelope_report_matches_golden_fixture() {
             "evidence_probe_failed",
             "resource_in_active_use",
             "git_worktree_dirty",
+            "regenerability_unknown",
+            "recoverability_irreversible",
             "owning_tool_live",
         ],
         pressure_states: vec!["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"],
