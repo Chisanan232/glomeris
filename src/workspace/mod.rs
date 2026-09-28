@@ -44,5 +44,10 @@
 //! resource belongs to and nothing about whether the resource may go.
 
 pub mod branch;
+mod group;
 
 pub use branch::{BranchProbe, GitCliBranchProbe, MergedState, UpstreamState, WorktreeBranchState};
+pub use group::{
+    group_families, ActivityState, WorkspaceFamily, WorkspaceMember, WorkspaceSurvey,
+    WorkspaceWorktree,
+};
