@@ -168,6 +168,11 @@ impl ResourceKind {
 }
 
 /// Tool that owns/manages a resource.
+///
+/// One variant per *tool*, not per ecosystem (HORO-1543): `Pip` and `Uv`
+/// are both Python and own separate caches in separate places, and a kind
+/// reporting the wrong one of them would be a lie in the one field a user
+/// reads to decide whether they recognise the thing being proposed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OwningTool {
     Xcode,
@@ -177,6 +182,12 @@ pub enum OwningTool {
     Pnpm,
     Yarn,
     Docker,
+    Pip,
+    Uv,
+    Go,
+    Gradle,
+    Maven,
+    SwiftPm,
     None,
 }
 
@@ -190,6 +201,12 @@ impl fmt::Display for OwningTool {
             OwningTool::Pnpm => "pnpm",
             OwningTool::Yarn => "yarn",
             OwningTool::Docker => "docker",
+            OwningTool::Pip => "pip",
+            OwningTool::Uv => "uv",
+            OwningTool::Go => "go",
+            OwningTool::Gradle => "gradle",
+            OwningTool::Maven => "maven",
+            OwningTool::SwiftPm => "swiftpm",
             OwningTool::None => "none",
         };
         f.write_str(s)
