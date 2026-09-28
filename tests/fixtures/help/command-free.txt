@@ -2,7 +2,7 @@ glomeris free — Reclaim space until a recovery goal is reached.
 
 usage: glomeris free (--goal-used-percent <N> | --target <N%|NB>)
                 [--dry-run] [--json] [--progress-json] [--stop-file <path>]
-                [--autopilot] [--project-root <path>]...
+                [--autopilot [--unattended]] [--project-root <path>]...
 
 Can delete data — every deletion is policy-gated.
 
@@ -23,7 +23,9 @@ in. `--goal-used-percent 60` and `--target 40%` request the same end state.
 wrote, instead of the limits above. It is purely subtractive: it can only
 withhold candidates the grant does not cover, never reach further than a run
 you start yourself, and a run it cuts short says so by name rather than
-reporting a disk with nothing safe left on it.
+reporting a disk with nothing safe left on it. A grant covers runs you start;
+starting one nobody asked for is a second permission, spelled `--unattended`
+here and `--respond-to-alerts` on the grant.
 
 Options
   --goal-used-percent <N>
@@ -67,6 +69,14 @@ Options
       nothing to narrow and the candidate list would look filtered while
       being the whole of it — read the grant with `autopilot show`
       instead.
+  --unattended
+      Declare that nobody asked for this run: it is the answer to a
+      disk-pressure alert. Only valid with `--autopilot`, and refused with
+      exit 3 unless the grant says in as many words that it may start a
+      run unasked — `autopilot enable --respond-to-alerts`. An enabled
+      envelope alone is not that permission. Say it even when the grant
+      allows it, so that a run nobody started is never indistinguishable
+      from one somebody typed.
   --project-root <path>
       Same meaning as for `detect`. Repeatable.
 

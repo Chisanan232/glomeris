@@ -36,6 +36,7 @@ and it is that file.
 | max duration | 60s | 900s | Wall-clock budget for one run. |
 | min pressure | none | — | A disk-pressure floor below which the run refuses. |
 | pre-authorized ASK | none | — | Exactly which `(kind, reason)` pairs an `ASK` classification may proceed on. |
+| respond to alerts | off | — | Whether a run may *begin* without being asked. The one row that is not a ceiling on outcomes — see [Runs nobody asked for](#runs-nobody-asked-for). |
 
 Two properties of that table matter more than the numbers in it:
 
@@ -150,6 +151,38 @@ safe rather than merely convenient:
 
 See [CLI Reference](cli_reference.md) for the flag's exit codes and its refusal
 alongside `--dry-run`.
+
+## Runs nobody asked for
+
+Everything above bounds what a run may *do*. Whether a run may *begin* when
+nobody pressed anything — the standing answer to a disk-pressure alert — is a
+separate question, and the envelope answers it separately:
+`autopilot enable --respond-to-alerts`, off by default, exercised by
+`free --autopilot --unattended`.
+
+**It is two consents, not one.** An enabled envelope does not authorize an
+unprompted run; `--unattended` without that permission exits 3 having attempted
+nothing. Reading "enabled" as consent to act unattended would widen every
+envelope already on disk — each written by somebody bounding a run they meant to
+start — into authority to delete while they were away. That is not a grant those
+people gave, so it is not one this reads out of their file.
+
+**It is the only field here that is not a ceiling on outcomes**, which is why
+the table above says so rather than glossing it. It is still narrowing in the
+direction that matters: off, the default, means every run has a human behind it,
+and turning it on changes nothing about what a run may do once it starts. The
+budgets, the allowlist and the pre-authorizations all still apply, unchanged.
+
+**The check lives in Rust, twice over.** The grant exposes
+`starts_unprompted` — in force *and* set — as one value, so that no client ever
+composes its own permission out of two fields; and `free` itself refuses an
+`--unattended` run the grant does not cover, so the check cannot be skipped by
+whatever launched the process. `--unattended` is the caller's statement about
+itself, and demanding it is what makes a run nobody started distinguishable from
+one somebody typed.
+
+**`revoke` stops it** with everything else, and keeps the setting on file — so
+revoking never reads as having silently cleared what you chose.
 
 ## The audit trail
 

@@ -577,3 +577,148 @@ fn revoking_the_grant_stops_a_later_autopilot_run() {
         run.stdout
     );
 }
+
+// HORO-1510, second half: `--unattended` is a run nobody asked for, and that
+// needs a permission separate from the grant's limits.
+
+/// The combination that must not exist: a run nobody asked for, bounded by
+/// nothing. Refused at the boundary as a usage error, so that no code path
+/// downstream is ever handed a value meaning it.
+#[test]
+fn unattended_without_a_grant_to_run_inside_is_a_usage_error() {
+    let run = run_free(&["--target", "0%", "--unattended"]);
+    assert_eq!(run.code, Some(2), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("--unattended") && run.stderr.contains("--autopilot"),
+        "the refusal must name both flags, since either one is the fix: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "a refused combination must print no report: {}",
+        run.stdout
+    );
+}
+
+/// The heart of the ticket. An envelope written to bound a run its owner meant
+/// to start is not consent to start one unasked, so an enabled grant alone
+/// refuses `--unattended` — and says which of the two permissions is missing,
+/// because "enable Autopilot" would be wrong advice to someone who already has.
+#[test]
+fn an_enabled_grant_is_not_by_itself_permission_to_start_unasked() {
+    let home = make_temp_home();
+    let enable = run_in(
+        &home,
+        "autopilot",
+        &["enable", "--kinds", "node_modules", "--max-actions", "1"],
+    );
+    assert_eq!(enable.code, Some(0), "stderr: {}", enable.stderr);
+
+    let run = run_free_in(&home, &["--target", "0%", "--autopilot", "--unattended"]);
+    assert_eq!(run.code, Some(3), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("--respond-to-alerts"),
+        "the refusal must name the permission that is actually missing: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("not enabled"),
+        "this grant *is* enabled; saying otherwise would send the reader to the \
+         wrong setting: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.is_empty(),
+        "an unauthorized run must print no report: {}",
+        run.stdout
+    );
+
+    // Proven by contrast, so that the exit 3 above is attributable to the
+    // unprompted-run permission and not to anything else about the invocation.
+    let asked = run_free_in(&home, &["--target", "0%", "--autopilot"]);
+    assert_eq!(
+        asked.code,
+        Some(0),
+        "the same grant must still admit a run somebody asked for: {}",
+        asked.stderr
+    );
+}
+
+/// With both permissions the run proceeds, and still opens by stating the
+/// authority it acted under — most of all this one, which nobody was present to
+/// read a prompt for.
+#[test]
+fn a_grant_that_says_so_admits_a_run_nobody_asked_for() {
+    let home = make_temp_home();
+    let enable = run_in(
+        &home,
+        "autopilot",
+        &[
+            "enable",
+            "--kinds",
+            "node_modules",
+            "--max-actions",
+            "1",
+            "--respond-to-alerts",
+        ],
+    );
+    assert_eq!(enable.code, Some(0), "stderr: {}", enable.stderr);
+
+    let run = run_free_in(&home, &["--target", "0%", "--autopilot", "--unattended"]);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(
+        run.stderr.contains("Autopilot envelope:"),
+        "a run nobody watched start must still record the grant it ran under: {}",
+        run.stderr
+    );
+}
+
+/// `revoke` is the single bit its own documentation promises: it stops unprompted
+/// runs too, without the setting having to be cleared. Worth proving separately
+/// from the revoke test above, because the authority here is a conjunction and a
+/// conjunction is exactly the shape that gets half-checked.
+#[test]
+fn revoking_stops_an_unprompted_run_as_well() {
+    let home = make_temp_home();
+    let enable = run_in(
+        &home,
+        "autopilot",
+        &[
+            "enable",
+            "--kinds",
+            "node_modules",
+            "--max-actions",
+            "1",
+            "--respond-to-alerts",
+        ],
+    );
+    assert_eq!(enable.code, Some(0), "stderr: {}", enable.stderr);
+    let granted = run_free_in(&home, &["--target", "0%", "--autopilot", "--unattended"]);
+    assert_eq!(
+        granted.code,
+        Some(0),
+        "the grant must admit the run before revoke can be shown to stop it: {}",
+        granted.stderr
+    );
+
+    let revoke = run_in(&home, "autopilot", &["revoke"]);
+    assert_eq!(revoke.code, Some(0), "stderr: {}", revoke.stderr);
+
+    let run = run_free_in(&home, &["--target", "0%", "--autopilot", "--unattended"]);
+    assert_eq!(
+        run.code,
+        Some(3),
+        "a revoked grant authorizes nothing, unasked least of all: {}",
+        run.stderr
+    );
+
+    // And the setting survived, so a later `enable --respond-to-alerts` is not
+    // the only way back — `autopilot show` still reports what was chosen.
+    let show = run_in(&home, "autopilot", &["show"]);
+    assert_eq!(show.code, Some(0), "stderr: {}", show.stderr);
+    assert!(
+        show.stdout.contains("dormant while revoked"),
+        "revoking must not read as having cleared the preference: {}",
+        show.stdout
+    );
+}

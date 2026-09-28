@@ -881,7 +881,7 @@ glomeris actions history --json --limit 2
 }
 ```
 
-## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--stop-file <path>] [--autopilot] [--project-root <path>]...`
+## `glomeris free (--goal-used-percent <N> | --target <N%|NB>) [--dry-run] [--json] [--progress-json] [--stop-file <path>] [--autopilot [--unattended]] [--project-root <path>]...`
 
 macOS only (exits 1 with an error message on other platforms). Exactly one of
 the two goal flags is required; any other argument is rejected (usage printed
@@ -948,6 +948,9 @@ exceed is a legitimate no-op probe.
 - `--autopilot` bounds the run by the stored Autopilot envelope instead of by
   this command's own limits. See [Running inside the
   grant](#running-inside-the-grant).
+- `--unattended` declares that nobody asked for this run. Only valid with
+  `--autopilot`, and it needs a second permission the grant states separately.
+  See [Runs nobody asked for](#runs-nobody-asked-for).
 - `--project-root <path>` is optional and repeatable, same meaning as
   `detect`'s flag above — it feeds the same `DiscoveryContext` the recovery
   loop discovers candidates from.
@@ -1032,6 +1035,36 @@ exactly as it would be otherwise, and the envelope can only **withhold** one.
   candidate list would look envelope-filtered while being the whole of it. Read
   the grant with `glomeris autopilot show`.
 
+### Runs nobody asked for
+
+An envelope answers "what may a run do". `--unattended` is about a different
+question — "may a run *start* when nobody pressed anything" — and that is a
+second permission, granted by
+`glomeris autopilot enable --respond-to-alerts` and off by default.
+
+- **Two consents, not one.** An enabled envelope alone does not authorize an
+  unprompted run, and `--unattended` without that permission exits **3** having
+  attempted nothing. The reason is what the alternative would mean for a grant
+  already on disk: somebody wrote it to bound a run they intended to start, and
+  reading it as consent to act while they are away would widen a grant they
+  already read and approved.
+- **The check is here, in this binary.** `--unattended` is the caller's own
+  statement about itself, and it exists so that whatever launched the process
+  cannot be the thing that decides it was allowed to. Without the flag, a client
+  starting an `--autopilot` run on its own initiative would be indistinguishable
+  from a person typing the same command.
+- **It narrows nothing else.** Every budget, the kind allowlist and the ASK
+  pre-authorizations apply to an unprompted run exactly as they do to one you
+  started. `--unattended --autopilot` is not a mode with different limits; it is
+  the same bounded run with one additional permission checked before it begins.
+- **`revoke` stops it** along with everything else, without clearing the
+  preference — so revoking never looks as though it had silently reset what you
+  chose.
+- **Only with `--autopilot`** (exit 2 otherwise). A run nobody asked for is
+  precisely the one that must be bounded by a grant somebody read, so the
+  combination that would be unbounded is refused at the boundary rather than
+  later.
+
 ### Reported figures
 
 Every percentage in the output names its axis (`60% used (40% free)`,
@@ -1094,6 +1127,13 @@ plan file cannot expand authority lives. What this page adds:
   (`healthy`, `warn`, `pressured`, `critical`, `emergency`) plus the literal
   `none`. An unobservable reading fails any floor you set, rather than passing
   it.
+- `--respond-to-alerts` belongs to `enable` and takes no value. It grants the
+  one thing the limits above cannot express: that a run may *begin* without
+  being asked, in answer to a disk-pressure alert (`free --autopilot
+  --unattended`). Off by default and deliberately not implied by `enable`
+  itself; see [Runs nobody asked for](#runs-nobody-asked-for) for why those are
+  two consents. It changes nothing about what a run may do once it starts, and
+  `revoke` suspends it with the rest of the grant while keeping it on file.
 - `--preauthorize-ask` is repeatable and takes `kind:reason` using the same
   tags `glomeris actions list` and `glomeris explain` print. Like the four
   limit flags above it, it belongs to `enable` — `run` accepts only
@@ -1101,7 +1141,8 @@ plan file cannot expand authority lives. What this page adds:
   else, so a run cannot widen its own grant on the command line.
 - `--json` belongs to `show`, `enable` and `revoke`, and prints one shape from
   all three: the grant (`enabled`, `allowed_kinds`, `ask_preauthorizations`,
-  the four limits, `min_pressure`), the hard `ceilings`, every choice `enable`
+  the four limits, `min_pressure`, and the two unprompted-run fields below),
+  the hard `ceilings`, every choice `enable`
   would accept (`allowlistable_kinds`, `preauthorizable_reasons`,
   `pressure_states`), what no envelope can authorize
   (`never_allowlistable_kinds`, `never_preauthorizable_reasons`,
@@ -1112,6 +1153,14 @@ plan file cannot expand authority lives. What this page adds:
   reason to add it would be to make triggering a run from a GUI easier, and
   [Menu Bar App](menu_bar_app.md#preferences--autopilot) explains why there is
   no such button.
+- The JSON carries **two** fields about unprompted runs, and they answer
+  different questions. `respond_to_alerts` is the setting as you left it, in
+  force or not — the one a settings toggle binds to, so that revoking Autopilot
+  does not read as having silently cleared the preference. `starts_unprompted`
+  is whether an unprompted run is authorized *right now*: this grant is in force
+  **and** it says so. Anything that acts consults the second, and is not the
+  thing that computes it — `enabled && respond_to_alerts` evaluated in a client
+  would be that client deciding its own authority.
 - `run` prints an `AutopilotReport`: one line per candidate with its kind,
   policy label, model rank and outcome, then the run totals (actions
   attempted, actions succeeded, bytes freed, whether a budget stopped it
@@ -1328,8 +1377,10 @@ cannot drift between its own `--help` and the summary.
   specifically) an unrecognized argument, a missing flag value, missing
   live-mode LLM environment configuration, a base URL that cannot work, or an
   `--api-key`/`--key`/`--token` flag.
-- `3` — (`autopilot run` only) Autopilot is not enabled, so nothing was
-  attempted.
+- `3` — (`autopilot run` and `free --autopilot` only) this run was not
+  authorized, so nothing was attempted: either Autopilot is not enabled, or
+  `--unattended` was given and the grant does not allow starting a run unasked.
+  One code for both because to a script they are the same fact.
 - `75` — (`free`/`emergency`/`execute`/`autopilot run` only) the HORO-1054
   execution lock is already held by another `glomeris` invocation.
 

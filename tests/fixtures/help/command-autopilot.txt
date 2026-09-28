@@ -3,8 +3,9 @@ glomeris autopilot — Read, grant or revoke a bounded standing authorization.
 usage: glomeris autopilot <show|enable|revoke|run> [--kinds <tag,...>]
                 [--max-actions <N>] [--max-bytes <N>] [--max-duration <secs>]
                 [--min-pressure <state|none>]
-                [--preauthorize-ask <kind>:<reason>] [--json] [--dry-run]
-                [--plan-file <path>] [--project-root <path>]...
+                [--preauthorize-ask <kind>:<reason>] [--respond-to-alerts]
+                [--json] [--dry-run] [--plan-file <path>]
+                [--project-root <path>]...
 
 Safety depends on the subcommand; each is labelled below. The strongest of
 them: Can delete data — every deletion is policy-gated.
@@ -14,6 +15,10 @@ can delete anything, and only what the grant already allowed: an envelope
 authorizes resource kinds, a number of actions, a byte total, a wall-clock
 budget and optionally a disk-pressure floor, and every candidate is still
 classified by policy and revalidated immediately before deletion.
+
+A grant covers runs you start. Whether one may also *begin* without being
+asked — the standing answer to a disk-pressure alert — is a separate
+permission, off unless `enable --respond-to-alerts` says otherwise.
 
 Defaults grant nothing: with no envelope file, Autopilot is revoked and `run`
 executes nothing. AUTO_SAFE resources are the only ones a grant reaches by
@@ -68,6 +73,13 @@ Options
       node_modules:rebuild_cost_high. Repeatable. Every PROTECTED reason
       and every evidence-quality reason is refused here, so this cannot
       become a blanket consent.
+  --respond-to-alerts
+      For `enable`: also allow a run nobody asked for, started in answer
+      to a disk-pressure alert (`free --autopilot --unattended`). Off by
+      default, and not implied by enabling Autopilot: a grant you wrote
+      for runs you start is not consent to act while you are away. Changes
+      nothing about what a run may do once it starts. `revoke` suspends it
+      with everything else.
   --json
       For `show`, `enable` and `revoke`: print the envelope as JSON —
       the grant, the hard ceilings, every choice `enable` would accept,
@@ -89,6 +101,9 @@ Examples
   glomeris autopilot enable --kinds node_modules \
     --max-actions 1 --max-bytes 1073741824
       Grant one narrow thing, and nothing else.
+  glomeris autopilot enable --kinds node_modules \
+    --min-pressure pressured --respond-to-alerts
+      Also let it act on a pressure alert without being asked.
   glomeris autopilot run --dry-run
       What would it do, before letting it do anything?
   glomeris autopilot revoke
