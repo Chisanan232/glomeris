@@ -70,6 +70,164 @@ impl WallClock for SystemWallClock {
     }
 }
 
+/// One thing that happened inside a run, as it happened (HORO-1509).
+///
+/// A closed loop that reports only its final [`RecoveryReport`] is a closed
+/// loop nobody can watch. These are the events a UI needs to say which
+/// iteration is running, what it is doing right now, and how many bytes have
+/// actually been reclaimed — and every byte figure here is a *measured* one,
+/// because the alternative (summing what candidates claimed they would free)
+/// is the estimate-as-progress mistake the campaign's section 9 forbids.
+///
+/// Deliberately a domain type with no `serde` derive. The wire shape belongs
+/// to the reporting layer, same as every other type this loop produces: see
+/// `crate::reporting::dto::RecoveryProgressEvent`, which projects these. That
+/// keeps the direction of dependency the one this codebase already has
+/// (reporting reads the executor's types, never the reverse) and keeps a
+/// rename of a JSON field from being a change to the executor.
+///
+/// `iteration` is always the 1-based ordinal of the iteration currently being
+/// *attempted*, which is `RecoveryReport::iterations_run + 1` at the moment of
+/// emission — an iteration is only counted once a candidate has been selected
+/// for it, and progress has to be reportable before that.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecoveryProgress {
+    /// Step 1: the filesystem was measured. The only statement of fact about
+    /// free space in this stream.
+    Measured {
+        iteration: u32,
+        usage: FsUsage,
+        bytes_freed_so_far: u64,
+    },
+    /// Step 4 is starting: detectors are being asked what exists right now.
+    /// This is the "rescanning" state the ticket asks to be visible, and it is
+    /// re-entered on every iteration by design — the loop never reuses an
+    /// earlier pass's candidate list.
+    Discovering { iteration: u32 },
+    /// Step 4 finished. `candidates` counts what has a resolvable action, not
+    /// what a detector saw, and `detectors_failed` being non-zero is what
+    /// withdraws a later [`StopReason::SafeExhausted`]'s usual meaning.
+    Discovered {
+        iteration: u32,
+        candidates: u32,
+        detectors_failed: u32,
+    },
+    /// Steps 5-6: every candidate's evidence is being re-collected and
+    /// reclassified before anything is chosen.
+    Revalidating { iteration: u32 },
+    /// Step 8: a real mutation is about to run. `estimated_bytes` is exactly
+    /// that — an estimate, named so it cannot be mistaken for progress.
+    ActionStarted {
+        iteration: u32,
+        resource: String,
+        action: String,
+        policy_label: &'static str,
+        estimated_bytes: Option<u64>,
+    },
+    /// Step 9: the mutation finished. `reclaimed_bytes` is what the executor
+    /// measured, and `None` means it could not be measured — never zero
+    /// standing in for unknown.
+    ActionFinished {
+        iteration: u32,
+        resource: String,
+        action: String,
+        outcome: &'static str,
+        reclaimed_bytes: Option<u64>,
+        bytes_freed_so_far: u64,
+    },
+    /// A cooperative stop was observed, between actions and never during one.
+    StopRequested { iteration: u32 },
+}
+
+/// Where [`RecoveryProgress`] events go.
+///
+/// A trait rather than a closure for the same reason [`WallClock`] is one:
+/// production passes a writer, tests pass a recorder, and both are named
+/// types a signature can talk about.
+pub trait RecoveryObserver {
+    fn observe(&self, event: RecoveryProgress);
+}
+
+/// Discards every event. The default, and what every caller that does not ask
+/// for `--progress-json` gets.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SilentObserver;
+
+impl RecoveryObserver for SilentObserver {
+    fn observe(&self, _event: RecoveryProgress) {}
+}
+
+/// Whether the user has asked the loop to stop after the action it is
+/// currently running (HORO-1509).
+///
+/// Cooperative by construction: the loop asks, between iterations and after
+/// each completed action, and there is no way for an implementation of this
+/// trait to interrupt a mutation that is already in flight. That asymmetry is
+/// the safety property — a `SIGTERM` partway through a deletion leaves the
+/// filesystem in a state neither the loop nor the audit log could describe,
+/// which is why the GUI has no handle on the child process and asks for a stop
+/// through here instead.
+pub trait StopSignal {
+    fn stop_requested(&self) -> bool;
+}
+
+/// Never asks the loop to stop. The default, for every non-interactive run.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NeverStops;
+
+impl StopSignal for NeverStops {
+    fn stop_requested(&self) -> bool {
+        false
+    }
+}
+
+/// A [`StopSignal`] backed by the existence of a file the caller creates when
+/// the user presses "Stop after current action".
+///
+/// A file rather than a signal because the GUI deliberately keeps no handle on
+/// the recovery child (see [`StopSignal`]), and a sentinel needs no handle,
+/// no signal-safe code and no IPC: `open(2)` from one process, `stat(2)` from
+/// the other. The loop only ever *reads* it, so this does not weaken the
+/// module's rule that every mutation happens inside [`crate::executor::execute`].
+///
+/// [`StopFile::watching`] refuses a path that already exists, which matters:
+/// a stale sentinel left behind by an earlier run would stop the next one
+/// before it did anything, and the report would truthfully say the user
+/// stopped it while the user had done nothing at all.
+#[derive(Debug)]
+pub struct StopFile {
+    path: std::path::PathBuf,
+}
+
+impl StopFile {
+    /// Watches `path`, which must not exist yet.
+    pub fn watching(path: &Path) -> std::io::Result<Self> {
+        if path.try_exists()? {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("stop file {} already exists", path.display()),
+            ));
+        }
+        Ok(Self {
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// How an existence probe is read. An error counts as a stop request, and
+    /// that direction is the point: a loop that cannot find out whether the
+    /// user asked it to stop must not keep deleting things on the assumption
+    /// they did not.
+    fn requested_from(probe: std::io::Result<bool>) -> bool {
+        probe.unwrap_or(true)
+    }
+}
+
+impl StopSignal for StopFile {
+    fn stop_requested(&self) -> bool {
+        Self::requested_from(self.path.try_exists())
+    }
+}
+
 /// The disk-free goal a recovery run is trying to reach.
 ///
 /// Both variants describe a target *state* of the filesystem (how much
@@ -1872,5 +2030,82 @@ mod types_tests {
         // target can't meaningfully be unmet.
         let usage = FsUsage::new(0, 0);
         assert!(target_met(&usage, &FreeTarget::Percentage(50.0)));
+    }
+
+    #[test]
+    fn the_default_stop_signal_never_asks_the_loop_to_stop() {
+        assert!(!NeverStops.stop_requested());
+    }
+
+    #[test]
+    fn a_stop_file_reports_a_stop_only_once_it_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-stopfile-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("stop");
+
+        let signal = StopFile::watching(&path).expect("a path that does not exist is watchable");
+        assert!(!signal.stop_requested(), "nothing has asked for a stop yet");
+
+        std::fs::write(&path, b"").expect("create the sentinel");
+        assert!(signal.stop_requested());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stop_file_that_already_exists_is_refused_rather_than_watched() {
+        // A stale sentinel would stop the next run before it did anything,
+        // and the report would say the user stopped a run they never touched.
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-stopfile-stale-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("stop");
+        std::fs::write(&path, b"").expect("leave a stale sentinel");
+
+        let refused = StopFile::watching(&path);
+        assert!(refused.is_err());
+        assert_eq!(
+            refused.unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_stop_file_counts_as_a_stop_request() {
+        // Fail-closed: a loop that cannot find out whether the user asked it
+        // to stop must not keep deleting on the assumption they did not.
+        assert!(StopFile::requested_from(Err(std::io::Error::other(
+            "parent directory is unreadable"
+        ))));
+        assert!(!StopFile::requested_from(Ok(false)));
+        assert!(StopFile::requested_from(Ok(true)));
+    }
+
+    #[test]
+    fn the_silent_observer_accepts_every_event_and_keeps_nothing() {
+        // Nothing to assert beyond "this compiles and does not panic": the
+        // point of the type is that a caller who wants no progress stream
+        // needs no branch at the call site.
+        SilentObserver.observe(RecoveryProgress::Discovering { iteration: 1 });
+        SilentObserver.observe(RecoveryProgress::Measured {
+            iteration: 1,
+            usage: FsUsage::new(100, 10),
+            bytes_freed_so_far: 0,
+        });
     }
 }
