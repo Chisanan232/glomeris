@@ -234,8 +234,8 @@ struct GlomerisPopoverView: View {
 
     // MARK: - Body
 
-    /// Status → recovery goal → candidates → AI plan → history. Also the
-    /// VoiceOver reading order.
+    /// Status → recovery goal → candidates → AI plan → Autopilot → history. Also
+    /// the VoiceOver reading order.
     ///
     /// HORO-1506 puts the recovery goal second, directly under the disk reading
     /// it works from. The order is the product's own claim about itself: the disk
@@ -283,6 +283,12 @@ struct GlomerisPopoverView: View {
                     projectRootsStore: projectRootsStore,
                     onOpenDetail: { navigation.open($0) }
                 )
+                // HORO-1510, campaign §13's position: after the optional
+                // assistance, before the log. What standing authority this Mac
+                // has given Glomeris is not an action the user takes from here,
+                // so it sits below everything that is — and above History,
+                // because it describes what may happen rather than what did.
+                AutopilotSectionView(client: client)
                 HistoryAuditSectionView()
             }
             .padding(GlomerisDesign.outerPadding)

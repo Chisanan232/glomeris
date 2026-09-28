@@ -199,6 +199,16 @@ targets:
       # grant must not read as off, or revoking looks like it cleared a choice it
       # deliberately keeps on file.
       - path: Sources/AutopilotUnpromptedMode.swift
+      # HORO-1510: the panel's standing statement of what Autopilot may do.
+      # Compiled in for one claim, which is the reason the file's error path is
+      # shaped the way it is: a grant that could not be read must not render as
+      # "off". "Off" means nothing on this Mac deletes anything unasked, and a
+      # failed read is precisely the case where that is unfounded — so the card
+      # has three states, not two, and only a test can tell the third from the
+      # first. `spokenState` is here for the neighbouring one: a listener told
+      # "Autopilot is on" and nothing else has not been told whether it starts by
+      # itself, which is the whole of AC 2 and is invisible on screen.
+      - path: Sources/AutopilotSectionView.swift
       # HORO-1507: the recovery settings pane. Compiled in because the two things
       # worth pinning are types, not pixels. `RecoverySettingsInterpretation` is
       # the only place in the app that has to tell a *refused pair* — a

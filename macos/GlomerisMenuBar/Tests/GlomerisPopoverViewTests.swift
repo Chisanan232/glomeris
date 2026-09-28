@@ -167,6 +167,41 @@ final class GlomerisPopoverViewTests: XCTestCase {
         )
     }
 
+    /// HORO-1510, campaign §13: the recovery goal is the product capability and
+    /// the AI plan is optional assistance, so the goal stays above the list the
+    /// plan reorders and the Autopilot card sits below both.
+    ///
+    /// Below, and not above, for a reason worth pinning: everything ahead of it
+    /// in this column is something the user can act on from here, and the
+    /// Autopilot card is a statement about standing authority with no control on
+    /// it. Above History because it says what may happen; History says what did.
+    /// Hoisting it would put the panel's one read-only card ahead of every
+    /// actionable one — including for a listener, who reaches it by tabbing.
+    func testTheAutopilotCardSitsAfterAssistanceAndBeforeTheLog() throws {
+        let recovery = try XCTUnwrap(code.range(of: "RecoverySectionView("))
+        let candidates = try XCTUnwrap(code.range(of: "CandidatesSectionView("))
+        let plan = try XCTUnwrap(code.range(of: "AiPlanSectionView("))
+        let autopilot = try XCTUnwrap(code.range(of: "AutopilotSectionView("))
+        let history = try XCTUnwrap(code.range(of: "HistoryAuditSectionView()"))
+
+        XCTAssertLessThan(
+            recovery.lowerBound, candidates.lowerBound,
+            "the recovery goal is the capability; the candidates list is what it draws on"
+        )
+        XCTAssertLessThan(
+            candidates.lowerBound, plan.lowerBound,
+            "Glomeris's own ranking is the default answer and the provider's is a second opinion"
+        )
+        XCTAssertLessThan(
+            plan.lowerBound, autopilot.lowerBound,
+            "what the user can do from here comes before what this Mac has standing authority to do"
+        )
+        XCTAssertLessThan(
+            autopilot.lowerBound, history.lowerBound,
+            "what may happen comes before what already has"
+        )
+    }
+
     /// Every section is a `GlomerisCard` now, so spacing does the grouping.
     /// The only dividers left are the two structural ones marking where the
     /// fixed header and footer stop and the scrolling body begins — a third
