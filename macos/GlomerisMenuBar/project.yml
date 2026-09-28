@@ -155,6 +155,14 @@ targets:
       # two DTOs share their required fields, so only a test can show the exit
       # code is what separates them.
       - path: Sources/RecoverySectionView.swift
+      # HORO-1509: the live-progress reducer, which is here for the reason its own
+      # header gives — it is the only place in the app that accumulates figures
+      # describing bytes that are already gone, and the rules it holds (only
+      # re-measured bytes are shown as progress, an unmeasured count stays absent
+      # rather than becoming zero, a revalidation abort is not a failure) are
+      # assertions against driven event sequences here. Its counterpart in the
+      # card can only be grepped; this can be run.
+      - path: Sources/RecoveryLiveProgress.swift
       # HORO-1366: the batch itself — the only place in the target that turns a
       # provider's suggestion set into `execute` invocations. Here so its two
       # call sites can be driven against a fixture binary, and so the guards

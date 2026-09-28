@@ -778,4 +778,354 @@ final class RecoverySectionViewTests: XCTestCase {
             try JSONDecoder().decode(ProgressEventDto.self, from: Data(recovery.utf8))
         )
     }
+    // MARK: - Accumulating the stream (HORO-1509)
+
+    /// Drives a sequence of NDJSON lines through the reducer, which is how every
+    /// test below is written: the rules being pinned are about what several
+    /// events add up to, and a single event cannot show them.
+    private func accumulate(_ jsonLines: [String]) throws -> RecoveryLiveProgress {
+        var progress = RecoveryLiveProgress()
+        for line in jsonLines {
+            progress.absorb(try progressEvent(line))
+        }
+        return progress
+    }
+
+    private func measuredLine(
+        iteration: UInt32, usedPercent: Double, freeHuman: String,
+        freedSoFar: UInt64, freedSoFarHuman: String
+    ) -> String {
+        #"{"phase":"measured","iteration":\#(iteration),"total_bytes":500,"#
+            + #""free_bytes":100,"used_percent":\#(usedPercent),"#
+            + #""free_human":"\#(freeHuman)","bytes_freed_so_far":\#(freedSoFar),"#
+            + #""bytes_freed_so_far_human":"\#(freedSoFarHuman)"}"#
+    }
+
+    private func actionStartedLine(
+        iteration: UInt32, resource: String, estimated: String = ""
+    ) -> String {
+        #"{"phase":"action_started","iteration":\#(iteration),"#
+            + #""resource":"\#(resource)","action":"cargo_clean","#
+            + #""policy_label":"AUTO_SAFE"\#(estimated)}"#
+    }
+
+    private func actionFinishedLine(
+        iteration: UInt32, resource: String, outcome: String,
+        freedSoFar: UInt64, freedSoFarHuman: String
+    ) -> String {
+        #"{"phase":"action_finished","iteration":\#(iteration),"#
+            + #""resource":"\#(resource)","action":"cargo_clean","#
+            + #""outcome":"\#(outcome)","bytes_freed_so_far":\#(freedSoFar),"#
+            + #""bytes_freed_so_far_human":"\#(freedSoFarHuman)"}"#
+    }
+
+    /// Before the child has said anything there is a real state to be in, and it
+    /// is not "round 0, 0 B reclaimed". Every figure is absent, so the card shows
+    /// its own starting wording rather than numbers standing in for nothing.
+    func testAnUnstartedRunReportsNoFiguresAtAll() {
+        let progress = RecoveryLiveProgress()
+        XCTAssertEqual(progress.iteration, 0)
+        XCTAssertNil(progress.statusText)
+        XCTAssertNil(progress.currentUsageText)
+        XCTAssertNil(
+            progress.reclaimedSoFarText,
+            "a run that has not measured must not claim it has reclaimed 0 B — nobody "
+                + "has looked yet"
+        )
+        XCTAssertNil(progress.workDoneText)
+        XCTAssertFalse(progress.hasCompletedWork)
+        XCTAssertFalse(progress.isActionInFlight)
+        XCTAssertFalse(progress.stopRequested)
+    }
+
+    /// The whole of HORO-1509 AC1 in one sequence: two rounds, an action in each,
+    /// and every figure the running card shows read off the result.
+    func testATwoRoundRunReportsTheRoundTheActionAndTheMeasuredTotal() throws {
+        let progress = try accumulate([
+            measuredLine(
+                iteration: 1, usedPercent: 94.0, freeHuman: "30 GB",
+                freedSoFar: 0, freedSoFarHuman: "0 B"
+            ),
+            #"{"phase":"discovering","iteration":1}"#,
+            #"{"phase":"discovered","iteration":1,"candidates":3,"detectors_failed":0}"#,
+            #"{"phase":"revalidating","iteration":1}"#,
+            actionStartedLine(iteration: 1, resource: "cargo:/a/target"),
+            actionFinishedLine(
+                iteration: 1, resource: "cargo:/a/target", outcome: "succeeded",
+                freedSoFar: 4_000_000_000, freedSoFarHuman: "4.0 GB"
+            ),
+            measuredLine(
+                iteration: 2, usedPercent: 93.2, freeHuman: "34 GB",
+                freedSoFar: 4_000_000_000, freedSoFarHuman: "4.0 GB"
+            ),
+            #"{"phase":"discovering","iteration":2}"#,
+            #"{"phase":"discovered","iteration":2,"candidates":2,"detectors_failed":0}"#,
+            #"{"phase":"revalidating","iteration":2}"#,
+            actionStartedLine(iteration: 2, resource: "cargo:/b/target"),
+            actionFinishedLine(
+                iteration: 2, resource: "cargo:/b/target", outcome: "succeeded",
+                freedSoFar: 9_500_000_000, freedSoFarHuman: "9.5 GB"
+            ),
+        ])
+
+        XCTAssertEqual(progress.iteration, 2, "the round is the loop's own, not a count of events")
+        XCTAssertEqual(progress.currentResource, "cargo:/b/target")
+        XCTAssertEqual(progress.currentAction, "cargo_clean")
+        XCTAssertEqual(progress.actionsSucceeded, 2)
+        XCTAssertEqual(progress.workDoneText, "2 cleaned")
+        XCTAssertEqual(
+            progress.reclaimedSoFarText, "9.5 GB reclaimed so far",
+            "the cumulative figure is the CLI's re-measured one, carried verbatim"
+        )
+        XCTAssertEqual(
+            progress.currentUsageText, "93.2% used — 34 GB free",
+            "one decimal place, on the used axis, naming both — the same shape the "
+                + "pre-flight and the terminal report use"
+        )
+        XCTAssertFalse(
+            progress.isActionInFlight,
+            "the last action finished, so a stop request would take effect immediately"
+        )
+    }
+
+    /// Campaign §9, as a test rather than a comment: the reducer never adds
+    /// anything up. Every cumulative figure it shows is one the CLI measured.
+    ///
+    /// Constructed so that a reducer summing the per-action estimates would give
+    /// a *different, larger* answer: two actions estimated at 8 GB each, whose
+    /// re-measured total is 1.0 GB because the second one mostly re-created what
+    /// the first removed. A sum would say 16 GB. Only the measurement is true.
+    func testProgressIsTheMeasuredTotalAndNeverASumOfEstimates() throws {
+        let progress = try accumulate([
+            actionStartedLine(
+                iteration: 1, resource: "cargo:/a/target",
+                estimated: #","estimated_bytes":8000000000,"estimated_human":"8.0 GB""#
+            ),
+            actionFinishedLine(
+                iteration: 1, resource: "cargo:/a/target", outcome: "succeeded",
+                freedSoFar: 600_000_000, freedSoFarHuman: "600 MB"
+            ),
+            actionStartedLine(
+                iteration: 2, resource: "cargo:/b/target",
+                estimated: #","estimated_bytes":8000000000,"estimated_human":"8.0 GB""#
+            ),
+            actionFinishedLine(
+                iteration: 2, resource: "cargo:/b/target", outcome: "succeeded",
+                freedSoFar: 1_000_000_000, freedSoFarHuman: "1.0 GB"
+            ),
+        ])
+
+        XCTAssertEqual(
+            progress.reclaimedSoFarText, "1.0 GB reclaimed so far",
+            "the estimates total 16 GB; the filesystem says 1.0 GB, and the "
+                + "filesystem is what the user gets back"
+        )
+    }
+
+    /// A revalidation abort is not a failure, and the run summary must not read
+    /// as though something went wrong. It is counted apart, and worded by the
+    /// vocabulary the history card and the audit log use.
+    func testARevalidationAbortIsCountedApartFromAFailure() throws {
+        let progress = try accumulate([
+            actionFinishedLine(
+                iteration: 1, resource: "cargo:/a/target", outcome: "succeeded",
+                freedSoFar: 10, freedSoFarHuman: "10 B"
+            ),
+            actionFinishedLine(
+                iteration: 2, resource: "cargo:/b/target", outcome: "failed",
+                freedSoFar: 10, freedSoFarHuman: "10 B"
+            ),
+            actionFinishedLine(
+                iteration: 3, resource: "cargo:/c/target",
+                outcome: "aborted_by_revalidation",
+                freedSoFar: 10, freedSoFarHuman: "10 B"
+            ),
+        ])
+
+        XCTAssertEqual(progress.actionsSucceeded, 1)
+        XCTAssertEqual(progress.actionsFailed, 1)
+        XCTAssertEqual(progress.actionsStoppedSafely, 1)
+        XCTAssertEqual(progress.workDoneText, "1 cleaned · 1 failed · 1 stopped safely")
+        XCTAssertEqual(
+            progress.statusText, "Stopped safely: cargo:/c/target",
+            "the outcome is worded by GlomerisVocabulary, so one action reads the "
+                + "same here as it does in the history card"
+        )
+    }
+
+    /// Only non-zero tallies appear. A row reading "· 0 failed" invites a reader
+    /// to check a number that is only there because the format string had a slot.
+    func testOnlyTheTalliesThatHappenedAreWorded() throws {
+        let clean = try accumulate([
+            actionFinishedLine(
+                iteration: 1, resource: "r", outcome: "succeeded",
+                freedSoFar: 1, freedSoFarHuman: "1 B"
+            )
+        ])
+        XCTAssertEqual(clean.workDoneText, "1 cleaned")
+
+        let withFailure = try accumulate([
+            actionFinishedLine(
+                iteration: 1, resource: "r", outcome: "succeeded",
+                freedSoFar: 1, freedSoFarHuman: "1 B"
+            ),
+            actionFinishedLine(
+                iteration: 2, resource: "s", outcome: "failed",
+                freedSoFar: 1, freedSoFarHuman: "1 B"
+            ),
+        ])
+        XCTAssertEqual(withFailure.workDoneText, "1 cleaned · 1 failed")
+    }
+
+    /// An outcome token this app has no wording for is reported and counted
+    /// nowhere, rather than added to the nearest tally.
+    ///
+    /// The alternative — folding it into `actionsFailed`, say — would make a
+    /// future CLI's new outcome look like a broken action to every user of this
+    /// build.
+    func testAnUnknownOutcomeIsReportedButCountedNowhere() throws {
+        let progress = try accumulate([
+            actionFinishedLine(
+                iteration: 1, resource: "cargo:/a/target", outcome: "quarantined",
+                freedSoFar: 7, freedSoFarHuman: "7 B"
+            )
+        ])
+
+        XCTAssertEqual(progress.actionsSucceeded, 0)
+        XCTAssertEqual(progress.actionsFailed, 0)
+        XCTAssertEqual(progress.actionsStoppedSafely, 0)
+        XCTAssertFalse(
+            progress.hasCompletedWork,
+            "nothing this app can name finished, so there is no tally row to show"
+        )
+        XCTAssertEqual(
+            progress.statusText, "Unrecognised outcome: cargo:/a/target",
+            "the action is uncounted, never hidden"
+        )
+        XCTAssertEqual(
+            progress.reclaimedSoFarText, "7 B reclaimed so far",
+            "the measured total is the CLI's regardless of how the outcome is classified"
+        )
+    }
+
+    /// The window in which "Stop after current action" cannot take effect yet,
+    /// which is exactly what the button's wording promises the user.
+    func testAnActionIsInFlightOnlyBetweenItsStartAndItsFinish() throws {
+        var progress = RecoveryLiveProgress()
+        XCTAssertFalse(progress.isActionInFlight)
+
+        progress.absorb(try progressEvent(actionStartedLine(iteration: 1, resource: "r")))
+        XCTAssertTrue(progress.isActionInFlight)
+        XCTAssertEqual(progress.statusText, "Reclaiming r…")
+
+        progress.absorb(
+            try progressEvent(
+                actionFinishedLine(
+                    iteration: 1, resource: "r", outcome: "succeeded",
+                    freedSoFar: 1, freedSoFarHuman: "1 B"
+                )
+            )
+        )
+        XCTAssertFalse(progress.isActionInFlight)
+    }
+
+    /// The stop is reported from the run's own event, not from the button press,
+    /// so the card says "stopping" only once the loop has actually noticed.
+    func testTheStopIsReportedOnlyOnceTheLoopHasSeenIt() throws {
+        var progress = try accumulate([
+            actionStartedLine(iteration: 3, resource: "cargo:/a/target")
+        ])
+        XCTAssertFalse(
+            progress.stopRequested,
+            "nothing in the stream has asked to stop yet"
+        )
+
+        progress.absorb(try progressEvent(#"{"phase":"stop_requested","iteration":3}"#))
+        XCTAssertTrue(progress.stopRequested)
+        XCTAssertEqual(progress.statusText, "Stopping after the current action…")
+        XCTAssertTrue(
+            progress.isActionInFlight,
+            "the stop was observed while an action was running; the promise is that "
+                + "this one finishes first"
+        )
+    }
+
+    /// Rescanning is a state of its own, said in words. Every iteration
+    /// rediscovers, and a user watching a second round begin needs to know the
+    /// search is happening again rather than wonder why nothing is being deleted.
+    func testRescanningAndRevalidatingAreDistinctSpokenStates() throws {
+        let rescanning = try accumulate([#"{"phase":"discovering","iteration":2}"#])
+        XCTAssertEqual(rescanning.statusText, "Looking again for what can be reclaimed…")
+
+        let revalidating = try accumulate([#"{"phase":"revalidating","iteration":2}"#])
+        XCTAssertEqual(revalidating.statusText, "Re-checking the evidence before acting…")
+
+        XCTAssertNotEqual(
+            rescanning.statusText, revalidating.statusText,
+            "the campaign asks for rescan and revalidation state; two loop phases "
+                + "sharing one sentence would report one"
+        )
+    }
+
+    /// A failed detector changes what a later "nothing safe left" means, so the
+    /// count is carried and said — the same distinction `ProgressStatusText`
+    /// draws for a discovery scan.
+    func testAnIncompleteDiscoveryPassIsSaidAndNotJustCounted() throws {
+        let complete = try accumulate([
+            #"{"phase":"discovered","iteration":1,"candidates":4,"detectors_failed":0}"#
+        ])
+        XCTAssertEqual(complete.statusText, "Found 4 candidates")
+        XCTAssertEqual(complete.detectorsFailedOnLastPass, 0)
+
+        let incomplete = try accumulate([
+            #"{"phase":"discovered","iteration":1,"candidates":1,"detectors_failed":2}"#
+        ])
+        XCTAssertEqual(
+            incomplete.statusText, "Found 1 candidate; 2 checks did not finish",
+            "singular candidate, plural checks, and the shortfall stated — a bare "
+                + "count cannot tell 'looked and found little' from 'part of the "
+                + "search never answered'"
+        )
+        XCTAssertEqual(incomplete.detectorsFailedOnLastPass, 2)
+    }
+
+    /// Campaign §14: spoken state must distinguish current usage from progress.
+    /// Both are percentages-and-byte-figures about the same disk, so each clause
+    /// names its own subject — a listener gets them one at a time and cannot
+    /// glance back at the one above.
+    func testTheSpokenSentenceNamesTheSubjectOfEveryFigure() throws {
+        let progress = try accumulate([
+            measuredLine(
+                iteration: 2, usedPercent: 88.0, freeHuman: "60 GB",
+                freedSoFar: 5_000_000_000, freedSoFarHuman: "5.0 GB"
+            ),
+            actionFinishedLine(
+                iteration: 2, resource: "cargo:/a/target", outcome: "succeeded",
+                freedSoFar: 5_000_000_000, freedSoFarHuman: "5.0 GB"
+            ),
+            #"{"phase":"stop_requested","iteration":2}"#,
+        ])
+
+        let spoken = progress.spokenState
+        XCTAssertTrue(spoken.contains("Round 2."), "got: \(spoken)")
+        XCTAssertTrue(
+            spoken.contains("Disk now 88.0% used — 60 GB free."),
+            "the current reading is named as the disk's state: \(spoken)"
+        )
+        XCTAssertTrue(
+            spoken.contains("5.0 GB reclaimed so far."),
+            "the progress figure says what it is a figure of: \(spoken)"
+        )
+        XCTAssertTrue(spoken.contains("1 cleaned."), "got: \(spoken)")
+        XCTAssertTrue(
+            spoken.contains("Stop requested; the current action will finish first."),
+            "a listener must not have to infer the stop from a dimmed button: \(spoken)"
+        )
+    }
+
+    /// Nothing is spoken for a run that has said nothing — an empty sentence
+    /// rather than a string of bare stops.
+    func testAnUnstartedRunSpeaksNothing() {
+        XCTAssertEqual(RecoveryLiveProgress().spokenState, "")
+    }
 }
