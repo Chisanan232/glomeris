@@ -106,6 +106,15 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
         StopReason::NoProgress => "The run stopped before reaching the goal because recent \
              actions reclaimed no measurable space."
             .to_string(),
+        // Says whose limit it was, because that is the whole point of the
+        // variant (HORO-1510): this sentence is read by someone who may
+        // otherwise conclude their disk has nothing safe left on it.
+        StopReason::EnvelopeRefused(refusal) => format!(
+            "The run stopped before reaching the goal because Autopilot reached the end of \
+             what you authorized it to do: {refusal}. That is a limit on Autopilot, not a \
+             finding about this disk — a recovery you start yourself is bounded only by what \
+             you ask for."
+        ),
         StopReason::StoppedByUser => "The run stopped before reaching the goal because you \
              asked it to stop; the action that was already running finished first."
             .to_string(),
@@ -820,6 +829,7 @@ mod tests {
                     requires_confirmation: 2,
                     protected: 3,
                     not_executable: 1,
+                    not_permitted_by_autopilot: 0,
                 }),
                 60,
                 0,

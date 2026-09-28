@@ -27,12 +27,15 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::actions::ActionRegistry;
+use crate::autopilot::{admit, admits_pressure, AutopilotEnvelope, BudgetLedger, RefusalReason};
 use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{ActionId, Evidence, NativeCleanup, ResourceId};
 use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
-use crate::monitor::{append_audit_record, ActionSource, AuditRecord, Clock, FsStat, FsUsage};
+use crate::monitor::{
+    append_audit_record, ActionSource, AuditRecord, Clock, FsStat, FsUsage, PressureState,
+};
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::policy_label::label_for;
@@ -263,6 +266,41 @@ pub struct RecoveryConfig {
     pub auto_approve_ask: bool,
 }
 
+/// Turns a recovery run into an *automatic* one, by narrowing it with an
+/// Autopilot envelope (HORO-1510).
+///
+/// Absent — `RecoveryRunRequest::admission` left `None` — a run is exactly what
+/// it was before: a human asked for it, so the only limits are
+/// [`RecoveryConfig`]'s. Present, every candidate additionally has to pass
+/// [`crate::autopilot::admit`] before it can be selected, and the run stops
+/// when one of the envelope's run-wide budgets or preconditions says so.
+///
+/// This is a second gate, never a second policy. The envelope can only ever
+/// *remove* candidates the existing pipeline had already permitted
+/// (`classify -> admit -> authorize -> execute`), which is why there is no
+/// Autopilot-shaped variant of this loop: an automatic run is the same loop with
+/// a narrower field of view. Nothing in here can make a `Protected` resource
+/// executable, and nothing in here is consulted about whether the *filesystem*
+/// goal was reached.
+///
+/// One consequence worth stating, because it is the one place an automatic run
+/// may act where a plain one would not: an `Ask` candidate whose risks the
+/// envelope pre-authorizes is eligible for selection even though
+/// [`RecoveryConfig::auto_approve_ask`] is `false`. That is not the MVP
+/// auto-consent that flag describes — the consent has a recorded basis, namely
+/// the pre-authorization the user granted the envelope — and it is what §10 of
+/// this feature's brief means by "ASK policy where explicitly pre-authorized".
+pub struct RecoveryAdmission<'a> {
+    /// The envelope, read live. Its enable bit is re-read every iteration, so
+    /// revoking Autopilot mid-run stops the run at the next iteration boundary
+    /// (never mid-action).
+    pub envelope: &'a AutopilotEnvelope,
+    /// Disk pressure as observed by the caller before the run, checked once
+    /// against the envelope's floor. `None` — the reading was unavailable —
+    /// fails closed, per [`crate::autopilot::admits_pressure`].
+    pub observed_pressure: Option<PressureState>,
+}
+
 /// What the last revalidation pass looked at and left alone.
 ///
 /// The counts are of candidates, never of bytes. Summing bytes a run is not
@@ -286,6 +324,16 @@ pub struct RemainingCandidates {
     /// [`crate::actionability::plan_refusal`]) — typically because the owning
     /// tool is live or the work is in progress.
     pub not_executable: u32,
+    /// Executable, and refused by the Autopilot envelope instead (HORO-1510):
+    /// a kind the user did not allowlist, an `Ask` risk they did not
+    /// pre-authorize, or a size the remaining byte budget cannot cover.
+    ///
+    /// Always `0` for a run with no [`RecoveryAdmission`], which is what makes
+    /// this the honest counterpart of the three above: those say a *resource*
+    /// is unavailable to anyone, this says only that *this* run was not allowed
+    /// to take it. A human-driven run over the same disk may well take all of
+    /// them.
+    pub not_permitted_by_autopilot: u32,
 }
 
 /// Why a recovery run stopped.
@@ -304,6 +352,23 @@ pub enum StopReason {
     SafeExhausted(RemainingCandidates),
     /// `max_iterations`, `max_actions`, or `max_duration` was reached.
     BudgetExceeded,
+    /// An *automatic* run (one given a [`RecoveryAdmission`]) ran out of
+    /// envelope: Autopilot was revoked, the machine is not under enough disk
+    /// pressure, or one of the envelope's action/time/byte budgets is spent
+    /// (HORO-1510).
+    ///
+    /// Its own variant rather than a flavour of [`StopReason::BudgetExceeded`]
+    /// or [`StopReason::SafeExhausted`], because it means something a user can
+    /// act on and those two do not. `BudgetExceeded` is about the limits *this
+    /// invocation* was given; this is about the standing authority the user
+    /// granted Autopilot, which they can widen. And reporting it as
+    /// `SafeExhausted` would be the serious error: it would tell someone their
+    /// disk has no safe opportunities left when what actually happened is that
+    /// Autopilot had used up its allowance and stopped — with, quite possibly,
+    /// plenty still there for a run they start themselves (§7).
+    ///
+    /// Unreachable for a run with no `RecoveryAdmission`.
+    EnvelopeRefused(RefusalReason),
     /// The last `NO_PROGRESS_STREAK_THRESHOLD` consecutive successfully
     /// executed actions each measured zero (or unmeasurable) actual
     /// reclaimed bytes.
@@ -474,6 +539,54 @@ struct ScoredCandidate {
     size: u64,
 }
 
+/// One iteration's view of a [`RecoveryAdmission`]: the envelope, plus what the
+/// run has spent so far, which is the other half of what
+/// [`crate::autopilot::admit`] needs.
+///
+/// Borrowed rather than owned so the ledger stays in [`run`] — there is exactly
+/// one per run, and a copy handed to a selection pass would let a pass's charges
+/// vanish when it returned.
+struct Narrowing<'a> {
+    envelope: &'a AutopilotEnvelope,
+    ledger: &'a BudgetLedger,
+    elapsed: Duration,
+}
+
+/// Everything one [`select_candidate`] pass needs.
+///
+/// A struct rather than a parameter list because HORO-1510's `narrowing` was
+/// the eighth argument, and eight positional arguments — three of which are
+/// `Option`/`bool` flags — is a call site nobody can read. Mirrors
+/// [`RecoveryRunRequest`], which exists for the same reason one level up.
+struct Selecting<'a> {
+    candidates: Vec<(Evidence, ActionId)>,
+    registry: &'a ActionRegistry,
+    policy_cfg: &'a PolicyConfig,
+    collector: &'a dyn EvidenceCollector,
+    now: SystemTime,
+    /// Resources this run has already given up on — see loop step 9.
+    excluded: &'a HashSet<ResourceId>,
+    auto_approve_ask: bool,
+    /// `Some` makes this an automatic run (HORO-1510).
+    narrowing: Option<Narrowing<'a>>,
+}
+
+/// What one [`select_candidate`] pass concluded.
+struct Selection {
+    /// The one candidate to act on this iteration, if any.
+    candidate: Option<ScoredCandidate>,
+    remaining: RemainingCandidates,
+    /// Under an Autopilot envelope: the first refusal naming one of its
+    /// run-wide budgets or preconditions, if the pass hit one.
+    ///
+    /// Only meaningful when `candidate` is `None`, and the caller reads it only
+    /// then. A pass that admitted something has nothing to explain: a byte
+    /// budget too small for the largest candidate is not a reason to stop when a
+    /// smaller one fits, and the pass keeps looking rather than taking the first
+    /// refusal as a verdict on the rest.
+    budget_refusal: Option<RefusalReason>,
+}
+
 /// Refreshes `ev`'s correlation fields via `collector` (reusing
 /// [`crate::evidence::correlate::merge_into`] exactly as HORO-951's
 /// deletion-time revalidation does) and re-stamps `collected_at` with the
@@ -522,19 +635,37 @@ fn refresh_evidence(
 /// ordering is why the filter reads the policy-free
 /// [`crate::actionability::plan_refusal`] rather than `static_refusal`: the
 /// `match` below is the Protected gate, and it is already there.
-fn select_candidate(
-    candidates: Vec<(Evidence, ActionId)>,
-    registry: &ActionRegistry,
-    policy_cfg: &PolicyConfig,
-    collector: &dyn EvidenceCollector,
-    now: SystemTime,
-    excluded: &HashSet<ResourceId>,
-    auto_approve_ask: bool,
-) -> (Option<ScoredCandidate>, RemainingCandidates) {
+///
+/// # The Autopilot gate, when there is one
+///
+/// `narrowing` present makes this an automatic run (HORO-1510). Every candidate
+/// that survives the filters above is then put to [`crate::autopilot::admit`],
+/// and a refusal drops it here for the same reason as the actionability filter:
+/// the loop moves on to the next-largest candidate within the same iteration
+/// rather than spending one to be told no.
+///
+/// The gate runs *after* the actionability filter on purpose. A candidate whose
+/// action refuses on sight is unavailable to every run, envelope or not, and
+/// that is the more durable half of the answer — so it is counted as
+/// `not_executable` rather than blamed on Autopilot.
+fn select_candidate(request: Selecting<'_>) -> Selection {
+    let Selecting {
+        candidates,
+        registry,
+        policy_cfg,
+        collector,
+        now,
+        excluded,
+        auto_approve_ask,
+        narrowing,
+    } = request;
+
     let mut auto_safe: Vec<ScoredCandidate> = Vec::new();
     let mut ask: Vec<ScoredCandidate> = Vec::new();
     let mut protected: u32 = 0;
     let mut not_executable: u32 = 0;
+    let mut not_permitted_by_autopilot: u32 = 0;
+    let mut budget_refusal: Option<RefusalReason> = None;
 
     for (ev, action_id) in candidates {
         if excluded.contains(&ev.resource) {
@@ -558,6 +689,27 @@ fn select_candidate(
                 if let Some(action) = registry.get(action_id.0) {
                     if crate::actionability::plan_refusal(action, &refreshed).is_some() {
                         not_executable += 1;
+                        continue;
+                    }
+                }
+                if let Some(narrowing) = narrowing.as_ref() {
+                    // `candidate_bytes`, not `size`: `admit` has to be told
+                    // "unmeasured" as unmeasured, because a candidate whose
+                    // reclaimable size is unknown cannot be charged against a
+                    // byte budget and it refuses rather than charging it as the
+                    // zero `candidate_size` would hand it.
+                    let admission = admit(
+                        narrowing.envelope,
+                        narrowing.ledger,
+                        &decision,
+                        candidate_bytes(&refreshed),
+                        narrowing.elapsed,
+                    );
+                    if let Some(reason) = admission.refusal() {
+                        not_permitted_by_autopilot += 1;
+                        if reason.is_budget_or_precondition_refusal() && budget_refusal.is_none() {
+                            budget_refusal = Some(reason);
+                        }
                         continue;
                     }
                 }
@@ -586,17 +738,28 @@ fn select_candidate(
         requires_confirmation,
         protected,
         not_executable,
+        not_permitted_by_autopilot,
+    };
+    let selected = |candidate: Option<ScoredCandidate>, requires_confirmation: u32| Selection {
+        candidate,
+        remaining: remaining(requires_confirmation),
+        budget_refusal,
     };
 
     if let Some(best) = auto_safe.into_iter().max_by_key(|c| c.size) {
-        return (Some(best), remaining(0));
+        return selected(Some(best), 0);
     }
 
-    if auto_approve_ask {
+    // An `Ask` candidate that reached the bucket under an envelope was admitted
+    // by the gate, and the gate admits `Ask` only where the envelope
+    // pre-authorizes that exact risk — so the envelope, not
+    // `auto_approve_ask`, is what makes it eligible here. See
+    // [`RecoveryAdmission`] for why those two are different kinds of consent.
+    if auto_approve_ask || narrowing.is_some() {
         let best = ask.into_iter().max_by_key(|c| c.size);
-        (best, remaining(0))
+        selected(best, 0)
     } else {
-        (None, remaining(ask.len() as u32))
+        selected(None, ask.len() as u32)
     }
 }
 
@@ -610,6 +773,44 @@ mod select_candidate_tests {
     };
     use crate::evidence::probe::ProbeReason;
     use std::path::PathBuf;
+
+    /// [`select_candidate`] as every test below calls it: with no Autopilot
+    /// envelope, which is what a recovery a human asked for looks like.
+    ///
+    /// The two assertions are the point, not plumbing. They hold HORO-1510's
+    /// central claim — that adding the envelope seam changed nothing about a
+    /// run that has no envelope — and because every existing test in this module
+    /// routes through here, all of them assert it.
+    #[allow(clippy::too_many_arguments)]
+    fn select_without_envelope(
+        candidates: Vec<(Evidence, ActionId)>,
+        registry: &ActionRegistry,
+        policy_cfg: &PolicyConfig,
+        collector: &dyn EvidenceCollector,
+        now: SystemTime,
+        excluded: &HashSet<ResourceId>,
+        auto_approve_ask: bool,
+    ) -> (Option<ScoredCandidate>, RemainingCandidates) {
+        let selection = select_candidate(Selecting {
+            candidates,
+            registry,
+            policy_cfg,
+            collector,
+            now,
+            excluded,
+            auto_approve_ask,
+            narrowing: None,
+        });
+        assert_eq!(
+            selection.budget_refusal, None,
+            "with no envelope there is no envelope allowance to have been spent"
+        );
+        assert_eq!(
+            selection.remaining.not_permitted_by_autopilot, 0,
+            "with no envelope nothing can have been refused by one"
+        );
+        (selection.candidate, selection.remaining)
+    }
 
     /// A collector that always reports clean, complete correlation — the
     /// baseline that makes complete/fresh evidence reach `AutoSafe`.
@@ -674,7 +875,7 @@ mod select_candidate_tests {
         let big = evidence("/tmp/big/target", ResourceKind::CargoTargetDir, 10_000);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, remaining) = select_candidate(
+        let (selected, remaining) = select_without_envelope(
             vec![
                 (small, ActionId("test.action")),
                 (big, ActionId("test.action")),
@@ -701,7 +902,7 @@ mod select_candidate_tests {
         excluded.insert(resource);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, _) = select_candidate(
+        let (selected, _) = select_without_envelope(
             vec![(only, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -719,7 +920,7 @@ mod select_candidate_tests {
         let ev = evidence("/tmp/live/target", ResourceKind::XcodeDerivedData, 100);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, remaining) = select_candidate(
+        let (selected, remaining) = select_without_envelope(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -740,6 +941,7 @@ mod select_candidate_tests {
                 requires_confirmation: 1,
                 protected: 0,
                 not_executable: 0,
+                not_permitted_by_autopilot: 0,
             }
         );
     }
@@ -749,7 +951,7 @@ mod select_candidate_tests {
         let ev = evidence("/tmp/live/target", ResourceKind::XcodeDerivedData, 100);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, remaining) = select_candidate(
+        let (selected, remaining) = select_without_envelope(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -771,7 +973,7 @@ mod select_candidate_tests {
         let ev = evidence("/tmp/unknown/thing", ResourceKind::Unknown, 100);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, remaining) = select_candidate(
+        let (selected, remaining) = select_without_envelope(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -791,6 +993,7 @@ mod select_candidate_tests {
                 requires_confirmation: 0,
                 protected: 1,
                 not_executable: 0,
+                not_permitted_by_autopilot: 0,
             }
         );
     }
@@ -860,7 +1063,7 @@ mod select_candidate_tests {
             "fixture invalid: this action must be statically refused"
         );
 
-        let (selected, remaining) = select_candidate(
+        let (selected, remaining) = select_without_envelope(
             vec![
                 (big_but_refused, ActionId("homebrew.cleanup.cache")),
                 (small_but_runnable, ActionId("cargo.clean.target_dir")),
@@ -905,7 +1108,7 @@ mod select_candidate_tests {
         );
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, remaining) = select_candidate(
+        let (selected, remaining) = select_without_envelope(
             vec![(ev, ActionId("homebrew.cleanup.cache"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -922,6 +1125,7 @@ mod select_candidate_tests {
                 requires_confirmation: 0,
                 protected: 0,
                 not_executable: 1,
+                not_permitted_by_autopilot: 0,
             },
             "a candidate the offered action refuses on sight is neither waiting for \
              consent nor protected: it may well run tomorrow, and the breakdown is \
@@ -953,7 +1157,7 @@ mod select_candidate_tests {
             "fixture invalid: this id must be absent from the registry"
         );
 
-        let (selected, _) = select_candidate(
+        let (selected, _) = select_without_envelope(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -966,6 +1170,322 @@ mod select_candidate_tests {
         assert!(
             selected.is_some(),
             "an unresolvable action id must reach the caller, which reports it"
+        );
+    }
+
+    // ----------------------------------------------------------------------
+    // HORO-1510: the same pass, narrowed by an Autopilot envelope.
+    //
+    // Everything above calls `select_without_envelope`, so the no-envelope
+    // behaviour is already pinned (including, in that helper's own two
+    // assertions, that the seam is inert without one). What follows is about
+    // the seam itself, and each test narrows the envelope in exactly ONE
+    // place — an envelope narrowed in two cannot say which of them refused.
+    // ----------------------------------------------------------------------
+
+    /// An enabled envelope that allows `kinds` and nothing else, with every
+    /// budget at its ceiling so no budget can be what refused.
+    fn envelope_allowing(kinds: &[ResourceKind]) -> AutopilotEnvelope {
+        let mut envelope = AutopilotEnvelope::revoked();
+        envelope.enable();
+        for kind in kinds {
+            envelope.allow_kind(*kind).expect("kind is allowlistable");
+        }
+        envelope
+            .set_max_actions(crate::autopilot::envelope::ACTIONS_CEILING)
+            .expect("the ceiling is within the ceiling");
+        envelope
+            .set_max_bytes(crate::autopilot::envelope::BYTES_CEILING)
+            .expect("the ceiling is within the ceiling");
+        envelope
+            .set_max_duration(crate::autopilot::envelope::DURATION_CEILING)
+            .expect("the ceiling is within the ceiling");
+        envelope
+    }
+
+    /// [`select_candidate`] under `envelope`, with a fresh (nothing-spent)
+    /// ledger and no elapsed time — so what refuses is the envelope's shape,
+    /// never what an earlier action in the same run had already used up.
+    fn select_under(
+        envelope: &AutopilotEnvelope,
+        candidates: Vec<(Evidence, ActionId)>,
+        collector: &dyn EvidenceCollector,
+        now: SystemTime,
+        auto_approve_ask: bool,
+    ) -> Selection {
+        let ledger = BudgetLedger::for_envelope(envelope);
+        select_candidate(Selecting {
+            candidates,
+            registry: &ActionRegistry::builtin(),
+            policy_cfg: &PolicyConfig::default(),
+            collector,
+            now,
+            excluded: &HashSet::new(),
+            auto_approve_ask,
+            narrowing: Some(Narrowing {
+                envelope,
+                ledger: &ledger,
+                elapsed: Duration::ZERO,
+            }),
+        })
+    }
+
+    /// A kind the user did not allowlist is Autopilot's limit, not the
+    /// disk's — so it is counted separately, and it is NOT reportable as a
+    /// reason to stop. Widening the allowlist would admit it, which is
+    /// precisely why `is_budget_or_precondition_refusal` excludes it.
+    ///
+    /// The allowed candidate here is the *smaller* of the two, so a pass that
+    /// ignored the envelope would pick the other one and fail.
+    #[test]
+    fn a_kind_the_envelope_does_not_allow_is_counted_against_autopilot() {
+        let allowed = evidence("/tmp/allowed/target", ResourceKind::CargoTargetDir, 100);
+        let not_allowed = evidence(
+            "/tmp/not-allowed/node_modules",
+            ResourceKind::NodeModules,
+            10_000,
+        );
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let envelope = envelope_allowing(&[ResourceKind::CargoTargetDir]);
+
+        let selection = select_under(
+            &envelope,
+            vec![
+                (allowed, ActionId("test.action")),
+                (not_allowed, ActionId("test.action")),
+            ],
+            &CleanCollector,
+            now,
+            false,
+        );
+
+        assert_eq!(
+            selection.candidate.as_ref().map(|c| c.size),
+            Some(100),
+            "the allowlisted candidate must be selected even though it is smaller"
+        );
+        assert_eq!(
+            selection.remaining,
+            RemainingCandidates {
+                requires_confirmation: 0,
+                protected: 0,
+                not_executable: 0,
+                not_permitted_by_autopilot: 1,
+            }
+        );
+        assert_eq!(
+            selection.budget_refusal, None,
+            "a non-allowlisted kind is not a spent allowance, and reporting it as \
+             one would tell the user to come back later about something that will \
+             refuse identically every time"
+        );
+    }
+
+    /// A byte budget too small for the largest candidate must not end the
+    /// pass: the loop is supposed to fall through to one that fits. This is
+    /// the reason `budget_refusal` is only read when nothing was selected.
+    #[test]
+    fn a_byte_budget_too_small_for_the_biggest_candidate_still_selects_a_smaller_one() {
+        let small = evidence("/tmp/small/target", ResourceKind::CargoTargetDir, 1_024);
+        let big = evidence("/tmp/big/target", ResourceKind::CargoTargetDir, 16_384);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let mut envelope = envelope_allowing(&[ResourceKind::CargoTargetDir]);
+        envelope.set_max_bytes(4_096).expect("under the ceiling");
+
+        let selection = select_under(
+            &envelope,
+            vec![
+                (big, ActionId("test.action")),
+                (small, ActionId("test.action")),
+            ],
+            &CleanCollector,
+            now,
+            false,
+        );
+
+        assert_eq!(
+            selection.candidate.as_ref().map(|c| c.size),
+            Some(1_024),
+            "the candidate that fits the remaining byte budget must be selected"
+        );
+        assert_eq!(selection.remaining.not_permitted_by_autopilot, 1);
+        // Recorded, but the caller must not act on it: something WAS selected.
+        assert!(matches!(
+            selection.budget_refusal,
+            Some(RefusalReason::ByteBudgetExhausted { .. })
+        ));
+    }
+
+    /// When the byte budget fits nothing, the pass reports the budget — and
+    /// the caller turns that into `EnvelopeRefused`. Calling this disk
+    /// "exhausted of safe candidates" would be false: the same candidate is
+    /// available to a recovery the user starts themselves.
+    #[test]
+    fn a_byte_budget_that_fits_nothing_reports_the_budget_not_exhaustion() {
+        let big = evidence("/tmp/big/target", ResourceKind::CargoTargetDir, 16_384);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let mut envelope = envelope_allowing(&[ResourceKind::CargoTargetDir]);
+        envelope.set_max_bytes(4_096).expect("under the ceiling");
+
+        let selection = select_under(
+            &envelope,
+            vec![(big, ActionId("test.action"))],
+            &CleanCollector,
+            now,
+            false,
+        );
+
+        assert!(selection.candidate.is_none());
+        assert_eq!(
+            selection.budget_refusal,
+            Some(RefusalReason::ByteBudgetExhausted {
+                would_reclaim: 16_384,
+                remaining: 4_096,
+            })
+        );
+    }
+
+    /// An `Ask` risk the envelope pre-authorizes is selectable even though
+    /// `auto_approve_ask` is false. Those two are different kinds of consent
+    /// — see [`RecoveryAdmission`] — and this is the one place the difference
+    /// is observable.
+    ///
+    /// `RebuildCostHigh` is the only pre-authorizable `Ask` reason there is
+    /// (see [`crate::autopilot::envelope::is_preauthorizable`]), and
+    /// per-instance `NotRegenerable` evidence is what produces it.
+    #[test]
+    fn an_ask_risk_the_envelope_preauthorized_is_selectable_without_auto_approve_ask() {
+        let mut ev = evidence("/tmp/costly/target", ResourceKind::CargoTargetDir, 100);
+        ev.regenerability = crate::evidence::model::Regenerability::NotRegenerable;
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let mut envelope = envelope_allowing(&[ResourceKind::CargoTargetDir]);
+        envelope
+            .preauthorize_ask(
+                ResourceKind::CargoTargetDir,
+                crate::policy::ReasonCode::RebuildCostHigh,
+            )
+            .expect("RebuildCostHigh is pre-authorizable for an allowlisted kind");
+
+        let selection = select_under(
+            &envelope,
+            vec![(ev, ActionId("test.action"))],
+            &CleanCollector,
+            now,
+            // The flag this feature must NOT be borrowing authority from.
+            false,
+        );
+
+        let selected = selection
+            .candidate
+            .expect("a pre-authorized Ask risk is admissible");
+        assert_eq!(selected.decision.class, PolicyClass::Ask);
+        assert_eq!(
+            selected.decision.reasons,
+            vec![crate::policy::ReasonCode::RebuildCostHigh],
+            "fixture invalid unless this is the exact risk the envelope named"
+        );
+        assert_eq!(selection.remaining.not_permitted_by_autopilot, 0);
+    }
+
+    /// The other half of the same claim: an `Ask` risk the envelope did NOT
+    /// name is refused, so pre-authorization is a per-risk grant rather than
+    /// a blanket one. `OwningToolLive` is not pre-authorizable at all — it is
+    /// true now and may be false a second later — so no envelope can admit
+    /// this candidate.
+    ///
+    /// Note where it is counted: against Autopilot, not against
+    /// `requires_confirmation`. Both are "left behind", but only one of them
+    /// is answered by the user pressing a button in this run.
+    #[test]
+    fn an_ask_risk_the_envelope_did_not_preauthorize_is_refused() {
+        let ev = evidence(
+            "/tmp/live/derived-data",
+            ResourceKind::XcodeDerivedData,
+            100,
+        );
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+        let envelope = envelope_allowing(&[ResourceKind::XcodeDerivedData]);
+
+        let selection = select_under(
+            &envelope,
+            vec![(ev, ActionId("test.action"))],
+            &ToolLiveCollector,
+            now,
+            false,
+        );
+
+        assert!(selection.candidate.is_none());
+        assert_eq!(
+            selection.remaining,
+            RemainingCandidates {
+                requires_confirmation: 0,
+                protected: 0,
+                not_executable: 0,
+                not_permitted_by_autopilot: 1,
+            }
+        );
+        assert_eq!(
+            selection.budget_refusal, None,
+            "an un-named Ask risk is not a spent allowance"
+        );
+    }
+
+    /// Anti-vacuity (campaign §15, §11): the envelope is a *narrowing* stage,
+    /// so there must be no envelope at all under which a `Protected`
+    /// candidate becomes selectable.
+    ///
+    /// Constructed to be the widest envelope the type system permits: every
+    /// allowlistable kind, every budget at its ceiling, and a pre-authorized
+    /// `Ask` risk. `ResourceKind::Unknown` is not among the allowlisted kinds
+    /// because [`AutopilotEnvelope::allow_kind`] refuses it — which is itself
+    /// part of what this test states.
+    #[test]
+    fn protected_is_not_selectable_under_the_widest_envelope_expressible() {
+        let ev = evidence("/tmp/unknown/thing", ResourceKind::Unknown, 10_000);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+
+        let allowlistable: Vec<ResourceKind> = ResourceKind::ALL
+            .iter()
+            .copied()
+            .filter(|k| *k != ResourceKind::Unknown)
+            .collect();
+        let mut envelope = envelope_allowing(&allowlistable);
+        envelope
+            .preauthorize_ask(
+                ResourceKind::CargoTargetDir,
+                crate::policy::ReasonCode::RebuildCostHigh,
+            )
+            .expect("allowlisted above");
+        assert!(
+            envelope.allow_kind(ResourceKind::Unknown).is_err(),
+            "an envelope must not be able to name the fail-closed kind at all"
+        );
+
+        let selection = select_under(
+            &envelope,
+            vec![(ev, ActionId("test.action"))],
+            &CleanCollector,
+            now,
+            // Both consent flags open simultaneously, so neither of them is
+            // what refused.
+            true,
+        );
+
+        assert!(
+            selection.candidate.is_none(),
+            "a Protected candidate is refused before the envelope is consulted"
+        );
+        assert_eq!(
+            selection.remaining,
+            RemainingCandidates {
+                requires_confirmation: 0,
+                protected: 1,
+                not_executable: 0,
+                // Attribution matters: this was not Autopilot's limit. A
+                // protected resource is refused to every run, and telling the
+                // user to widen their envelope would be a lie.
+                not_permitted_by_autopilot: 0,
+            }
         );
     }
 }
@@ -1084,6 +1604,10 @@ pub struct RecoveryRunRequest<'a> {
     /// How the run finds out the user asked it to stop. Pass `&NeverStops`
     /// where nothing can ask (HORO-1509).
     pub stop: &'a dyn StopSignal,
+    /// `Some` makes this an *automatic* run, narrowed by an Autopilot envelope.
+    /// `None` is a run a human asked for, bounded only by `config`
+    /// (HORO-1510). See [`RecoveryAdmission`].
+    pub admission: Option<RecoveryAdmission<'a>>,
 }
 
 /// Runs one bounded closed-loop recovery pass against
@@ -1106,6 +1630,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         audit_log_path,
         observer,
         stop,
+        admission,
     } = request;
 
     let start_instant = clock.now();
@@ -1140,6 +1665,17 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
     // every iteration should be reported once, not once per iteration
     // (HORO-1484).
     let mut detector_failures: Vec<String> = Vec::new();
+    // `Some` exactly for an automatic run (HORO-1510). The envelope and its
+    // ledger are held together in one `Option` rather than in two, so there is
+    // no representable state in which a run is narrowed by an envelope whose
+    // budgets nothing is counting. One ledger per run, which is
+    // `BudgetLedger::for_envelope`'s own contract — budgets that carried across
+    // runs would quietly compound into a larger standing allowance than the user
+    // granted.
+    let mut budgeted: Option<(&AutopilotEnvelope, BudgetLedger)> = admission
+        .as_ref()
+        .map(|a| (a.envelope, BudgetLedger::for_envelope(a.envelope)));
+    let mut pressure_checked = false;
 
     loop {
         // 1. Measure.
@@ -1209,6 +1745,55 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             );
         }
 
+        // 2c. Envelope preconditions, for an automatic run only (HORO-1510).
+        //
+        // After the target and stop checks for the same reason those two are in
+        // that order: if the goal is met the run reached the goal, and if the
+        // user asked it to stop it stopped, and neither of those becomes an
+        // Autopilot refusal just because Autopilot is what started the run.
+        if let Some((envelope, _)) = budgeted.as_ref() {
+            // Re-read every iteration. `admit` re-reads it per candidate too,
+            // but that only bites where there is a candidate to refuse: a run
+            // whose discovery comes back empty would otherwise report
+            // `SafeExhausted` about an envelope that had been revoked out from
+            // under it.
+            if !envelope.is_enabled() {
+                return build_report(
+                    StopReason::EnvelopeRefused(RefusalReason::AutopilotRevoked),
+                    iterations_run,
+                    actions_executed,
+                    actions_declined_or_skipped,
+                    total_bytes_freed,
+                    started_free_bytes,
+                    last_free_bytes,
+                    &detector_failures,
+                );
+            }
+            // The pressure floor, checked once and deliberately never again.
+            // Not an optimisation: a run that is working lowers the very
+            // pressure that admitted it, so re-checking each iteration would
+            // abort a successful recovery precisely *because* it had made
+            // progress — and would report the abort as a refusal rather than as
+            // the partial success it was. What bounds the run once it is under
+            // way is the envelope's action, byte and time budgets.
+            if !pressure_checked {
+                pressure_checked = true;
+                let observed = admission.as_ref().and_then(|a| a.observed_pressure);
+                if let Err(reason) = admits_pressure(envelope, observed) {
+                    return build_report(
+                        StopReason::EnvelopeRefused(reason),
+                        iterations_run,
+                        actions_executed,
+                        actions_declined_or_skipped,
+                        total_bytes_freed,
+                        started_free_bytes,
+                        last_free_bytes,
+                        &detector_failures,
+                    );
+                }
+            }
+        }
+
         // 3. Budget check.
         let elapsed = clock.now().duration_since(start_instant);
         if iterations_run >= config.max_iterations
@@ -1249,20 +1834,34 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             iteration: iterations_run + 1,
         });
         let now = wall_clock.now();
-        let (selected, remaining) = select_candidate(
+        let selection = select_candidate(Selecting {
             candidates,
-            action_registry,
+            registry: action_registry,
             policy_cfg,
             collector,
             now,
-            &no_retry,
-            config.auto_approve_ask,
-        );
+            excluded: &no_retry,
+            auto_approve_ask: config.auto_approve_ask,
+            narrowing: budgeted.as_ref().map(|(envelope, ledger)| Narrowing {
+                envelope,
+                ledger,
+                elapsed,
+            }),
+        });
+        let remaining = selection.remaining;
         actions_declined_or_skipped += remaining.requires_confirmation;
 
-        let Some(candidate) = selected else {
+        let Some(candidate) = selection.candidate else {
+            // Nothing to act on. Which of the two possible reasons that is
+            // matters (HORO-1510): an envelope out of allowance has not
+            // discovered that the disk holds nothing safe, and must not be
+            // reported as though it had.
+            let stop_reason = match selection.budget_refusal {
+                Some(reason) => StopReason::EnvelopeRefused(reason),
+                None => StopReason::SafeExhausted(remaining),
+            };
             return build_report(
-                StopReason::SafeExhausted(remaining),
+                stop_reason,
                 iterations_run,
                 actions_executed,
                 actions_declined_or_skipped,
@@ -1354,6 +1953,22 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             ProbeOutcome::Observed(bytes) => Some(bytes),
             ProbeOutcome::Unavailable(_) => None,
         };
+
+        // Charge the envelope for the action just *attempted*, per
+        // `BudgetLedger::charge` — a failed attempt counts, because the action
+        // budget bounds how much Autopilot does rather than how much of it
+        // worked. Deliberately before the `report.outcome` match below, all of
+        // whose arms `continue` or return.
+        //
+        // `unwrap_or(0)` on either figure is safe rather than lenient: `charge`
+        // takes the larger of the two, and an automatic run cannot reach here
+        // with an unknown estimate at all (`admit` refuses
+        // `ReclaimSizeUnknown`), so the fallback is unreachable today and
+        // charges nothing it could not measure if it ever stops being.
+        if let Some((_, ledger)) = budgeted.as_mut() {
+            ledger.charge(estimated_bytes.unwrap_or(0), reclaimed_bytes.unwrap_or(0));
+        }
+
         if matches!(report.outcome, ExecutionOutcome::Succeeded) {
             if let Some(bytes) = reclaimed_bytes {
                 total_bytes_freed += bytes;
@@ -1805,6 +2420,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -1838,6 +2454,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         // No detector found anything at all, so there is genuinely nothing
@@ -1898,6 +2515,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         // Zeros here too — and that is exactly why they are not the whole
@@ -1985,6 +2603,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(
@@ -1993,6 +2612,7 @@ mod run_tests {
                 requires_confirmation: 1,
                 protected: 1,
                 not_executable: 0,
+                not_permitted_by_autopilot: 0,
             }),
             "the stop reason must carry the breakdown, not merely the word"
         );
@@ -2043,6 +2663,7 @@ mod run_tests {
             audit_log_path: &dir.join("actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert!(
@@ -2088,6 +2709,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::BudgetExceeded);
@@ -2117,6 +2739,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         match report.stop_reason {
@@ -2174,6 +2797,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::NoProgress);
@@ -2251,6 +2875,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &SilentObserver,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2326,6 +2951,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &observer,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.iterations_run, 2);
@@ -2430,6 +3056,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &observer,
             stop: &NeverStops,
+            admission: None,
         });
 
         let finished: Vec<(String, String, &'static str, Option<u64>)> = observer
@@ -2508,6 +3135,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &observer,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2591,6 +3219,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &observer,
             stop: &NeverStops,
+            admission: None,
         });
 
         let totals: Vec<u64> = observer
@@ -2653,6 +3282,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &observer,
             stop: &NeverStops,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2713,6 +3343,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &observer,
             stop: &stop,
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::StoppedByUser);
@@ -2796,6 +3427,7 @@ mod run_tests {
             audit_log_path: &audit_log_path,
             observer: &observer,
             stop: &StopsAfterProbes::quiet_for(0),
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::StoppedByUser);
@@ -2842,6 +3474,7 @@ mod run_tests {
             audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
             observer: &observer,
             stop: &StopsAfterProbes::quiet_for(0),
+            admission: None,
         });
 
         assert_eq!(report.stop_reason, StopReason::TargetReached);
@@ -2875,6 +3508,514 @@ mod run_tests {
         );
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    // ----------------------------------------------------------------------
+    // HORO-1510: the same loop, made *automatic* by a `RecoveryAdmission`.
+    //
+    // Every test above passes `admission: None`, so the human-started run is
+    // already pinned. These are about what the envelope adds — and the one
+    // claim they exist to hold is the §7 one: an envelope that runs out of
+    // allowance has not discovered that the disk holds nothing safe, and must
+    // not report as though it had.
+    // ----------------------------------------------------------------------
+
+    /// Like [`empty_node_modules_evidence`] but with `bytes` of real content
+    /// inside, because several of the envelope's budgets are *about* size: a
+    /// zero-byte fixture can never be refused by a byte budget, so a test
+    /// built on one would pass without the budget ever being consulted.
+    ///
+    /// The reported figures must equal what `executor::build_fresh_evidence`
+    /// recomputes from the same tree at revalidation time, or the run aborts
+    /// on a byte-magnitude mismatch instead of executing — see
+    /// [`empty_node_modules_evidence`]'s note on that same equivalence. The
+    /// fingerprint is re-probed for the same reason: writing into the tree
+    /// moves `node_modules`' own mtime.
+    fn sized_node_modules_evidence(dir: &Path, bytes: u64) -> Evidence {
+        let mut ev = empty_node_modules_evidence(dir);
+        let node_modules = dir.join("node_modules");
+        let pkg = node_modules.join("pkg");
+        fs::create_dir_all(&pkg).expect("create pkg fixture");
+        fs::write(pkg.join("index.js"), vec![0u8; bytes as usize]).expect("write fixture bytes");
+        ev.logical_bytes = ProbeOutcome::Observed(bytes);
+        ev.reclaimable_bytes = ProbeOutcome::Observed(bytes);
+        ev.fingerprint.mtime = crate::detectors::probe_mtime(&node_modules)
+            .observed()
+            .copied();
+        ev
+    }
+
+    /// An enabled envelope allowing `NodeModules` (the kind every fixture in
+    /// this module is) with every budget at its ceiling, so that whatever a
+    /// test then narrows is unambiguously what refused.
+    fn wide_node_modules_envelope() -> AutopilotEnvelope {
+        let mut envelope = AutopilotEnvelope::revoked();
+        envelope.enable();
+        envelope
+            .allow_kind(ResourceKind::NodeModules)
+            .expect("kind is allowlistable");
+        envelope
+            .set_max_actions(crate::autopilot::envelope::ACTIONS_CEILING)
+            .expect("the ceiling is within the ceiling");
+        envelope
+            .set_max_bytes(crate::autopilot::envelope::BYTES_CEILING)
+            .expect("the ceiling is within the ceiling");
+        envelope
+            .set_max_duration(crate::autopilot::envelope::DURATION_CEILING)
+            .expect("the ceiling is within the ceiling");
+        envelope
+    }
+
+    /// A revoked envelope stops the run before it discovers anything, and
+    /// says whose decision that was.
+    ///
+    /// `is_enabled()` is re-read at the top of every iteration rather than
+    /// only inside `admit`, and this is the case that needs it: a run whose
+    /// discovery came back empty would otherwise reach `SafeExhausted` and
+    /// report a finding about the disk on the strength of an envelope that had
+    /// been switched off.
+    #[test]
+    fn a_revoked_envelope_stops_the_run_before_discovery() {
+        let dir = make_temp_dir("autopilot-revoked");
+        let evidence = sized_node_modules_evidence(&dir, 16_384);
+        let survivor = dir.join("node_modules");
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+        let observer = RecordingObserver::default();
+
+        // Enabled, then revoked: the budgets and the allowlist are all still
+        // wide, so the enable bit is the only thing that could refuse.
+        let mut envelope = wide_node_modules_envelope();
+        envelope.revoke();
+
+        let detector_registry = fake_registry(vec![evidence]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+            observer: &observer,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: Some(PressureState::Emergency),
+            }),
+        });
+
+        assert_eq!(
+            report.stop_reason,
+            StopReason::EnvelopeRefused(RefusalReason::AutopilotRevoked)
+        );
+        assert_eq!(report.iterations_run, 0);
+        assert_eq!(report.actions_executed, 0);
+        assert_eq!(
+            observer.phases(),
+            vec!["measured"],
+            "the refusal is a precondition, so the run must not have gone looking"
+        );
+        assert!(
+            survivor.exists(),
+            "nothing was authorised, so nothing may have been deleted"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Too little disk pressure refuses the run as a whole, before discovery
+    /// — it is a property of the machine, not of any candidate.
+    #[test]
+    fn an_envelope_pressure_floor_the_machine_does_not_meet_refuses_the_run() {
+        let dir = make_temp_dir("autopilot-pressure-low");
+        let evidence = sized_node_modules_evidence(&dir, 16_384);
+        let survivor = dir.join("node_modules");
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+        let observer = RecordingObserver::default();
+
+        let mut envelope = wide_node_modules_envelope();
+        envelope.set_min_pressure(Some(PressureState::Critical));
+
+        let detector_registry = fake_registry(vec![evidence]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+            observer: &observer,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: Some(PressureState::Warn),
+            }),
+        });
+
+        assert_eq!(
+            report.stop_reason,
+            StopReason::EnvelopeRefused(RefusalReason::DiskPressureTooLow {
+                required: PressureState::Critical,
+                observed: Some(PressureState::Warn),
+            })
+        );
+        assert_eq!(
+            observer.phases(),
+            vec!["measured"],
+            "checked once for the run, not once per candidate"
+        );
+        assert!(survivor.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Unmeasured pressure fails closed: an envelope with a floor refuses a
+    /// run that cannot say where the machine is relative to it. "We could not
+    /// tell" is not "it is fine".
+    #[test]
+    fn an_unobserved_pressure_state_fails_closed_against_a_floor() {
+        let dir = make_temp_dir("autopilot-pressure-unknown");
+        let evidence = sized_node_modules_evidence(&dir, 16_384);
+        let survivor = dir.join("node_modules");
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let mut envelope = wide_node_modules_envelope();
+        envelope.set_min_pressure(Some(PressureState::Warn));
+
+        let detector_registry = fake_registry(vec![evidence]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: None,
+            }),
+        });
+
+        assert_eq!(
+            report.stop_reason,
+            StopReason::EnvelopeRefused(RefusalReason::DiskPressureTooLow {
+                required: PressureState::Warn,
+                observed: None,
+            })
+        );
+        assert!(survivor.exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A goal already met is `TargetReached` even under a revoked envelope.
+    /// Autopilot being switched off is not a finding about the disk either —
+    /// and the user asking "am I there?" gets the same answer whoever asked.
+    #[test]
+    fn an_already_met_goal_reports_target_reached_even_under_a_revoked_envelope() {
+        let usage = FsUsage::new(1_000, 990); // 99% free
+        let config = RecoveryConfig {
+            target: FreeTarget::Percentage(90.0),
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+        let envelope = AutopilotEnvelope::revoked();
+
+        let detector_registry = fake_registry(Vec::new());
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: None,
+            }),
+        });
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+    }
+
+    /// A user stop outranks an envelope refusal. The run stopped because
+    /// somebody asked it to; it did not stop because Autopilot was off.
+    #[test]
+    fn a_user_stop_outranks_an_envelope_refusal() {
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+        let envelope = AutopilotEnvelope::revoked();
+        let stop = StopsAfterProbes::quiet_for(0);
+
+        let detector_registry = fake_registry(Vec::new());
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &stop,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: None,
+            }),
+        });
+
+        assert_eq!(report.stop_reason, StopReason::StoppedByUser);
+        assert!(
+            stop.probe_count() >= 1,
+            "fixture invalid unless the loop actually asked"
+        );
+    }
+
+    /// THE HORO-1510 test (campaign §7). Two real candidates, an envelope
+    /// that permits one action: the run does one, then stops — and it reports
+    /// that Autopilot reached its limit, NOT that the disk has nothing safe
+    /// left on it. The second candidate is still there, still safe, and still
+    /// available to a recovery the user starts themselves.
+    ///
+    /// Paired with
+    /// `the_same_two_candidates_run_to_exhaustion_under_a_wide_envelope`
+    /// below, which is byte-for-byte the same fixture with the action budget
+    /// widened. Together they are the anti-vacuity pair: the *only*
+    /// difference between the two runs is `set_max_actions`, so nothing else
+    /// can be what produced the different stop reason.
+    #[test]
+    fn an_exhausted_envelope_action_budget_is_not_reported_as_an_exhausted_disk() {
+        let dir = make_temp_dir("autopilot-action-budget");
+        let big_dir = dir.join("big");
+        let small_dir = dir.join("small");
+        let big = sized_node_modules_evidence(&big_dir, 16_384);
+        let small = sized_node_modules_evidence(&small_dir, 1_024);
+        let usage = FsUsage::new(1_000_000_000, 100); // far from any target
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let mut envelope = wide_node_modules_envelope();
+        envelope.set_max_actions(1).expect("under the ceiling");
+
+        let detector_registry = fake_registry(vec![big, small]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: Some(PressureState::Critical),
+            }),
+        });
+
+        assert_eq!(
+            report.stop_reason,
+            StopReason::EnvelopeRefused(RefusalReason::ActionBudgetExhausted { max_actions: 1 })
+        );
+        // Stated separately and negatively, because this is the specific
+        // wrong answer the variant exists to prevent — a user told
+        // "nothing safe left" would stop looking.
+        assert!(
+            !matches!(report.stop_reason, StopReason::SafeExhausted(_)),
+            "an envelope out of allowance has not established anything about this disk"
+        );
+        assert_eq!(report.actions_executed, 1);
+        assert_eq!(
+            report.total_bytes_freed, 16_384,
+            "the largest candidate is the one an action budget of 1 should have spent \
+             itself on"
+        );
+        assert!(
+            !big_dir.join("node_modules").exists(),
+            "the one authorised action must really have run"
+        );
+        assert!(
+            small_dir.join("node_modules").exists(),
+            "the candidate the budget refused must still be there — that is what \
+             makes reporting it as SafeExhausted a lie"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The other half of the pair above: same two candidates, same collector,
+    /// same disk, envelope budgets at their ceilings. The run clears both and
+    /// reaches a genuine `SafeExhausted` — so `SafeExhausted` is still
+    /// reachable under an envelope, and the paired test's different answer
+    /// came from the action budget rather than from the envelope's mere
+    /// presence.
+    #[test]
+    fn the_same_two_candidates_run_to_exhaustion_under_a_wide_envelope() {
+        let dir = make_temp_dir("autopilot-wide-envelope");
+        let big_dir = dir.join("big");
+        let small_dir = dir.join("small");
+        let big = sized_node_modules_evidence(&big_dir, 16_384);
+        let small = sized_node_modules_evidence(&small_dir, 1_024);
+        let usage = FsUsage::new(1_000_000_000, 100);
+        let config = base_config();
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+        let envelope = wide_node_modules_envelope();
+
+        let detector_registry = fake_registry(vec![big, small]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: Some(PressureState::Critical),
+            }),
+        });
+
+        assert_eq!(
+            report.stop_reason,
+            StopReason::SafeExhausted(RemainingCandidates::default()),
+            "an automatic run that really did run out of candidates says so, with \
+             zeros rather than with an Autopilot excuse"
+        );
+        assert_eq!(report.actions_executed, 2);
+        assert_eq!(report.total_bytes_freed, 17_408);
+        assert!(!big_dir.join("node_modules").exists());
+        assert!(!small_dir.join("node_modules").exists());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An automatic run that reaches the goal reports `TargetReached`, decided
+    /// by a re-measurement of the filesystem — campaign §9 and §11: nothing in
+    /// the envelope is consulted about whether the goal was met, and the
+    /// envelope's remaining allowance (wide here, and untouched) is not what
+    /// ended the run.
+    #[test]
+    fn an_automatic_run_that_reaches_the_goal_reports_target_reached() {
+        let dir = make_temp_dir("autopilot-target-reached");
+        let evidence = sized_node_modules_evidence(&dir, 16_384);
+        let config = RecoveryConfig {
+            target: FreeTarget::AbsoluteBytes(500),
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+        let envelope = wide_node_modules_envelope();
+
+        // Below target twice — the opening reading that becomes
+        // `started_free_bytes`, then iteration 1's own — and above it on the
+        // third, which is the reading taken after the mutation. Only a loop
+        // that re-measures can tell the second and third apart.
+        let fs_stat = ScriptedFsStat::new(vec![
+            FsUsage::new(1_000_000, 100),
+            FsUsage::new(1_000_000, 100),
+            FsUsage::new(1_000_000, 900),
+        ]);
+
+        let detector_registry = fake_registry(vec![evidence]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &fs_stat,
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &dir.join("actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: Some(RecoveryAdmission {
+                envelope: &envelope,
+                observed_pressure: Some(PressureState::Critical),
+            }),
+        });
+
+        assert_eq!(report.stop_reason, StopReason::TargetReached);
+        assert_eq!(report.actions_executed, 1);
+        assert_eq!(report.started_free_bytes, 100);
+        assert_eq!(report.final_free_bytes, 900);
+        assert!(
+            fs_stat.call_count() >= 3,
+            "the goal must have been judged on a second, post-mutation reading"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
 

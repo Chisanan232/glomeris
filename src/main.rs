@@ -3013,6 +3013,9 @@ fn free_run(
         audit_log_path: &audit_log_path,
         observer: observer.as_ref(),
         stop: stop_signal.as_ref(),
+        // A human typed this command, so the only limits are the ones above.
+        // `--autopilot` is what fills this in (HORO-1510).
+        admission: None,
     });
 
     if json {

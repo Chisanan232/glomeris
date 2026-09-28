@@ -851,6 +851,9 @@ fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
             requires_confirmation: 2,
             protected: 1,
             not_executable: 3,
+            // A human-started run, which is what this fixture is: no Autopilot
+            // envelope, so nothing can have been refused by one (HORO-1510).
+            not_permitted_by_autopilot: 0,
         }),
         iterations_run: 2,
         actions_executed: 1,
