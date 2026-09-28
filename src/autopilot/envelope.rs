@@ -9,7 +9,10 @@
 //! possible model response could cause". An [`AutopilotEnvelope`] is this
 //! crate's answer: a bound the model never sees, never sends, and cannot
 //! name. Every field here is a ceiling on outcomes, not a hint about
-//! intent.
+//! intent — with one stated exception, `respond_to_alerts`, which bounds
+//! when a run may *begin* rather than what it may do; see its own
+//! documentation for why it is a separate bit and not an implication of
+//! `enabled`.
 //!
 //! The model's entire influence is *ordering* — see
 //! [`crate::autopilot::run`]. Ordering a list cannot add an item to it,
@@ -235,6 +238,22 @@ pub struct AutopilotEnvelope {
     max_bytes: u64,
     max_duration: Duration,
     min_pressure: Option<PressureState>,
+    /// Whether Autopilot may *begin* a run nobody asked for — the standing
+    /// answer to a disk-pressure alert, as opposed to the standing answer to
+    /// "what may a run do" that the rest of this struct gives (HORO-1510).
+    ///
+    /// The one field here that is not a ceiling on outcomes, so the module
+    /// docs' claim needs this exception stated rather than glossed. It is
+    /// still only ever narrowing in the direction that matters: `false`, the
+    /// default, means every run has a human behind it, and turning it on
+    /// changes nothing about what a run may do once it starts — the budgets,
+    /// the allowlist and the pre-authorizations all still apply, unchanged.
+    ///
+    /// Separate from `enabled` rather than implied by it, because an envelope
+    /// written before this field existed granted authority over runs its
+    /// owner asked for, and reading it as consent to run unasked would widen
+    /// a grant that person already read and approved.
+    respond_to_alerts: bool,
 }
 
 impl Default for AutopilotEnvelope {
@@ -260,6 +279,7 @@ impl AutopilotEnvelope {
             max_bytes: DEFAULT_MAX_BYTES,
             max_duration: DEFAULT_MAX_DURATION,
             min_pressure: None,
+            respond_to_alerts: false,
         }
     }
 
@@ -365,6 +385,16 @@ impl AutopilotEnvelope {
         self.min_pressure = min_pressure;
     }
 
+    /// Allows or forbids Autopilot *starting* a run in answer to a
+    /// disk-pressure alert. See the field's own documentation.
+    ///
+    /// Unbounded like [`set_min_pressure`](Self::set_min_pressure) and for a
+    /// related reason: there is nothing here to clamp. The value is one bit,
+    /// and the narrow one is the default.
+    pub fn set_respond_to_alerts(&mut self, respond_to_alerts: bool) {
+        self.respond_to_alerts = respond_to_alerts;
+    }
+
     pub fn allowed_kinds(&self) -> &[ResourceKind] {
         &self.allowed_kinds
     }
@@ -387,6 +417,26 @@ impl AutopilotEnvelope {
 
     pub fn min_pressure(&self) -> Option<PressureState> {
         self.min_pressure
+    }
+
+    /// What the user set, whether or not it is in force. For *displaying* the
+    /// setting; to decide anything, use
+    /// [`starts_unprompted`](Self::starts_unprompted).
+    pub fn responds_to_alerts(&self) -> bool {
+        self.respond_to_alerts
+    }
+
+    /// Whether an unprompted run is authorized right now: the standing grant
+    /// is in force **and** it says so.
+    ///
+    /// Exists as one method because this conjunction is the authority check,
+    /// and a caller that computed it — most of all the SwiftUI client, which
+    /// is not allowed to hold policy — would be deciding rather than reading.
+    /// Revoking Autopilot therefore stops unprompted runs without touching
+    /// this setting, which is what makes `revoke` the single bit its own
+    /// documentation promises.
+    pub fn starts_unprompted(&self) -> bool {
+        self.enabled && self.respond_to_alerts
     }
 
     pub fn permits_kind(&self, kind: ResourceKind) -> bool {
@@ -463,6 +513,18 @@ impl AutopilotEnvelope {
             match self.min_pressure {
                 Some(state) => format!("runs only at {} or worse", state.as_str()),
                 None => "not required".to_string(),
+            }
+        ));
+        // Stated for both values, never omitted when off. "Can this start
+        // without me" is the question a reader of a standing deletion grant is
+        // most entitled to a straight answer to, and a line that appeared only
+        // in the dangerous case would leave its absence to be interpreted.
+        lines.push(format!(
+            "unprompted runs:   {}",
+            match (self.enabled, self.respond_to_alerts) {
+                (_, false) => "never — every run starts because you asked",
+                (true, true) => "may start on a disk-pressure alert",
+                (false, true) => "allowed, but dormant while revoked",
             }
         ));
 
@@ -546,6 +608,73 @@ mod tests {
         assert!(envelope.allowed_kinds().is_empty());
         assert!(envelope.ask_preauthorizations().is_empty());
         assert!(envelope.min_pressure().is_none());
+        assert!(!envelope.responds_to_alerts());
+        assert!(!envelope.starts_unprompted());
+    }
+
+    /// Neither half of the conjunction is sufficient. The first case is the
+    /// upgrade path — every envelope written before HORO-1510 parses to
+    /// exactly this — and the second is the one a GUI could get wrong by
+    /// leaving a toggle on after revoking.
+    #[test]
+    fn an_unprompted_run_needs_both_the_grant_and_the_setting() {
+        let mut enabled_only = AutopilotEnvelope::revoked();
+        enabled_only.enable();
+        assert!(!enabled_only.starts_unprompted());
+
+        let mut setting_only = AutopilotEnvelope::revoked();
+        setting_only.set_respond_to_alerts(true);
+        assert!(setting_only.responds_to_alerts());
+        assert!(
+            !setting_only.starts_unprompted(),
+            "a revoked envelope must not start anything, whatever this setting says"
+        );
+
+        let mut both = AutopilotEnvelope::revoked();
+        both.enable();
+        both.set_respond_to_alerts(true);
+        assert!(both.starts_unprompted());
+    }
+
+    /// Revocation stays one bit: it stops unprompted runs without editing the
+    /// setting, so re-enabling does not silently drop a preference the user
+    /// never changed — and does not silently restore one either, because
+    /// `enable` on the CLI rebuilds the envelope from `revoked()`.
+    #[test]
+    fn revoking_stops_unprompted_runs_without_clearing_the_setting() {
+        let mut envelope = AutopilotEnvelope::revoked();
+        envelope.enable();
+        envelope.set_respond_to_alerts(true);
+
+        envelope.revoke();
+
+        assert!(!envelope.starts_unprompted());
+        assert!(envelope.responds_to_alerts());
+    }
+
+    #[test]
+    fn describe_answers_whether_a_run_can_start_without_being_asked() {
+        let mut envelope = AutopilotEnvelope::revoked();
+        envelope.enable();
+        envelope.allow_kind(ResourceKind::NodeModules).unwrap();
+
+        let asked_only = envelope.describe().join("\n");
+        assert!(
+            asked_only.contains("unprompted runs:   never"),
+            "{asked_only}"
+        );
+
+        envelope.set_respond_to_alerts(true);
+        let unprompted = envelope.describe().join("\n");
+        assert!(
+            unprompted.contains("may start on a disk-pressure alert"),
+            "{unprompted}"
+        );
+
+        // Set but not in force must read as neither of the other two.
+        envelope.revoke();
+        let dormant = envelope.describe().join("\n");
+        assert!(dormant.contains("dormant while revoked"), "{dormant}");
     }
 
     /// Enabling is necessary but never sufficient. The allowlist is a
@@ -789,6 +918,7 @@ mod tests {
         }
         envelope.set_max_bytes(BYTES_CEILING).unwrap();
         envelope.set_min_pressure(Some(PressureState::Emergency));
+        envelope.set_respond_to_alerts(true);
 
         for line in envelope.describe() {
             assert!(
