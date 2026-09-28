@@ -502,8 +502,19 @@ pub enum Regenerability {
 
 /// Per-instance judgment of what happens if this specific resource is
 /// removed. Distinct from [`Regenerability`] (a static per-kind property):
-/// `Recoverability` is what a later ticket's policy will actually reason
-/// over for a given observed [`Evidence`].
+/// `Recoverability` is the detector's judgment about *this* observed
+/// instance.
+///
+/// Load-bearing, not reporting-only (HORO-1553): until that ticket the
+/// field on [`Evidence`] was read by no decision anywhere, so a detector
+/// setting `Irreversible` on a resource achieved nothing beyond a line in a
+/// report. [`crate::policy::classify`] now diverts `Irreversible` to
+/// `ASK`/[`crate::policy::ReasonCode::RecoverabilityIrreversible`], and
+/// `crate::autopilot::is_preauthorizable` refuses to let that reason be
+/// consented to in advance. There is deliberately no `Unknown` variant
+/// here: a detector that does not know says so through
+/// [`Regenerability::Unknown`], which is the axis `classify` reads for
+/// absence of knowledge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recoverability {
     RegenerableByTool,
