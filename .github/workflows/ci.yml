@@ -266,6 +266,21 @@ jobs:
       - name: Check workspace aggregation has no authority
         run: bash scripts/check-workspace-aggregation-has-no-authority.sh
 
+  recovery-progress-is-not-persisted:
+    # HORO-1512 (verification items 11 and 12): nothing about a recovery run is
+    # written down, which is what lets RecoveryRestartGateTests prove a relaunched
+    # panel claims no run it never ran — a relaunch is a second RecoveryState(),
+    # not a restore. A run deletes things, so its figures are the only account the
+    # user has of what is gone: a panel reopening on a previous run's numbers would
+    # present them as this session's, and a persisted "a run is in flight" would
+    # refuse every future run with nothing left to release it. The regression is an
+    # absence becoming a presence, which no test can observe.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check no recovery progress is persisted
+        run: bash scripts/check-recovery-progress-is-not-persisted.sh
+
   credential-store-uses-keychain:
     # HORO-1309: the BYOK API key is the only secret the macOS app holds. This
     # asserts mechanically that it is keychain-backed and that nothing in the
