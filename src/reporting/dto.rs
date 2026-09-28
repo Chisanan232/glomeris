@@ -1873,6 +1873,7 @@ mod tests {
         ResourceId, ResourceKind, ResourceLocator,
     };
     use crate::policy::{PolicyClass, ReasonCode};
+    use crate::workspace::{ActivityState, MergedState, WorkspaceMember, WorktreeBranchState};
 
     // --- HORO-1327: RefusalReason is the sole producer of execute's tokens ---
 
@@ -2454,6 +2455,232 @@ mod tests {
         assert_ne!(
             protected_report.refusal_reason,
             no_action_report.refusal_reason
+        );
+    }
+
+    // --- HORO-1511: the workspace-family projection ---
+    //
+    // `tests/dto_golden_fixtures.rs` pins one whole shape against JSON. These
+    // pin the discriminations that shape would still satisfy if they were
+    // wrong in the same direction on both sides: protected bulk kept out of
+    // the byte totals, unmeasured told apart from zero, and an unread branch
+    // reported as unread rather than tidied into a plausible answer.
+
+    fn member(id: &str, bytes: Option<u64>, label: PolicyLabel) -> WorkspaceMember {
+        WorkspaceMember {
+            resource_id: id.to_string(),
+            reclaimable_bytes: bytes,
+            reclaimable_bytes_is_lower_bound: false,
+            label,
+        }
+    }
+
+    /// A settled worktree: clean, idle, published, merged. Every test below
+    /// varies only what it is about, so a changed expectation is traceable to
+    /// the thing the test names.
+    fn settled_worktree(root: &str, members: Vec<WorkspaceMember>) -> WorkspaceWorktree {
+        WorkspaceWorktree {
+            root: PathBuf::from(root),
+            linked: true,
+            dirty: false,
+            untracked: false,
+            activity: ActivityState::Idle,
+            newest_member_modified_at: None,
+            branch: ProbeOutcome::Observed(WorktreeBranchState {
+                branch: Some("spent/branch".to_string()),
+                upstream: UpstreamState::Tracking {
+                    ahead: 0,
+                    behind: 0,
+                },
+                merged: MergedState::Merged {
+                    into: "origin/main".to_string(),
+                },
+            }),
+            members,
+        }
+    }
+
+    fn family_of(worktrees: Vec<WorkspaceWorktree>) -> WorkspaceFamilyReport {
+        WorkspaceFamilyReport::from_family(&WorkspaceFamily {
+            common_dir: PathBuf::from("/work/proj/.git"),
+            worktrees,
+        })
+    }
+
+    /// Protected bulk is counted, never summed. Presenting bytes a run can
+    /// never take as part of a project's reclaimable total is the misread the
+    /// whole split exists to prevent, and a 100 GB protected member is the
+    /// case where getting it wrong would dominate the figure a person reads.
+    #[test]
+    fn protected_bulk_is_counted_and_never_added_to_any_byte_total() {
+        let report = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![
+                member("safe", Some(1_000), PolicyLabel::AutoSafe),
+                member("protected", Some(100_000_000_000), PolicyLabel::Protected),
+            ],
+        )]);
+
+        assert_eq!(report.actionable_now_bytes, 1_000);
+        assert_eq!(report.requires_confirmation_bytes, 0);
+        assert_eq!(report.protected_count, 1);
+        assert_eq!(report.actionable_now_count, 1);
+        // The figure a person reads must not contain it anywhere.
+        assert!(!report.actionable_now_human.contains("GB"));
+        assert!(!report.requires_confirmation_human.contains("GB"));
+    }
+
+    /// `None` bytes and `Some(0)` bytes both contribute nothing to a total,
+    /// so the totals alone cannot tell them apart — which is exactly why
+    /// `unmeasured_count` exists. A family of unmeasured members must not
+    /// read as a family that is genuinely empty.
+    #[test]
+    fn an_unmeasured_member_is_not_a_zero_byte_member() {
+        let unmeasured = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![member("unmeasured", None, PolicyLabel::AutoSafe)],
+        )]);
+        let measured_empty = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![member("empty", Some(0), PolicyLabel::AutoSafe)],
+        )]);
+
+        assert_eq!(unmeasured.actionable_now_bytes, 0);
+        assert_eq!(measured_empty.actionable_now_bytes, 0);
+        assert_eq!(unmeasured.unmeasured_count, 1);
+        assert_eq!(measured_empty.unmeasured_count, 0);
+    }
+
+    /// `is_lower_bound` says "the totals above may be larger". A lower-bound
+    /// estimate on a member no total includes says nothing about those
+    /// totals, so it must not raise the flag — otherwise every family with a
+    /// partially-measured protected member would advertise uncertainty about
+    /// a number that is exact.
+    #[test]
+    fn only_a_member_inside_a_total_can_make_that_total_a_lower_bound() {
+        let mut protected = member("protected", Some(9_000), PolicyLabel::Protected);
+        protected.reclaimable_bytes_is_lower_bound = true;
+        let outside = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![
+                member("safe", Some(1_000), PolicyLabel::AutoSafe),
+                protected,
+            ],
+        )]);
+
+        let mut asked = member("asked", Some(9_000), PolicyLabel::Ask);
+        asked.reclaimable_bytes_is_lower_bound = true;
+        let inside = family_of(vec![settled_worktree("/work/proj", vec![asked])]);
+
+        assert!(
+            !outside.is_lower_bound,
+            "a protected member is not inside any total it could widen"
+        );
+        assert!(inside.is_lower_bound);
+    }
+
+    /// Every member lands in exactly one bucket, whatever its label. A family
+    /// whose counts do not add up to its member list is how bulk goes
+    /// missing from the explanation, so the arithmetic is asserted over all
+    /// five labels rather than the four `label_for` can produce.
+    #[test]
+    fn every_member_is_counted_exactly_once_whatever_its_label() {
+        let all_labels = vec![
+            member("a", Some(1), PolicyLabel::AutoSafe),
+            member("b", Some(2), PolicyLabel::Ask),
+            member("c", Some(4), PolicyLabel::Protected),
+            member("d", Some(8), PolicyLabel::UnknownIncomplete),
+            member("e", Some(16), PolicyLabel::NotPolicyGoverned),
+        ];
+        let total_members = all_labels.len();
+        let report = family_of(vec![settled_worktree("/work/proj", all_labels)]);
+
+        assert_eq!(
+            report.actionable_now_count
+                + report.requires_confirmation_count
+                + report.protected_count
+                + report.unknown_count,
+            total_members,
+            "a member in no bucket is bulk the family cannot account for"
+        );
+        // `NotPolicyGoverned` is counted with the protected members, and its
+        // 16 bytes stay out of both byte totals.
+        assert_eq!(report.protected_count, 2);
+        assert_eq!(report.actionable_now_bytes, 1);
+        assert_eq!(report.requires_confirmation_bytes, 2);
+    }
+
+    /// An unread branch is reported as unread. Three `"unknown"` tags and no
+    /// names — not a detached HEAD with no upstream and no merge answer,
+    /// which would be three assertions manufactured from one failure. And it
+    /// still counts as work in progress: "the probe timed out" is not
+    /// evidence that a worktree is spent.
+    #[test]
+    fn an_unread_branch_reports_unknown_everywhere_and_names_nothing() {
+        let mut worktree = settled_worktree(
+            "/work/proj-hotfix",
+            vec![member("m", Some(1_000), PolicyLabel::AutoSafe)],
+        );
+        worktree.branch = ProbeOutcome::Unavailable(ProbeReason::TimedOut);
+        let report = family_of(vec![worktree]);
+        let only = &report.worktrees[0];
+
+        assert_eq!(only.upstream, "unknown");
+        assert_eq!(only.merged, "unknown");
+        assert_eq!(only.branch, None);
+        assert_eq!(only.merged_into, None);
+        assert_eq!(only.ahead, None);
+        assert_eq!(only.behind, None);
+        assert!(only.holds_work_in_progress);
+        assert_eq!(report.worktrees_holding_work_in_progress, 1);
+    }
+
+    /// The report carries member ids and nothing a caller could act on. The
+    /// ids are what joins a family total back to the candidate lines that
+    /// hold the action and the refusal reason — AC 5 — and the absence of
+    /// anything else is what stops the total being read as permission.
+    #[test]
+    fn a_worktree_report_publishes_member_ids_in_the_members_own_order() {
+        let report = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![
+                member("second-in-nothing", Some(1), PolicyLabel::Ask),
+                member("first-in-nothing", Some(2), PolicyLabel::AutoSafe),
+            ],
+        )]);
+
+        assert_eq!(
+            report.worktrees[0].member_resource_ids,
+            vec![
+                "second-in-nothing".to_string(),
+                "first-in-nothing".to_string()
+            ],
+            "ids are published in the members' own order, not re-sorted"
+        );
+    }
+
+    /// A settled-looking family reports what it is without that changing any
+    /// member's label. The counts are the only thing the projection says
+    /// about permission, and they are copies of labels the policy engine
+    /// already assigned.
+    #[test]
+    fn a_family_that_looks_spent_still_reports_its_protected_member() {
+        let report = family_of(vec![
+            settled_worktree(
+                "/work/proj",
+                vec![member("safe", Some(1_000), PolicyLabel::AutoSafe)],
+            ),
+            settled_worktree(
+                "/work/proj-old",
+                vec![member("protected", Some(2_000), PolicyLabel::Protected)],
+            ),
+        ]);
+
+        assert_eq!(report.worktrees_holding_work_in_progress, 0);
+        assert_eq!(report.protected_count, 1);
+        assert_eq!(
+            report.actionable_now_bytes, 1_000,
+            "the protected member's bulk is not unlocked by a quiet family"
         );
     }
 }
