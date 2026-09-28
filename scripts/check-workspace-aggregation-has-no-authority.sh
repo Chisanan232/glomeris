@@ -16,10 +16,21 @@
 # unpushed member swept along. So the rule is structural: the layers that
 # decide and the layer that explains do not meet.
 #
-# Five checks, each one a separate way the boundary could be crossed. The first
-# three are about the Rust module; the last two are about the macOS surface that
-# renders it, because a group with no authority shown by a card that can act is
-# the same defect one layer up:
+# HORO-1542 extends the same boundary to two new modules without changing its
+# shape. `src/workspace/graph.rs` is more evidence inside the zone this script
+# already watches, so checks 1–3 cover it unchanged. `src/planner` is new: it
+# is the one place a resource alias and an action id are allowed to meet,
+# because the model has to be told what is on offer and `crate::workspace` may
+# not say. Being allowed to name an action id makes it exactly as dangerous as
+# the aggregation was, so check 7 keeps the deciding layers out of it too, and
+# check 6 holds its egress half to a stricter rule than any other module here:
+# it may not name a path type at all.
+#
+# Seven checks, each one a separate way the boundary could be crossed. The
+# first three are about the aggregation module, the next two about the macOS
+# surface that renders it — because a group with no authority shown by a card
+# that can act is the same defect one layer up — and the last two about the
+# planner:
 #
 #   1. No module under src/policy, src/executor, src/autopilot or src/actions
 #      may reference `crate::workspace` at all. Those four are, in order:
@@ -62,6 +73,24 @@
 #      semantics — but it does catch the join being deleted, which is the
 #      change that would turn the card into a summary with nothing under it.
 #
+#   6. `src/planner/dto.rs` — the complete set of types that may be serialized
+#      to an LLM provider — may not name `PathBuf`, `Path`, `std::path`,
+#      `ResourceId` or `Evidence`. Every other guard on egress in this
+#      repository tests an *output*, which is only ever as good as the fixture
+#      that produced it: a field populated from a path on a code path no test
+#      exercises leaks in production and passes CI. This check makes the first
+#      rule of the campaign a property of the module instead. A module that
+#      cannot name a path cannot serialize one, whatever anybody adds to it
+#      later and whatever the tests happen to cover.
+#
+#   7. No module under src/policy, src/executor, src/autopilot or src/actions
+#      may reference `crate::planner`. Check 1's argument, unchanged, for the
+#      module that holds the alias table: resolving an alias yields a resource
+#      to *re-evaluate*, and a deciding layer that could resolve one itself
+#      would be taking a model's word for which resource it meant. The
+#      direction is one-way — planner → {workspace, actionability, actions} —
+#      and nothing that decides may look back up it.
+#
 # Exit 0 = pass. Exit 1 = fail, with file:line detail on stdout.
 
 set -euo pipefail
@@ -92,7 +121,12 @@ strip_comments() {
 violations=0
 
 # ---------------------------------------------------------------------------
-# Check 1: the deciding and mutating layers cannot reach the aggregation.
+# Checks 1 and 7: the deciding and mutating layers cannot reach the
+# aggregation, nor the planner that projects it.
+#
+# One loop over both targets rather than two loops: the argument is identical
+# and so is the single-file handling, and a copy would be a second place to
+# forget when a third explanatory module is added.
 # ---------------------------------------------------------------------------
 
 DECIDING_PATHS=(
@@ -102,34 +136,50 @@ DECIDING_PATHS=(
   "src/actions"
 )
 
+# "<module>;;<what reaching it would let a deciding layer do>"
+UNREACHABLE_MODULES=(
+  'workspace;;read a group fact, which would let sibling state decide a member'
+  'planner;;resolve a model-supplied alias, which would be taking the model'"'"'s word for which resource it meant'
+)
+
 for rel_dir in "${DECIDING_PATHS[@]}"; do
   abs_dir="${REPO_ROOT}/${rel_dir}"
   if [[ ! -d "$abs_dir" ]]; then
     echo "FAIL: ${rel_dir}/ is missing — this script's list of deciding layers is out of date."
     exit 1
   fi
-
-  while IFS= read -r -d '' file; do
-    rel_file="${file#"${REPO_ROOT}"/}"
-    while IFS= read -r match; do
-      echo "VIOLATION: ${rel_file}:${match%%:*}: a deciding layer references crate::workspace"
-      echo "    ${match#*:}"
-      violations=$((violations + 1))
-    done < <(grep -nE '\b(crate|super)::workspace\b' "$file" | strip_comments)
-  done < <(find "$abs_dir" -name '*.rs' -print0)
 done
 
-# `src/policy.rs`-style single-file modules would sit next to the directory
-# rather than inside it, so check those too if they exist.
-for rel_dir in "${DECIDING_PATHS[@]}"; do
-  single_file="${REPO_ROOT}/${rel_dir}.rs"
-  [[ -f "$single_file" ]] || continue
-  rel_file="${rel_dir}.rs"
-  while IFS= read -r match; do
-    echo "VIOLATION: ${rel_file}:${match%%:*}: a deciding layer references crate::workspace"
-    echo "    ${match#*:}"
-    violations=$((violations + 1))
-  done < <(grep -nE '\b(crate|super)::workspace\b' "$single_file" | strip_comments)
+for entry in "${UNREACHABLE_MODULES[@]}"; do
+  module="${entry%%;;*}"
+  why="${entry#*;;}"
+
+  if [[ ! -d "${REPO_ROOT}/src/${module}" ]]; then
+    echo "FAIL: src/${module}/ is missing — UNREACHABLE_MODULES is out of date."
+    echo "Its absence would mean the module moved somewhere this script no longer watches."
+    exit 1
+  fi
+
+  for rel_dir in "${DECIDING_PATHS[@]}"; do
+    while IFS= read -r -d '' file; do
+      rel_file="${file#"${REPO_ROOT}"/}"
+      while IFS= read -r match; do
+        echo "VIOLATION: ${rel_file}:${match%%:*}: a deciding layer references crate::${module} — it could ${why}"
+        echo "    ${match#*:}"
+        violations=$((violations + 1))
+      done < <(grep -nE "\\b(crate|super)::${module}\\b" "$file" | strip_comments)
+    done < <(find "${REPO_ROOT}/${rel_dir}" -name '*.rs' -print0)
+
+    # `src/policy.rs`-style single-file modules would sit next to the
+    # directory rather than inside it, so check those too if they exist.
+    single_file="${REPO_ROOT}/${rel_dir}.rs"
+    [[ -f "$single_file" ]] || continue
+    while IFS= read -r match; do
+      echo "VIOLATION: ${rel_dir}.rs:${match%%:*}: a deciding layer references crate::${module} — it could ${why}"
+      echo "    ${match#*:}"
+      violations=$((violations + 1))
+    done < <(grep -nE "\\b(crate|super)::${module}\\b" "$single_file" | strip_comments)
+  done
 done
 
 # ---------------------------------------------------------------------------
@@ -258,6 +308,61 @@ for entry in "${REQUIRED_IN_SWIFT[@]}"; do
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Check 6: the model-facing DTO cannot name a path.
+# ---------------------------------------------------------------------------
+
+DTO_FILE="src/planner/dto.rs"
+abs_dto="${REPO_ROOT}/${DTO_FILE}"
+
+if [[ ! -f "$abs_dto" ]]; then
+  # Not skippable, for the same reason as the missing-module cases above. If
+  # the model-facing types moved, they moved out from under the one check that
+  # constrains them by construction rather than by fixture.
+  echo "FAIL: ${DTO_FILE} is missing."
+  echo "It holds every type that may be serialized to an LLM provider. If it moved, update DTO_FILE."
+  exit 1
+fi
+
+FORBIDDEN_IN_DTO=(
+  '\bPathBuf\b;;names an owned path type, and a field of that type would serialize an absolute path'
+  '\bPath\b;;names a path type'
+  'std::path;;imports the path module'
+  '\bResourceId\b;;names the real resource identity, which embeds a path — the opaque alias exists so this type never has to'
+  '\bEvidence\b;;names the local evidence type, whose fields are the thing being withheld'
+)
+
+for entry in "${FORBIDDEN_IN_DTO[@]}"; do
+  pattern="${entry%%;;*}"
+  why="${entry#*;;}"
+
+  compile_error="$(grep -E "$pattern" /dev/null 2>&1 || true)"
+  if [[ -n "$compile_error" ]]; then
+    echo "FAIL: forbidden-pattern regex does not compile: ${pattern}"
+    echo "    grep said: ${compile_error}"
+    exit 1
+  fi
+
+  while IFS= read -r match; do
+    [[ -n "$match" ]] || continue
+    echo "VIOLATION: ${DTO_FILE}:${match%%:*}: ${why}"
+    echo "    ${match#*:}"
+    violations=$((violations + 1))
+  done < <(grep -nE "$pattern" "$abs_dto" | strip_comments)
+done
+
+# Non-vacuity. Every check above passes when its file is empty, and this one
+# would pass if `dto.rs` were reduced to a stub or if `strip_comments` started
+# eating code. Require the module to still hold the view type whose key set
+# `tests/planner_model_egress_contract.rs` pins, and the `Reported` wrapper
+# that keeps an unavailable probe from looking like a zero.
+for needle in 'pub struct ModelGraphView' 'pub struct Reported'; do
+  if ! grep -nF "$needle" "$abs_dto" | strip_comments | grep -q .; then
+    echo "VIOLATION: ${DTO_FILE}: '${needle}' is gone — the checks above would now pass over a stub."
+    violations=$((violations + 1))
+  fi
+done
+
 if [[ "$violations" -gt 0 ]]; then
   echo ""
   echo "FAIL: found ${violations} line(s) breaking HORO-1511's no-authority boundary."
@@ -269,6 +374,7 @@ if [[ "$violations" -gt 0 ]]; then
   exit 1
 fi
 
-echo "PASS: crate::workspace is unreachable from ${DECIDING_PATHS[*]} and carries no permission-shaped field."
+echo "PASS: crate::workspace and crate::planner are unreachable from ${DECIDING_PATHS[*]}, and crate::workspace carries no permission-shaped field."
 echo "PASS: the developer-projects card has nothing to act with and still reads each member's own verdict."
+echo "PASS: ${DTO_FILE} cannot name a path type, so the model-facing types cannot serialize one."
 exit 0
