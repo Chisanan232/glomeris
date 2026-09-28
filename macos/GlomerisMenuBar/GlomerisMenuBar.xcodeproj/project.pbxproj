@@ -55,6 +55,7 @@
 		6D9DD1B21DA0C217B8B11758 /* GlomerisDesignSystemTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BECB6ADDEAAC408D1C8FBD6A /* GlomerisDesignSystemTests.swift */; };
 		6EDF8A0DD97C09CBCE5ABE8A /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
 		6EF44220294C701CFE6C2DC0 /* SingleInstanceGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0803EC181FBF0B0D1507D2C /* SingleInstanceGuardTests.swift */; };
+		7089C39F2C1E62332E18A302 /* WorkspaceFamilyRowViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA52C6B614B130972EA20DF1 /* WorkspaceFamilyRowViewModelTests.swift */; };
 		7234B87DA614D063F3FB6063 /* AiPlanSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F2E709BCC8869676C1A53C /* AiPlanSectionView.swift */; };
 		74B89E9F04018A21BB2E177A /* GlomerisExecutableLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A3E6A530DA68EDBAE46ED8 /* GlomerisExecutableLocatorTests.swift */; };
 		75B85E1DE42B288E5148DDFE /* ApplyPlanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E169B1E4235782D6C59E4FE /* ApplyPlanView.swift */; };
@@ -210,6 +211,7 @@
 		C0359A703B0EC625794FFEAF /* MenuBarAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarAppearanceTests.swift; sourceTree = "<group>"; };
 		C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiProviderPreferencesViewTests.swift; sourceTree = "<group>"; };
 		C6C6CC02C2C88B2B364E5697 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		CA52C6B614B130972EA20DF1 /* WorkspaceFamilyRowViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceFamilyRowViewModelTests.swift; sourceTree = "<group>"; };
 		CAB8A9241AA91E088AF94047 /* GlomerisByteFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisByteFormat.swift; sourceTree = "<group>"; };
 		CCB103016472A37B7F09292B /* GlomerisPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisPopoverView.swift; sourceTree = "<group>"; };
 		CE314DB9D37F8B5EC603468D /* RecoveryDeepLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryDeepLinkTests.swift; sourceTree = "<group>"; };
@@ -355,6 +357,7 @@
 				8E5B2CB785BF50188F2E792A /* TestUserDefaults.swift */,
 				EA61784D28A6235DDA429D45 /* TestUserDefaultsTests.swift */,
 				D8C38528DF3AD874F4AEA896 /* UnpromptedRecoveryTests.swift */,
+				CA52C6B614B130972EA20DF1 /* WorkspaceFamilyRowViewModelTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -538,6 +541,7 @@
 				A5E57FA4AAB36C8B8CAC4AF5 /* UnpromptedRecovery.swift in Sources */,
 				8309D6D68336995F7DA36ADB /* UnpromptedRecoveryTests.swift in Sources */,
 				1D5BD582833868115CA02EDC /* WorkspaceFamilyRowViewModel.swift in Sources */,
+				7089C39F2C1E62332E18A302 /* WorkspaceFamilyRowViewModelTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
