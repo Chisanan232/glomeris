@@ -5,6 +5,11 @@
   "iterations_run": 2,
   "actions_executed": 1,
   "actions_declined_or_skipped": 3,
+  "remaining": {
+    "requires_confirmation_count": 2,
+    "protected_count": 1,
+    "not_executable_count": 3
+  },
   "bytes_freed_measured": 2147483648,
   "bytes_freed_measured_human": "2.0 GB",
   "started_free_bytes": 60000000000,

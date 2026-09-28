@@ -1866,25 +1866,47 @@ fn autopilot_run(_args: &[String]) {
 /// `goal`/`target` are printed because the report alone does not say what the
 /// run was aiming at, and a free-space figure with no stated goal is the
 /// ambiguity HORO-1506 exists to remove. The stop reason is printed as a
-/// sentence from `stop_reason_detail` as well as its `Debug` token: a bare
-/// `SafeExhausted` does not tell a user that the goal was *not* reached.
+/// sentence from `stop_reason_detail` as well as its stable tag: a bare
+/// `safe_exhausted` does not tell a user that the goal was *not* reached.
+///
+/// The tag comes from `stop_reason_tag` rather than `Debug`, so this prints the
+/// same word the JSON does; `SafeExhausted`'s own breakdown gets a line of its
+/// own below instead of arriving as a derived struct dump (HORO-1509).
 fn print_recovery_report(
     goal: Option<&glomeris::executor::goal::RecoveryGoal>,
     target: &glomeris::executor::recovery_loop::FreeTarget,
     report: &glomeris::executor::recovery_loop::RecoveryReport,
 ) {
     use glomeris::cli::recovery::{describe_free_target, stop_reason_detail};
+    use glomeris::executor::recovery_loop::StopReason;
+    use glomeris::reporting::dto::stop_reason_tag;
     use glomeris::reporting::human_bytes;
 
     match goal {
         Some(goal) => println!("recovery goal:          {}", goal.describe()),
         None => println!("free-space target:      {}", describe_free_target(target)),
     }
-    println!("stop reason:            {:?}", report.stop_reason);
+    println!(
+        "stop reason:            {}",
+        stop_reason_tag(&report.stop_reason)
+    );
     println!(
         "                        {}",
         stop_reason_detail(&report.stop_reason)
     );
+    // Printed only for the one stop reason that concluded something about what
+    // it left alone. Each count is a different next step for the user — say
+    // yes, wait for the tool to finish, or nothing at all — so they are listed
+    // separately rather than summed, and they are counts of candidates rather
+    // than bytes: space this run was not permitted to take is not an
+    // opportunity (HORO-1509).
+    if let StopReason::SafeExhausted(remaining) = &report.stop_reason {
+        println!(
+            "still there:            {} awaiting your confirmation, {} not runnable now, \
+             {} protected",
+            remaining.requires_confirmation, remaining.not_executable, remaining.protected
+        );
+    }
     println!("iterations run:         {}", report.iterations_run);
     println!("actions executed:       {}", report.actions_executed);
     println!(

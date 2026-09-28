@@ -1147,6 +1147,33 @@ pub struct RecoveryPreviewReport {
     pub candidates: Vec<DetectCandidateReport>,
 }
 
+/// What a run that ran out of safe work left behind (HORO-1509).
+///
+/// Present on [`RecoveryRunReport`] only for `stop_reason == "safe_exhausted"`,
+/// because that is the one stop for which "what is still there" is part of the
+/// answer. A run that reached its goal, hit a budget, or was stopped by the
+/// user concluded nothing about the candidates it never got to, and reporting
+/// zeros for those would be a claim it did not make.
+///
+/// Counts of candidates, never bytes. Summing space a run is not permitted to
+/// take would present unreachable space as an opportunity — the same misread
+/// [`RecoveryOpportunityReport`] splits its own totals to prevent. The field
+/// names match that report's deliberately: a client learns one vocabulary for
+/// "needs confirmation / protected / not executable" and uses it before and
+/// after a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RecoveryRemainingReport {
+    /// Reachable, real, and waiting for the user to say yes.
+    pub requires_confirmation_count: u32,
+    /// Refused by policy on evidence. Not a queue: a later run refuses these
+    /// again on the same evidence.
+    pub protected_count: u32,
+    /// Past the policy gate, but the offered action refuses to run against the
+    /// resource as it currently stands — a live tool, work in progress. This
+    /// one may well be available tomorrow.
+    pub not_executable_count: u32,
+}
+
 /// The outcome of a real recovery run, machine-readable (HORO-1506).
 ///
 /// `glomeris free` printed prose only, which left a GUI with nothing to
@@ -1172,6 +1199,12 @@ pub struct RecoveryRunReport {
     /// Present only for `stop_reason == "error"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What the run's last discovery pass looked at and left alone. Present
+    /// only for `stop_reason == "safe_exhausted"` — see
+    /// [`RecoveryRemainingReport`], which explains why it is absent otherwise
+    /// rather than zeroed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<RecoveryRemainingReport>,
     pub iterations_run: u32,
     pub actions_executed: u32,
     pub actions_declined_or_skipped: u32,
@@ -1461,7 +1494,7 @@ pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &
     use crate::executor::recovery_loop::StopReason;
     match reason {
         StopReason::TargetReached => "target_reached",
-        StopReason::SafeExhausted => "safe_exhausted",
+        StopReason::SafeExhausted(_) => "safe_exhausted",
         StopReason::BudgetExceeded => "budget_exceeded",
         StopReason::NoProgress => "no_progress",
         StopReason::StoppedByUser => "stopped_by_user",

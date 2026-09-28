@@ -853,6 +853,31 @@ struct RecoveryPreviewReportDto: Decodable, Equatable {
     }
 }
 
+/// Mirrors `reporting::dto::RecoveryRemainingReport` — what a run that ran out
+/// of safe work left behind (HORO-1509).
+///
+/// Three counts rather than one total, because each is a different next step:
+/// the user can say yes to the first, can only wait for the second, and will
+/// never be offered the third. Counts of candidates, never bytes — space the
+/// run was not permitted to take is not an opportunity, which is the same rule
+/// `RecoveryOpportunityReportDto` splits its own totals for.
+struct RecoveryRemainingReportDto: Decodable, Equatable {
+    /// Reachable, real, and waiting for the user to say yes.
+    let requiresConfirmationCount: UInt32
+    /// Refused by policy on evidence. A later run refuses these again.
+    let protectedCount: UInt32
+    /// Past policy, but the offered action refuses to run against the resource
+    /// as it currently stands — a live tool, work in progress. This one may
+    /// well be available tomorrow.
+    let notExecutableCount: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case requiresConfirmationCount = "requires_confirmation_count"
+        case protectedCount = "protected_count"
+        case notExecutableCount = "not_executable_count"
+    }
+}
+
 /// Mirrors `reporting::dto::RecoveryRunReport` — the outcome of a real
 /// recovery run, from `glomeris free --json`.
 ///
@@ -883,6 +908,12 @@ struct RecoveryRunReportDto: Decodable, Equatable {
     /// because nothing safe was left has to say so.
     let stopReasonDetail: String
     let error: String?
+    /// What the run's last discovery pass looked at and left alone. Present
+    /// only when `stopReason == "safe_exhausted"`: no other stop concluded
+    /// anything about the candidates it never reached, so zeros there would be
+    /// a claim the run did not make. `nil` means "not stated", never "none
+    /// left" (HORO-1509).
+    let remaining: RecoveryRemainingReportDto?
     let iterationsRun: UInt32
     let actionsExecuted: UInt32
     let actionsDeclinedOrSkipped: UInt32
@@ -905,6 +936,7 @@ struct RecoveryRunReportDto: Decodable, Equatable {
         case stopReason = "stop_reason"
         case stopReasonDetail = "stop_reason_detail"
         case error
+        case remaining
         case iterationsRun = "iterations_run"
         case actionsExecuted = "actions_executed"
         case actionsDeclinedOrSkipped = "actions_declined_or_skipped"

@@ -263,6 +263,31 @@ pub struct RecoveryConfig {
     pub auto_approve_ask: bool,
 }
 
+/// What the last revalidation pass looked at and left alone.
+///
+/// The counts are of candidates, never of bytes. Summing bytes a run is not
+/// allowed to take would present unreachable space as an opportunity, which is
+/// the same misread [`crate::reporting::dto::RecoveryOpportunityReport`]
+/// already splits its own totals to prevent.
+///
+/// Each count is a different next step for the user, which is why they are not
+/// one number: something needing confirmation is waiting on them, something
+/// protected is not going to become available, and something not executable
+/// right now (a live tool, a dirty worktree) may well be tomorrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RemainingCandidates {
+    /// Classified `Ask`: real, reachable, and waiting for the user to say so.
+    pub requires_confirmation: u32,
+    /// Classified `Protected`. Not a queue — the policy refuses these on
+    /// evidence, and a later run refuses them again on the same evidence.
+    pub protected: u32,
+    /// Past the policy gate, but the offered action refuses to run against the
+    /// resource as it currently stands (per
+    /// [`crate::actionability::plan_refusal`]) — typically because the owning
+    /// tool is live or the work is in progress.
+    pub not_executable: u32,
+}
+
 /// Why a recovery run stopped.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StopReason {
@@ -271,7 +296,12 @@ pub enum StopReason {
     TargetReached,
     /// No `AutoSafe` candidate remains, and either no `Ask` candidate
     /// remains or `auto_approve_ask` is `false`.
-    SafeExhausted,
+    ///
+    /// Carries what the last pass left behind, and carries it in the variant
+    /// rather than beside it: "nothing safe left" is only honest alongside
+    /// what *is* still there, and a breakdown that could be omitted would be
+    /// (HORO-1509).
+    SafeExhausted(RemainingCandidates),
     /// `max_iterations`, `max_actions`, or `max_duration` was reached.
     BudgetExceeded,
     /// The last `NO_PROGRESS_STREAK_THRESHOLD` consecutive successfully
@@ -339,7 +369,7 @@ impl RecoveryReport {
         for failure in &self.detector_failures {
             lines.push(format!("  - {failure}"));
         }
-        if self.stop_reason == StopReason::SafeExhausted {
+        if matches!(self.stop_reason, StopReason::SafeExhausted(_)) {
             lines.push(
                 "note: this run stopped because no safe candidate remained among the \
                  detectors that answered; it is not a finding that nothing safe is left"
@@ -471,9 +501,11 @@ fn refresh_evidence(
 /// `excluded`, i.e. one this run has already given up on — see loop step
 /// 9), then picks the largest-by-`candidate_size` `AutoSafe` candidate if
 /// any exist; only when none exist, and only when `auto_approve_ask` is
-/// set, picks the largest `Ask` candidate instead. Returns the number of
-/// `Ask` candidates seen but not eligible for auto-approval, for the
-/// caller's `actions_declined_or_skipped` bookkeeping.
+/// set, picks the largest `Ask` candidate instead. Also returns what it left
+/// behind, which the caller needs in two places: the number of `Ask`
+/// candidates not eligible for auto-approval feeds
+/// `actions_declined_or_skipped`, and the whole breakdown is what
+/// [`StopReason::SafeExhausted`] carries.
 ///
 /// # Why the actionability filter is here rather than at step 8
 ///
@@ -498,9 +530,11 @@ fn select_candidate(
     now: SystemTime,
     excluded: &HashSet<ResourceId>,
     auto_approve_ask: bool,
-) -> (Option<ScoredCandidate>, u32) {
+) -> (Option<ScoredCandidate>, RemainingCandidates) {
     let mut auto_safe: Vec<ScoredCandidate> = Vec::new();
     let mut ask: Vec<ScoredCandidate> = Vec::new();
+    let mut protected: u32 = 0;
+    let mut not_executable: u32 = 0;
 
     for (ev, action_id) in candidates {
         if excluded.contains(&ev.resource) {
@@ -523,6 +557,7 @@ fn select_candidate(
                 // `execute` refuses an unknown action independently.
                 if let Some(action) = registry.get(action_id.0) {
                     if crate::actionability::plan_refusal(action, &refreshed).is_some() {
+                        not_executable += 1;
                         continue;
                     }
                 }
@@ -538,19 +573,30 @@ fn select_candidate(
                     ask.push(scored);
                 }
             }
-            PolicyClass::Protected => {}
+            PolicyClass::Protected => protected += 1,
         }
     }
 
+    // `requires_confirmation` is what this pass could not act on *itself*, so
+    // it is zero wherever a candidate was selected: an `Ask` left unpicked
+    // because something safer went first has not been left behind, it is next.
+    // The only reader of the breakdown is `StopReason::SafeExhausted`, which
+    // exists precisely when nothing was selected.
+    let remaining = |requires_confirmation: u32| RemainingCandidates {
+        requires_confirmation,
+        protected,
+        not_executable,
+    };
+
     if let Some(best) = auto_safe.into_iter().max_by_key(|c| c.size) {
-        return (Some(best), 0);
+        return (Some(best), remaining(0));
     }
 
     if auto_approve_ask {
         let best = ask.into_iter().max_by_key(|c| c.size);
-        (best, 0)
+        (best, remaining(0))
     } else {
-        (None, ask.len() as u32)
+        (None, remaining(ask.len() as u32))
     }
 }
 
@@ -628,7 +674,7 @@ mod select_candidate_tests {
         let big = evidence("/tmp/big/target", ResourceKind::CargoTargetDir, 10_000);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, ask_skipped) = select_candidate(
+        let (selected, remaining) = select_candidate(
             vec![
                 (small, ActionId("test.action")),
                 (big, ActionId("test.action")),
@@ -641,7 +687,7 @@ mod select_candidate_tests {
             false,
         );
 
-        assert_eq!(ask_skipped, 0);
+        assert_eq!(remaining.requires_confirmation, 0);
         let selected = selected.expect("expected an AutoSafe candidate");
         assert_eq!(selected.decision.class, PolicyClass::AutoSafe);
         assert_eq!(selected.size, 10_000);
@@ -673,7 +719,7 @@ mod select_candidate_tests {
         let ev = evidence("/tmp/live/target", ResourceKind::XcodeDerivedData, 100);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, ask_skipped) = select_candidate(
+        let (selected, remaining) = select_candidate(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -684,7 +730,18 @@ mod select_candidate_tests {
         );
 
         assert!(selected.is_none());
-        assert_eq!(ask_skipped, 1);
+        // The whole breakdown, not just the one non-zero field: a candidate
+        // waiting for consent must not also be reported as protected or as
+        // unrunnable, because each of those is a different answer to "what
+        // should I do next?" (HORO-1509).
+        assert_eq!(
+            remaining,
+            RemainingCandidates {
+                requires_confirmation: 1,
+                protected: 0,
+                not_executable: 0,
+            }
+        );
     }
 
     #[test]
@@ -692,7 +749,7 @@ mod select_candidate_tests {
         let ev = evidence("/tmp/live/target", ResourceKind::XcodeDerivedData, 100);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, ask_skipped) = select_candidate(
+        let (selected, remaining) = select_candidate(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -702,7 +759,7 @@ mod select_candidate_tests {
             true,
         );
 
-        assert_eq!(ask_skipped, 0);
+        assert_eq!(remaining.requires_confirmation, 0);
         let selected = selected.expect("expected an Ask candidate to be auto-approved");
         assert_eq!(selected.decision.class, PolicyClass::Ask);
     }
@@ -714,7 +771,7 @@ mod select_candidate_tests {
         let ev = evidence("/tmp/unknown/thing", ResourceKind::Unknown, 100);
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, _) = select_candidate(
+        let (selected, remaining) = select_candidate(
             vec![(ev, ActionId("test.action"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -725,6 +782,17 @@ mod select_candidate_tests {
         );
 
         assert!(selected.is_none());
+        // `auto_approve_ask` is true here, so the only thing that can have
+        // held this candidate back is the policy class — and the breakdown
+        // must name that rather than implying the user could consent to it.
+        assert_eq!(
+            remaining,
+            RemainingCandidates {
+                requires_confirmation: 0,
+                protected: 1,
+                not_executable: 0,
+            }
+        );
     }
 
     /// A real, minimal cargo project under the OS temp dir, so
@@ -792,7 +860,7 @@ mod select_candidate_tests {
             "fixture invalid: this action must be statically refused"
         );
 
-        let (selected, ask_skipped) = select_candidate(
+        let (selected, remaining) = select_candidate(
             vec![
                 (big_but_refused, ActionId("homebrew.cleanup.cache")),
                 (small_but_runnable, ActionId("cargo.clean.target_dir")),
@@ -816,7 +884,7 @@ mod select_candidate_tests {
             "the larger candidate is the refused one; picking it is the defect"
         );
         assert_eq!(
-            ask_skipped, 0,
+            remaining.requires_confirmation, 0,
             "a statically-refused candidate is not an Ask skip: that count means consent, \
              and conflating the two would misreport why the loop stopped"
         );
@@ -837,7 +905,7 @@ mod select_candidate_tests {
         );
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
 
-        let (selected, ask_skipped) = select_candidate(
+        let (selected, remaining) = select_candidate(
             vec![(ev, ActionId("homebrew.cleanup.cache"))],
             &ActionRegistry::builtin(),
             &PolicyConfig::default(),
@@ -848,7 +916,17 @@ mod select_candidate_tests {
         );
 
         assert!(selected.is_none());
-        assert_eq!(ask_skipped, 0);
+        assert_eq!(
+            remaining,
+            RemainingCandidates {
+                requires_confirmation: 0,
+                protected: 0,
+                not_executable: 1,
+            },
+            "a candidate the offered action refuses on sight is neither waiting for \
+             consent nor protected: it may well run tomorrow, and the breakdown is \
+             what tells the user that"
+        );
     }
 
     /// An action id absent from the registry is deliberately NOT treated as
@@ -1171,7 +1249,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             iteration: iterations_run + 1,
         });
         let now = wall_clock.now();
-        let (selected, ask_skipped) = select_candidate(
+        let (selected, remaining) = select_candidate(
             candidates,
             action_registry,
             policy_cfg,
@@ -1180,11 +1258,11 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             &no_retry,
             config.auto_approve_ask,
         );
-        actions_declined_or_skipped += ask_skipped;
+        actions_declined_or_skipped += remaining.requires_confirmation;
 
         let Some(candidate) = selected else {
             return build_report(
-                StopReason::SafeExhausted,
+                StopReason::SafeExhausted(remaining),
                 iterations_run,
                 actions_executed,
                 actions_declined_or_skipped,
@@ -1586,6 +1664,22 @@ mod run_tests {
         }
     }
 
+    /// A collector that reports the owning tool as live, which pins an
+    /// otherwise-safe candidate to `Ask{OwningToolLive}` — a candidate the run
+    /// may not touch without consent, and therefore one it leaves behind.
+    struct ToolLiveCollector;
+
+    impl EvidenceCollector for ToolLiveCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(true),
+            }
+        }
+    }
+
     /// Keeps every event the loop emits, in order, so a test can state what
     /// a UI would have been able to render (HORO-1509).
     ///
@@ -1746,7 +1840,14 @@ mod run_tests {
             stop: &NeverStops,
         });
 
-        assert_eq!(report.stop_reason, StopReason::SafeExhausted);
+        // No detector found anything at all, so there is genuinely nothing
+        // left behind — and the report says so with zeros rather than by
+        // omitting the breakdown, which would read the same as "we did not
+        // look" (HORO-1509).
+        assert_eq!(
+            report.stop_reason,
+            StopReason::SafeExhausted(RemainingCandidates::default())
+        );
         assert_eq!(report.iterations_run, 0);
         assert_eq!(report.actions_executed, 0);
         // The anti-vacuity half of the HORO-1484 test below: a run in which
@@ -1799,7 +1900,14 @@ mod run_tests {
             stop: &NeverStops,
         });
 
-        assert_eq!(report.stop_reason, StopReason::SafeExhausted);
+        // Zeros here too — and that is exactly why they are not the whole
+        // answer. The detector that failed might have found anything; the
+        // breakdown reports what was *seen*, and `detector_failures` below
+        // reports the part of the disk nobody looked at (HORO-1484).
+        assert_eq!(
+            report.stop_reason,
+            StopReason::SafeExhausted(RemainingCandidates::default())
+        );
         assert_eq!(
             report.detector_failures,
             vec!["failing_test_detector: probe did not answer".to_string()],
@@ -1821,6 +1929,85 @@ mod run_tests {
             "reaching SafeExhausted without having looked everywhere must be \
              explicitly withdrawn as a finding; got:\n{caveat}"
         );
+    }
+
+    /// HORO-1509: "nothing safe is left" must arrive with what *is* left, so
+    /// a user who is told the run stopped early learns what to do next.
+    ///
+    /// The two candidates here need opposite things — one is waiting for the
+    /// user's consent, the other will never be offered at all — and a report
+    /// that summed them into "2 candidates remain" would be describing a
+    /// single next step that does not exist. Neither is ever executed (`Ask`
+    /// without `auto_approve_ask`, and `Protected`), so both fixtures must
+    /// survive the run; that assertion is also what proves the breakdown is
+    /// about things still there rather than things already taken.
+    ///
+    /// Both are `node_modules` because that is one of the three kinds with a
+    /// registered built-in action: a candidate with no resolvable action is
+    /// dropped before classification (see `candidates_with_actions`), so a
+    /// fixture of some actionless kind would have produced an all-zero
+    /// breakdown that passed for the wrong reason. The protected one is
+    /// protected by its path — a `.git` component, which `protected_reason`
+    /// answers without any filesystem I/O — rather than by its evidence.
+    #[test]
+    fn safe_exhausted_names_what_it_left_behind() {
+        let dir = make_temp_dir("remaining-breakdown");
+        let consent_parent = dir.join("live-project");
+        let protected_parent = dir.join(".git");
+        let waiting_for_consent = consent_parent.join("node_modules");
+        let never_offered = protected_parent.join("node_modules");
+
+        let usage = FsUsage::new(1_000_000_000, 100); // far from any target
+        let config = base_config(); // auto_approve_ask: false
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::UNIX_EPOCH);
+        let action_registry = ActionRegistry::builtin();
+        let ctx = empty_discovery_ctx();
+
+        let detector_registry = fake_registry(vec![
+            empty_node_modules_evidence(&consent_parent),
+            empty_node_modules_evidence(&protected_parent),
+        ]);
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &FixedFsStat(usage),
+            // A live owning tool is what pins the first candidate to `Ask`
+            // rather than `AutoSafe`. It has no bearing on the second: a
+            // protected path is refused before any evidence is weighed.
+            collector: &ToolLiveCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: Path::new("/nonexistent-glomeris-recovery-audit-test/actions.jsonl"),
+            observer: &SilentObserver,
+            stop: &NeverStops,
+        });
+
+        assert_eq!(
+            report.stop_reason,
+            StopReason::SafeExhausted(RemainingCandidates {
+                requires_confirmation: 1,
+                protected: 1,
+                not_executable: 0,
+            }),
+            "the stop reason must carry the breakdown, not merely the word"
+        );
+        assert_eq!(report.actions_executed, 0);
+        assert_eq!(
+            report.actions_declined_or_skipped, 1,
+            "only the consent-gated candidate is a skip; a protected resource was \
+             never a candidate for this run to decline"
+        );
+        assert!(
+            waiting_for_consent.exists() && never_offered.exists(),
+            "nothing was authorised, so nothing may have been deleted"
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// A detector that fails on every iteration is reported once, not once

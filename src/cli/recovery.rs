@@ -27,7 +27,8 @@ use crate::executor::recovery_loop::{target_met, FreeTarget, RecoveryReport, Sto
 use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::reporting::dto::{
     stop_reason_tag, DetectCandidateReport, DetectReport, RecoveryGoalRejectionReport,
-    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryRunReport,
+    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryRemainingReport,
+    RecoveryRunReport,
 };
 use crate::reporting::human_bytes;
 
@@ -91,7 +92,7 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
         StopReason::TargetReached => {
             "The recovery goal was reached: re-measured free space satisfies it.".to_string()
         }
-        StopReason::SafeExhausted => "The run stopped before reaching the goal because no \
+        StopReason::SafeExhausted(_) => "The run stopped before reaching the goal because no \
              safe candidate remained among the detectors that answered."
             .to_string(),
         StopReason::BudgetExceeded => "The run stopped before reaching the goal because a run \
@@ -264,7 +265,7 @@ fn build_run_caveats(report: &RecoveryReport) -> Vec<String> {
          found is unknown and the real opportunity may be larger.",
         report.detector_failures.len()
     )];
-    if report.stop_reason == StopReason::SafeExhausted {
+    if matches!(report.stop_reason, StopReason::SafeExhausted(_)) {
         caveats.push(
             "This run stopped because no safe candidate remained among the detectors \
              that answered. That is not a finding that nothing safe is left."
@@ -293,6 +294,19 @@ pub fn build_recovery_run_report(
         StopReason::Error(message) => Some(message.clone()),
         _ => None,
     };
+    // Projected from the variant that carries it, so the breakdown cannot
+    // appear beside a stop reason that concluded nothing about what is left
+    // (HORO-1509). The field names change here on purpose: the loop names its
+    // own policy classes, the wire names what a user does next, and that is
+    // the same vocabulary `RecoveryOpportunityReport` already uses.
+    let remaining = match &report.stop_reason {
+        StopReason::SafeExhausted(left_behind) => Some(RecoveryRemainingReport {
+            requires_confirmation_count: left_behind.requires_confirmation,
+            protected_count: left_behind.protected,
+            not_executable_count: left_behind.not_executable,
+        }),
+        _ => None,
+    };
 
     RecoveryRunReport {
         goal: goal.map(build_recovery_goal_report),
@@ -300,6 +314,7 @@ pub fn build_recovery_run_report(
         stop_reason: stop_reason_tag(&report.stop_reason),
         stop_reason_detail: stop_reason_detail(&report.stop_reason),
         error,
+        remaining,
         iterations_run: report.iterations_run,
         actions_executed: report.actions_executed,
         actions_declined_or_skipped: report.actions_declined_or_skipped,
@@ -354,7 +369,16 @@ pub fn print_recovery_preview_report(report: &RecoveryPreviewReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::recovery_loop::RemainingCandidates;
     use crate::reporting::dto::{DetectorHealthReport, OfferedAction};
+
+    /// `SafeExhausted` having left nothing behind — the right fixture wherever
+    /// a test is about something other than the breakdown itself. The
+    /// breakdown's own projection is pinned by
+    /// `safe_exhausted_projects_what_the_run_left_behind`.
+    fn safe_exhausted() -> StopReason {
+        StopReason::SafeExhausted(RemainingCandidates::default())
+    }
 
     fn candidate(
         id: &str,
@@ -634,18 +658,66 @@ mod tests {
             &target,
             1000,
             // Freed 290 bytes, ending at 350 free — still 65% used.
-            &run_report(StopReason::SafeExhausted, 350, 290),
+            &run_report(safe_exhausted(), 350, 290),
         );
         assert!(!report.target_met);
         assert_eq!(report.bytes_freed_measured, 290);
         assert_eq!(report.stop_reason, "safe_exhausted");
     }
 
+    /// HORO-1509: a client told "no safe candidate remained" must be able to
+    /// tell the user what to do next, which means the counts reach the wire.
+    ///
+    /// The second half is the load-bearing half. Zeros on a `target_reached`
+    /// run would read as "we looked and found nothing left", a claim that run
+    /// never made, so the field is absent rather than defaulted — and a
+    /// `Serialize` DTO makes absence the client's problem to handle only if it
+    /// is genuinely absent.
+    #[test]
+    fn safe_exhausted_projects_what_the_run_left_behind() {
+        let target = FreeTarget::Percentage(20.0);
+        let exhausted = build_recovery_run_report(
+            None,
+            &target,
+            1000,
+            &run_report(
+                StopReason::SafeExhausted(RemainingCandidates {
+                    requires_confirmation: 2,
+                    protected: 3,
+                    not_executable: 1,
+                }),
+                60,
+                0,
+            ),
+        );
+        let remaining = exhausted
+            .remaining
+            .expect("a safe_exhausted run must say what is still there");
+        assert_eq!(remaining.requires_confirmation_count, 2);
+        assert_eq!(remaining.protected_count, 3);
+        assert_eq!(remaining.not_executable_count, 1);
+
+        for reason in [
+            StopReason::TargetReached,
+            StopReason::BudgetExceeded,
+            StopReason::NoProgress,
+            StopReason::StoppedByUser,
+            StopReason::Error("statfs failed".to_string()),
+        ] {
+            let other = build_recovery_run_report(None, &target, 1000, &run_report(reason, 60, 0));
+            assert!(
+                other.remaining.is_none(),
+                "{} concluded nothing about what is left, so it must claim nothing",
+                other.stop_reason
+            );
+        }
+    }
+
     #[test]
     fn no_stop_reason_detail_collapses_into_a_bare_success_word() {
         for reason in [
             StopReason::TargetReached,
-            StopReason::SafeExhausted,
+            safe_exhausted(),
             StopReason::BudgetExceeded,
             StopReason::NoProgress,
             StopReason::StoppedByUser,
@@ -696,7 +768,7 @@ mod tests {
 
     #[test]
     fn detector_failures_make_the_run_report_say_discovery_was_incomplete() {
-        let mut inner = run_report(StopReason::SafeExhausted, 60, 0);
+        let mut inner = run_report(safe_exhausted(), 60, 0);
         inner.detector_failures = vec!["cargo_target_dir: probe exploded".to_string()];
         let report = build_recovery_run_report(None, &FreeTarget::Percentage(20.0), 1000, &inner);
         assert!(!report.discovery_complete);
@@ -726,7 +798,7 @@ mod tests {
     /// formatting.
     #[test]
     fn run_caveats_carry_no_terminal_formatting() {
-        let mut inner = run_report(StopReason::SafeExhausted, 60, 0);
+        let mut inner = run_report(safe_exhausted(), 60, 0);
         inner.detector_failures = vec![
             "cargo_target_dir: probe exploded".to_string(),
             "homebrew_cache: brew --cache exited 1".to_string(),
