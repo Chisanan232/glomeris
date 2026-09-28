@@ -251,6 +251,21 @@ jobs:
       - name: Check no policy_label branching in Swift
         run: bash scripts/check-no-policy-label-branching.sh
 
+  workspace-aggregation-has-no-authority:
+    # HORO-1511: `crate::workspace` groups discovered resources into git
+    # worktree families so a person can see that one project accounts for
+    # 30 GiB. Every fact it computes reads as permission — "already merged",
+    # "untouched for months", "30 GiB" — so the boundary is structural: the
+    # aggregation is unreachable from policy/executor/autopilot/actions, and
+    # its types carry no executable flag, action id or offered action. A
+    # member's own candidate report stays the only place that says what may
+    # run. See the header of src/workspace/mod.rs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check workspace aggregation has no authority
+        run: bash scripts/check-workspace-aggregation-has-no-authority.sh
+
   credential-store-uses-keychain:
     # HORO-1309: the BYOK API key is the only secret the macOS app holds. This
     # asserts mechanically that it is keychain-backed and that nothing in the
