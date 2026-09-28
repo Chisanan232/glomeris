@@ -10,6 +10,7 @@
 
 mod cargo;
 mod docker;
+mod go;
 mod homebrew;
 mod node;
 mod python;
@@ -536,8 +537,8 @@ pub(crate) fn cache_root_status(
 }
 
 /// Plain compile-time list of the built-in detectors — deliberately NOT a
-/// plugin/inventory registration system. Five detectors don't earn that
-/// complexity.
+/// plugin/inventory registration system. A hand-written list of this size
+/// doesn't earn that complexity.
 pub struct DetectorRegistry {
     detectors: Vec<Box<dyn Detector>>,
 }
@@ -557,6 +558,8 @@ impl DetectorRegistry {
                 Box::new(docker::DockerDetector),
                 Box::new(python::PipCacheDetector),
                 Box::new(python::UvCacheDetector),
+                Box::new(go::GoBuildCacheDetector),
+                Box::new(go::GoModuleCacheDetector),
             ],
         }
     }
@@ -683,6 +686,8 @@ mod tests {
                 "docker_build_cache",
                 "pip_cache",
                 "uv_cache",
+                "go_build_cache",
+                "go_module_cache",
             ]
         );
     }
