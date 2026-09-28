@@ -546,6 +546,11 @@ fn run_detect_command(args: &[String]) {
         &pass.detectors,
         &actions,
         impact_context(),
+        // HORO-1511: the worktree-family grouping, so `detect` can answer
+        // "which project is this 40 GiB" and not only "which directories".
+        // Explanatory metadata — the candidate lines remain the only thing
+        // that says what may run.
+        &glomeris::cli::group_workspaces_now(&pass.candidates),
     );
 
     if flags.contains(&"--json") {
@@ -2967,6 +2972,11 @@ fn free_preview(
         &pass.detectors,
         &actions,
         impact_context(),
+        // Same grouping on the recovery pre-flight (HORO-1511): a person
+        // deciding whether to start a run is exactly who needs to see that
+        // nine worktrees of one project account for the bulk, and which of
+        // them still hold work.
+        &glomeris::cli::group_workspaces_now(&pass.candidates),
     );
 
     let report = glomeris::cli::recovery::build_recovery_preview_report(

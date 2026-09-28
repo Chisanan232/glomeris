@@ -236,6 +236,10 @@ fn detect_report_matches_golden_fixture() {
         // False because of `project_roots` above: two candidates were
         // found, and the list they are in is still not the whole picture.
         discovery_complete: false,
+        // Empty on purpose, and the fixture has no `workspaces` key at all:
+        // the field is `skip_serializing_if = "Vec::is_empty"`, so this pins
+        // the shape a caller that did not group produces.
+        workspaces: vec![],
     };
     assert_matches_fixture(&report, "detect_report.json");
 }
@@ -763,6 +767,10 @@ fn recovery_discovery_pass() -> DetectReport {
             },
         ],
         discovery_complete: false,
+        // The recovery previews are about a volume and a goal, not about
+        // where the bulk sits; grouping would add a second thing for those
+        // fixtures to pin.
+        workspaces: vec![],
     }
 }
 

@@ -16,6 +16,8 @@ use crate::policy::PolicyDecision;
 use super::bytes::human_bytes;
 use super::impact::{classify_impact, ImpactContext, ImpactThresholds};
 use super::policy_label::{label_for, PolicyLabel};
+use crate::evidence::probe::ProbeOutcome;
+use crate::workspace::{UpstreamState, WorkspaceFamily, WorkspaceWorktree};
 
 fn regenerability_tag(r: Regenerability) -> &'static str {
     match r {
@@ -434,6 +436,217 @@ pub struct DetectorHealthReport {
     pub reason: Option<String>,
 }
 
+/// One worktree inside a [`WorkspaceFamilyReport`] (HORO-1511).
+///
+/// Every field is a statement about this worktree alone. None of them is a
+/// permission, and there is deliberately no `executable` field, no action id
+/// and no offered action: a client that wants to know what may run joins
+/// `member_resource_ids` against [`DetectReport::candidates`], where the
+/// action and the refusal reason live.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceWorktreeReport {
+    pub root: String,
+    /// `true` when this is a `git worktree add` sibling rather than the
+    /// repository's main checkout.
+    pub linked_worktree: bool,
+    pub dirty: bool,
+    pub untracked: bool,
+    /// `"in_use"`, `"idle"` or `"unknown"`. `"unknown"` is not `"idle"`: a
+    /// correlation probe that could not answer leaves it here, and
+    /// `holds_work_in_progress` counts it as possible use.
+    pub activity: &'static str,
+    /// `"untracked"`, `"tracking"` or `"unknown"`. `"untracked"` means there
+    /// is no published counterpart to compare against — not that nothing is
+    /// unpushed.
+    pub upstream: &'static str,
+    /// Commits this branch has that its upstream does not, and vice versa.
+    /// Both `None` unless `upstream` is `"tracking"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ahead: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<u32>,
+    /// The checked-out branch, or omitted for a detached HEAD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// `"merged"`, `"not_merged"` or `"unknown"`, always alongside
+    /// `merged_into` for the first two. `"unknown"` is what a repository
+    /// with no recorded default branch gets — never a guess at `main`.
+    pub merged: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_into: Option<String>,
+    /// Whether this worktree holds something that should stop it being
+    /// treated as spent: uncommitted work, untracked files, something using
+    /// it, or commits no remote has. A *sentence*, not a gate — the executor
+    /// never reads it, and a worktree where this is `false` still goes
+    /// through policy classification and deletion-time revalidation
+    /// unchanged.
+    pub holds_work_in_progress: bool,
+    /// The resource ids of this worktree's discovered candidates, in
+    /// [`DetectReport::candidates`]' own order. Ids only: the aggregate
+    /// explains, the candidate list authorizes.
+    pub member_resource_ids: Vec<String>,
+}
+
+/// Every worktree sharing one git directory — one repository's checkouts —
+/// and what they add up to (HORO-1511).
+///
+/// This exists so a person can be told "this project accounts for 30 GiB
+/// across nine worktrees" instead of reading thirty unrelated-looking lines.
+/// That figure is an attention figure and nothing else: it is summed from
+/// detector **estimates**, and campaign section 9 reserves progress and
+/// completion for re-measured filesystem state.
+///
+/// The byte split follows [`RecoveryOpportunityReport`]'s: confirmation-gated
+/// space is separated from automatic space, and protected space is *counted,
+/// not summed*, because presenting bytes a run can never take as part of a
+/// project's reclaimable bulk is the exact misread the split prevents.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceFamilyReport {
+    /// The shared git directory that identifies this family.
+    pub common_dir: String,
+    pub worktree_count: usize,
+    /// Members labelled `AUTO_SAFE`: estimated space a recovery run could
+    /// take from this family without asking.
+    pub actionable_now_bytes: u64,
+    pub actionable_now_human: String,
+    pub actionable_now_count: usize,
+    /// Members labelled `ASK`. Real bulk, but not automatic.
+    pub requires_confirmation_bytes: u64,
+    pub requires_confirmation_human: String,
+    pub requires_confirmation_count: usize,
+    /// Counted, not summed. See this type's doc comment.
+    pub protected_count: usize,
+    /// Members whose label is `UNKNOWN_INCOMPLETE` — evidence too thin to
+    /// classify, which policy treats as protected.
+    pub unknown_count: usize,
+    /// Members no probe measured. Distinct from a zero-byte member, and the
+    /// reason the totals above are not the whole story.
+    pub unmeasured_count: usize,
+    /// `true` when any member contributing to a byte total reported its
+    /// estimate as a lower bound, so the real figure may be larger.
+    pub is_lower_bound: bool,
+    /// How many worktrees in this family hold work in progress. `> 0` is
+    /// why a family's total must never read as "delete this project": the
+    /// bulk and the outstanding work are in the same group.
+    pub worktrees_holding_work_in_progress: usize,
+    /// Sorted by root path, so two runs over one disk state agree.
+    pub worktrees: Vec<WorkspaceWorktreeReport>,
+}
+
+impl WorkspaceFamilyReport {
+    /// Projects one [`WorkspaceFamily`].
+    ///
+    /// Byte figures are summed from the members' own
+    /// [`WorkspaceMember::reclaimable_bytes`], which is the same
+    /// `Option<u64>` [`DetectCandidateReport::reclaimable_bytes`] carries —
+    /// so the family total and the candidate lines a client shows beside it
+    /// cannot disagree.
+    pub fn from_family(family: &WorkspaceFamily) -> Self {
+        let mut actionable_now_bytes = 0u64;
+        let mut actionable_now_count = 0usize;
+        let mut requires_confirmation_bytes = 0u64;
+        let mut requires_confirmation_count = 0usize;
+        let mut protected_count = 0usize;
+        let mut unknown_count = 0usize;
+        let mut unmeasured_count = 0usize;
+        let mut is_lower_bound = false;
+
+        for member in family.members() {
+            if member.reclaimable_bytes.is_none() {
+                unmeasured_count += 1;
+            }
+            let bytes = member.reclaimable_bytes.unwrap_or(0);
+            match member.label {
+                PolicyLabel::AutoSafe => {
+                    actionable_now_count += 1;
+                    actionable_now_bytes = actionable_now_bytes.saturating_add(bytes);
+                    is_lower_bound |= member.reclaimable_bytes_is_lower_bound;
+                }
+                PolicyLabel::Ask => {
+                    requires_confirmation_count += 1;
+                    requires_confirmation_bytes = requires_confirmation_bytes.saturating_add(bytes);
+                    is_lower_bound |= member.reclaimable_bytes_is_lower_bound;
+                }
+                PolicyLabel::Protected => protected_count += 1,
+                PolicyLabel::UnknownIncomplete => unknown_count += 1,
+                // Unreachable for a worktree member: `label_for` projects a
+                // decision and every decision has a class, so this variant
+                // only ever labels an audit entry for the tool's own
+                // disposable state. Counted with the protected members
+                // rather than silently dropped, because a member that
+                // reached here contributed bulk that no arm above claimed
+                // and a family whose counts do not add up to its member
+                // list is the failure this whole split guards against.
+                PolicyLabel::NotPolicyGoverned => protected_count += 1,
+            }
+        }
+
+        Self {
+            common_dir: family.common_dir.display().to_string(),
+            worktree_count: family.worktree_count(),
+            actionable_now_bytes,
+            actionable_now_human: human_bytes(actionable_now_bytes),
+            actionable_now_count,
+            requires_confirmation_bytes,
+            requires_confirmation_human: human_bytes(requires_confirmation_bytes),
+            requires_confirmation_count,
+            protected_count,
+            unknown_count,
+            unmeasured_count,
+            is_lower_bound,
+            worktrees_holding_work_in_progress: family
+                .worktrees
+                .iter()
+                .filter(|w| w.holds_work_in_progress())
+                .count(),
+            worktrees: family
+                .worktrees
+                .iter()
+                .map(WorkspaceWorktreeReport::from_worktree)
+                .collect(),
+        }
+    }
+}
+
+impl WorkspaceWorktreeReport {
+    fn from_worktree(worktree: &WorkspaceWorktree) -> Self {
+        // A branch state that could not be read reports the same
+        // `"unknown"` tags a probe-level failure would, and `branch`/
+        // `merged_into` stay absent. There is no tidier default: claiming a
+        // detached HEAD with no upstream and no merge answer would be three
+        // assertions from one failure.
+        let branch = match &worktree.branch {
+            ProbeOutcome::Observed(state) => Some(state),
+            ProbeOutcome::Unavailable(_) => None,
+        };
+        let (ahead, behind) = match branch.map(|s| &s.upstream) {
+            Some(UpstreamState::Tracking { ahead, behind }) => (Some(*ahead), Some(*behind)),
+            _ => (None, None),
+        };
+        Self {
+            root: worktree.root.display().to_string(),
+            linked_worktree: worktree.linked,
+            dirty: worktree.dirty,
+            untracked: worktree.untracked,
+            activity: worktree.activity.tag(),
+            upstream: branch.map_or("unknown", |s| s.upstream.tag()),
+            ahead,
+            behind,
+            branch: branch.and_then(|s| s.branch.clone()),
+            merged: branch.map_or("unknown", |s| s.merged.tag()),
+            merged_into: branch
+                .and_then(|s| s.merged.compared_against())
+                .map(str::to_string),
+            holds_work_in_progress: worktree.holds_work_in_progress(),
+            member_resource_ids: worktree
+                .members
+                .iter()
+                .map(|m| m.resource_id.clone())
+                .collect(),
+        }
+    }
+}
+
 /// `glomeris detect` report: one candidate line per discovered resource,
 /// plus the health of every detector that ran.
 #[derive(Debug, Clone, PartialEq, Serialize, Default)]
@@ -454,6 +667,17 @@ pub struct DetectReport {
     /// nobody has filled in: an empty candidate list that has not been
     /// asserted complete should not read as "nothing to clean up".
     pub discovery_complete: bool,
+    /// Discovered resources grouped by the git worktree family they belong
+    /// to (HORO-1511) — explanatory metadata for "where did my disk go",
+    /// never an authorization. Empty for a caller that did not group, which
+    /// is why it is a separate field rather than something a client could
+    /// read as "this machine has no worktree families".
+    ///
+    /// A resource outside any git working tree, or one whose git probe
+    /// failed, appears in `candidates` and in no family. The two lists are
+    /// joined on resource id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<WorkspaceFamilyReport>,
 }
 
 /// `glomeris explain <resource>` report: the full evidence-and-policy
