@@ -231,7 +231,10 @@ pub fn build_request_payload(
     })
 }
 
-fn regenerability_tag(r: Regenerability) -> &'static str {
+/// `pub(crate)` so [`crate::planner::dto`]'s richer projection reuses the
+/// same token rather than growing a second mapping that can drift from this
+/// one.
+pub(crate) fn regenerability_tag(r: Regenerability) -> &'static str {
     match r {
         Regenerability::RegenerableByTool => "regenerable_by_tool",
         Regenerability::RegenerableByRebuild => "regenerable_by_rebuild",
@@ -240,7 +243,8 @@ fn regenerability_tag(r: Regenerability) -> &'static str {
     }
 }
 
-fn completeness_tag(c: &Completeness) -> &'static str {
+/// See [`regenerability_tag`] for why this is `pub(crate)`.
+pub(crate) fn completeness_tag(c: &Completeness) -> &'static str {
     match c {
         Completeness::Complete => "complete",
         Completeness::Partial { .. } => "partial",
