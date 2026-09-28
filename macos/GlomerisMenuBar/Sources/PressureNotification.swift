@@ -309,11 +309,24 @@ extension PressureEpisodeMonitor {
     /// It does not `start()`. Polling begins when the caller says so — the app
     /// starts it only after the single-instance guard has let this process live,
     /// and the preview never starts it at all.
+    /// The `unpromptedRecovery` runner is supplied here and only here (HORO-1510).
+    /// Nothing about that is a switch: it is the capability to start a bounded
+    /// unattended run, and whether one ever starts is the grant's answer, read
+    /// afresh on every poll that owes a banner. Passing it unconditionally is
+    /// right — the shipped app must be able to honour a grant the user wrote —
+    /// and every test builds a monitor without one, so no test can delete
+    /// anything through this path even by accident.
+    ///
+    /// It reads project roots from the same defaults every other surface does, so
+    /// an unattended run is scoped exactly as a run the user started would be.
     static func production() -> PressureEpisodeMonitor {
         PressureEpisodeMonitor(
             client: PressureEpisodeClient(),
             banners: PressureNotificationCenterBanner(center: .current()),
-            deepLink: RecoveryDeepLinkWindowPresenter()
+            deepLink: RecoveryDeepLinkWindowPresenter(),
+            unpromptedRecovery: UnpromptedRecoveryClient(
+                projectRootsStore: ProjectRootsStore()
+            )
         )
     }
 }

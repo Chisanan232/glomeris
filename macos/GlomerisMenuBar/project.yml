@@ -226,6 +226,20 @@ targets:
       # on the id alone, "remind me later" would silently mean "never again"), and
       # a raise that failed must not consume the episode's one chance to be shown.
       - path: Sources/PressureEpisodeMonitor.swift
+      # HORO-1510: the optional half of §10 — whether a run may *begin* unasked.
+      # Compiled in because every claim here is one no other kind of test could
+      # reach: a real `free --autopilot --unattended` deletes from the machine the
+      # suite runs on, so the whole path is only checkable through this seam.
+      # `UnpromptedRecoveryPlan.decide` is pure, so "an unreadable grant is not
+      # consent", "one attempt per banner-worth of pressure" and "not opted in
+      # means ask" are assertions about values. `interpret` is where exit 3 and
+      # exit 75 stop being numbers: `busy` is the one outcome that provably
+      # mutated nothing and therefore the one that may be retried, and getting
+      # that pair the wrong way round is either a lost attempt or an unbounded
+      # retry loop. And `arguments` is the only place `--unattended` is spelled —
+      # the flag whose absence would make a run nobody started indistinguishable
+      # from one somebody typed.
+      - path: Sources/UnpromptedRecovery.swift
       # HORO-1508: the deep link. Compiled in for one test above all others —
       # `RecoveryDeepLink.reviewToken` is the single literal in this app that names
       # an answer in order to *act* on it rather than to word it, and
