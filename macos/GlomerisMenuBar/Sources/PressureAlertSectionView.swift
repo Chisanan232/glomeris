@@ -34,9 +34,9 @@
 //  ---------------------------------------------------------------------
 //  On a Mac whose grant allows a run to start unasked, this card can appear after
 //  one already has — because a banner is owed precisely when that run did not get
-//  the disk under its goal. So the card carries something HORO-1508 did not need:
-//  what the automatic run turned out to be. It is read from the monitor, not
-//  composed here.
+//  the disk under its goal. So the card carries two things HORO-1508 did not need:
+//  which mode is in force, and what the automatic run turned out to be. Both are
+//  read from the monitor; neither is composed here.
 //
 
 import SwiftUI
@@ -68,6 +68,9 @@ enum PressureAlertPresentation {
         String(format: "%.1f%% used", report.current.usedPercent)
     }
 
+    /// The label on the row saying what happens if the disk keeps filling up.
+    static let unpromptedModeLabel = "If it keeps filling up"
+
     /// What a screen reader is told, as one element.
     ///
     /// Four clauses, and the first three are deliberately separate. The threshold
@@ -97,6 +100,15 @@ enum PressureAlertPresentation {
         ])
     }
 
+    /// What a listener hears for the mode row, as its own element.
+    ///
+    /// The mode's own `summary` is a fragment — it answers a label rather than
+    /// standing alone — so it is spoken with the axis attached, the way every other
+    /// row in this app is.
+    static func spokenMode(_ mode: AutopilotUnpromptedMode) -> String {
+        SpokenLabel.compose([SpokenLabel.clause(Self.unpromptedModeLabel, mode.summary)])
+    }
+
     /// The hint under an answer button, from the shared vocabulary so the
     /// notification and the card explain an answer the same way.
     static func answerHint(_ responseToken: String) -> String {
@@ -123,6 +135,12 @@ struct PressureAlertSectionView: View {
                 }
                 if let report = monitor.lastReport, report.episode != nil {
                     figures(report)
+                    // Between the figures and the answers, because it is what the
+                    // answers are a choice about: a user deciding whether to press
+                    // Review & recover should know whether something already ran.
+                    if let mode = monitor.unpromptedMode {
+                        modeRow(mode)
+                    }
                     answers(report)
                 }
             }
@@ -182,6 +200,32 @@ struct PressureAlertSectionView: View {
     /// the episode check lives in one place.
     private func automaticRun(_ report: PressureStatusReportDto) -> UnpromptedRecoveryOutcome? {
         monitor.automaticRun(forEpisodeIn: report)
+    }
+
+    /// Which mode is in force, in the wording the Autopilot pane uses.
+    ///
+    /// AC 2's in-the-moment half. The pane says what was chosen; this says what it
+    /// means *now*, on the card that appears when it is about to matter. One
+    /// wording for both, from `AutopilotUnpromptedMode`, because the drift that
+    /// matters is a card still saying "you will be asked first" on a Mac that no
+    /// longer asks.
+    ///
+    /// The symbol comes from the mode too, so the distinction survives for a reader
+    /// who cannot use colour (campaign §14) — and the row is labelled text rather
+    /// than a badge alone, so it survives for one who cannot see either.
+    private func modeRow(_ mode: AutopilotUnpromptedMode) -> some View {
+        GlomerisDetailRow(label: PressureAlertPresentation.unpromptedModeLabel) {
+            HStack(spacing: GlomerisDesign.inlineSpacing) {
+                Image(systemName: mode.symbolName)
+                    .imageScale(.small)
+                    .foregroundStyle(mode.tone.color)
+                Text(mode.summary)
+                    .font(GlomerisDesign.secondaryFont)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(PressureAlertPresentation.spokenMode(mode))
     }
 
     /// One button per answer the CLI published, in its order.

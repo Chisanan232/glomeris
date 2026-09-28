@@ -147,6 +147,41 @@ final class PressureAlertSectionViewTests: XCTestCase {
         XCTAssertTrue(spoken.hasPrefix("Disk now: 91.0% used, 41.9 GB free."), spoken)
     }
 
+    /// AC 2's in-the-moment half, spoken. The mode's own `summary` answers a label, so
+    /// heard on its own — "You will be asked first" with no axis — it could be about
+    /// anything on the card. It is read with the axis attached, the way every other row
+    /// in this app is.
+    func testTheModeIsSpokenWithItsAxisAttached() {
+        for mode in [
+            AutopilotUnpromptedMode.askedFirst, .startsOnPressure, .dormantWhileRevoked,
+        ] {
+            let spoken = PressureAlertPresentation.spokenMode(mode)
+
+            XCTAssertEqual(
+                spoken,
+                SpokenLabel.compose([
+                    SpokenLabel.clause(PressureAlertPresentation.unpromptedModeLabel, mode.summary)
+                ])
+            )
+            XCTAssertTrue(spoken.contains(mode.summary), spoken)
+            XCTAssertTrue(
+                spoken.hasPrefix(PressureAlertPresentation.unpromptedModeLabel),
+                spoken
+            )
+        }
+    }
+
+    /// The three modes are told apart by what is *said*, not only by glyph and colour
+    /// (campaign §14). A listener who hears the same sentence whichever mode is in
+    /// force has not been told which one it is.
+    func testTheThreeModesAreSpokenDistinctly() {
+        let spoken = [
+            AutopilotUnpromptedMode.askedFirst, .startsOnPressure, .dormantWhileRevoked,
+        ].map(PressureAlertPresentation.spokenMode)
+
+        XCTAssertEqual(Set(spoken).count, 3, "\(spoken)")
+    }
+
     /// Composed through the shared composer, so every spoken row in the app
     /// terminates its clauses the same way. Asserted against `SpokenLabel` itself
     /// rather than against a sentence retyped here.
