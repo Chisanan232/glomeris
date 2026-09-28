@@ -374,28 +374,14 @@ struct GlomerisPopoverView: View {
         .padding(.vertical, GlomerisDesign.cardPadding)
     }
 
-    @ViewBuilder private var settingsButton: some View {
-        if #available(macOS 14.0, *) {
-            // The supported way in: it opens the app's `Settings` scene
-            // without this view knowing anything about window management.
-            SettingsLink {
-                Text("Project roots…")
-            }
-            .buttonStyle(.borderless)
-            .font(GlomerisDesign.captionFont)
-            .accessibilityLabel("Open project roots settings")
-        } else {
-            // macOS 13 has no `SettingsLink`. The responder-chain action the
-            // standard Settings menu item sends is the documented route on
-            // that version; the deployment target is 13.0, so it has to be
-            // here even though 14+ takes the branch above.
-            Button("Project roots…") {
-                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
-            }
-            .buttonStyle(.borderless)
-            .font(GlomerisDesign.captionFont)
-            .accessibilityLabel("Open project roots settings")
-        }
+    /// HORO-1510: the `#available` shim this used to hold inline now lives in
+    /// `GlomerisSettingsLink`, because a second surface needs the same route in
+    /// and a version check copied per surface is one that goes stale in one copy.
+    private var settingsButton: some View {
+        GlomerisSettingsLink(
+            title: "Project roots…",
+            accessibilityLabel: "Open project roots settings"
+        )
     }
 }
 

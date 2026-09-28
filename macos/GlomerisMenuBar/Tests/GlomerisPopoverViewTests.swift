@@ -184,16 +184,29 @@ final class GlomerisPopoverViewTests: XCTestCase {
     /// only surface. Without these two it is a dead end: no route to the
     /// project roots that decide what `detect` looks at, and no way to quit
     /// short of Activity Monitor.
-    func testThePanelIsNotADeadEnd() {
+    ///
+    /// HORO-1510 moved the `#available` branch itself into
+    /// `GlomerisSettingsLink`, because a second surface — the Autopilot card —
+    /// needs the same route in. So this follows it there rather than relaxing:
+    /// both versions' routes are still asserted, in the one file that now has
+    /// them, and a shim that lost its macOS 13 branch would fail here even
+    /// though this panel no longer contains the branch itself.
+    func testThePanelIsNotADeadEnd() throws {
         XCTAssertTrue(
-            code.contains("SettingsLink"),
+            code.contains("GlomerisSettingsLink("),
+            "the panel has no route into the Settings scene"
+        )
+        XCTAssertTrue(code.contains("NSApplication.shared.terminate"))
+
+        let shim = Self.strippedOfComments(try Self.readSource("GlomerisDesignSystem.swift"))
+        XCTAssertTrue(
+            shim.contains("SettingsLink {"),
             "macOS 14+ must use the supported route into the Settings scene"
         )
         XCTAssertTrue(
-            code.contains("showPreferencesWindow:"),
+            shim.contains("showPreferencesWindow:"),
             "the deployment target is macOS 13, which has no SettingsLink"
         )
-        XCTAssertTrue(code.contains("NSApplication.shared.terminate"))
     }
 
     /// The mark is drawn as a template image so it follows the label colour
