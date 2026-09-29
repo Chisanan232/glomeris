@@ -538,6 +538,54 @@ fn a_live_daemon_denies_auto_safe_to_every_docker_kind() {
     }
 }
 
+/// The reference query alone, with Docker's activity answer left positive.
+///
+/// `classify` has two Docker gates and this is the second one: an
+/// `active_referrers` count that never arrived must not travel the same path
+/// as a count of zero. Nothing pinned it before, and the reason is worth
+/// stating because it is a general trap — every fixture in the suite that
+/// exercised an unobserved reference set *also* carried
+/// `DockerActivity::Unknown`, so the activity gate refused it first and the
+/// reference gate was never the thing under test. Deleting the reference
+/// gate outright left the whole suite green.
+///
+/// So the discriminating input is this one: activity positively `Inactive`,
+/// persistence tool-managed, and only the reference query unanswered. There
+/// is exactly one gate left that can refuse it.
+#[test]
+fn an_unanswered_reference_query_alone_denies_auto_safe_to_every_docker_kind() {
+    for kind in ResourceKind::ALL.iter().filter(|k| is_docker(**k)) {
+        let mut evidence = cleanest_evidence(*kind);
+        evidence.docker_lifecycle = Some(DockerLifecycle {
+            activity: DockerActivity::Inactive,
+            persistence: DockerPersistence::ToolManaged,
+            references: ProbeOutcome::Unavailable(ProbeReason::Failed),
+        });
+
+        let decision = classify(&evidence, &cfg(), NOW);
+        assert_ne!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "{}: Docker called it idle but never said what references it, and the classifier \
+             read the silence as nothing (reasons: {:?})",
+            kind.tag(),
+            decision.reasons,
+        );
+
+        if expected_cleanest_class(*kind).0 == PolicyClass::AutoSafe {
+            assert!(
+                decision
+                    .reasons
+                    .contains(&ReasonCode::DockerActivityUnknown),
+                "{}: refused an unanswered reference query for {:?} rather than for the gap \
+                 itself",
+                kind.tag(),
+                decision.reasons,
+            );
+        }
+    }
+}
+
 /// Docker declining to answer whether an object is in use must not travel
 /// the same path as Docker answering that it is idle, for any Docker kind.
 #[test]
