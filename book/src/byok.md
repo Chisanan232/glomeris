@@ -320,16 +320,33 @@ Two consequences worth stating plainly:
 ### The privacy preview
 
 The same screen offers a preview of the outbound payload, over `glomeris
-llm-plan --print-payload --json` with the app's configured project roots — the
-same scope a real plan would use, so the preview is of *your* payload and not a
-generic example. It separates **what leaves this Mac** (the two prompts) from
-**what stays on this Mac** (the wire-alias table, which is where the absolute
-paths are).
+llm-plan --contract-version 2 --print-payload --json` with the app's configured
+project roots — the same scope a real plan would use, so the preview is of *your*
+payload and not a generic example. It separates **what leaves this Mac** (the two
+prompts) from **what stays on this Mac** (the wire-alias table, which is where the
+absolute paths are).
+
+The contract version is part of what makes the preview true, which is why the app
+pins it here as well as on the AI Plan card, from the same constant. The two
+versions build their request from different sources — version 1 from the candidate
+list, version 2 from the workspace projection (see [Planner contract version
+2](#planner-contract-version-2-horo-1548)) — with a different system prompt and a
+different user prompt. A preview that printed the version 1 request while the card
+sent the version 2 one would be accurate about a payload that is never
+transmitted.
 
 Opening it sends nothing, and cannot: `--print-payload` returns before a
-provider is constructed (AC 7). The preview runs without the credential in its
-environment at all — only the connection test is given it — so there is no
-version of this screen in which looking at the payload transmits it.
+provider is constructed (AC 7), on the version 2 path as on the version 1 one —
+the version 2 branch runs `build_workspace_request` and stops, with no provider,
+no credential and no charge, returning the same three-field report. The preview
+runs without the credential in its environment at all — only the connection test
+is given it — so there is no version of this screen in which looking at the
+payload transmits it.
+
+A `glomeris` older than the contract the app asks for rejects the flag while
+parsing arguments. That is reported as its own outcome — nothing to preview,
+nothing sent anywhere, update the CLI — rather than as the CLI's usage text,
+because the other reading of "could not preview" is "it went out unpreviewed".
 
 ## `LlmPlan` schema — the concrete `--plan-file` example (HORO-1048)
 

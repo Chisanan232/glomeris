@@ -20,7 +20,11 @@ network request at all, or (`glomeris llm-check`) sends two fixed words that
 describe nothing local. Since HORO-1309 those three settings may come from the
 menu-bar app's Settings rather than from `GLOMERIS_LLM_*` in a shell, which
 changes where they are stored and nothing about what is sent: the GUI's AI Plan
-card spawns the same subcommand with the same bounded payload. Even then, what is sent is bounded and
+card spawns the same subcommand with the same bounded payload. Since HORO-1550
+that card pins `--contract-version 2`, and so does the Settings screen's privacy
+preview, from the same constant — the two contract versions build different
+requests, and a preview of the version the app does not send would be a preview
+of nothing. Even then, what is sent is bounded and
 explicit: `LlmResourceView` is a hand-maintained projection of one
 `Evidence` record containing a resource's kind, size estimate, age,
 regenerability, completeness, and the action ids offered for it — never raw
