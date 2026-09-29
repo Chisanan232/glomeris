@@ -68,9 +68,9 @@ pub use contract::{
 };
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
-    PatchEquivalenceView, PlannerRequestView, Reported, RepositoryView, ResourceView,
-    UnplacedResourceView, WorkflowHistoryView, WorkflowSupportView, WorktreeView,
-    MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    PatchEquivalenceView, PlannerRequestView, ProbeFindingView, ProbeResultView, Reported,
+    RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView, WorkflowSupportView,
+    WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 pub use plan::{build_workspace_request, plan_workspace, WorkspacePlanResult, WorkspaceRequest};
 pub use project::{AliasTable, GraphProjection, ProbeSubject, SubjectTable};

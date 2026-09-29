@@ -128,6 +128,20 @@ pub struct PlannerRequestView {
     /// explain.
     contract_version: u32,
     pub graph: ModelGraphView,
+    /// Evidence acquired since the first request, in the order it was acquired
+    /// (HORO-1549). Empty on the first round, and emitted as `[]` rather than
+    /// skipped — for the reason [`Reported`] emits its nulls: a key set that
+    /// appears only when the data is non-empty is a key set a pin cannot hold.
+    ///
+    /// Appended to, never merged into [`Self::graph`]. Two reasons, and the
+    /// second is the load-bearing one. Aliases stay stable across rounds
+    /// because the projection they came from is untouched, so `workspace_2`
+    /// still means what it meant when the model asked about it. And a re-read
+    /// that *disagrees* with the snapshot stays visible as a disagreement: a
+    /// tree that was clean at collection and is dirty now produces two
+    /// entries, where folding the second into the graph would silently
+    /// overwrite the first and leave no trace that anything moved.
+    pub probe_results: Vec<ProbeResultView>,
 }
 
 impl PlannerRequestView {
@@ -137,12 +151,94 @@ impl PlannerRequestView {
         Self {
             contract_version: super::PLANNER_CONTRACT_VERSION,
             graph,
+            probe_results: Vec::new(),
         }
+    }
+
+    /// The same request with one round's probe findings appended.
+    pub fn with_probe_results(mut self, results: Vec<ProbeResultView>) -> Self {
+        self.probe_results.extend(results);
+        self
     }
 
     pub fn contract_version(&self) -> u32 {
         self.contract_version
     }
+}
+
+/// One answered evidence request, as the model sees it (HORO-1549).
+///
+/// # Why the probe and the subject are echoed back
+///
+/// So a finding cannot be read against the wrong question. The model asked
+/// about an opaque reference it was already shown, and `subject_ref` is that
+/// same reference — not a path, not a resolved identity, the string it sent.
+/// Echoing it costs no egress: it is a request-scoped positional alias that
+/// was already in the payload.
+///
+/// # Why there is no `status` field beside `finding`
+///
+/// Because a probe that could not answer is a *finding*, not a missing
+/// entry — see [`ProbeFindingView::Unavailable`]. One field that is always
+/// present and always says something leaves no shape in which "the probe
+/// failed" and "the probe found nothing" look alike.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProbeResultView {
+    /// Which expansion round ran this, counting from 1. Sent so the model can
+    /// see that a re-read is a re-read.
+    pub round: u32,
+    /// The [`super::ProbeId`] tag, as the model spelled it.
+    pub probe_id: &'static str,
+    /// The opaque reference the request named.
+    pub subject_ref: String,
+    pub finding: ProbeFindingView,
+}
+
+/// What one probe found.
+///
+/// # Every payload is a type the snapshot already sends
+///
+/// Deliberately, and it is the reason a probe result cannot widen egress. A
+/// finding is a [`BranchView`], a [`PatchEquivalenceView`], an
+/// [`ActivityView`], an [`ExternalFactView`], a [`WorkflowHistoryView`] or a
+/// bounded [`Reported`] — every one of them already leaves this machine inside
+/// [`ModelGraphView`]. So "what does an extra round send" has the same answer
+/// as "what does the first round send", and a new field cannot arrive here
+/// without arriving there too.
+///
+/// # Why [`Self::Unavailable`] exists rather than an empty finding
+///
+/// Two of these views cannot express their own absence.
+/// [`BranchView::dirty`] and [`BranchView::untracked`] are bare `bool`s,
+/// because in a snapshot they come from a git probe that had already answered
+/// before a worktree existed to describe. A `git_branch_state` request whose
+/// git probe fails has no honest value for either, and `false` would be
+/// exactly the reading campaign section 13 forbids — a failed probe becoming
+/// negative evidence. So the whole finding is unavailable, carrying the reason,
+/// and no field is invented.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeFindingView {
+    /// Boxed, and so is the variant below it: a `BranchView` is an order of
+    /// magnitude wider than a `ToolLiveness` answer, and `clippy` is right that
+    /// every finding should not cost the size of the widest one. `Box`
+    /// serializes as its contents, so the wire shape is unaffected.
+    BranchState(Box<BranchView>),
+    PatchEquivalence(Box<PatchEquivalenceView>),
+    Activity(ActivityView),
+    /// Whether the tool that owns a resource is running. `Reported` rather
+    /// than `bool` because "the tool is absent" and "the tool is not running"
+    /// are different facts and neither is `false`.
+    ToolLiveness(Reported<bool>),
+    PullRequest(ExternalFactView),
+    Task(ExternalFactView),
+    WorkflowHistory(WorkflowHistoryView),
+    /// The probe could not be run, or ran and could not answer at all.
+    /// `reason` is a [`crate::evidence::ProbeReason`] tag — the same closed
+    /// vocabulary every other unavailability in this module uses.
+    Unavailable {
+        reason: &'static str,
+    },
 }
 
 /// The complete model-facing projection. Serializing this is the only way
