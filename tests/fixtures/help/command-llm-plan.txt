@@ -1,7 +1,8 @@
 glomeris llm-plan — Ask a configured LLM for a suggestion. Advisory only.
 
-usage: glomeris llm-plan [--schema] [--print-payload] [--plan-file <path>]
-                [--project-root <path>]... [--json] [--progress-json]
+usage: glomeris llm-plan [--contract-version <1|2>] [--schema] [--print-payload]
+                [--plan-file <path>] [--project-root <path>]... [--json]
+                [--progress-json]
 
 Advisory — proposes, never executes.
 
@@ -13,8 +14,17 @@ or run a command. Requires a BYOK provider you configure; no provider is built
 into Glomeris.
 
 Options
+  --contract-version <1|2>
+      Which planner contract to use. 1 (the default) ranks the candidate
+      list. 2 sends a privacy-safe projection of this workspace —
+      repositories, working trees, branch and activity state, caches, and
+      a local usage baseline — and asks for a disposition and a
+      confidence per resource plus what the model could not establish.
+      Version 2 is not more powerful: it still executes nothing and still
+      cannot name a path, an action it was not offered, or a command.
   --schema
-      Print an example LlmPlan document and exit. Contacts nothing.
+      Print an example response document for the selected contract version
+      and exit. Contacts nothing.
   --print-payload
       Print the exact request a live run would send, without sending it
       and without reading a credential. Shows which fields leave this Mac
@@ -26,7 +36,8 @@ Options
       Same meaning as for `detect`. Repeatable. Note it does not bound
       every detector, so it is not a privacy control.
   --json
-      Print an LlmPlanReport as JSON on stdout.
+      Print the report for the selected contract version as JSON on stdout
+      — an LlmPlanReport for 1, a WorkspacePlanReport for 2.
   --progress-json
       Stream progress events as JSON lines to stderr.
 
@@ -35,12 +46,15 @@ Examples
       What would be sent, before I send anything?
   glomeris llm-plan --json
       Get a suggestion for this machine.
+  glomeris llm-plan --contract-version 2 --print-payload
+      What does the workspace-aware request say about my machine?
 
 Exit codes
   1   the provider call or response parsing failed, or --plan-file named
       an unreadable path.
-  2   an unrecognized argument, a missing flag value, a credential passed
-      as a flag, or no provider configured for a live run.
+  2   an unrecognized argument, a missing flag value, an unsupported
+      contract version, a credential passed as a flag, or no provider
+      configured for a live run.
   Run `glomeris help exit-codes` for the codes shared by every command.
 
-See also: llm-check, clean, execute
+See also: llm-check, clean, execute, workflow-profile

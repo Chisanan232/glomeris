@@ -731,12 +731,39 @@ fn run_llm_plan_command(args: &[String]) {
     let mut progress_json = false;
     let mut schema = false;
     let mut print_payload = false;
+    // HORO-1548: version 1 unless asked for otherwise. The version 2 contract
+    // is a different request, a different prompt and a different response
+    // shape, so defaulting to it would change what an existing invocation
+    // sends — which is exactly the silent wire-contract mutation AC1 forbids.
+    let mut contract_version: u32 = 1;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
             "--json" => {
                 json = true;
                 i += 1;
+            }
+            "--contract-version" => {
+                let Some(value) = remaining.get(i + 1) else {
+                    eprintln!("glomeris llm-plan: --contract-version requires a value (1 or 2)");
+                    print_command_usage("llm-plan");
+                    std::process::exit(2);
+                };
+                match value.parse::<u32>() {
+                    Ok(v @ (1 | 2)) => contract_version = v,
+                    // Not "the newest we have" and not 1 either: a caller who
+                    // asked for a version this build does not implement must
+                    // find out, or they will read a version 1 report as a
+                    // version 2 one.
+                    _ => {
+                        eprintln!(
+                            "glomeris llm-plan: unsupported --contract-version '{value}' — this \
+                             build implements 1 and 2"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+                i += 2;
             }
             "--progress-json" => {
                 progress_json = true;
@@ -775,12 +802,24 @@ fn run_llm_plan_command(args: &[String]) {
     }
 
     if schema {
-        println!("{}", glomeris::cli::llm_plan_schema_example());
+        // Each contract version documents its own response shape. Printing
+        // version 1's example under `--contract-version 2` would hand the user
+        // a fixture that is dropped as soon as they use it.
+        if contract_version == 2 {
+            println!("{}", glomeris::cli::workspace_plan_schema_example());
+        } else {
+            println!("{}", glomeris::cli::llm_plan_schema_example());
+        }
         return;
     }
 
     let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = ActionRegistry::builtin();
+
+    if contract_version == 2 {
+        run_llm_plan_v2(&candidates, &actions, plan_file, json, print_payload);
+        return;
+    }
 
     // HORO-1298: prints the request and stops, before any provider is
     // constructed — so this needs no credential, makes no network call,
@@ -845,6 +884,154 @@ fn run_llm_plan_command(args: &[String]) {
 
     if report.provider_error.is_some() {
         std::process::exit(1);
+    }
+}
+
+/// `glomeris llm-plan --contract-version 2` (HORO-1548) — the version 2
+/// planning round, or its payload preview.
+///
+/// Split out of [`run_llm_plan_command`] rather than threaded through it: the
+/// two versions build a different request, hold the response to a different
+/// shape and render a different report, and the one thing they must share is
+/// the discovered candidate set, which is passed in. **Advisory, exactly as
+/// version 1 is** — see [`glomeris::cli::build_workspace_plan_report`].
+fn run_llm_plan_v2(
+    candidates: &[(
+        glomeris::evidence::Evidence,
+        glomeris::policy::PolicyDecision,
+    )],
+    actions: &glomeris::actions::ActionRegistry,
+    plan_file: Option<std::path::PathBuf>,
+    json: bool,
+    print_payload: bool,
+) {
+    use glomeris::actions::llm::{provider_from_env, FilePlanProvider};
+
+    let now = std::time::SystemTime::now();
+    let projection = glomeris::cli::build_workspace_projection_now(
+        candidates,
+        actions,
+        machine_context(),
+        &history_state(),
+        now,
+        unix_now(),
+    );
+
+    if print_payload {
+        match glomeris::cli::build_workspace_payload_report(&projection) {
+            Ok(report) => {
+                if json {
+                    print_json_or_exit(&report);
+                } else {
+                    glomeris::cli::print_llm_payload_report(&report);
+                }
+            }
+            Err(e) => {
+                eprintln!("glomeris llm-plan: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    let impact = impact_context();
+    let report = match plan_file {
+        Some(path) => {
+            let provider = FilePlanProvider { path };
+            glomeris::cli::build_workspace_plan_report(
+                &projection,
+                candidates,
+                actions,
+                &provider,
+                impact,
+            )
+        }
+        None => match provider_from_env() {
+            Ok(provider) => glomeris::cli::build_workspace_plan_report(
+                &projection,
+                candidates,
+                actions,
+                &provider,
+                impact,
+            ),
+            Err(glomeris::actions::llm::LlmError::InvalidConfiguration(detail)) => {
+                eprintln!("glomeris llm-plan: {detail}");
+                std::process::exit(2);
+            }
+            Err(_) => {
+                eprintln!(
+                    "glomeris llm-plan: missing LLM configuration — set GLOMERIS_LLM_API_KEY, \
+                     GLOMERIS_LLM_BASE_URL, and GLOMERIS_LLM_MODEL, or pass \
+                     --plan-file <path> instead"
+                );
+                std::process::exit(2);
+            }
+        },
+    };
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        glomeris::cli::print_workspace_plan_report(&report);
+    }
+
+    if report.provider_error.is_some() {
+        std::process::exit(1);
+    }
+}
+
+/// This machine's storage situation for the version 2 projection (HORO-1548).
+///
+/// A failed `statfs` yields [`glomeris::evidence::ProbeReason::Failed`] and a
+/// platform with no implementation yields
+/// [`glomeris::evidence::ProbeReason::NotAttempted`] — never zero, which would
+/// tell the model this machine has no free space, and never the same value for
+/// both, because "the probe broke" and "there is no probe here" are different
+/// things a user might want to fix differently.
+#[cfg(target_os = "macos")]
+fn machine_context() -> glomeris::workspace::MachineContext {
+    use glomeris::evidence::{ProbeOutcome, ProbeReason};
+    use glomeris::monitor::FsStat;
+    use glomeris::platform::macos::MacosFsStat;
+
+    match MacosFsStat.stat(std::path::Path::new("/")) {
+        Ok(usage) => glomeris::workspace::MachineContext {
+            free_bytes: ProbeOutcome::Observed(usage.free_bytes),
+            total_bytes: ProbeOutcome::Observed(usage.total_bytes),
+            recovery_goal_bytes: None,
+        },
+        Err(_) => glomeris::workspace::MachineContext {
+            free_bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+            total_bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+            recovery_goal_bytes: None,
+        },
+    }
+}
+
+/// Non-macOS builds have no `FsStat` implementation — see the macOS variant.
+#[cfg(not(target_os = "macos"))]
+fn machine_context() -> glomeris::workspace::MachineContext {
+    glomeris::workspace::MachineContext::unmeasured()
+}
+
+/// The local workflow baseline for the version 2 projection (HORO-1548).
+///
+/// Reads, never writes: `glomeris workflow-profile record` is the command that
+/// collects a sample, and a planning run must not quietly grow the history it
+/// is reasoning over.
+///
+/// A `HOME` this process cannot read is
+/// [`glomeris::workspace::history::StoreState::Unreadable`] and not
+/// `NeverCollected`. The distinction is the campaign's own rule: "never
+/// collected" is a fact about this machine, and claiming it because the path
+/// could not be resolved would report a failed probe as an established absence.
+fn history_state() -> glomeris::workspace::history::StoreState {
+    use glomeris::evidence::ProbeReason;
+    use glomeris::workspace::history::StoreState;
+
+    match glomeris::workspace::history::default_history_path() {
+        Ok(path) => glomeris::workspace::history::read(&path),
+        Err(_) => StoreState::Unreadable(ProbeReason::Failed),
     }
 }
 
