@@ -320,7 +320,7 @@ const PROVIDER_ERROR_BODY_LIMIT: usize = 512;
 /// real policy verdict off screen) must not be able to decide how much of
 /// the UI it occupies. 400 characters is enough for a genuine one- or
 /// two-sentence rationale and not enough to bury anything.
-const MODEL_REASON_LIMIT: usize = 400;
+pub(crate) const MODEL_REASON_LIMIT: usize = 400;
 
 /// Why an [`LlmProvider`] call failed. Its `Debug` and `Display` output are
 /// both safe to log: no variant embeds the API key. For
@@ -857,7 +857,14 @@ fn extract_plan(text: &str) -> Result<LlmPlan, LlmError> {
 
 /// Returns the contents of the first fenced code block (```` ``` ```` or
 /// ```` ```json ````) in `text`, if any.
-fn extract_fenced_block(text: &str) -> Option<&str> {
+///
+/// `pub(crate)` so that [`crate::planner`]'s v2 parser reads a provider's
+/// bytes through the same two functions this one does rather than through a
+/// second copy of them (HORO-1548). Every leniency here is a decision about
+/// what counts as a response, and two parsers that had drifted apart would
+/// mean a v2 response accepted where a v1 response is refused, or the reverse
+/// — with nothing to say which behaviour was intended.
+pub(crate) fn extract_fenced_block(text: &str) -> Option<&str> {
     let fence_start = text.find("```")?;
     let after_first_fence = &text[fence_start + 3..];
     // Skip an optional language tag (e.g. "json") up to the first newline.
@@ -869,7 +876,9 @@ fn extract_fenced_block(text: &str) -> Option<&str> {
 
 /// Returns the span from the first `{` to the last `}` in `text`, if
 /// both are present and correctly ordered.
-fn extract_json_object_span(text: &str) -> Option<&str> {
+///
+/// `pub(crate)` for the reason given on [`extract_fenced_block`].
+pub(crate) fn extract_json_object_span(text: &str) -> Option<&str> {
     let start = text.find('{')?;
     let end = text.rfind('}')?;
     if end < start {
@@ -931,7 +940,13 @@ pub struct ValidatedPlanItem {
 /// Returns `None` for input that is empty or whitespace-only after
 /// cleaning: "the model said nothing" and "the model said `   `" are the
 /// same fact, and a blank rationale row is worse than no row.
-fn sanitize_model_reason(raw: &str) -> Option<String> {
+///
+/// `pub(crate)` because the v2 contract has four more free-text fields than
+/// this one — a profile summary, per-item uncertainties, observation details,
+/// evidence-request reasons — and every one of them is model bytes bound for
+/// a terminal line or a popover row. Forking this function would mean the
+/// escape-forging defence landing on some of them and not others.
+pub(crate) fn sanitize_model_reason(raw: &str) -> Option<String> {
     let cleaned: String = raw
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
