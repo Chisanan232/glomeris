@@ -49,6 +49,6 @@ pub mod project;
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
     Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
-    WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 pub use project::{AliasTable, GraphProjection};

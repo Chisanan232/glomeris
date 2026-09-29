@@ -344,4 +344,61 @@ pub struct WorkflowHistoryView {
     /// `"observed"` or `"insufficient"`.
     pub confidence: Reported<&'static str>,
     pub observation_count: Reported<u32>,
+    /// The counts the mode was read off.
+    ///
+    /// Present so the model can weigh the claim instead of only receiving it —
+    /// HORO-1547's fourth acceptance criterion. It is also the half that makes
+    /// `confidence: "insufficient"` usable rather than merely a refusal: two
+    /// observations three minutes apart and two observations three weeks apart
+    /// are both insufficient, and only the support says which this is.
+    pub support: WorkflowSupportView,
+}
+
+/// Aggregate counts behind a [`WorkflowHistoryView`].
+///
+/// Every field is a small integer. Nothing here names a repository, a branch, a
+/// path or a task, which is why the whole struct can be sent: the local
+/// [`crate::workspace::WorkflowSupport`] it mirrors was defined with the same
+/// restriction, so this is a rename rather than a filter. Kept as a separate
+/// type anyway, so that adding a local field cannot widen the payload without
+/// an edit here — the rule from campaign section 5.
+///
+/// Flat `u32`s rather than [`Reported`], because these are properties of a
+/// summary that was already either observed or not: when the history itself is
+/// unavailable there is nothing to count, and
+/// [`super::project`]'s unavailable branch reports zeros beside three
+/// `unavailable` fields rather than dressing absence up as measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct WorkflowSupportView {
+    pub spanning_days: u32,
+    pub repositories_observed: u32,
+    pub parallel_observations: u32,
+    pub serial_observations: u32,
+    pub mixed_observations: u32,
+    pub single_checkout_branch_changes: u32,
+    pub most_worktrees_seen_at_once: u32,
+}
+
+impl WorkflowSupportView {
+    /// Mirrors the local counts one for one.
+    pub(crate) fn of(support: &crate::workspace::WorkflowSupport) -> Self {
+        Self {
+            spanning_days: support.spanning_days,
+            repositories_observed: support.repositories_observed,
+            parallel_observations: support.parallel_observations,
+            serial_observations: support.serial_observations,
+            mixed_observations: support.mixed_observations,
+            single_checkout_branch_changes: support.single_checkout_branch_changes,
+            most_worktrees_seen_at_once: support.most_worktrees_seen_at_once,
+        }
+    }
+
+    /// All zeros — for a history that was never collected or could not be read.
+    ///
+    /// Safe to send as zeros only because the three fields beside it say
+    /// `unavailable`: a reader that took these counts for observation would
+    /// already be ignoring the status it was given.
+    pub(crate) fn nothing_observed() -> Self {
+        Self::of(&crate::workspace::WorkflowSupport::nothing_observed())
+    }
 }

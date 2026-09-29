@@ -48,7 +48,7 @@ use glomeris::policy::{PolicyClass, PolicyDecision, ReasonCode};
 use glomeris::workspace::{
     ExternalFact, ExternalSource, IntegrationEvidence, MachineContext, MergedState,
     PullRequestState, TaskState, UpstreamState, WorkflowHistorySummary, WorkflowMode,
-    WorkspaceEvidenceGraph, WorkspaceSurvey, WorktreeBranchState,
+    WorkflowSupport, WorkspaceEvidenceGraph, WorkspaceSurvey, WorktreeBranchState,
 };
 
 use serde_json::Value;
@@ -317,6 +317,15 @@ fn projection() -> GraphProjection {
     graph.history = ProbeOutcome::Observed(WorkflowHistorySummary::from_observations(
         WorkflowMode::ParallelMultiWorktree,
         14,
+        WorkflowSupport {
+            spanning_days: 21,
+            repositories_observed: 3,
+            parallel_observations: 14,
+            serial_observations: 0,
+            mixed_observations: 0,
+            single_checkout_branch_changes: 2,
+            most_worktrees_seen_at_once: 9,
+        },
     ));
 
     GraphProjection::build(
@@ -504,6 +513,18 @@ fn pinned_paths() -> BTreeSet<String> {
         // Workflow history
         "workflow_history".into(),
         "workflow_history.evidence_ref".into(),
+        // HORO-1547's supporting evidence. Written out one by one, like every
+        // other line here: these are counts today, and the point of the pin is
+        // that a future field on `WorkflowSupportView` cannot reach a provider
+        // until somebody has read it and decided it may go.
+        "workflow_history.support".into(),
+        "workflow_history.support.spanning_days".into(),
+        "workflow_history.support.repositories_observed".into(),
+        "workflow_history.support.parallel_observations".into(),
+        "workflow_history.support.serial_observations".into(),
+        "workflow_history.support.mixed_observations".into(),
+        "workflow_history.support.single_checkout_branch_changes".into(),
+        "workflow_history.support.most_worktrees_seen_at_once".into(),
     ];
 
     paths.extend(reported("machine.free_bytes"));

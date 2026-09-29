@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use super::dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
     Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
-    WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 use crate::actions::llm::{completeness_tag, regenerability_tag};
 use crate::actions::ActionRegistry;
@@ -235,6 +235,7 @@ fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView 
             mode: Reported::observed(summary.mode.tag()),
             confidence: Reported::observed(summary.confidence.tag()),
             observation_count: Reported::observed(summary.observation_count),
+            support: WorkflowSupportView::of(&summary.support),
         },
         // One reason, repeated across all three fields: no baseline was
         // collected, so there is no mode, no confidence in a mode, and no
@@ -245,6 +246,7 @@ fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView 
             mode: Reported::unavailable(reason.tag()),
             confidence: Reported::unavailable(reason.tag()),
             observation_count: Reported::unavailable(reason.tag()),
+            support: WorkflowSupportView::nothing_observed(),
         },
     }
 }
@@ -514,7 +516,7 @@ mod tests {
     use crate::workspace::{
         Divergence, EquivalenceMethod, ExternalSource, IntegrationEvidence, MachineContext,
         MergedState, PullRequestState, TaskState, WorkflowHistorySummary, WorkflowMode,
-        WorkspaceSurvey, WorktreeBranchState,
+        WorkflowSupport, WorkspaceSurvey, WorktreeBranchState,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1447,6 +1449,7 @@ mod tests {
         graph.history = ProbeOutcome::Observed(WorkflowHistorySummary::from_observations(
             WorkflowMode::ParallelMultiWorktree,
             1,
+            WorkflowSupport::nothing_observed(),
         ));
         let too_few = GraphProjection::build(
             &graph,
@@ -1463,6 +1466,7 @@ mod tests {
         graph.history = ProbeOutcome::Observed(WorkflowHistorySummary::from_observations(
             WorkflowMode::ParallelMultiWorktree,
             12,
+            WorkflowSupport::nothing_observed(),
         ));
         let settled = GraphProjection::build(
             &graph,

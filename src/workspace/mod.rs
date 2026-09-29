@@ -57,7 +57,7 @@ pub use graph::{
     ActivityFacts, BranchLifecycle, ExternalContext, ExternalContextAttempt, ExternalFact,
     ExternalSource, GlobalResourceNode, HistoryConfidence, MachineContext, PullRequestState,
     RepositoryNode, ResourceNode, TaskState, UniqueWork, UnplacedResourceNode,
-    WorkflowHistorySummary, WorkflowMode, WorkspaceEvidenceGraph, WorktreeNode,
+    WorkflowHistorySummary, WorkflowMode, WorkflowSupport, WorkspaceEvidenceGraph, WorktreeNode,
     MIN_OBSERVATIONS_FOR_A_PATTERN,
 };
 pub use group::{
