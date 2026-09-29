@@ -26,7 +26,7 @@ use std::path::Path;
 use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
-    cache_root_status, query_tool_single_line, Detector, DetectorId, DetectorStatus,
+    cache_root_status, query_tool_single_path, Detector, DetectorId, DetectorStatus,
     DiscoveryContext, RootAbsence, ToolQuery,
 };
 
@@ -69,7 +69,7 @@ fn go_env_cache_root(
     regenerability: Regenerability,
     recoverability: Recoverability,
 ) -> DetectorStatus {
-    match query_tool_single_line("go", &["env", var]) {
+    match query_tool_single_path("go", &["env", var]) {
         ToolQuery::Lines(lines) => match interpret_go_env_answer(&lines[0]) {
             GoEnvAnswer::CacheDisabled => DetectorStatus::Found(Vec::new()),
             GoEnvAnswer::Root(root) => cache_root_status(

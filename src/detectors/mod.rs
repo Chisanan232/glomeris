@@ -423,6 +423,7 @@ pub(crate) fn discovery_evidence(
 /// must never travel the same channel as "the tool is installed and the
 /// probe went wrong" — HORO-1543 AC 2. A caller that collapsed the two
 /// would report a broken probe as an absent ecosystem.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ToolQuery {
     /// stdout's non-empty, trimmed lines in the order the tool printed
     /// them. Never empty — no-output is [`ToolQuery::Failed`], because a
@@ -479,19 +480,50 @@ pub(crate) fn query_tool_lines(program: &str, args: &[&str]) -> ToolQuery {
 
 /// [`query_tool_lines`] for a tool asked for exactly one path.
 ///
-/// More than one line is [`ToolQuery::Failed`] rather than a guess at
-/// which line is the path: picking the first or the last would turn an
-/// unexpected banner, warning or deprecation notice on stdout into a
-/// confidently wrong filesystem location.
-pub(crate) fn query_tool_single_line(program: &str, args: &[&str]) -> ToolQuery {
+/// The answer must be the *only* absolute path the tool printed. Anything
+/// else on stdout is discarded by its shape rather than by its position:
+/// picking the first or the last line would turn a banner, a warning or a
+/// deprecation notice into a confidently wrong filesystem location, and which
+/// end of the output it lands on is not a property anything guarantees.
+///
+/// Requiring one line and nothing else was the earlier rule, and it reported
+/// a false [`ToolQuery::Failed`] — "the probe did not answer" for a tool that
+/// answered perfectly well. Observed while writing HORO-1557: with
+/// `CLAUDECODE=1` in the environment, the `proto` shims that front `npm`, `pip`
+/// and `uv` on one workstation prepend
+/// `{"type":"message","message":"Detected an AI agent environment, ..."}` to
+/// stdout, so three of the five cache probes failed on a machine where all
+/// three tools were installed and working.
+///
+/// Zero absolute paths, or two of them, is still [`ToolQuery::Failed`]. Two
+/// candidates means the output is genuinely ambiguous — a banner that itself
+/// mentions a path — and there is no honest way to choose.
+pub(crate) fn query_tool_single_path(program: &str, args: &[&str]) -> ToolQuery {
     match query_tool_lines(program, args) {
-        ToolQuery::Lines(lines) if lines.len() == 1 => ToolQuery::Lines(lines),
-        ToolQuery::Lines(lines) => ToolQuery::Failed(format!(
-            "{program} {} printed {} lines where one path was expected",
-            args.join(" "),
-            lines.len()
-        )),
+        ToolQuery::Lines(lines) => single_absolute_path(program, args, lines),
         other => other,
+    }
+}
+
+/// [`query_tool_single_path`]'s selection rule, without the subprocess, so
+/// that the shapes it has to survive can be asserted directly.
+fn single_absolute_path(program: &str, args: &[&str], lines: Vec<String>) -> ToolQuery {
+    let printed = lines.len();
+    let mut paths: Vec<String> = lines
+        .into_iter()
+        .filter(|line| Path::new(line).is_absolute())
+        .collect();
+
+    match paths.len() {
+        1 => ToolQuery::Lines(vec![paths.remove(0)]),
+        0 => ToolQuery::Failed(format!(
+            "{program} {} printed {printed} line(s), none of them an absolute path",
+            args.join(" ")
+        )),
+        n => ToolQuery::Failed(format!(
+            "{program} {} printed {n} absolute paths where one was expected",
+            args.join(" ")
+        )),
     }
 }
 
@@ -1401,5 +1433,110 @@ mod size_estimate_tests {
         assert_eq!(estimate.stop_reason, StopReason::Exhausted);
 
         fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// Tests for [`single_absolute_path`] — the rule that decides which of a
+/// tool's stdout lines is the path it was asked for (HORO-1557).
+///
+/// Pure, without spawning anything: the shapes worth defending are properties
+/// of the selection rule, and a test that ran the real `npm` would assert a
+/// property of whichever npm the machine happens to have.
+#[cfg(test)]
+mod single_absolute_path_tests {
+    use super::*;
+
+    fn select(lines: &[&str]) -> ToolQuery {
+        single_absolute_path(
+            "npm",
+            &["config", "get", "cache"],
+            lines.iter().map(|l| l.to_string()).collect(),
+        )
+    }
+
+    /// The shape that motivated the rule, quoted from the workstation where it
+    /// was observed: with `CLAUDECODE=1` set, the `proto` shim fronting `npm`
+    /// prepends an NDJSON notice to stdout before npm's own answer. The earlier
+    /// one-line-and-nothing-else rule reported `Failed` here — "the probe did
+    /// not answer" for a tool that answered perfectly well.
+    #[test]
+    fn a_banner_line_before_the_answer_is_discarded() {
+        assert_eq!(
+            select(&[
+                r#"{"type":"message","message":"Detected an AI agent environment, printing as NDJSON. Trace logs are written to stderr, while user-facing logs are written to stdout."}"#,
+                "/tmp/probeshape/.npm",
+            ]),
+            ToolQuery::Lines(vec!["/tmp/probeshape/.npm".to_string()])
+        );
+    }
+
+    /// A banner *after* the answer is discarded by the same rule. Which end of
+    /// stdout the noise lands on is not a property anything guarantees, which
+    /// is why the rule is about shape rather than position.
+    #[test]
+    fn a_trailing_notice_after_the_answer_is_discarded() {
+        assert_eq!(
+            select(&["/Users/dev/.npm", "npm notice New version available"]),
+            ToolQuery::Lines(vec!["/Users/dev/.npm".to_string()])
+        );
+    }
+
+    /// The ordinary case, unchanged.
+    #[test]
+    fn a_lone_absolute_path_is_the_answer() {
+        assert_eq!(
+            select(&["/Users/dev/.npm"]),
+            ToolQuery::Lines(vec!["/Users/dev/.npm".to_string()])
+        );
+    }
+
+    /// Output that names no absolute path at all is a failed probe, not an
+    /// absent tool: the tool ran and said something, so `ToolAbsent` would be
+    /// a false statement about the machine. A relative path is included here
+    /// deliberately — accepting one would produce a location resolved against
+    /// whatever directory Glomeris happened to be started from.
+    #[test]
+    fn output_with_no_absolute_path_fails() {
+        for lines in [
+            vec!["undefined"],
+            vec!["relative/cache/dir"],
+            vec!["npm notice something", "npm notice something else"],
+        ] {
+            match select(&lines) {
+                ToolQuery::Failed(msg) => assert!(
+                    msg.contains("none of them an absolute path"),
+                    "unexpected message for {lines:?}: {msg}"
+                ),
+                other => panic!("expected Failed for {lines:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Two candidates means the output is genuinely ambiguous, and there is no
+    /// honest way to choose. Failing closed here is what keeps the rule from
+    /// degrading into "take the first one", which would confidently name the
+    /// wrong directory.
+    #[test]
+    fn two_absolute_paths_fail_rather_than_picking_one() {
+        match select(&["/opt/homebrew/lib/node_modules", "/Users/dev/.npm"]) {
+            ToolQuery::Failed(msg) => assert!(
+                msg.contains("printed 2 absolute paths"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// The boundary of "absolute path" the rule relies on: a prose line that
+    /// *mentions* a path does not itself start at the root, so it does not
+    /// count as a second candidate and does not trigger the ambiguity refusal
+    /// above. Without this, the common "warning, see /usr/local/share/doc"
+    /// shape would turn a perfectly clear answer into a failed probe.
+    #[test]
+    fn a_line_merely_mentioning_a_path_is_not_a_candidate() {
+        assert_eq!(
+            select(&["warning: see /usr/local/share/doc", "/Users/dev/.npm"]),
+            ToolQuery::Lines(vec!["/Users/dev/.npm".to_string()])
+        );
     }
 }

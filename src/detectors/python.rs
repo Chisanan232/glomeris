@@ -24,7 +24,7 @@ use std::path::Path;
 use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
-    cache_root_status, query_tool_single_line, Detector, DetectorId, DetectorStatus,
+    cache_root_status, query_tool_single_path, Detector, DetectorId, DetectorStatus,
     DiscoveryContext, RootAbsence, ToolQuery,
 };
 
@@ -55,7 +55,7 @@ impl Detector for PipCacheDetector {
         let mut last_failure: Option<String> = None;
 
         for program in PIP_PROGRAMS {
-            match query_tool_single_line(program, &["cache", "dir"]) {
+            match query_tool_single_path(program, &["cache", "dir"]) {
                 ToolQuery::Lines(lines) => {
                     return cache_root_status(
                         self.id(),
@@ -95,7 +95,7 @@ impl Detector for UvCacheDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        match query_tool_single_line("uv", &["cache", "dir"]) {
+        match query_tool_single_path("uv", &["cache", "dir"]) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
                 ResourceKind::UvCache,

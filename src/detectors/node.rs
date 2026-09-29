@@ -22,7 +22,7 @@ use crate::evidence::{
 
 use super::{
     cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
-    query_tool_single_line, size_estimate_budget, Detector, DetectorId, DetectorStatus,
+    query_tool_single_path, size_estimate_budget, Detector, DetectorId, DetectorStatus,
     DiscoveryContext, RootAbsence, ToolQuery,
 };
 
@@ -160,7 +160,7 @@ impl Detector for NodePackageManagerCacheDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        match query_tool_single_line("npm", NPM_CACHE_QUERY) {
+        match query_tool_single_path("npm", NPM_CACHE_QUERY) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
                 ResourceKind::NodePackageManagerCache,
