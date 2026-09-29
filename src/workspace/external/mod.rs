@@ -55,6 +55,6 @@ mod subject;
 pub use error::ExternalProviderError;
 pub use http::{HeaderPair, HttpJson, ReadOnlyHttp, UreqReadOnlyHttp, MAX_BODY_BYTES};
 pub use subject::{
-    resolve_repository_branch, task_key_from_branch, RepositoryBranchSubject, SubjectUnknown,
-    TaskKey,
+    resolve_repository_branch, task_key_from_branch, GitSubjectResolver, RepositoryBranchSubject,
+    SubjectResolver, SubjectUnknown, TaskKey,
 };

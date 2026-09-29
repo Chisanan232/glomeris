@@ -143,6 +143,38 @@ impl SubjectUnknown {
     }
 }
 
+/// How a subject is obtained for a worktree.
+///
+/// A trait with one real implementation, for one reason: it lets
+/// [`crate::workspace::external::ExternalContextResolver`]'s tests reach every
+/// branch of provider handling — a host that is not served, a refused
+/// credential, an answered absence — without each of them first building a git
+/// repository with a remote. The git reading itself is tested against real git,
+/// in this module, where a stub would only restate the assumption.
+pub trait SubjectResolver {
+    fn repository_branch(
+        &self,
+        worktree: &Path,
+        branch: Option<&str>,
+    ) -> Result<RepositoryBranchSubject, SubjectUnknown>;
+}
+
+/// The real one: reads git.
+pub struct GitSubjectResolver {
+    /// Bound on each `git` invocation.
+    pub timeout: Duration,
+}
+
+impl SubjectResolver for GitSubjectResolver {
+    fn repository_branch(
+        &self,
+        worktree: &Path,
+        branch: Option<&str>,
+    ) -> Result<RepositoryBranchSubject, SubjectUnknown> {
+        resolve_repository_branch(worktree, branch, self.timeout)
+    }
+}
+
 /// Reads this worktree's remote identity for `branch`.
 ///
 /// `branch` is passed in rather than probed because
@@ -766,6 +798,193 @@ mod tests {
             ..subject
         };
         assert_eq!(plain.encoded_branch(), "main");
+    }
+
+    // ---- Against real git -------------------------------------------------
+    //
+    // What is under test below is how git answers, so these use real git in a
+    // throwaway repository. A stub would only restate the assumption, which is
+    // the same reasoning `crate::workspace::branch`'s tests already follow.
+
+    fn run(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed in {root:?}");
+    }
+
+    /// A throwaway repository on branch `trunk` with one commit and no remote.
+    fn scratch_repo(name: &str) -> std::path::PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("glomeris-h1546-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch repo");
+        run(&root, &["init", "--initial-branch=trunk"]);
+        std::fs::write(root.join("f"), b"x").expect("write file");
+        run(&root, &["add", "f"]);
+        run(
+            &root,
+            &[
+                "-c",
+                "user.name=glomeris test",
+                "-c",
+                "user.email=test@invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "one",
+            ],
+        );
+        root
+    }
+
+    fn resolved(root: &Path, branch: &str) -> Result<RepositoryBranchSubject, SubjectUnknown> {
+        resolve_repository_branch(root, Some(branch), Duration::from_secs(10))
+    }
+
+    /// Local-only work. Ordinary, and not a fault.
+    #[test]
+    fn a_repository_with_no_remote_has_no_subject() {
+        let root = scratch_repo("no-remote");
+        assert_eq!(resolved(&root, "trunk"), Err(SubjectUnknown::NoRemote));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One remote and no branch preference: the sole remote is unambiguous, so
+    /// it is used. AC 5 — the owner, repository and branch all come from the
+    /// repository itself.
+    #[test]
+    fn a_sole_remote_identifies_the_subject() {
+        let root = scratch_repo("sole-remote");
+        run(
+            &root,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:Chisanan232/glomeris.git",
+            ],
+        );
+
+        let subject = resolved(&root, "trunk").expect("a subject");
+
+        assert_eq!(subject.host, "github.com");
+        assert_eq!(subject.owner, "Chisanan232");
+        assert_eq!(subject.repo, "glomeris");
+        assert_eq!(subject.branch, "trunk");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two remotes and nothing saying which: refused. Arranged so a guess would
+    /// succeed — one of them is called `origin`, the name a guesser would reach
+    /// for — because the point is that Glomeris does not reach for it. Asking
+    /// the fork instead of the parent returns confident answers about the wrong
+    /// pull requests.
+    #[test]
+    fn two_remotes_without_a_branch_preference_are_ambiguous() {
+        let root = scratch_repo("two-remotes");
+        run(
+            &root,
+            &["remote", "add", "origin", "git@github.com:me/glomeris.git"],
+        );
+        run(
+            &root,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:Chisanan232/glomeris.git",
+            ],
+        );
+
+        assert_eq!(
+            resolved(&root, "trunk"),
+            Err(SubjectUnknown::AmbiguousRemote)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// …and with two remotes, what the branch itself records wins. This is the
+    /// only thing that makes the ambiguous case above safe to refuse: a branch
+    /// that tracks something has already answered the question.
+    #[test]
+    fn a_branch_that_records_its_remote_resolves_against_that_one() {
+        let root = scratch_repo("branch-preference");
+        run(
+            &root,
+            &["remote", "add", "origin", "git@github.com:me/glomeris.git"],
+        );
+        run(
+            &root,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "git@github.com:Chisanan232/glomeris.git",
+            ],
+        );
+        run(&root, &["config", "branch.trunk.remote", "upstream"]);
+
+        let subject = resolved(&root, "trunk").expect("a subject");
+
+        assert_eq!(subject.owner, "Chisanan232");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A remote git accepts and this module cannot read an owner out of.
+    #[test]
+    fn a_local_path_remote_has_no_remote_identity() {
+        let root = scratch_repo("path-remote");
+        run(&root, &["remote", "add", "origin", "/srv/git/mirror.git"]);
+
+        assert_eq!(
+            resolved(&root, "trunk"),
+            Err(SubjectUnknown::UnreadableRemoteUrl)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A corporate remote resolves to a subject naming its own host, so the
+    /// caller can decline to ask github.com about it. A parse failure here
+    /// would make "this is somewhere else" look like a broken URL.
+    #[test]
+    fn a_non_github_remote_still_resolves_and_names_its_host() {
+        let root = scratch_repo("other-host");
+        run(
+            &root,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://git.example.test/t/s.git",
+            ],
+        );
+
+        let subject = resolved(&root, "trunk").expect("a subject");
+
+        assert_eq!(subject.host, "git.example.test");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// git itself missing is git's reason, not a missing subject.
+    #[test]
+    fn a_directory_that_is_not_a_repository_fails_rather_than_inventing_a_subject() {
+        let root =
+            std::env::temp_dir().join(format!("glomeris-h1546-not-a-repo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create dir");
+
+        // `git remote` outside a repository exits non-zero with no output, which
+        // reads as "no remotes" — the honest answer for a directory that has
+        // none, and one that cannot be mistaken for an observation.
+        assert_eq!(resolved(&root, "trunk"), Err(SubjectUnknown::NoRemote));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The encoder is only complete because the allowlist is narrow. If the
