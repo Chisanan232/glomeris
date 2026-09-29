@@ -8,8 +8,9 @@ use std::time::SystemTime;
 use super::contract::ProbeSubjectKind;
 use super::dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
-    Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
-    WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    PatchEquivalenceView, Reported, RepositoryView, ResourceView, UnplacedResourceView,
+    WorkflowHistoryView, WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF,
+    WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 use crate::actions::llm::{completeness_tag, regenerability_tag};
 use crate::actions::ActionRegistry;
@@ -17,7 +18,7 @@ use crate::evidence::{DockerLifecycle, Evidence, ProbeOutcome, ResourceId};
 use crate::policy::PolicyDecision;
 use crate::workspace::{
     ActivityFacts, BranchLifecycle, ExternalFact, IntegrationEvidence, PatchEquivalence,
-    ResourceNode, UpstreamState, WorkspaceEvidenceGraph,
+    ResourceNode, UpstreamState, WorkflowHistorySummary, WorkspaceEvidenceGraph,
 };
 
 /// A projection plus the local tables needed to read its answers back.
@@ -337,7 +338,7 @@ impl GraphProjection {
                 repositories,
                 global_resources,
                 unplaced_resources,
-                workflow_history: workflow_history_view(graph),
+                workflow_history: workflow_history_view(&graph.history),
             },
             aliases: issuer.table,
             subjects: issuer.subjects,
@@ -467,8 +468,16 @@ fn machine_view(graph: &WorkspaceEvidenceGraph) -> MachineView {
     }
 }
 
-fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView {
-    match &graph.history {
+/// One workflow baseline as the model sees it.
+///
+/// Takes the outcome rather than the graph so the same projection serves a
+/// freshly run `workspace_history_summary` probe (HORO-1549), which has an
+/// outcome and no graph. Keeping one function means a probe result and a
+/// snapshot cannot describe the same baseline differently.
+pub(super) fn workflow_history_view(
+    history: &ProbeOutcome<WorkflowHistorySummary>,
+) -> WorkflowHistoryView {
+    match history {
         ProbeOutcome::Observed(summary) => WorkflowHistoryView {
             evidence_ref: WORKFLOW_HISTORY_EVIDENCE_REF,
             mode: Reported::observed(summary.mode.tag()),
@@ -490,82 +499,75 @@ fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView 
     }
 }
 
-/// The integration half of [`BranchView`], assembled apart from the rest
-/// because `branch_view`'s tuple was already at the edge of legibility and
-/// seven more elements would have put the projection's correctness in the
-/// order of a tuple's fields.
-struct IntegrationFields {
-    patch_equivalence: Reported<&'static str>,
-    equivalence_method: Reported<&'static str>,
-    commits_unique_to_head: Reported<u32>,
-    commits_equivalent_elsewhere: Reported<u32>,
-    commits_unclassified: Reported<u32>,
-    head_tip_age_days: Reported<u64>,
-    comparison_tip_age_days: Reported<u64>,
+/// Every field unavailable for one reason — what the branch probe not
+/// answering leaves behind.
+///
+/// `pub(super)` because a `git_patch_equivalence` evidence request that the
+/// probe could not answer has to produce the same shape, and a second
+/// hand-written set of seven unavailable fields would be a second chance to
+/// get one of them wrong.
+pub(super) fn patch_equivalence_unavailable(reason: &'static str) -> PatchEquivalenceView {
+    PatchEquivalenceView {
+        patch_equivalence: Reported::unavailable(reason),
+        equivalence_method: Reported::unavailable(reason),
+        commits_unique_to_head: Reported::unavailable(reason),
+        commits_equivalent_elsewhere: Reported::unavailable(reason),
+        commits_unclassified: Reported::unavailable(reason),
+        head_tip_age_days: Reported::unavailable(reason),
+        comparison_tip_age_days: Reported::unavailable(reason),
+    }
 }
 
-impl IntegrationFields {
-    /// Every field unavailable for one reason — what the branch probe not
-    /// answering leaves behind.
-    fn unavailable(reason: &'static str) -> Self {
-        Self {
-            patch_equivalence: Reported::unavailable(reason),
-            equivalence_method: Reported::unavailable(reason),
-            commits_unique_to_head: Reported::unavailable(reason),
-            commits_equivalent_elsewhere: Reported::unavailable(reason),
-            commits_unclassified: Reported::unavailable(reason),
-            head_tip_age_days: Reported::unavailable(reason),
-            comparison_tip_age_days: Reported::unavailable(reason),
-        }
-    }
-
-    fn of(integration: &IntegrationEvidence, now: SystemTime) -> Self {
-        // `Unknown` collapses into `unavailable` carrying its reason rather
-        // than becoming an observed `"unknown"` string. Two layers of
-        // not-knowing on one field is one layer too many for a reader to
-        // keep straight, and this way the reason survives — which is the
-        // only part of an unknown that is worth anything.
-        let (equivalence, method) = match integration.equivalence {
-            PatchEquivalence::Equivalent(method) => (
-                Reported::observed("equivalent"),
-                Reported::observed(method.tag()),
-            ),
-            PatchEquivalence::NotEquivalent => (
-                Reported::observed("not_equivalent"),
-                // No method, because nothing was established. Not
-                // `failed`: both methods ran and agreed.
-                Reported::unavailable("not_attempted"),
-            ),
-            PatchEquivalence::NotApplicable => (
-                Reported::observed("not_applicable"),
-                Reported::unavailable("not_attempted"),
-            ),
-            PatchEquivalence::Unknown(reason) => (
-                Reported::unavailable(reason.tag()),
-                Reported::unavailable(reason.tag()),
-            ),
-        };
-        let (unique, equivalent, unclassified) = match &integration.divergence {
-            ProbeOutcome::Observed(divergence) => (
-                Reported::observed(divergence.unique_commits),
-                Reported::observed(divergence.equivalent_commits),
-                Reported::observed(divergence.unclassified_commits),
-            ),
-            ProbeOutcome::Unavailable(reason) => (
-                Reported::unavailable(reason.tag()),
-                Reported::unavailable(reason.tag()),
-                Reported::unavailable(reason.tag()),
-            ),
-        };
-        Self {
-            patch_equivalence: equivalence,
-            equivalence_method: method,
-            commits_unique_to_head: unique,
-            commits_equivalent_elsewhere: equivalent,
-            commits_unclassified: unclassified,
-            head_tip_age_days: tip_age_days(&integration.tip_committed_at, now),
-            comparison_tip_age_days: tip_age_days(&integration.comparison_tip_committed_at, now),
-        }
+/// What a measured [`IntegrationEvidence`] says, as the model sees it.
+pub(super) fn patch_equivalence_view(
+    integration: &IntegrationEvidence,
+    now: SystemTime,
+) -> PatchEquivalenceView {
+    // `Unknown` collapses into `unavailable` carrying its reason rather
+    // than becoming an observed `"unknown"` string. Two layers of
+    // not-knowing on one field is one layer too many for a reader to
+    // keep straight, and this way the reason survives — which is the
+    // only part of an unknown that is worth anything.
+    let (equivalence, method) = match integration.equivalence {
+        PatchEquivalence::Equivalent(method) => (
+            Reported::observed("equivalent"),
+            Reported::observed(method.tag()),
+        ),
+        PatchEquivalence::NotEquivalent => (
+            Reported::observed("not_equivalent"),
+            // No method, because nothing was established. Not
+            // `failed`: both methods ran and agreed.
+            Reported::unavailable("not_attempted"),
+        ),
+        PatchEquivalence::NotApplicable => (
+            Reported::observed("not_applicable"),
+            Reported::unavailable("not_attempted"),
+        ),
+        PatchEquivalence::Unknown(reason) => (
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+        ),
+    };
+    let (unique, equivalent, unclassified) = match &integration.divergence {
+        ProbeOutcome::Observed(divergence) => (
+            Reported::observed(divergence.unique_commits),
+            Reported::observed(divergence.equivalent_commits),
+            Reported::observed(divergence.unclassified_commits),
+        ),
+        ProbeOutcome::Unavailable(reason) => (
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+        ),
+    };
+    PatchEquivalenceView {
+        patch_equivalence: equivalence,
+        equivalence_method: method,
+        commits_unique_to_head: unique,
+        commits_equivalent_elsewhere: equivalent,
+        commits_unclassified: unclassified,
+        head_tip_age_days: tip_age_days(&integration.tip_committed_at, now),
+        comparison_tip_age_days: tip_age_days(&integration.comparison_tip_committed_at, now),
     }
 }
 
@@ -584,7 +586,7 @@ fn tip_age_days(tip: &ProbeOutcome<SystemTime>, now: SystemTime) -> Reported<u64
     }
 }
 
-fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
+pub(super) fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
     let (upstream_state, ahead, behind, merged_state, comparison_known, detached) =
         match &lifecycle.branch {
             ProbeOutcome::Observed(state) => {
@@ -633,8 +635,8 @@ fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
             ),
         };
     let integration = match &lifecycle.branch {
-        ProbeOutcome::Observed(state) => IntegrationFields::of(&state.integration, now),
-        ProbeOutcome::Unavailable(reason) => IntegrationFields::unavailable(reason.tag()),
+        ProbeOutcome::Observed(state) => patch_equivalence_view(&state.integration, now),
+        ProbeOutcome::Unavailable(reason) => patch_equivalence_unavailable(reason.tag()),
     };
 
     BranchView {
@@ -647,17 +649,11 @@ fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
         merged_state,
         merge_comparison_known: comparison_known,
         detached_head: detached,
-        patch_equivalence: integration.patch_equivalence,
-        equivalence_method: integration.equivalence_method,
-        commits_unique_to_head: integration.commits_unique_to_head,
-        commits_equivalent_elsewhere: integration.commits_equivalent_elsewhere,
-        commits_unclassified: integration.commits_unclassified,
-        head_tip_age_days: integration.head_tip_age_days,
-        comparison_tip_age_days: integration.comparison_tip_age_days,
+        integration,
     }
 }
 
-fn activity_view(activity: &ActivityFacts) -> ActivityView {
+pub(super) fn activity_view(activity: &ActivityFacts) -> ActivityView {
     ActivityView {
         state: activity.state.tag(),
         observed_process_count: activity.observed_processes.len(),
@@ -665,7 +661,11 @@ fn activity_view(activity: &ActivityFacts) -> ActivityView {
     }
 }
 
-fn external_view<T, F>(fact: &ExternalFact<T>, tag: F, now: SystemTime) -> ExternalFactView
+pub(super) fn external_view<T, F>(
+    fact: &ExternalFact<T>,
+    tag: F,
+    now: SystemTime,
+) -> ExternalFactView
 where
     F: Fn(&T) -> &'static str,
 {
@@ -1400,17 +1400,23 @@ mod tests {
         );
 
         let branch = &projection.view.repositories[0].worktrees[0].branch;
-        assert_eq!(branch.patch_equivalence.value, Some("equivalent"));
         assert_eq!(
-            branch.equivalence_method.value,
+            branch.integration.patch_equivalence.value,
+            Some("equivalent")
+        );
+        assert_eq!(
+            branch.integration.equivalence_method.value,
             Some("content_identical"),
             "the two methods are not equally strong, so which one answered is sent"
         );
-        assert_eq!(branch.commits_unique_to_head.value, Some(2));
-        assert_eq!(branch.commits_equivalent_elsewhere.value, Some(1));
-        assert_eq!(branch.commits_unclassified.value, Some(0));
-        assert_eq!(branch.head_tip_age_days.value, Some(4));
-        assert_eq!(branch.comparison_tip_age_days.value, Some(7));
+        assert_eq!(branch.integration.commits_unique_to_head.value, Some(2));
+        assert_eq!(
+            branch.integration.commits_equivalent_elsewhere.value,
+            Some(1)
+        );
+        assert_eq!(branch.integration.commits_unclassified.value, Some(0));
+        assert_eq!(branch.integration.head_tip_age_days.value, Some(4));
+        assert_eq!(branch.integration.comparison_tip_age_days.value, Some(7));
         assert_eq!(
             branch.unique_work, "present",
             "equivalence is not an answer to whether this tree holds unique work"
@@ -1461,24 +1467,24 @@ mod tests {
         );
         let branch = &projection.view.repositories[0].worktrees[0].branch;
 
-        assert_eq!(branch.patch_equivalence.status, "unavailable");
-        assert_eq!(branch.patch_equivalence.value, None);
+        assert_eq!(branch.integration.patch_equivalence.status, "unavailable");
+        assert_eq!(branch.integration.patch_equivalence.value, None);
         assert_eq!(
-            branch.patch_equivalence.unavailable_reason,
+            branch.integration.patch_equivalence.unavailable_reason,
             Some("not_attempted")
         );
-        assert_eq!(branch.equivalence_method.status, "unavailable");
+        assert_eq!(branch.integration.equivalence_method.status, "unavailable");
         assert_eq!(
-            branch.commits_unclassified.value,
+            branch.integration.commits_unclassified.value,
             Some(1),
             "the count the per-commit method declined to explain is still sent, \
              so nothing reads as an absence of unique work"
         );
         assert_eq!(
-            branch.head_tip_age_days.unavailable_reason,
+            branch.integration.head_tip_age_days.unavailable_reason,
             Some("timed_out")
         );
-        assert_eq!(branch.comparison_tip_age_days.value, Some(3));
+        assert_eq!(branch.integration.comparison_tip_age_days.value, Some(3));
     }
 
     /// A commit dated after this machine's clock has no age. Zero would read
@@ -1504,17 +1510,20 @@ mod tests {
             GraphProjection::build(&graph, &candidates, &ActionRegistry::builtin(), at(86_400));
         let branch = &projection.view.repositories[0].worktrees[0].branch;
 
-        assert_eq!(branch.head_tip_age_days.status, "unavailable");
-        assert_eq!(branch.head_tip_age_days.unavailable_reason, Some("failed"));
-        // Positive control: the same projection, one day of it subtractable.
-        assert_eq!(branch.comparison_tip_age_days.value, Some(1));
+        assert_eq!(branch.integration.head_tip_age_days.status, "unavailable");
         assert_eq!(
-            branch.patch_equivalence.value,
+            branch.integration.head_tip_age_days.unavailable_reason,
+            Some("failed")
+        );
+        // Positive control: the same projection, one day of it subtractable.
+        assert_eq!(branch.integration.comparison_tip_age_days.value, Some(1));
+        assert_eq!(
+            branch.integration.patch_equivalence.value,
             Some("not_applicable"),
             "ancestry left no question to ask, which is not an answer of no"
         );
         assert_eq!(
-            branch.commits_unique_to_head.unavailable_reason,
+            branch.integration.commits_unique_to_head.unavailable_reason,
             Some("failed")
         );
     }

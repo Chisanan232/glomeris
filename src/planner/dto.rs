@@ -209,13 +209,9 @@ pub struct WorktreeView {
 /// axis to compare against at all — which is what distinguishes "not
 /// merged" from "this machine has no `origin/HEAD` so nobody knows".
 ///
-/// The integration fields HORO-1545 added keep to the same rule, and it
-/// costs them something: no commit ids, no branch name on either side of
-/// the comparison, no commit messages and no dates. A model is told that
-/// two commits here have equivalents over there and cannot be told which
-/// commits, which branch, or when — because every one of those is a
-/// description of what this machine's owner is working on, and none of them
-/// changes how a directory should be ranked.
+/// The integration fields HORO-1545 added live in [`PatchEquivalenceView`]
+/// and are flattened in here, so the wire shape stays one object while the
+/// facts have one definition.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BranchView {
     pub dirty: bool,
@@ -233,6 +229,33 @@ pub struct BranchView {
     /// `true` when HEAD is detached. Not an error and not an absence — a
     /// state a worktree is sometimes deliberately left in.
     pub detached_head: Reported<bool>,
+    /// Flattened, so the seven integration keys sit directly under `branch`
+    /// on the wire exactly as they did before HORO-1549 gave them a name.
+    #[serde(flatten)]
+    pub integration: PatchEquivalenceView,
+}
+
+/// Whether the work in a tree has landed somewhere, measured rather than
+/// assumed (HORO-1545).
+///
+/// # Why this is a type rather than seven fields of [`BranchView`]
+///
+/// A `git_patch_equivalence` evidence request (HORO-1549) asks this and only
+/// this, so its answer has to be expressible on its own — and the model must
+/// not be able to get a *differently shaped* answer to the same question
+/// depending on which round it asked in. One declaration, flattened into
+/// [`BranchView`] where the whole lifecycle is being described and sent alone
+/// where only this was asked for, is the way those two stay the same facts.
+///
+/// The same rule the rest of this module keeps applies here and costs
+/// something: no commit ids, no branch name on either side of the comparison,
+/// no commit messages and no dates. A model is told that two commits here have
+/// equivalents over there and cannot be told which commits, which branch, or
+/// when — because every one of those is a description of what this machine's
+/// owner is working on, and none of them changes how a directory should be
+/// ranked.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PatchEquivalenceView {
     /// `"equivalent"`, `"not_equivalent"` or `"not_applicable"` — whether
     /// the work here has landed on the comparison branch in some form other
     /// than ancestry (HORO-1545). `unavailable` covers both a probe that
