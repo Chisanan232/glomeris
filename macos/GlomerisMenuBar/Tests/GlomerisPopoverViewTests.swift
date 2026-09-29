@@ -202,6 +202,40 @@ final class GlomerisPopoverViewTests: XCTestCase {
         )
     }
 
+    /// HORO-1550, campaign §17: local fact, remote supporting context, AI
+    /// inference, policy verdict are four things that must not be mistaken for
+    /// each other — and since this is a plain `VStack`, the cheapest place to
+    /// keep them apart is the order they are read in.
+    ///
+    /// So the column is those tiers top to bottom. "Reclaimable space" and
+    /// "Developer projects" are local fact measured today; "Workspace
+    /// intelligence" is recorded habit and remote *setup*, neither of which is a
+    /// reading of the present; "AI assistance" is a model's reading of both; and
+    /// the safety class on every row is the verdict. A reader — and a listener,
+    /// who has no layout at all and reaches these by tabbing — meets what is
+    /// true now before what was true before, and both before an inference drawn
+    /// from either.
+    ///
+    /// Above the AI card for the same reason the AI card is below the candidates
+    /// list: context precedes advice. Below it, the card would read as an
+    /// elaboration of the model's answer rather than as the ground it was drawn
+    /// from.
+    func testWorkspaceIntelligenceSitsBetweenLocalFactAndTheModelsReading() throws {
+        let families = try XCTUnwrap(code.range(of: "WorkspaceFamiliesSectionView("))
+        let intelligence = try XCTUnwrap(code.range(of: "WorkspaceIntelligenceSectionView("))
+        let plan = try XCTUnwrap(code.range(of: "AiPlanSectionView("))
+
+        XCTAssertLessThan(
+            families.lowerBound, intelligence.lowerBound,
+            "what was measured today comes before what was recorded earlier"
+        )
+        XCTAssertLessThan(
+            intelligence.lowerBound, plan.lowerBound,
+            "recorded habit and remote setup are the ground an inference is drawn from, so they "
+                + "come before the inference"
+        )
+    }
+
     /// Every section is a `GlomerisCard` now, so spacing does the grouping.
     /// The only dividers left are the two structural ones marking where the
     /// fixed header and footer stop and the scrolling body begins — a third
