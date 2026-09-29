@@ -246,6 +246,39 @@ impl GraphProjection {
 
         refs
     }
+
+    /// The projected resource an alias refers to, or `None` for an alias this
+    /// projection never issued.
+    ///
+    /// The companion to [`AliasTable::resolve`], which answers *which local
+    /// resource* an alias means. This answers *what the model was told about
+    /// it* — and the field [`super::validate`] needs is
+    /// [`ResourceView::offered_action_ids`]. Checking a claimed action id
+    /// against that list, rather than against the whole
+    /// [`ActionRegistry`], is the tightening HORO-1548 makes over version 1:
+    /// `CargoCleanTargetDir` is a registered action, so v1 accepted it on a
+    /// `node_modules` directory and left the mismatch for policy to refuse
+    /// later. The offered list is per resource, so the mismatch is refused
+    /// here, at the parse boundary, and the report never carries an item that
+    /// was never on offer.
+    ///
+    /// Walks the view for the same reason [`Self::issued_evidence_refs`] does:
+    /// a resource the payload did not carry cannot have been offered anything.
+    pub fn resource_view(&self, alias: &str) -> Option<&ResourceView> {
+        self.view
+            .repositories
+            .iter()
+            .flat_map(|repository| repository.worktrees.iter())
+            .flat_map(|worktree| worktree.resources.iter())
+            .chain(self.view.global_resources.iter())
+            .chain(
+                self.view
+                    .unplaced_resources
+                    .iter()
+                    .map(|unplaced| &unplaced.resource),
+            )
+            .find(|resource| resource.evidence_ref == alias)
+    }
 }
 
 /// Which action ids are on offer per resource, keyed by the resource's own
@@ -1381,6 +1414,48 @@ mod tests {
         // Nothing beyond the machine, the baseline, 2 repositories,
         // 3 worktrees and 5 resources.
         assert_eq!(refs.len(), 2 + 2 + 3 + 5);
+    }
+
+    /// HORO-1548. Every resource alias the payload carried can be looked back
+    /// up — including the two that sit outside any repository, which is where
+    /// a traversal that only walked the repository tree would quietly return
+    /// `None` and make a legitimate item look invented.
+    #[test]
+    fn every_issued_resource_alias_resolves_to_the_view_that_was_sent() {
+        let candidates = vec![
+            candidate("/w/a/target", in_repo("/w/a", "/w/.git")),
+            candidate("/cache/registry", ProbeOutcome::Observed(None)),
+            candidate(
+                "/lost/target",
+                ProbeOutcome::Unavailable(ProbeReason::TimedOut),
+            ),
+        ];
+        let projection = project(&candidates);
+
+        for alias in ["resource_1", "resource_2", "resource_3"] {
+            let view = projection
+                .resource_view(alias)
+                .unwrap_or_else(|| panic!("{alias} was sent but does not resolve"));
+            assert_eq!(view.evidence_ref, alias);
+        }
+
+        // A resource alias is the only kind this answers for. The other
+        // citable references name things that are not resources, and an
+        // action id is never on offer for one.
+        for not_a_resource in [
+            "resource_4",
+            "resource_0",
+            "workspace_1",
+            "repo_1",
+            MACHINE_EVIDENCE_REF,
+            WORKFLOW_HISTORY_EVIDENCE_REF,
+            "",
+        ] {
+            assert!(
+                projection.resource_view(not_a_resource).is_none(),
+                "{not_a_resource} resolved to a resource view"
+            );
+        }
     }
 
     /// HORO-1561 AC 5. A tool-owned resource is projected as the global cache
