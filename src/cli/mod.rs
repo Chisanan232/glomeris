@@ -1327,6 +1327,66 @@ pub fn llm_plan_schema_example() -> String {
     serde_json::to_string_pretty(&value).expect("static example JSON value always serializes")
 }
 
+/// Renders an example, syntactically valid version 2 planner response
+/// (HORO-1548) — `glomeris llm-plan --contract-version 2 --schema`'s entire
+/// stdout.
+///
+/// Serves the purpose [`llm_plan_schema_example`] serves and one more. Version
+/// 2 is a richer contract, and the only way to exercise it without a
+/// credential is a `--plan-file` fixture; a fixture a human can only write by
+/// reading `src/planner/response.rs` is the founder-dogfood finding HORO-1048
+/// already fixed once for version 1.
+///
+/// Two deliberate differences from the version 1 example. Its `resource_id` is
+/// a wire alias — `resource_1`, the form a live model is actually handed — and
+/// not a `ResourceId::to_string()`-shaped value, because version 2 resolves
+/// aliases against the request's own alias table and nothing else: a fixture
+/// naming a local path would be dropped as an unknown resource, which is the
+/// correct behaviour and a confusing first experience. And every vocabulary
+/// word here is interpolated from [`crate::planner::contract`] rather than
+/// written out, so an example advertising a word the parser stopped accepting
+/// cannot be shipped.
+pub fn workspace_plan_schema_example() -> String {
+    use crate::planner::{ClaimConfidence, Disposition, ObservationKind, ProbeId};
+
+    let value = serde_json::json!({
+        "contract_version": crate::planner::PLANNER_CONTRACT_VERSION,
+        "workspace_profile": {
+            "mode": crate::workspace::WorkflowMode::Unknown.tag(),
+            "confidence": ClaimConfidence::Unknown.tag(),
+            "evidence_refs": [crate::planner::WORKFLOW_HISTORY_EVIDENCE_REF],
+            "summary": "no baseline has been collected on this machine yet"
+        },
+        "items": [
+            {
+                "resource_id": "resource_1",
+                "action_id": "cargo.clean.target_dir",
+                "disposition": Disposition::AskUser.tag(),
+                "confidence": ClaimConfidence::Inferred.tag(),
+                "priority": 1,
+                "evidence_refs": ["resource_1"],
+                "uncertainties": ["no process probe was attempted for this resource"],
+                "reason": "large, regenerable, and not modified in 30 days"
+            }
+        ],
+        "observations": [
+            {
+                "kind": ObservationKind::MissingEvidence.tag(),
+                "evidence_refs": [crate::planner::MACHINE_EVIDENCE_REF],
+                "detail": "free space was not measured, so recovery headroom is unknown"
+            }
+        ],
+        "evidence_requests": [
+            {
+                "probe_id": ProbeId::ProcessActivity.tag(),
+                "subject_ref": "resource_1",
+                "reason": "to tell an idle build directory from one in active use"
+            }
+        ]
+    });
+    serde_json::to_string_pretty(&value).expect("static example JSON value always serializes")
+}
+
 /// Builds an [`ActionListReport`] (HORO-1047) by enumerating every action
 /// [`ActionRegistry::actions`] actually returns — never a hand-maintained
 /// list — so registering a new action in [`ActionRegistry::builtin`]
@@ -3473,6 +3533,42 @@ mod tests {
             !line.contains("duplicate item"),
             "a zero count was rendered: {line}"
         );
+    }
+
+    /// The version 2 `--schema` example is a document that actually works: fed
+    /// back through `--plan-file` against a projection that offered exactly
+    /// what it names, it produces one item and drops nothing. A schema example
+    /// that only *parses* would still be useless, because the alias and the
+    /// action have to match the request.
+    #[test]
+    fn workspace_plan_schema_example_survives_a_real_round_trip() {
+        let (dir, candidates) = v2_auto_safe_candidate("schema");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(workspace_plan_schema_example()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert_eq!(report.provider_error, None);
+        assert!(report.contract_declared);
+        assert_eq!(report.items.len(), 1, "{report:?}");
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.evidence_requests.len(), 1);
+        assert!(report.profile.is_some());
+        assert_eq!(
+            report.dropped,
+            WorkspacePlanDroppedReport::default(),
+            "the documented example is not accepted verbatim"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// SAFETY-CRITICAL, and stricter in version 2 than in version 1. A
