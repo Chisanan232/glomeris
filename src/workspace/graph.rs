@@ -845,6 +845,31 @@ impl WorkspaceEvidenceGraph {
         }
     }
 
+    /// Attaches the local workflow baseline (HORO-1547).
+    ///
+    /// Separate from [`Self::build`] so that stays pure: the baseline lives in a
+    /// file, and a `build` that read one could not be called from a test without
+    /// a `$HOME`. The caller passes the state it already read and the clock it
+    /// already has.
+    ///
+    /// # All three store states go through here
+    ///
+    /// Never collected, could not be read, and collected-but-thin all arrive as
+    /// [`ProbeOutcome::Unavailable`] or an `Observed` summary whose mode is
+    /// `Unknown` — never as a default shape. That is
+    /// [`super::history::classify`]'s job and it is asserted there; this method
+    /// exists so nothing downstream has to re-derive it, because the one
+    /// dangerous implementation is the convenient one: `unwrap_or(Serial…)`.
+    ///
+    /// The result carries no authority. `history` hangs off the machine node and
+    /// is unreachable from a [`WorktreeNode`], holds only counts and a mode so
+    /// it cannot be matched against a resource, and is never read by
+    /// `policy::classify` — see `tests/workflow_history_has_no_authority.rs`.
+    pub fn with_history(mut self, state: &super::history::StoreState, now_unix_secs: u64) -> Self {
+        self.history = super::history::classify(state, now_unix_secs);
+        self
+    }
+
     /// Every resource in the graph, in bucket order. Used by the tests that
     /// prove the buckets partition the input, and by the model projection,
     /// which needs one stable traversal to assign aliases from.
