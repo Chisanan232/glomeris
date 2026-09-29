@@ -266,6 +266,20 @@ jobs:
       - name: Check workspace aggregation has no authority
         run: bash scripts/check-workspace-aggregation-has-no-authority.sh
 
+  workflow-history-labels-no-one:
+    # HORO-1547 (AC 7): the workflow baseline reports layouts and counts —
+    # `serial_single_checkout`, `parallel_multi_worktree`, `mixed`, `unknown` —
+    # and never rates the developer. The classifier's vocabulary has no word
+    # for a person in it; prose does, and calling a six-worktree layout
+    # "advanced" would make `serial_single_checkout` a judgement and an
+    # `unknown` baseline a verdict on somebody barely observed. See the header
+    # of src/cli/workflow_profile.rs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the workflow baseline labels no one
+        run: bash scripts/check-workflow-history-labels-no-one.sh
+
   external-context-is-read-only:
     # HORO-1546: the optional GitHub and Jira providers read a pull request's
     # state and a work item's state as supporting evidence. Campaign sections 10
