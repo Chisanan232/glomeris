@@ -1122,7 +1122,10 @@ pub const COMMANDS: &[CommandSpec] = &[
         group: Group::Observe,
         safety: Safety::WritesOwnState,
         summary: "How this machine has been used, over several looks.",
-        usage: &["workflow-profile [show] [--json]", "workflow-profile record [--json]"],
+        usage: &[
+            "workflow-profile [show] [--json]",
+            "workflow-profile record [--project-root <path>]... [--json]",
+        ],
         details: "A single look at this machine cannot honestly say how you usually work. \
                   Running six working trees of one repository today might be this week's \
                   shape or this afternoon's. So `record` takes one bounded observation — how \
@@ -1149,19 +1152,29 @@ pub const COMMANDS: &[CommandSpec] = &[
             },
             SubcommandSpec {
                 name: "record",
-                args: "[--json]",
+                args: "[--project-root <path>]... [--json]",
                 safety: Safety::WritesOwnState,
                 description: "Take one observation and add it to the baseline. Writes only \
                               Glomeris's own history file. Declines when the last observation \
                               is too recent, so repeated runs cannot manufacture a pattern.",
             },
         ],
-        options: &[OptionSpec {
-            syntax: "--json",
-            description: "Print the report as JSON on stdout: the store's state, the shape, \
-                          the confidence, the seven counts behind them, the recording bounds, \
-                          and the note that none of it is permission.",
-        }],
+        options: &[
+            OptionSpec {
+                syntax: "--project-root <path>",
+                description: "Where `record` looks for repositories. Repeatable, and read by \
+                              `record` only — `show` reports the stored file and has nothing \
+                              to discover. Without it the census covers the same roots \
+                              `detect` would, so an observation taken from one directory is \
+                              not a record of where the command was typed.",
+            },
+            OptionSpec {
+                syntax: "--json",
+                description: "Print the report as JSON on stdout: the store's state, the shape, \
+                              the confidence, the seven counts behind them, the recording \
+                              bounds, and the note that none of it is permission.",
+            },
+        ],
         examples: &[
             ExampleSpec {
                 command: "glomeris workflow-profile",

@@ -1,7 +1,7 @@
 glomeris workflow-profile — How this machine has been used, over several looks.
 
 usage: glomeris workflow-profile [show] [--json]
-                workflow-profile record [--json]
+                workflow-profile record [--project-root <path>]... [--json]
 
 Safety depends on the subcommand; each is labelled below. The strongest of
 them: Writes only Glomeris's own state — never your files.
@@ -34,13 +34,19 @@ Subcommands
       Read-only — changes nothing.
       Report the current baseline: its shape, the confidence, and the
       counts behind both. The default when no verb is given.
-  record [--json]
+  record [--project-root <path>]... [--json]
       Writes only Glomeris's own state — never your files.
       Take one observation and add it to the baseline. Writes only
       Glomeris's own history file. Declines when the last observation is
       too recent, so repeated runs cannot manufacture a pattern.
 
 Options
+  --project-root <path>
+      Where `record` looks for repositories. Repeatable, and read by
+      `record` only — `show` reports the stored file and has nothing to
+      discover. Without it the census covers the same roots `detect`
+      would, so an observation taken from one directory is not a record of
+      where the command was typed.
   --json
       Print the report as JSON on stdout: the store's state, the shape,
       the confidence, the seven counts behind them, the recording bounds,
