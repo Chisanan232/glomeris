@@ -455,6 +455,28 @@ mod tests {
         )
     }
 
+    /// A resource Docker addresses by its own id, as a real detector produces
+    /// it: no path, so `git_state` is `Unavailable(NotAttempted)` because there
+    /// was nothing to run the probe against.
+    fn tool_candidate(kind: ResourceKind, id: &str) -> (Evidence, PolicyDecision) {
+        let resource = ResourceId::new(
+            kind,
+            ResourceLocator::Tool {
+                tool: crate::evidence::OwningTool::Docker,
+                id: id.to_string(),
+            },
+        );
+        let mut ev = evidence(
+            "/unused",
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        );
+        ev.resource = resource.clone();
+        ev.regenerability = kind.regenerability();
+        let mut d = decision("/unused", PolicyClass::Ask);
+        d.resource = resource;
+        (ev, d)
+    }
+
     fn in_repo(root: &str, common_dir: &str) -> ProbeOutcome<Option<GitState>> {
         ProbeOutcome::Observed(Some(GitState {
             repo_root: PathBuf::from(root),
@@ -949,6 +971,50 @@ mod tests {
             projection.view.unplaced_resources[0].unplaced_reason, "timed_out",
             "the model is told the repository is unknown because a probe \
              timed out, not that there is no repository"
+        );
+    }
+
+    /// HORO-1561 AC 5. A tool-owned resource is projected as the global cache
+    /// it is, so the model is never handed an `unplaced_reason` of
+    /// `"not_attempted"` about a probe that had nothing to run against — and
+    /// the path-located resource beside it, which really was left unprobed,
+    /// still carries its reason.
+    #[test]
+    fn a_tool_owned_resource_is_projected_with_no_unplaced_reason() {
+        let candidates = vec![
+            tool_candidate(ResourceKind::DockerVolume, "pgdata"),
+            candidate(
+                "/lost/target",
+                ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            ),
+        ];
+        let projection = project(&candidates);
+
+        assert_eq!(projection.view.global_resources.len(), 1);
+        let reasons: Vec<&str> = projection
+            .view
+            .unplaced_resources
+            .iter()
+            .map(|view| view.unplaced_reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            vec!["not_attempted"],
+            "exactly one resource here has an unresolved placement, and it is \
+             the one with a path"
+        );
+
+        // And from the serialized payload's side, since that is what the model
+        // actually reads: one unplaced entry, not two.
+        let payload: serde_json::Value =
+            serde_json::from_str(&json(&projection)).expect("the projection serializes");
+        assert_eq!(
+            payload["unplaced_resources"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(
+            payload["global_resources"].as_array().map(Vec::len),
+            Some(1)
         );
     }
 

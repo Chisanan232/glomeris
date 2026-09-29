@@ -36,15 +36,23 @@
 //!
 //! - [`WorkspaceEvidenceGraph::repositories`] — git state observed, inside
 //!   a working tree.
-//! - [`WorkspaceEvidenceGraph::global_resources`] — git state observed as
-//!   `None`. A complete answer: this is a tool-owned global cache, not a
-//!   repository's build output.
-//! - [`WorkspaceEvidenceGraph::unplaced_resources`] — the git probe could
-//!   not answer, and carries the [`ProbeReason`] saying so.
+//! - [`WorkspaceEvidenceGraph::global_resources`] — no containing
+//!   repository, and that is a complete answer: either the git probe ran and
+//!   observed `None`, or the resource is tool-owned and so has no path for a
+//!   containing repository to exist under.
+//! - [`WorkspaceEvidenceGraph::unplaced_resources`] — a resource that does
+//!   have a path, whose git probe could not answer for it. Carries the
+//!   [`ProbeReason`] saying so.
 //!
 //! The third bucket is the whole point. Without it a Cargo `target/` under
 //! a repository `git` timed out on would be reported as a global cache,
 //! which is the most flattering possible misreading of a failed probe.
+//!
+//! Which is also why [`WorkspaceEvidenceGraph::build`] reads the *locator*
+//! before the probe outcome (HORO-1561). A tool-owned resource's `git_state`
+//! is `Unavailable(NotAttempted)` because there was no path to probe, not
+//! because a probe went missing — and the two must not share a bucket any
+//! more than "not in a repository" and "could not tell" do.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -70,9 +78,11 @@ pub struct WorkspaceEvidenceGraph {
     /// One entry per git directory, sorted by it, so two runs over one disk
     /// state produce the same graph.
     pub repositories: Vec<RepositoryNode>,
-    /// Resources observed to sit outside any git working tree.
+    /// Resources with no containing repository: observed to sit outside any
+    /// git working tree, or tool-owned and so having no path to sit under.
     pub global_resources: Vec<GlobalResourceNode>,
-    /// Resources whose git probe could not answer. See the module header.
+    /// Path-located resources whose git probe could not answer. See the
+    /// module header.
     pub unplaced_resources: Vec<UnplacedResourceNode>,
     /// The local workflow baseline, which is deliberately NOT part of any
     /// node above: see [`WorkflowHistorySummary`] for why the separation is
@@ -659,6 +669,32 @@ impl WorkspaceEvidenceGraph {
 
         for (ev, decision) in candidates {
             let node = ResourceNode::from_evidence(ev, decision);
+
+            // The locator is consulted before the probe outcome (HORO-1561). A
+            // tool-owned resource — a Docker volume, the build cache — has no
+            // containing repository *by construction*, and
+            // `DefaultEvidenceCollector` therefore reports its `git_state` as
+            // `Unavailable(NotAttempted)`: there is no path to run the probe
+            // against. Reading `git_state` first filed every one of them under
+            // "containing repository could not be determined", which is the
+            // campaign's own rule run backwards — not-applicable reported as
+            // not-attempted, telling the model a probe was missing when nothing
+            // ever was.
+            //
+            // Placement carries no authority in either direction: group
+            // membership grants nothing (HORO-1511) and `policy::classify` never
+            // reads this graph. What moves is only the honesty of the picture.
+            if matches!(
+                ev.resource.locator,
+                crate::evidence::ResourceLocator::Tool { .. }
+            ) {
+                global_resources.push(GlobalResourceNode {
+                    owning_tool: node.owning_tool,
+                    resource: node,
+                });
+                continue;
+            }
+
             match &ev.git_state {
                 ProbeOutcome::Observed(Some(git)) => {
                     let accumulator = repositories
@@ -863,6 +899,31 @@ mod tests {
         )
     }
 
+    /// A resource Docker addresses by its own id, as a real detector produces
+    /// it: no path, and therefore `git_state: Unavailable(NotAttempted)` —
+    /// `DefaultEvidenceCollector` has nothing to run the probe against.
+    fn tool_candidate(kind: ResourceKind, id: &str) -> (Evidence, PolicyDecision) {
+        let resource = ResourceId::new(
+            kind,
+            ResourceLocator::Tool {
+                tool: OwningTool::Docker,
+                id: id.to_string(),
+            },
+        );
+        let mut ev = evidence(
+            "/unused",
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        );
+        ev.resource = resource.clone();
+        let mut d = decision(
+            "/unused",
+            PolicyClass::Ask,
+            vec![ReasonCode::RebuildCostHigh],
+        );
+        d.resource = resource;
+        (ev, d)
+    }
+
     fn surveyed(root: &str, state: WorktreeBranchState) -> WorkspaceSurvey {
         struct Fixed(WorktreeBranchState);
         impl super::super::branch::BranchProbe for Fixed {
@@ -1055,6 +1116,107 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // HORO-1561 — a tool-owned resource has no repository by construction
+    // ---------------------------------------------------------------
+
+    /// AC 1. Every Docker object arrives with `git_state:
+    /// Unavailable(NotAttempted)` because there is no path to probe. Reading
+    /// that outcome first filed all of them under "containing repository could
+    /// not be determined", which reports not-applicable as not-attempted — the
+    /// campaign's own rule inverted.
+    #[test]
+    fn a_tool_owned_resource_is_a_global_cache_on_the_strength_of_its_locator() {
+        let graph = build(
+            &[
+                tool_candidate(ResourceKind::DockerVolume, "pgdata"),
+                tool_candidate(ResourceKind::DockerImage, "sha256:abc"),
+                tool_candidate(ResourceKind::DockerBuildCache, "build_cache"),
+            ],
+            &WorkspaceSurvey::unsurveyed(),
+        );
+
+        assert_eq!(graph.global_resources.len(), 3);
+        assert!(
+            graph.unplaced_resources.is_empty(),
+            "nothing was missing, so nothing is unplaced: {:?}",
+            graph
+                .unplaced_resources
+                .iter()
+                .map(|n| n.resource.resource.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(graph.repositories.is_empty());
+    }
+
+    /// AC 4, the mutation control. These two candidates are identical in the
+    /// only field the old rule read — both carry
+    /// `Unavailable(NotAttempted)` — and differ only in their locator. A
+    /// revert to bucketing on `git_state` first puts both in
+    /// `unplaced_resources` and fails here, naming the Docker volume as the
+    /// resource that moved.
+    #[test]
+    fn a_locator_alone_separates_a_tool_owned_cache_from_an_unprobed_path() {
+        let graph = build(
+            &[
+                tool_candidate(ResourceKind::DockerVolume, "pgdata"),
+                candidate(
+                    "/w/a/target",
+                    ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+                ),
+            ],
+            &WorkspaceSurvey::unsurveyed(),
+        );
+
+        assert_eq!(
+            graph
+                .global_resources
+                .iter()
+                .map(|n| n.resource.resource.to_string())
+                .collect::<Vec<_>>(),
+            vec!["docker_volume:docker:pgdata"],
+            "the tool-owned resource belongs here; if this list is empty the \
+             bucketing is reading git_state before the locator again"
+        );
+        assert_eq!(
+            graph
+                .unplaced_resources
+                .iter()
+                .map(|n| n.resource.resource.to_string())
+                .collect::<Vec<_>>(),
+            vec!["cargo_target_dir:/w/a/target"],
+            "and the path-located resource whose probe did not run stays here"
+        );
+    }
+
+    /// AC 2, from the other side and with the reasons that matter most. A path
+    /// exists for each of these, so "no containing repository" was never
+    /// established — and the real reason travels with the resource so a reader
+    /// can weigh a denied permission differently from a timeout.
+    #[test]
+    fn a_path_whose_git_probe_failed_is_still_unplaced_with_its_reason() {
+        for reason in [
+            ProbeReason::TimedOut,
+            ProbeReason::PermissionDenied,
+            ProbeReason::Failed,
+            ProbeReason::ToolAbsent,
+            ProbeReason::NotAttempted,
+        ] {
+            let graph = build(
+                &[candidate("/w/a/target", ProbeOutcome::Unavailable(reason))],
+                &WorkspaceSurvey::unsurveyed(),
+            );
+
+            assert!(
+                graph.global_resources.is_empty(),
+                "a path-located resource must not become a global cache on a \
+                 {reason:?} probe"
+            );
+            assert_eq!(graph.unplaced_resources.len(), 1, "{reason:?}");
+            assert_eq!(graph.unplaced_resources[0].reason, reason);
+        }
+    }
+
+    // ---------------------------------------------------------------
     // AC 9 fixture 4 — contradictory evidence
     // ---------------------------------------------------------------
 
@@ -1167,6 +1329,10 @@ mod tests {
             candidate("/cache/one", ProbeOutcome::Observed(None)),
             candidate("/cache/two", ProbeOutcome::Observed(None)),
             candidate("/lost/one", ProbeOutcome::Unavailable(ProbeReason::Failed)),
+            // The locator-decided path, in the same partition check (HORO-1561
+            // AC 3): the early `continue` that places it must not skip the
+            // accounting either.
+            tool_candidate(ResourceKind::DockerVolume, "pgdata"),
         ];
         let graph = build(&candidates, &WorkspaceSurvey::unsurveyed());
 
@@ -1174,7 +1340,7 @@ mod tests {
         assert_eq!(graph.repositories.len(), 2, "grouped by common_dir");
         assert_eq!(graph.repositories[0].worktree_count(), 1);
         assert_eq!(graph.repositories[1].worktree_count(), 2);
-        assert_eq!(graph.global_resources.len(), 2);
+        assert_eq!(graph.global_resources.len(), 3);
         assert_eq!(graph.unplaced_resources.len(), 1);
 
         let ids: Vec<String> = graph

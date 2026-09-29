@@ -95,12 +95,15 @@ impl<T> Reported<T> {
 pub struct ModelGraphView {
     pub machine: MachineView,
     pub repositories: Vec<RepositoryView>,
-    /// Tool-owned caches observed to sit outside any repository.
+    /// Resources with no containing repository — the global caches. Either
+    /// the git probe ran and found none, or the resource is addressed by its
+    /// owning tool rather than by a path, so there is nothing for a
+    /// repository to contain (HORO-1561).
     pub global_resources: Vec<ResourceView>,
-    /// Resources whose containing repository could not be determined. Kept
-    /// as their own list rather than folded into `global_resources`, so the
-    /// model is never told a build directory is a global cache because a
-    /// probe timed out.
+    /// Path-located resources whose containing repository could not be
+    /// determined. Kept as their own list rather than folded into
+    /// `global_resources`, so the model is never told a build directory is a
+    /// global cache because a probe timed out.
     pub unplaced_resources: Vec<UnplacedResourceView>,
     pub workflow_history: WorkflowHistoryView,
 }
