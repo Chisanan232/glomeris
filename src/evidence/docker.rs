@@ -158,6 +158,44 @@ impl DockerLifecycle {
     }
 }
 
+/// Signatures a Docker client prints when it is installed and cannot reach a
+/// daemon, lowercased.
+///
+/// Deliberately not one substring. The client, Docker Desktop, Colima and
+/// Podman's docker shim each word this differently, and the socket path in the
+/// message differs per runtime — matching on the wording that is common to each
+/// family is what keeps this working on a machine whose Docker is not the one
+/// this was written on.
+const DAEMON_UNREACHABLE_SIGNATURES: &[&str] = &[
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+    "the docker daemon is not running",
+    "error during connect",
+];
+
+/// Whether a failed `docker` invocation failed *because the daemon was not
+/// reachable*, according to the client's own stderr.
+///
+/// # Why this lives in the evidence layer
+///
+/// Two callers in different modules need the same answer, and they must not be
+/// allowed to disagree. [`crate::detectors`] turns it into a detector health
+/// status — a daemon that is down is `ToolNotRunning`, not `ToolAbsent` — and
+/// [`crate::evidence::correlate`] turns it into the tool-liveness observation
+/// itself (HORO-1562). One list, so a stopped daemon cannot be "not running"
+/// to the detector and "something went wrong" to the liveness probe on the same
+/// machine at the same moment.
+///
+/// `false` does not mean the daemon is up. It means *this stderr does not say
+/// the daemon is down*, which every caller is expected to treat as an
+/// unattributed failure rather than as its opposite.
+pub fn daemon_unreachable(stderr: &str) -> bool {
+    let haystack = stderr.to_ascii_lowercase();
+    DAEMON_UNREACHABLE_SIGNATURES
+        .iter()
+        .any(|sig| haystack.contains(sig))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +252,42 @@ mod tests {
         assert!(asked.is_observed());
         assert!(!not_asked.is_observed());
         assert_ne!(asked, not_asked);
+    }
+
+    /// Each message is what a real client prints when its daemon is down —
+    /// Docker Desktop, Colima (whose socket lives under the user's home, hence
+    /// the elided path) and Podman's shim. None of them means the tool is
+    /// absent, and none of them is an error to report as such.
+    #[test]
+    fn each_runtimes_daemon_down_message_is_recognized() {
+        for stderr in [
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?\n",
+            "Cannot connect to the Docker daemon at unix:///Users/x/.colima/default/docker.sock. \
+             Is the docker daemon running?\n",
+            "error during connect: Get \"http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.24/info\": \
+             open //./pipe/docker_engine: The system cannot find the file specified.\n",
+            "Error: the Docker daemon is not running\n",
+        ] {
+            assert!(daemon_unreachable(stderr), "should match: {stderr}");
+        }
+    }
+
+    /// The anti-vacuity half, and the one that matters more: a matcher that
+    /// returned `true` for everything would pass the test above and would
+    /// convert every unrelated Docker failure into the confident claim that the
+    /// daemon is down.
+    #[test]
+    fn an_unrelated_failure_is_not_a_daemon_that_is_down() {
+        for stderr in [
+            "permission denied while trying to connect\n",
+            "Error response from daemon: no such image: redis:7\n",
+            "unknown flag: --nope\n",
+            "",
+            "   \n",
+        ] {
+            assert!(!daemon_unreachable(stderr), "should not match: {stderr}");
+        }
     }
 
     #[test]

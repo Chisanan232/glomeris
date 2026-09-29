@@ -119,22 +119,6 @@ pub(super) fn parse_human_size(s: &str) -> Option<u64> {
     Some((value * multiplier).round() as u64)
 }
 
-/// Signatures a Docker client prints when it is installed and cannot reach a
-/// daemon, lowercased.
-///
-/// Deliberately not one substring. The client, Docker Desktop, Colima and
-/// Podman's docker shim each word this differently, and the socket path in
-/// the message differs per runtime — matching on the wording that is common
-/// to each family is what keeps this working on a machine whose Docker is
-/// not the one this was written on (HORO-1562 covers the same question for
-/// the liveness probe).
-const NOT_RUNNING_SIGNATURES: &[&str] = &[
-    "cannot connect to the docker daemon",
-    "is the docker daemon running",
-    "the docker daemon is not running",
-    "error during connect",
-];
-
 /// What a non-zero `docker` exit means, as far as its own stderr says.
 ///
 /// Before HORO-1544 every non-zero exit returned `ToolAbsent`, which said
@@ -153,11 +137,7 @@ const NOT_RUNNING_SIGNATURES: &[&str] = &[
 /// that is down must not be `ToolNotRunning` for one of them and `Failed` for
 /// the other.
 pub(super) fn failure_status(stderr: &str) -> DetectorStatus {
-    let haystack = stderr.to_ascii_lowercase();
-    if NOT_RUNNING_SIGNATURES
-        .iter()
-        .any(|sig| haystack.contains(sig))
-    {
+    if crate::evidence::daemon_unreachable(stderr) {
         return DetectorStatus::ToolNotRunning;
     }
     let detail = stderr.trim();
@@ -265,27 +245,19 @@ mod tests {
         assert_eq!(DockerDetector.id(), DetectorId("docker_build_cache"));
     }
 
-    /// AC2's central distinction. Each message is what a real client prints
-    /// when its daemon is down — Docker Desktop, Colima (whose socket lives
-    /// under the user's home, hence the elided path) and Podman's shim — and
-    /// none of them means the tool is absent.
+    /// AC2's central distinction, over the one message shape common to every
+    /// runtime. The full per-runtime wording matrix belongs to the shared
+    /// matcher this delegates to — see `crate::evidence::docker` — and is
+    /// asserted there rather than twice.
     #[test]
     fn a_daemon_that_is_not_answering_is_tool_not_running() {
-        for stderr in [
-            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
-             Is the docker daemon running?\n",
-            "Cannot connect to the Docker daemon at unix:///Users/x/.colima/default/docker.sock. \
-             Is the docker daemon running?\n",
-            "error during connect: Get \"http://%2F%2F.%2Fpipe%2Fdocker_engine/v1.24/info\": \
-             open //./pipe/docker_engine: The system cannot find the file specified.\n",
-            "Error: the Docker daemon is not running\n",
-        ] {
-            assert_eq!(
-                failure_status(stderr),
-                DetectorStatus::ToolNotRunning,
-                "should be tool_not_running: {stderr}"
-            );
-        }
+        assert_eq!(
+            failure_status(
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+                 Is the docker daemon running?\n"
+            ),
+            DetectorStatus::ToolNotRunning
+        );
     }
 
     /// The case that matters more than the one above: an exit this code cannot

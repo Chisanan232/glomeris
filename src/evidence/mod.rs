@@ -11,7 +11,9 @@ pub mod docker;
 pub mod model;
 pub mod probe;
 
-pub use docker::{DockerActivity, DockerLifecycle, DockerPersistence, DockerReferences};
+pub use docker::{
+    daemon_unreachable, DockerActivity, DockerLifecycle, DockerPersistence, DockerReferences,
+};
 pub use model::{
     decode_fingerprint_token, encode_fingerprint_token, ActionId, Completeness, Confidence,
     Evidence, EvidenceField, FingerprintTokenError, GitState, NativeCleanup, OwningTool,
