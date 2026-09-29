@@ -25,6 +25,7 @@ use crate::evidence::{
 use super::{
     cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
     size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence,
+    ToolHomeVar,
 };
 
 pub struct CargoDetector;
@@ -117,8 +118,12 @@ const REGISTRY_SUBDIR: &str = "registry";
 /// Resolves the registry cache root from `CARGO_HOME` and `$HOME`, applying
 /// Cargo's own two rules.
 ///
-/// Pure so it is testable: `std::env::set_var` is unsound in Rust's threaded
-/// test harness, so the environment is read once at the call site.
+/// Pure so it is testable: the `CARGO_HOME` override arrives through
+/// [`DiscoveryContext::tool_home`] rather than from the process environment,
+/// so a fixture context can exercise both rules. Reading it here directly
+/// would make this detector answer from the developer's real registry even
+/// under a fixture `home_dir` — see [`super::ToolHomeVar`], which exists
+/// because that is exactly what happened.
 ///
 /// An empty or whitespace-only `CARGO_HOME` falls back to `~/.cargo` rather
 /// than resolving to a relative `registry` or to `/registry` — an exported
@@ -142,8 +147,7 @@ impl Detector for CargoRegistryCacheDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
-        let cargo_home = std::env::var("CARGO_HOME").ok();
-        let registry = cargo_registry_dir(cargo_home.as_deref(), &ctx.home_dir);
+        let registry = cargo_registry_dir(ctx.tool_home(ToolHomeVar::CargoHome), &ctx.home_dir);
 
         cache_root_status(
             self.id(),
@@ -325,21 +329,10 @@ mod tests {
         )
         .unwrap();
 
-        // `cache_root_status` directly, with the path the resolver produced,
-        // rather than `discover`: `discover` reads the real `CARGO_HOME`,
-        // which on a developer machine points at a real registry. Path
-        // resolution is covered by the pure tests above.
-        let status = cache_root_status(
-            CargoRegistryCacheDetector.id(),
-            ResourceKind::CargoRegistryCache,
-            &cargo_registry_dir(None, &home),
-            Regenerability::RegenerableByTool,
-            Recoverability::RegenerableByTool,
-            "test fixture",
-            RootAbsence::NothingObservedAboutTheTool,
-        );
-
-        match status {
+        // The real `discover`, through a hermetic `DiscoveryContext`: with no
+        // `CargoHome` tool home set, the detector resolves from `home_dir`
+        // and cannot see this machine's own registry (HORO-1543).
+        match CargoRegistryCacheDetector.discover(&DiscoveryContext::new(&home)) {
             DetectorStatus::Found(evidence) => {
                 assert_eq!(evidence.len(), 1);
                 let ev = &evidence[0];
@@ -367,16 +360,54 @@ mod tests {
     #[test]
     fn a_missing_registry_is_tool_absent_not_zero_bytes() {
         let home = make_temp_dir("cargo-home-empty");
-        let status = cache_root_status(
-            CargoRegistryCacheDetector.id(),
-            ResourceKind::CargoRegistryCache,
-            &cargo_registry_dir(None, &home),
-            Regenerability::RegenerableByTool,
-            Recoverability::RegenerableByTool,
-            "test fixture",
-            RootAbsence::NothingObservedAboutTheTool,
+        assert_eq!(
+            CargoRegistryCacheDetector.discover(&DiscoveryContext::new(&home)),
+            DetectorStatus::ToolAbsent
         );
-        assert_eq!(status, DetectorStatus::ToolAbsent);
         fs::remove_dir_all(&home).ok();
+    }
+
+    /// The `CargoHome` override has to reach `discover`, not merely
+    /// `cargo_registry_dir`: the pure test above would still pass if
+    /// `discover` ignored `ctx.tool_home` and always resolved from
+    /// `home_dir`. So the fixture registry lives somewhere `home_dir` cannot
+    /// reach, and `home_dir` points at a decoy that holds a *different* number
+    /// of bytes — a detector reading the wrong one reports 1_024 and fails.
+    #[test]
+    fn the_cargo_home_override_reaches_the_detector() {
+        let relocated = make_temp_dir("cargo-relocated");
+        fs::create_dir_all(relocated.join("registry/cache")).unwrap();
+        fs::write(
+            relocated.join("registry/cache/serde.crate"),
+            vec![0u8; 2_048],
+        )
+        .unwrap();
+
+        let decoy_home = make_temp_dir("cargo-decoy-home");
+        fs::create_dir_all(decoy_home.join(".cargo/registry")).unwrap();
+        fs::write(
+            decoy_home.join(".cargo/registry/decoy.crate"),
+            vec![0u8; 1_024],
+        )
+        .unwrap();
+
+        let ctx = DiscoveryContext::new(&decoy_home)
+            .with_tool_home(ToolHomeVar::CargoHome, relocated.to_str().unwrap());
+
+        match CargoRegistryCacheDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                assert_eq!(
+                    evidence[0].logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(2_048),
+                    "the relocated registry is the one CARGO_HOME names; \
+                     1024 would mean the override never reached `discover`"
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&relocated).ok();
+        fs::remove_dir_all(&decoy_home).ok();
     }
 }
