@@ -1031,22 +1031,23 @@ mod tests {
         use crate::evidence::ResourceKind;
 
         /// Kinds with no detector yet, each with the ticket that owns it.
-        /// The last Docker object kind is HORO-1544's: they are distinct
-        /// lifecycle evidence, and collapsing them into the existing
-        /// build-cache detector merely to satisfy this guard is exactly what
-        /// that ticket forbids. `DockerContainer` and `DockerImage` have left
-        /// this list — `docker_objects` declares them.
-        const NOT_YET_DETECTABLE: &[ResourceKind] = &[ResourceKind::DockerVolume];
+        ///
+        /// Empty as of HORO-1544: `docker_objects` declares the last three —
+        /// `DockerContainer`, `DockerImage` and `DockerVolume` — as the
+        /// distinct lifecycle evidence they are, rather than collapsing them
+        /// into the existing build-cache detector to satisfy this guard, which
+        /// is what that ticket forbids.
+        const NOT_YET_DETECTABLE: &[ResourceKind] = &[];
 
-        // Pinned, so this exemption cannot quietly grow. A kind added here
-        // without its ticket, or one left behind after its detector landed,
-        // both fail on this line.
-        assert_eq!(
-            NOT_YET_DETECTABLE,
-            &[ResourceKind::DockerVolume],
-            "the not-yet-detectable exemption changed — add the ticket that \
-             owns the new kind to this test's doc comment, or remove a kind \
-             whose detector now exists"
+        // Pinned empty, so the exemption cannot quietly come back. A kind added
+        // to `ResourceKind` without a detector must either get one or be listed
+        // here with the ticket that owns it — and the list is asserted so the
+        // second choice cannot be made silently.
+        assert!(
+            NOT_YET_DETECTABLE.is_empty(),
+            "a kind was exempted from needing a detector — name the ticket that \
+             owns it in this test's doc comment, and delete this assertion's \
+             expectation of emptiness deliberately rather than as a side effect"
         );
 
         let registry = DetectorRegistry::builtin();

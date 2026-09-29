@@ -53,7 +53,11 @@ use super::{Detector, DetectorId, DetectorStatus, DiscoveryContext};
 
 pub struct DockerObjectDetector;
 
-const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::DockerContainer, ResourceKind::DockerImage];
+const RESOURCE_KINDS: &[ResourceKind] = &[
+    ResourceKind::DockerContainer,
+    ResourceKind::DockerImage,
+    ResourceKind::DockerVolume,
+];
 
 const SOURCE: &str = "docker system df -v --format '{{json .}}'";
 
@@ -565,6 +569,192 @@ fn image_evidence(
     }
 }
 
+/// Is `name` one Docker minted for itself rather than one a human chose?
+///
+/// Docker names an anonymous volume — the kind a `VOLUME` instruction produces
+/// when nothing was mounted over it — with a 64-character hex string, and that
+/// is the only thing distinguishing it from a named one in this report.
+///
+/// Length-and-alphabet exact on purpose. Two of the four volumes on the machine
+/// this was written against are named `act-test-port-test-<64 hex>`: they
+/// *contain* 64 hex characters, a human chose them, and a `contains`-style test
+/// would have called both anonymous.
+fn is_anonymous_volume_name(name: &str) -> bool {
+    name.len() == 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Does a container's `Mounts` entry name this volume?
+///
+/// `Mounts` is a comma-separated list of what the container has mounted, mixing
+/// volume names with bind-mount host paths. A bind path is not a volume name, so
+/// exact equality against the volume's own name is both the match and the
+/// filter — and it is why a container bind-mounting `/Users/x/data` cannot be
+/// read as a referrer of some volume.
+fn mounts_name_volume(mounts: &str, volume_name: &str) -> bool {
+    mounts
+        .split(',')
+        .map(str::trim)
+        .any(|mount| mount == volume_name)
+}
+
+/// One container as the volume half needs to see it: identity, what it has
+/// mounted, and whether it is active.
+struct VolumeContainerRef {
+    resource: ResourceId,
+    mounts: String,
+    active: bool,
+}
+
+fn volume_container_refs(snapshot: &Value) -> Result<Vec<VolumeContainerRef>, DetectorStatus> {
+    let entries = section(snapshot, "Containers")?;
+    let mut refs = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let id = object_id(entry, "container")?;
+        refs.push(VolumeContainerRef {
+            resource: ResourceId::new(
+                ResourceKind::DockerContainer,
+                ResourceLocator::Tool {
+                    tool: crate::evidence::OwningTool::Docker,
+                    id: id.to_string(),
+                },
+            ),
+            mounts: field(entry, "Mounts").unwrap_or("").to_string(),
+            active: activity_from_state(field(entry, "State").unwrap_or(""))
+                == DockerActivity::Active,
+        });
+    }
+    Ok(refs)
+}
+
+/// Builds one [`Evidence`] per volume in the snapshot.
+fn volumes(snapshot: &Value, detector: DetectorId) -> Result<Vec<Evidence>, DetectorStatus> {
+    let entries = section(snapshot, "Volumes")?;
+    let refs = volume_container_refs(snapshot)?;
+    let mut evidence = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let name = field(entry, "Name")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                DetectorStatus::Failed(
+                    "docker system df -v reported a volume with no Name".to_string(),
+                )
+            })?;
+        evidence.push(volume_evidence(entry, name, &refs, detector));
+    }
+    Ok(evidence)
+}
+
+fn volume_evidence(
+    entry: &Value,
+    name: &str,
+    refs: &[VolumeContainerRef],
+    detector: DetectorId,
+) -> Evidence {
+    // Docker's own count of containers using this volume, and the authority for
+    // whether it is attached at all. Only `docker system df -v` computes it;
+    // `docker volume ls` prints `N/A`, which does not parse and therefore
+    // arrives as unknown rather than as zero.
+    let declared_links = field(entry, "Links").and_then(|n| n.parse::<usize>().ok());
+
+    let matched: Vec<&VolumeContainerRef> = refs
+        .iter()
+        .filter(|c| mounts_name_volume(&c.mounts, name))
+        .collect();
+
+    // The same two-readings rule the image half uses, for the same reason: an
+    // attachment list that is missing a container reads downstream as "and
+    // nothing else has this mounted", which is the one thing it must not say
+    // about a volume.
+    let references = match declared_links {
+        Some(links) if links == matched.len() => ProbeOutcome::Observed(DockerReferences {
+            referenced_by: matched.iter().map(|c| c.resource.clone()).collect(),
+            active_referrers: matched.iter().filter(|c| c.active).count() as u32,
+        }),
+        _ => ProbeOutcome::Unavailable(ProbeReason::Failed),
+    };
+
+    let activity = if matched.iter().any(|c| c.active) {
+        DockerActivity::Active
+    } else {
+        match (declared_links, references.is_observed()) {
+            (Some(0), _) => DockerActivity::Inactive,
+            (Some(_), true) => DockerActivity::Inactive,
+            (Some(_), false) => DockerActivity::Unknown,
+            (None, _) => DockerActivity::Unknown,
+        }
+    };
+
+    let bytes = match field(entry, "Size").and_then(super::docker::parse_human_size) {
+        Some(bytes) => ProbeOutcome::Observed(bytes),
+        None => ProbeOutcome::Unavailable(ProbeReason::Failed),
+    };
+
+    Evidence {
+        resource: ResourceId::new(
+            ResourceKind::DockerVolume,
+            ResourceLocator::Tool {
+                tool: crate::evidence::OwningTool::Docker,
+                // The name, not the mount point. Docker addresses a volume by
+                // name, and on a VM-backed runtime the mount point is a path
+                // inside the VM that means nothing on this host.
+                id: name.to_string(),
+            },
+        ),
+        fingerprint: ResourceFingerprint {
+            dev_ino: None,
+            mtime: None,
+            // Nothing to add. A volume's name is its identity and is already
+            // the locator; `Links` is a fact about *other* objects and belongs
+            // in `references`, not smuggled into a fingerprint.
+            tool_revision: None,
+        },
+        detector,
+        logical_bytes: bytes.clone(),
+        physical_bytes: None,
+        reclaimable_bytes: bytes,
+        reclaimable_bytes_is_lower_bound: false,
+        // `docker system df -v` reports no timestamp for a volume, and the one
+        // path it does report is the mount point — which on this workstation's
+        // Colima runtime lives inside the VM and cannot be stat'd from here. Not
+        // attempted, therefore, rather than attempted and failed.
+        last_modified: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        // Whatever wrote into this volume is not observable from here, and
+        // nothing regenerates it. This is the axis that makes a volume `Ask`
+        // even before the protected-kind rule makes it `Protected`.
+        regenerability: Regenerability::NotRegenerable,
+        recoverability: Recoverability::Irreversible,
+        native_cleanup: NativeCleanup::Unsupported,
+        open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        docker_lifecycle: Some(DockerLifecycle {
+            activity,
+            persistence: if is_anonymous_volume_name(name) {
+                // Not `ToolManaged`. Docker minted the name, which is not the
+                // same as Docker being able to produce the contents again: an
+                // anonymous volume behind a database image's `VOLUME` line holds
+                // that database, and no name says so either way. The campaign's
+                // Maven argument, applied to the case where there is no name to
+                // misread.
+                DockerPersistence::Unknown
+            } else {
+                // A human or a compose file chose this name, so it is treated as
+                // possibly holding the only copy of their data.
+                DockerPersistence::UserManaged
+            },
+            references,
+        }),
+        collected_at: SystemTime::now(),
+        sources: vec![SOURCE.to_string()],
+    }
+}
+
 impl Detector for DockerObjectDetector {
     fn id(&self) -> DetectorId {
         DetectorId("docker_objects")
@@ -587,6 +777,10 @@ impl Detector for DockerObjectDetector {
             Ok(images) => evidence.extend(images),
             Err(status) => return status,
         }
+        match volumes(&snapshot, self.id()) {
+            Ok(volumes) => evidence.extend(volumes),
+            Err(status) => return status,
+        }
         DetectorStatus::Found(evidence)
     }
 }
@@ -606,12 +800,51 @@ mod tests {
     }
 
     fn snapshot_with(images: &str, containers: &str) -> Value {
+        snapshot_of(images, containers, "")
+    }
+
+    fn snapshot_of(images: &str, containers: &str, volumes: &str) -> Value {
         serde_json::from_str(&format!(
             "{{\"Images\":[{images}],\"Containers\":[{containers}],\
-             \"Volumes\":[],\"BuildCache\":[]}}"
+             \"Volumes\":[{volumes}],\"BuildCache\":[]}}"
         ))
         .expect("test fixture must be valid JSON")
     }
+
+    /// The volume field set `docker system df -v` prints, verbatim in shape.
+    /// `links` is Docker's own count of containers with the volume mounted.
+    /// `Availability`/`Group`/`Status` really are `"N/A"` on the local driver.
+    fn volume_json(name: &str, links: &str, size: &str) -> String {
+        format!(
+            "{{\"Availability\":\"N/A\",\"Driver\":\"local\",\"Group\":\"N/A\",\
+             \"Labels\":\"\",\"Links\":\"{links}\",\
+             \"Mountpoint\":\"/var/lib/docker/volumes/{name}/_data\",\
+             \"Name\":\"{name}\",\"Scope\":\"local\",\"Size\":\"{size}\",\
+             \"Status\":\"N/A\"}}"
+        )
+    }
+
+    /// A container fixture with an explicit `Mounts` rendering — the
+    /// comma-separated list `docker system df -v` prints, mixing volume names
+    /// with bind-mount host paths.
+    fn container_with_mounts(id: &str, state: &str, mounts: &str) -> String {
+        container_json(id, state, "0B", "2026-09-20 03:00:00 +0000 UTC")
+            .replace("\"Mounts\":\"\"", &format!("\"Mounts\":\"{mounts}\""))
+    }
+
+    fn only_volume(volumes: &str, containers: &str) -> Evidence {
+        let mut found = volumes_of(&snapshot_of("", containers, volumes)).into_iter();
+        let evidence = found.next().expect("one volume expected");
+        assert!(found.next().is_none(), "exactly one volume expected");
+        evidence
+    }
+
+    fn volumes_of(snapshot: &Value) -> Vec<Evidence> {
+        volumes(snapshot, DETECTOR).expect("fixture should parse")
+    }
+
+    /// A name of the shape Docker mints for an anonymous volume.
+    const ANONYMOUS: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     /// The image field set `docker system df -v` prints, verbatim in shape.
     /// `containers` is Docker's own count of containers referencing the image.
@@ -673,11 +906,20 @@ mod tests {
         assert_eq!(DockerObjectDetector.id(), DetectorId("docker_objects"));
     }
 
+    /// Pinned rather than merely non-empty. `resource_kinds()` is what
+    /// `AutopilotEnvelope::allow_kind` accepts an allowlist entry against, so a
+    /// kind silently added here would silently widen what an existing
+    /// allowlist authorizes, and a kind silently dropped would make an entry
+    /// authorize nothing while still reporting as configured.
     #[test]
     fn resource_kinds_reports_each_kind_this_detector_declares() {
         assert_eq!(
             DockerObjectDetector.resource_kinds(),
-            &[ResourceKind::DockerContainer, ResourceKind::DockerImage]
+            &[
+                ResourceKind::DockerContainer,
+                ResourceKind::DockerImage,
+                ResourceKind::DockerVolume,
+            ]
         );
     }
 
@@ -1324,6 +1566,304 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    /// AC 5 and §8's "a named/persistent/user-data-bearing volume must fail
+    /// closed". A name a human chose is treated as possibly holding the only
+    /// copy of their data.
+    #[test]
+    fn a_named_volume_is_user_managed() {
+        let evidence = only_volume(&volume_json("horo1500-cargo", "0", "123.5MB"), "");
+
+        assert_eq!(
+            lifecycle(&evidence).persistence,
+            DockerPersistence::UserManaged
+        );
+    }
+
+    /// The AC 5 control. Docker minted this name, and that is not the same
+    /// fact as Docker being able to produce the contents again — an anonymous
+    /// volume behind a database image's `VOLUME` line holds that database.
+    /// `ToolManaged` here would be §7's Maven error in the case where there is
+    /// no name to misread, so the assertion is written as the inequality it
+    /// exists to protect as well as the value.
+    #[test]
+    fn an_anonymous_volume_is_unknown_not_tool_managed() {
+        let evidence = only_volume(&volume_json(ANONYMOUS, "0", "0B"), "");
+
+        assert_ne!(
+            lifecycle(&evidence).persistence,
+            DockerPersistence::ToolManaged,
+            "Docker naming a volume is not Docker regenerating its contents"
+        );
+        assert_eq!(lifecycle(&evidence).persistence, DockerPersistence::Unknown);
+    }
+
+    /// The anti-vacuity control for [`is_anonymous_volume_name`]. Two of the
+    /// four volumes on the machine this was written against are named
+    /// `act-test-port-test-<64 hex>`: they *contain* 64 hex characters, a human
+    /// chose them, and a `contains`-style test would have called both anonymous
+    /// and downgraded a user-managed volume to `Unknown`.
+    #[test]
+    fn a_chosen_name_containing_a_hex_run_is_still_user_managed() {
+        let name = format!("act-test-port-test-{ANONYMOUS}");
+        let evidence = only_volume(&volume_json(&name, "0", "177B"), "");
+
+        assert_eq!(
+            lifecycle(&evidence).persistence,
+            DockerPersistence::UserManaged,
+            "a human-chosen prefix is what makes {name} a named volume"
+        );
+    }
+
+    /// AC 3 and AC 4 for volumes: a running container with the volume mounted
+    /// is active-use evidence, and the referrer is named so the workspace graph
+    /// can link the two rather than re-deriving the relationship from strings.
+    #[test]
+    fn a_volume_a_running_container_has_mounted_is_active() {
+        let evidence = only_volume(
+            &volume_json("horo1500-cargo", "1", "123.5MB"),
+            &container_with_mounts("694b49533978", "running", "horo1500-cargo"),
+        );
+        let lifecycle = lifecycle(&evidence);
+
+        assert_eq!(lifecycle.activity, DockerActivity::Active);
+        match &lifecycle.references {
+            ProbeOutcome::Observed(refs) => {
+                assert_eq!(refs.active_referrers, 1);
+                assert_eq!(
+                    refs.referenced_by
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
+                    vec!["docker_container:docker:694b49533978"]
+                );
+            }
+            other => panic!("expected observed references, got {other:?}"),
+        }
+    }
+
+    /// §8's "a stopped container is NOT automatically safe to delete", read
+    /// from the volume side: the volume is mounted and nothing is running, so
+    /// it is referenced and not in use — two different facts, and `Inactive`
+    /// is the one that was established.
+    #[test]
+    fn a_volume_only_a_stopped_container_has_mounted_is_inactive_but_referenced() {
+        let evidence = only_volume(
+            &volume_json("horo1500-cargo", "1", "123.5MB"),
+            &container_with_mounts("694b49533978", "exited", "horo1500-cargo"),
+        );
+        let lifecycle = lifecycle(&evidence);
+
+        assert_eq!(lifecycle.activity, DockerActivity::Inactive);
+        match &lifecycle.references {
+            ProbeOutcome::Observed(refs) => {
+                assert_eq!(refs.active_referrers, 0);
+                assert_eq!(refs.referenced_by.len(), 1);
+            }
+            other => panic!("expected observed references, got {other:?}"),
+        }
+    }
+
+    /// Docker was asked and said nothing has this mounted. A real answer, and
+    /// still not deletion authority — the persistence axis and the protected
+    /// kind rule both outlive it.
+    #[test]
+    fn an_unattached_volume_is_inactive_with_observed_empty_references() {
+        let evidence = only_volume(&volume_json("act-toolcache", "0", "0B"), "");
+        let lifecycle = lifecycle(&evidence);
+
+        assert_eq!(lifecycle.activity, DockerActivity::Inactive);
+        assert_eq!(
+            lifecycle.references,
+            ProbeOutcome::Observed(DockerReferences::none())
+        );
+    }
+
+    /// `docker volume ls` renders `Links` as `"N/A"`, and only `system df -v`
+    /// computes it. An uncounted attachment set must not read as an empty one:
+    /// unknown is not zero.
+    #[test]
+    fn an_uncomputed_attachment_count_is_unknown_not_zero() {
+        let evidence = only_volume(&volume_json("horo1500-cargo", "N/A", "123.5MB"), "");
+        let lifecycle = lifecycle(&evidence);
+
+        assert_eq!(lifecycle.activity, DockerActivity::Unknown);
+        assert_eq!(
+            lifecycle.references,
+            ProbeOutcome::Unavailable(ProbeReason::Failed),
+            "an attachment list that cannot be checked against Docker's own count \
+             must not be published as complete"
+        );
+    }
+
+    /// Docker counts one container with this mounted and the snapshot lists
+    /// none. The unaccounted-for container may well be running, so neither the
+    /// list nor the activity is an answer — and a published list missing a
+    /// referrer would read downstream as "and nothing else has this mounted",
+    /// which is the one thing it must not say about a volume.
+    #[test]
+    fn an_attachment_set_that_cannot_be_fully_accounted_for_is_unanswered() {
+        let evidence = only_volume(&volume_json("horo1500-cargo", "1", "123.5MB"), "");
+        let lifecycle = lifecycle(&evidence);
+
+        assert_eq!(lifecycle.activity, DockerActivity::Unknown);
+        assert_eq!(
+            lifecycle.references,
+            ProbeOutcome::Unavailable(ProbeReason::Failed)
+        );
+    }
+
+    /// `Mounts` mixes volume names with bind-mount host paths. A container
+    /// bind-mounting a directory is not a referrer of a volume, and matching on
+    /// anything looser than exact equality would invent one — here, one that
+    /// makes an attached volume look unattached by disagreeing with `Links`.
+    #[test]
+    fn a_bind_mount_path_never_matches_a_volume_name() {
+        let evidence = only_volume(
+            &volume_json("data", "0", "0B"),
+            &container_with_mounts("694b49533978", "running", "/Users/x/data"),
+        );
+        let lifecycle = lifecycle(&evidence);
+
+        assert_eq!(
+            lifecycle.activity,
+            DockerActivity::Inactive,
+            "a container bind-mounting /Users/x/data does not have the `data` volume"
+        );
+        assert_eq!(
+            lifecycle.references,
+            ProbeOutcome::Observed(DockerReferences::none())
+        );
+    }
+
+    /// One container, several volumes: `Mounts` is a comma-separated list, and
+    /// each volume must find itself in it without a neighbouring name matching
+    /// by accident.
+    #[test]
+    fn a_container_mounting_several_volumes_refers_to_each_of_them() {
+        let snapshot = snapshot_of(
+            "",
+            &container_with_mounts("694b49533978", "running", "cargo-cache,build-out"),
+            &format!(
+                "{},{}",
+                volume_json("cargo-cache", "1", "123.5MB"),
+                volume_json("build-out", "1", "4.1kB")
+            ),
+        );
+
+        for evidence in volumes_of(&snapshot) {
+            assert_eq!(
+                lifecycle(&evidence).activity,
+                DockerActivity::Active,
+                "{} should find itself in the mount list",
+                evidence.resource
+            );
+        }
+    }
+
+    /// The locator is the volume's name, which is how Docker addresses it. Not
+    /// the mount point: on this workstation's VM-backed runtime that path lives
+    /// inside the VM and means nothing on the host.
+    #[test]
+    fn a_volume_is_identified_by_name_not_mount_point() {
+        let evidence = only_volume(&volume_json("horo1500-cargo", "0", "123.5MB"), "");
+
+        assert_eq!(
+            evidence.resource.to_string(),
+            "docker_volume:docker:horo1500-cargo"
+        );
+    }
+
+    /// AC 6 / §6: a volume is enumerable and has no cleanup contract here.
+    /// `NotRegenerable` + `Irreversible` are the two axes that make it `Ask`
+    /// before the protected-kind rule makes it `Protected`, and `last_modified`
+    /// is honestly not attempted — `system df -v` reports no volume timestamp.
+    #[test]
+    fn volumes_are_detect_only_with_no_age_claimed() {
+        let evidence = only_volume(&volume_json("horo1500-cargo", "0", "123.5MB"), "");
+
+        assert_eq!(evidence.native_cleanup, NativeCleanup::Unsupported);
+        assert_eq!(evidence.regenerability, Regenerability::NotRegenerable);
+        assert_eq!(evidence.recoverability, Recoverability::Irreversible);
+        assert_eq!(
+            evidence.last_modified,
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+    }
+
+    /// The volume's own bytes, as Docker reports them. No permission judgement
+    /// is folded in here: an attached volume still reports what removing it
+    /// would free, and whether removal is allowed is policy's question.
+    #[test]
+    fn a_volume_reports_the_bytes_docker_measured_for_it() {
+        let evidence = only_volume(
+            &volume_json("horo1500-cargo", "1", "123.5MB"),
+            &container_with_mounts("694b49533978", "running", "horo1500-cargo"),
+        );
+
+        assert_eq!(evidence.logical_bytes, ProbeOutcome::Observed(123_500_000));
+        assert_eq!(
+            evidence.reclaimable_bytes,
+            ProbeOutcome::Observed(123_500_000)
+        );
+        assert!(!evidence.reclaimable_bytes_is_lower_bound);
+    }
+
+    /// A shape this code cannot read must not be reported as a machine with no
+    /// volumes — the third instance of the same trap, and the same answer.
+    #[test]
+    fn a_report_with_no_volumes_section_is_failed_not_empty() {
+        let no_section: Value =
+            serde_json::from_str("{\"Images\":[],\"Containers\":[]}").expect("valid JSON");
+        match volumes(&no_section, DETECTOR) {
+            Err(DetectorStatus::Failed(reason)) => assert!(reason.contains("Volumes")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// A volume has no identity but its name, so a nameless one cannot be
+    /// reported at all — and it is also a volume missing from some container's
+    /// mount accounting.
+    #[test]
+    fn a_volume_with_no_name_fails_the_detector() {
+        let nameless = "{\"Links\":\"0\",\"Size\":\"0B\",\"Name\":\"\"}";
+        match volumes(&snapshot_of("", "", nameless), DETECTOR) {
+            Err(DetectorStatus::Failed(reason)) => {
+                assert!(reason.contains("volume"), "got: {reason}");
+                assert!(reason.contains("no Name"), "got: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// AC 1, completed: one snapshot, three kinds, none of them collapsed into
+    /// another.
+    #[test]
+    fn one_snapshot_yields_all_three_kinds_as_distinct_resources() {
+        let snapshot = snapshot_of(
+            &image_json("sha256:abc0123456789def", "example", "1", "1", "1GB", "1GB"),
+            &container_with_mounts("dfe320e00b9f", "running", "horo1500-cargo"),
+            &volume_json("horo1500-cargo", "1", "123.5MB"),
+        );
+
+        let mut kinds: Vec<ResourceKind> = containers(&snapshot, DETECTOR)
+            .expect("containers parse")
+            .into_iter()
+            .chain(images_of(&snapshot))
+            .chain(volumes_of(&snapshot))
+            .map(|e| e.resource.kind)
+            .collect();
+        kinds.sort_by_key(|k| k.tag());
+
+        assert_eq!(
+            kinds,
+            vec![
+                ResourceKind::DockerContainer,
+                ResourceKind::DockerImage,
+                ResourceKind::DockerVolume,
+            ]
+        );
     }
 
     // No test spawns a real `docker`: daemon presence and reachability are

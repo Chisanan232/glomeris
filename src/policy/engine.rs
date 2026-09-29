@@ -640,6 +640,36 @@ mod tests {
         assert_eq!(decision.reasons, vec![ReasonCode::RebuildCostHigh]);
     }
 
+    /// AC 5, through the whole classifier rather than through
+    /// `protected_reason` alone, and with the evidence stacked as favourably as
+    /// any real snapshot could ever make it: Docker was asked and answered on
+    /// every axis, nothing references the volume, nothing is running, and the
+    /// persistence axis has been set to the most permissive value in the
+    /// vocabulary. This is the exact shape a "surely this one is fine" argument
+    /// would arrive in, and it must still not be executable without asking.
+    ///
+    /// The refusal comes from the kind, not from the evidence — which is why it
+    /// cannot be argued out of by a better-looking snapshot.
+    #[test]
+    fn a_docker_volume_is_never_auto_safe_however_idle_the_evidence_says_it_is() {
+        let mut lifecycle = observed_idle();
+        lifecycle.persistence = crate::evidence::DockerPersistence::ToolManaged;
+        let ev = docker_evidence(ResourceKind::DockerVolume, lifecycle);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_ne!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "a volume may hold the only copy of the developer's data"
+        );
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedPersistentVolume]
+        );
+    }
+
     /// A non-Docker resource carries `docker_lifecycle: None`, which must mean
     /// "the concept does not apply" and not "the facts are unknown". If the
     /// `None` arm ever started defaulting to `Unknown`, every Cargo target dir
