@@ -98,7 +98,7 @@ final class GlomerisVocabularyTests: XCTestCase {
         "ok", "misconfigured", "unreachable", "rejected", "unusable_response",
     ]
 
-    /// `src/policy/class.rs` — `ReasonCode::as_str`, all 20.
+    /// `src/policy/class.rs` — `ReasonCode::as_str`, all 22.
     private static let reasonTokens = [
         "protected_credential_material", "protected_git_internals", "protected_infra_state",
         "protected_persistent_volume", "protected_user_documents", "protected_system_path",
@@ -106,7 +106,8 @@ final class GlomerisVocabularyTests: XCTestCase {
         "evidence_incomplete", "evidence_stale", "evidence_probe_failed",
         "resource_in_active_use", "git_worktree_dirty", "rebuild_cost_high",
         "regenerability_unknown", "recoverability_irreversible",
-        "owning_tool_live", "evidence_fresh_and_complete", "regenerable_by_tool",
+        "owning_tool_live", "docker_object_in_use", "docker_activity_unknown",
+        "evidence_fresh_and_complete", "regenerable_by_tool",
         "no_active_use_observed",
     ]
 

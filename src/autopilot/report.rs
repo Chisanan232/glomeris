@@ -180,7 +180,9 @@ fn is_refusal_reason(reason: ReasonCode) -> bool {
         | ReasonCode::RebuildCostHigh
         | ReasonCode::RegenerabilityUnknown
         | ReasonCode::RecoverabilityIrreversible
-        | ReasonCode::OwningToolLive => true,
+        | ReasonCode::OwningToolLive
+        | ReasonCode::DockerObjectInUse
+        | ReasonCode::DockerActivityUnknown => true,
     }
 }
 
