@@ -241,6 +241,39 @@ pub enum ProbeFindingView {
     },
 }
 
+impl ProbeFindingView {
+    /// Which shape this finding took, as the serialized form spells it.
+    ///
+    /// For a local report, not for the model — the model receives the finding
+    /// itself. Kept beside the enum rather than written out in
+    /// `crate::reporting` so a new variant is one edit and not two, and pinned
+    /// against the serialization by a test below so the two cannot drift.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::BranchState(_) => "branch_state",
+            Self::PatchEquivalence(_) => "patch_equivalence",
+            Self::Activity(_) => "activity",
+            Self::ToolLiveness(_) => "tool_liveness",
+            Self::PullRequest(_) => "pull_request",
+            Self::Task(_) => "task",
+            Self::WorkflowHistory(_) => "workflow_history",
+            Self::Unavailable { .. } => "unavailable",
+        }
+    }
+
+    /// The reason this probe could not answer, or `None` because it did.
+    ///
+    /// Only [`Self::Unavailable`] has one. A finding that answered is not
+    /// reported with a reason of `"none"` — that would be a third state in a
+    /// field that has two.
+    pub fn unavailable_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Unavailable { reason } => Some(reason),
+            _ => None,
+        }
+    }
+}
+
 /// The complete model-facing projection. Serializing this is the only way
 /// local evidence reaches a provider.
 #[derive(Debug, Clone, PartialEq, Serialize)]

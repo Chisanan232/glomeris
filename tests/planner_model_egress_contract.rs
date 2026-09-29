@@ -614,18 +614,12 @@ fn pinned_probe_result_paths() -> BTreeSet<String> {
         "head_tip_age_days",
         "comparison_tip_age_days",
     ] {
-        paths.extend(
-            reported(&format!("{entry}.finding.patch_equivalence.{field}"))
-                .into_iter()
-                .map(String::from),
-        );
+        paths.extend(reported(&format!(
+            "{entry}.finding.patch_equivalence.{field}"
+        )));
     }
     // `tool_liveness` is a bare `Reported<bool>` — no wrapper object of its own.
-    paths.extend(
-        reported(&format!("{entry}.finding.tool_liveness"))
-            .into_iter()
-            .map(String::from),
-    );
+    paths.extend(reported(&format!("{entry}.finding.tool_liveness")));
 
     paths
 }
@@ -906,6 +900,28 @@ fn the_key_set_a_probe_finding_adds_is_pinned() {
                 "[{label}] {} answers nothing in this fixture, so whatever \
                  shape its finding takes is unpinned",
                 probe.tag()
+            );
+        }
+
+        // `ProbeFindingView::tag` names the shape for the *local* report, and
+        // is pinned here against the wire spelling so a report and a payload
+        // cannot end up calling the same finding two different things.
+        for result in &request.probe_results {
+            let value = serde_json::to_value(&result.finding).expect("a finding serializes");
+            let key = value
+                .as_object()
+                .and_then(|object| object.keys().next().cloned())
+                .expect("a finding serializes as one tagged key");
+            assert_eq!(
+                key,
+                result.finding.tag(),
+                "[{label}] a finding is spelled {key} on the wire and {} locally",
+                result.finding.tag()
+            );
+            assert_eq!(
+                result.finding.unavailable_reason().is_some(),
+                key == "unavailable",
+                "[{label}] {key} disagrees with itself about whether it answered"
             );
         }
     }
