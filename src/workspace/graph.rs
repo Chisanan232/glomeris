@@ -62,7 +62,9 @@ use super::branch::WorktreeBranchState;
 use super::group::ActivityState;
 use crate::detectors::DetectorId;
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
-use crate::evidence::{Completeness, Evidence, OwningTool, ProcessRef, Regenerability, ResourceId};
+use crate::evidence::{
+    Completeness, DockerLifecycle, Evidence, OwningTool, ProcessRef, Regenerability, ResourceId,
+};
 use crate::policy::PolicyDecision;
 use crate::reporting::{label_for, PolicyLabel};
 
@@ -489,6 +491,17 @@ pub struct ResourceNode {
     pub regenerability: Regenerability,
     pub completeness: Completeness,
     pub tool_liveness: ProbeOutcome<bool>,
+    /// What Docker said about this particular object, for the resources
+    /// Docker owns (HORO-1544). `None` for everything else, and that is a
+    /// different fact from `Some(DockerLifecycle::unknown(..))`: a Cargo
+    /// target directory has no Docker activity to be unknown about, whereas a
+    /// Docker image whose daemon stopped answering does.
+    ///
+    /// Carried here rather than re-derived because the relationships are the
+    /// reason the graph exists. `tool_liveness` above is one answer for every
+    /// Docker object on the machine — the daemon is up or it is not — and
+    /// says nothing about which of them a running container needs.
+    pub docker_lifecycle: Option<DockerLifecycle>,
     pub label: PolicyLabel,
 }
 
@@ -505,6 +518,7 @@ impl ResourceNode {
             regenerability: ev.regenerability,
             completeness: ev.completeness(),
             tool_liveness: ev.tool_liveness.clone(),
+            docker_lifecycle: ev.docker_lifecycle.clone(),
             label: label_for(decision),
         }
     }
@@ -1113,6 +1127,66 @@ mod tests {
         );
         assert_eq!(graph.global_resources.len(), 1);
         assert_eq!(graph.unplaced_resources.len(), 1);
+    }
+
+    /// The lifecycle facts reach the graph intact, and — the half that
+    /// matters — a resource Docker does not own is `None` rather than an
+    /// all-unknown lifecycle. Collapsing the two would tell a reader that a
+    /// Cargo target directory has Docker activity nobody established, which
+    /// is a gap invented out of an inapplicable question.
+    #[test]
+    fn docker_lifecycle_reaches_the_graph_and_absence_is_not_unknown() {
+        let (mut ev, decision) = tool_candidate(ResourceKind::DockerImage, "sha256:abc");
+        ev.docker_lifecycle = Some(DockerLifecycle {
+            activity: crate::evidence::DockerActivity::Active,
+            persistence: crate::evidence::DockerPersistence::ToolManaged,
+            references: ProbeOutcome::Observed(crate::evidence::DockerReferences {
+                referenced_by: vec![ResourceId::new(
+                    ResourceKind::DockerContainer,
+                    ResourceLocator::Tool {
+                        tool: OwningTool::Docker,
+                        id: "c1".to_string(),
+                    },
+                )],
+                active_referrers: 1,
+            }),
+        });
+
+        let graph = build(
+            &[
+                (ev, decision),
+                candidate("/w/a/target", ProbeOutcome::Observed(None)),
+            ],
+            &WorkspaceSurvey::unsurveyed(),
+        );
+
+        let by_id = |id: &str| {
+            graph
+                .global_resources
+                .iter()
+                .find(|n| n.resource.resource.to_string() == id)
+                .map(|n| n.resource.docker_lifecycle.clone())
+                .expect("candidate should be a global resource")
+        };
+
+        let image = by_id("docker_image:docker:sha256:abc").expect("Docker object carries one");
+        assert_eq!(image.activity, crate::evidence::DockerActivity::Active);
+        assert_eq!(
+            image.persistence,
+            crate::evidence::DockerPersistence::ToolManaged
+        );
+        match &image.references {
+            ProbeOutcome::Observed(refs) => {
+                assert_eq!(refs.referenced_by.len(), 1);
+                assert_eq!(refs.active_referrers, 1);
+            }
+            other => panic!("references should survive the join: {other:?}"),
+        }
+
+        assert!(
+            by_id("cargo_target_dir:/w/a/target").is_none(),
+            "a non-Docker resource has no Docker lifecycle to be unknown about"
+        );
     }
 
     // ---------------------------------------------------------------
