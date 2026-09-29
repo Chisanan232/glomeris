@@ -54,6 +54,7 @@
 //! working unchanged. It was never versioned on the wire, so a response that
 //! declares no version is read as v1 rather than guessed at.
 
+pub mod bounds;
 pub mod contract;
 pub mod dto;
 pub mod plan;
@@ -63,6 +64,7 @@ pub mod prompt;
 pub mod response;
 pub mod validate;
 
+pub use bounds::{ElapsedClock, EvidenceBounds, MonotonicClock};
 pub use contract::{
     ClaimConfidence, Disposition, ObservationKind, ProbeId, ProbeSubjectKind,
     PLANNER_CONTRACT_VERSION,
