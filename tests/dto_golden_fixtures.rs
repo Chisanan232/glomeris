@@ -42,6 +42,17 @@
 //! process that raises the pressure notification the daemon can only record.
 //! Three status fixtures rather than one: the shape a client acts on is mostly
 //! made of optionals, and "absent" is a meaning of its own on this surface.
+//!
+//! HORO-1550 added three more families, because the GUI has to explain
+//! workspace intelligence rather than just list candidates:
+//! `WorkspacePlanReport` (the contract-version-2 plan, whose model inference
+//! sits *beside* a nested v1 row instead of flattened into it — the separation
+//! the explanation surface depends on), `ExternalContextPreviewReport` (which
+//! must keep "not configured" and "configured but refused" distinguishable all
+//! the way to the screen), and `WorkflowProfileReport` (where a measurement
+//! that has been taken but not yet answered must not render as one that was
+//! never taken). Each of the latter two got a second fixture for its
+//! nothing-observed state for that reason.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -54,6 +65,7 @@ use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
 };
 use glomeris::cli::settings::{build_settings_rejection_report, build_settings_report};
+use glomeris::cli::workflow_profile::build_workflow_profile_report;
 use glomeris::evidence::{ProbeOutcome, ProbeReason};
 use glomeris::executor::goal::RecoveryGoal;
 use glomeris::executor::recovery_loop::{
@@ -76,6 +88,9 @@ use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
 use glomeris::workspace::external::{
     ConfiguredProviders, ExternalContextConfig, ExternalProviderError, GitHubSettings, JiraSettings,
+};
+use glomeris::workspace::history::{
+    LocalAlias, RepositoryObservation, StoreState, WorkspaceObservation,
 };
 use glomeris::workspace::{
     ActivityState, Divergence, EquivalenceMethod, IntegrationEvidence, MergedState,
@@ -1843,4 +1858,63 @@ fn external_context_preview_report_matches_golden_fixture() {
         None,
     );
     assert_matches_fixture(&report, "external_context_preview_report.json");
+}
+
+/// A collected baseline that is not yet allowed to claim a habit (HORO-1550).
+///
+/// Two observations, and `MIN_OBSERVATIONS_FOR_A_PATTERN` is three — so
+/// `state: "collected"`, `confidence: "insufficient"`, `mode: "unknown"` and
+/// `observations_still_needed: 1` all at once. That combination is the whole
+/// reason AC 2 of this ticket asks for current evidence and historical habit to
+/// be *semantically* distinct and not merely two rows: a surface that rendered
+/// this as "workflow: unknown" would be reporting a measurement that was taken
+/// and has an answer pending, as though nothing had been looked at.
+///
+/// Built through the real builder rather than as a literal, because
+/// `authority` is a constant sentence the CLI prints and the counts are read off
+/// the observations by `workspace::history::classify`. A literal would let this
+/// fixture assert a classification the classifier does not make — and `mode`
+/// being `"unknown"` for two *parallel* observations is exactly the sort of
+/// non-obvious outcome a hand-written fixture gets wrong in the reassuring
+/// direction.
+#[test]
+fn workflow_profile_report_matches_golden_fixture() {
+    let day = 86_400;
+    let now = 1_700_000_000;
+    let observations = (0..2)
+        .map(|i| WorkspaceObservation {
+            at_unix_secs: now - (5 * day) + (i * 2 * day),
+            repositories: vec![RepositoryObservation {
+                repository: LocalAlias::of_name("repo-0"),
+                worktree_count: 4,
+                linked_worktree_count: 3,
+                detached_worktree_count: 0,
+                single_checkout_branch: None,
+            }],
+        })
+        .collect();
+
+    let report = build_workflow_profile_report(
+        &StoreState::Collected(observations),
+        Some("/Users/dev/Library/Application Support/Glomeris/workflow-history.json".to_string()),
+        now,
+    );
+    assert_matches_fixture(&report, "workflow_profile_report.json");
+}
+
+/// No baseline at all (HORO-1550), which is not the same as an unreadable one.
+///
+/// `state: "never_collected"` with `unreadable_reason` omitted. The sibling
+/// state — `"unreadable"` with a `ProbeReason` tag — has a different next step
+/// (look at the file's permissions, not run the recorder), and a surface that
+/// folded the two into "no history" would send somebody to re-run a recorder
+/// that is running fine.
+///
+/// `stored_at` is `None` here, standing for a machine where `$HOME` could not be
+/// resolved, so the key is absent rather than null. Same rule the recovery
+/// settings report follows.
+#[test]
+fn workflow_profile_report_never_collected_matches_golden_fixture() {
+    let report = build_workflow_profile_report(&StoreState::NeverCollected, None, 1_700_000_000);
+    assert_matches_fixture(&report, "workflow_profile_report_never_collected.json");
 }

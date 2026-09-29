@@ -1,0 +1,20 @@
+{
+  "authority": "This baseline explains and orders. It is never permission: a working tree that is dirty, in use, or holds commits that exist nowhere else stays protected by its own evidence, whatever the pattern here says.",
+  "confidence": "insufficient",
+  "minimum_interval_secs": 3600,
+  "mode": "unknown",
+  "observation_count": 2,
+  "observations_still_needed": 1,
+  "retention_days": 90,
+  "state": "collected",
+  "stored_at": "/Users/dev/Library/Application Support/Glomeris/workflow-history.json",
+  "support": {
+    "mixed_observations": 0,
+    "most_worktrees_seen_at_once": 4,
+    "parallel_observations": 2,
+    "repositories_observed": 1,
+    "serial_observations": 0,
+    "single_checkout_branch_changes": 0,
+    "spanning_days": 2
+  }
+}
