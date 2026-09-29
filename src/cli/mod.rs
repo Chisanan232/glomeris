@@ -1597,6 +1597,173 @@ pub fn print_llm_plan_report(report: &LlmPlanReport) {
     }
 }
 
+/// Prints a [`WorkspacePlanReport`] as concise, human-readable text
+/// (HORO-1548).
+///
+/// Every line the model is responsible for is prefixed `model` — the
+/// disposition, the confidence, the rationale, the uncertainties, the profile
+/// and the observations. Every unprefixed line is this machine's own finding.
+/// That prefix is the whole of §17's separation in the text surface: a reader
+/// must be able to tell a claim from a finding without knowing which fields of
+/// which DTO came from where, and a plan output that reads `AUTO_SAFE …
+/// recommend_now` on one line has merged exactly the two things it must not.
+pub fn print_workspace_plan_report(report: &WorkspacePlanReport) {
+    for line in workspace_plan_lines(report) {
+        println!("{line}");
+    }
+}
+
+/// The lines [`print_workspace_plan_report`] prints, returned rather than
+/// printed so the attribution prefixes are testable. A property asserted over
+/// captured stdout would be a test of the test harness; a property asserted
+/// over this is a test of the rendering.
+fn workspace_plan_lines(report: &WorkspacePlanReport) -> Vec<String> {
+    let mut lines = vec![format!(
+        "WORKSPACE PLAN (contract v{}) — advisory only, nothing is executed by this command",
+        report.contract_version
+    )];
+    if !report.contract_declared && report.provider_error.is_none() {
+        lines.push(
+            "note: the provider did not declare the contract version it answered".to_string(),
+        );
+    }
+    if let Some(err) = &report.provider_error {
+        lines.push(format!("provider error: {err}"));
+    }
+    if let Some(dropped) = rendered_dropped(&report.dropped) {
+        lines.push(dropped);
+    }
+
+    match &report.profile {
+        Some(profile) => {
+            lines.push(format!(
+                "model workspace profile: {} (confidence {})",
+                profile.mode, profile.confidence
+            ));
+            if let Some(summary) = &profile.summary {
+                lines.push(format!("  model says: {summary}"));
+            }
+            push_citations(&mut lines, &profile.evidence_refs);
+        }
+        // Not "serial_single_checkout", and not silence either: a profile the
+        // model did not claim is a thing the operator should know was not
+        // claimed.
+        None => lines.push("model workspace profile: (none claimed)".to_string()),
+    }
+
+    if report.items.is_empty() {
+        lines.push("no suggestions".to_string());
+    }
+    for row in &report.items {
+        let action = row.item.requested_action_id.unwrap_or("(none)");
+        let priority = row
+            .item
+            .priority
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(format!(
+            "[{}] {} action={} priority={}",
+            row.item.policy_label, row.item.resource_id, action, priority
+        ));
+        lines.push(format!(
+            "  model wants: {} (confidence {})",
+            row.disposition, row.model_confidence
+        ));
+        if let Some(reason) = &row.item.model_reason {
+            lines.push(format!("  model says: {reason}"));
+        }
+        for uncertainty in &row.uncertainties {
+            lines.push(format!("  model unsure: {uncertainty}"));
+        }
+        push_citations(&mut lines, &row.evidence_refs);
+        match (&row.item.explain, &row.item.skip_reason) {
+            (Some(explain), _) => lines.push(format!("  {explain}")),
+            (None, Some(reason)) => lines.push(format!("  skipped: {reason}")),
+            (None, None) => lines.push("  (no plan rendered)".to_string()),
+        }
+    }
+
+    for observation in &report.observations {
+        lines.push(format!("model observation [{}]", observation.kind));
+        if let Some(detail) = &observation.detail {
+            lines.push(format!("  model says: {detail}"));
+        }
+        push_citations(&mut lines, &observation.evidence_refs);
+    }
+
+    for request in &report.evidence_requests {
+        lines.push(format!(
+            "model asks for probe {} of {} — not run by this command",
+            request.probe_id, request.subject_ref
+        ));
+        if let Some(reason) = &request.reason {
+            lines.push(format!("  model says: {reason}"));
+        }
+    }
+
+    lines
+}
+
+fn push_citations(lines: &mut Vec<String>, refs: &[String]) {
+    if !refs.is_empty() {
+        lines.push(format!("  model cites: {}", refs.join(", ")));
+    }
+}
+
+/// One line naming only the non-zero counts, or `None`. A report with nothing
+/// dropped should not spend fifteen lines saying so — but a report that dropped
+/// something must never be silent about it, which is why this is not gated
+/// behind a verbosity flag.
+fn rendered_dropped(dropped: &WorkspacePlanDroppedReport) -> Option<String> {
+    let counts: [(&str, u32); 15] = [
+        ("unknown resource", dropped.unknown_resource),
+        ("unoffered action", dropped.unoffered_action),
+        ("unknown disposition", dropped.unknown_disposition),
+        ("duplicate item", dropped.duplicate_item),
+        ("unknown observation kind", dropped.unknown_observation_kind),
+        ("unknown probe", dropped.unknown_probe),
+        ("unknown probe subject", dropped.unknown_probe_subject),
+        ("uncited evidence ref", dropped.uncited_evidence_ref),
+        (
+            "confidence degraded to unknown",
+            dropped.degraded_unknown_confidence,
+        ),
+        (
+            "workflow mode degraded to unknown",
+            dropped.degraded_unknown_workflow_mode,
+        ),
+        ("items over the bound", dropped.truncated_items),
+        (
+            "observations over the bound",
+            dropped.truncated_observations,
+        ),
+        (
+            "evidence requests over the bound",
+            dropped.truncated_evidence_requests,
+        ),
+        (
+            "uncertainties over the bound",
+            dropped.truncated_uncertainties,
+        ),
+        (
+            "evidence refs over the bound",
+            dropped.truncated_evidence_refs,
+        ),
+    ];
+    let rendered: Vec<String> = counts
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect();
+    if rendered.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "dropped from the response: {}",
+        rendered.join(", ")
+    ))
+}
+
 /// Outcome of resolving `glomeris execute`'s `--resource-id`/`--action-id`
 /// selectors and, when authorized, actually running
 /// [`crate::executor::execute`] (HORO-1055). `main.rs` maps each variant
@@ -3213,6 +3380,99 @@ mod tests {
         assert_eq!(report.dropped, WorkspacePlanDroppedReport::default());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §17. Every line carrying something the model claimed is attributed to
+    /// it, and no line merges a claim with a finding. Asserted over the
+    /// rendered lines rather than eyeballed: the failure this prevents is a
+    /// future line that appends a disposition to the policy-label line, which
+    /// reads as Glomeris having decided to recommend it.
+    #[test]
+    fn the_text_rendering_attributes_every_model_claim_and_merges_none() {
+        let (dir, candidates) = v2_auto_safe_candidate("rendering");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "workspace_profile":{"mode":"unknown","confidence":"unknown",
+                                     "evidence_refs":["workflow_history"],
+                                     "summary":"no history collected"},
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"recommend_now","confidence":"inferred",
+                          "priority":3,"evidence_refs":["resource_1"],
+                          "uncertainties":["no process probe was attempted"],
+                          "reason":"large and untouched"}],
+                "observations":[{"kind":"missing_evidence","evidence_refs":["machine"],
+                                 "detail":"free space was not measured"}]}"#
+                .to_string()),
+        };
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+        let lines = workspace_plan_lines(&report);
+
+        // Every model claim appears, on a line that says whose it is.
+        for claim in [
+            "recommend_now",
+            "inferred",
+            "large and untouched",
+            "no process probe was attempted",
+            "no history collected",
+            "free space was not measured",
+        ] {
+            let carriers: Vec<&String> = lines.iter().filter(|l| l.contains(claim)).collect();
+            assert!(!carriers.is_empty(), "the rendering never shows: {claim}");
+            for line in carriers {
+                assert!(
+                    line.trim_start().starts_with("model "),
+                    "a model claim is rendered as this machine's own: {line}"
+                );
+            }
+        }
+
+        // And the policy verdict's own line carries no model claim with it.
+        let verdict: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("[AUTO_SAFE]"))
+            .collect();
+        assert_eq!(verdict.len(), 1, "{lines:?}");
+        for claim in ["recommend_now", "inferred", "large and untouched"] {
+            assert!(
+                !verdict[0].contains(claim),
+                "the policy verdict line merged a model claim: {}",
+                verdict[0]
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A response that dropped nothing renders no dropped line; a response that
+    /// dropped something names what and how many. Silence about a discarded
+    /// item is the failure mode — it reads as "the model had nothing to say".
+    #[test]
+    fn the_text_rendering_never_stays_silent_about_a_dropped_item() {
+        assert_eq!(
+            rendered_dropped(&WorkspacePlanDroppedReport::default()),
+            None
+        );
+
+        let dropped = WorkspacePlanDroppedReport {
+            unknown_resource: 2,
+            unknown_probe: 1,
+            ..WorkspacePlanDroppedReport::default()
+        };
+        let line = rendered_dropped(&dropped).expect("a dropped count is reported");
+        assert!(line.contains("2 unknown resource"), "{line}");
+        assert!(line.contains("1 unknown probe"), "{line}");
+        assert!(
+            !line.contains("duplicate item"),
+            "a zero count was rendered: {line}"
+        );
     }
 
     /// SAFETY-CRITICAL, and stricter in version 2 than in version 1. A
