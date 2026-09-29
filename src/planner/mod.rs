@@ -58,6 +58,7 @@ pub mod contract;
 pub mod dto;
 pub mod project;
 pub mod response;
+pub mod validate;
 
 pub use contract::{
     ClaimConfidence, Disposition, ObservationKind, ProbeId, PLANNER_CONTRACT_VERSION,
@@ -72,4 +73,8 @@ pub use project::{AliasTable, GraphProjection};
 pub use response::{
     read_planner_response, EvidenceRequestClaim, ObservationClaim, PlanItemClaim, PlannerResponse,
     PlannerResponseClaim, ResponseError, WorkspaceProfileClaim,
+};
+pub use validate::{
+    validate_response, PlanValidationCounters, ValidatedEvidenceRequest, ValidatedObservation,
+    ValidatedProfile, ValidatedWorkspaceItem, ValidatedWorkspacePlan,
 };
