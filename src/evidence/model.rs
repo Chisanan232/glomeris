@@ -10,6 +10,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use super::docker::DockerLifecycle;
 use super::probe::ProbeOutcome;
 use crate::detectors::DetectorId;
 
@@ -766,6 +767,18 @@ pub struct Evidence {
     /// [`crate::evidence::correlate::GitProbe`].
     pub git_state: ProbeOutcome<Option<GitState>>,
     pub tool_liveness: ProbeOutcome<bool>,
+    /// What Docker stated about this object's lifecycle, for the resource
+    /// kinds Docker owns (HORO-1544). `None` for every other kind — which
+    /// is a statement that the concept does not apply, not that the facts
+    /// are unknown; a Docker resource whose facts are unknown carries
+    /// `Some(DockerLifecycle::unknown(reason))` instead.
+    ///
+    /// A kind-specific field on the shared struct, following
+    /// [`Self::git_state`]'s precedent: `tool_liveness` is the only
+    /// tool-shaped signal the generic correlation layer can produce, and it
+    /// answers a question about the daemon rather than about the object.
+    /// Whether *this* container is running is not derivable from it.
+    pub docker_lifecycle: Option<DockerLifecycle>,
     pub collected_at: SystemTime,
     /// Bounded provenance notes (capped at `MAX_SOURCES` entries).
     pub sources: Vec<String>,
@@ -946,6 +959,7 @@ mod tests {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

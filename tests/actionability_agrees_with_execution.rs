@@ -83,6 +83,7 @@ fn auto_safe_evidence(kind: ResourceKind, path: &Path, reclaimable: u64) -> Evid
         process_cwd_match: ProbeOutcome::Observed(Vec::new()),
         git_state: ProbeOutcome::Observed(None),
         tool_liveness: ProbeOutcome::Observed(false),
+        docker_lifecycle: None,
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }

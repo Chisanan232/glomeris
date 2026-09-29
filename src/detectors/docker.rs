@@ -174,6 +174,7 @@ impl Detector for DockerDetector {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: SystemTime::now(),
             sources: vec!["docker system df --format '{{json .}}'".to_string()],
         };

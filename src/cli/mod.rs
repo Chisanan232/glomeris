@@ -1613,6 +1613,7 @@ mod tests {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
@@ -3061,6 +3062,7 @@ mod execute_tests {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: now,
             sources: Vec::new(),
         };

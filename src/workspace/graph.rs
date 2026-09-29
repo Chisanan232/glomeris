@@ -829,6 +829,7 @@ mod tests {
             process_cwd_match: ProbeOutcome::Observed(Vec::new()),
             git_state,
             tool_liveness: ProbeOutcome::Observed(false),
+            docker_lifecycle: None,
             collected_at: at(86_400 * 30),
             sources: Vec::new(),
         }
