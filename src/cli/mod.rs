@@ -49,9 +49,10 @@ use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
     DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport,
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    ProgressEvent, StatusReport, WorkspaceEvidenceRequestReport, WorkspaceFamilyReport,
-    WorkspaceObservationReport, WorkspacePlanDroppedReport, WorkspacePlanItemReport,
-    WorkspacePlanReport, WorkspaceProfileReport,
+    ProgressEvent, StatusReport, WorkspaceEvidenceRequestReport, WorkspaceExpansionReport,
+    WorkspaceFamilyReport, WorkspaceObservationReport, WorkspacePlanDroppedReport,
+    WorkspacePlanItemReport, WorkspacePlanReport, WorkspaceProbeFindingReport,
+    WorkspaceProfileReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
@@ -1031,6 +1032,101 @@ pub fn build_workspace_plan_report(
     impact: ImpactContext,
 ) -> WorkspacePlanReport {
     let result = crate::planner::plan_workspace(provider, projection, actions);
+    render_workspace_plan(result, None, candidates, actions, impact)
+}
+
+/// Builds a [`WorkspacePlanReport`] from a bounded evidence-expansion run
+/// (HORO-1549).
+///
+/// **Still advisory, and still nothing is executed.** What the extra rounds buy
+/// is evidence: a probe the model asked for is run locally, read-only, and the
+/// answer goes back into the next request. What they cannot buy is authority —
+/// the probes are the seven compiled into [`crate::planner::ProbeId`], the
+/// subject of each is an alias this projection issued, and the plan that comes
+/// out is validated against the same projection the first round was, so a round
+/// spent asking questions cannot widen what the model may name.
+///
+/// `bounds` decides the cost. [`EvidenceBounds::SINGLE_ROUND`] here is byte-for-
+/// byte [`build_workspace_plan_report`] plus an [`WorkspaceExpansionReport`]
+/// saying one round ran and no probe did.
+///
+/// # What the external probes can answer here
+///
+/// Nothing, today, and they say so. The resolver built below has no providers,
+/// because `llm-plan` reaches no network — see [`build_workspace_graph_now`] for
+/// why that is a property worth being able to read off a call site. So
+/// `github_pr_state` and `jira_task_state` return *unavailable*, which is a
+/// different answer from "no pull request exists" and is reported as such.
+pub fn build_workspace_plan_report_expanded(
+    projection: &GraphProjection,
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    provider: &dyn LlmProvider,
+    impact: ImpactContext,
+    bounds: crate::planner::EvidenceBounds,
+    now: SystemTime,
+) -> WorkspacePlanReport {
+    // Held in locals because `LocalProbeRunner` borrows all of them, and the
+    // resolver borrows the subject resolver in turn.
+    let git = crate::evidence::correlate::GitCliProbe;
+    let branch = GitCliBranchProbe;
+    let processes = crate::evidence::correlate::LsofProcessCwdProbe;
+    let tools = crate::evidence::correlate::SystemToolLivenessProbe;
+    let subjects = crate::workspace::external::GitSubjectResolver {
+        timeout: bounds.per_probe_timeout,
+    };
+    let external = crate::workspace::external::ExternalContextResolver::disabled(&subjects);
+    let runner = crate::planner::LocalProbeRunner::new(
+        &git,
+        &branch,
+        &processes,
+        &tools,
+        &external,
+        bounds.per_probe_timeout,
+    );
+    let clock = crate::planner::MonotonicClock::started_now();
+
+    let run = crate::planner::expand_and_plan(
+        provider, projection, actions, &runner, bounds, &clock, now,
+    );
+
+    let expansion = WorkspaceExpansionReport {
+        rounds_run: run.rounds_run,
+        rounds_allowed: bounds.rounds_allowed(),
+        probes_run: run.probes_run(),
+        probes_allowed: bounds.max_probes_total,
+        stopped_because: run.stopped_because.tag(),
+        converged: run.stopped_because.converged(),
+        findings: run
+            .probe_results
+            .iter()
+            .map(|result| WorkspaceProbeFindingReport {
+                round: result.round,
+                probe_id: result.probe_id,
+                subject_ref: result.subject_ref.clone(),
+                finding: result.finding.tag(),
+                unavailable_reason: result.finding.unavailable_reason(),
+            })
+            .collect(),
+    };
+
+    render_workspace_plan(run.plan, Some(expansion), candidates, actions, impact)
+}
+
+/// Renders one planning outcome, however many rounds produced it.
+///
+/// Shared by [`build_workspace_plan_report`] and
+/// [`build_workspace_plan_report_expanded`] so the two cannot disagree about
+/// what a validated plan looks like rendered — the whole difference between
+/// them is how the plan was reached, and it belongs in `expansion` rather than
+/// in a second copy of this loop.
+fn render_workspace_plan(
+    result: crate::planner::WorkspacePlanResult,
+    expansion: Option<WorkspaceExpansionReport>,
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    impact: ImpactContext,
+) -> WorkspacePlanReport {
     let plan = result.plan;
 
     let mut items = Vec::with_capacity(plan.items.len());
@@ -1087,6 +1183,7 @@ pub fn build_workspace_plan_report(
                 reason: request.reason,
             })
             .collect(),
+        expansion,
         dropped: WorkspacePlanDroppedReport {
             unknown_resource: counters.dropped_unknown_resource,
             unoffered_action: counters.dropped_unoffered_action,
@@ -1695,6 +1792,35 @@ fn workspace_plan_lines(report: &WorkspacePlanReport) -> Vec<String> {
     if let Some(dropped) = rendered_dropped(&report.dropped) {
         lines.push(dropped);
     }
+    // Before the plan rather than after it, because the findings are why the
+    // plan says what it says.
+    if let Some(expansion) = &report.expansion {
+        lines.push(format!(
+            "evidence rounds: {} of {} allowed, {} probes of {} — stopped: {}{}",
+            expansion.rounds_run,
+            expansion.rounds_allowed,
+            expansion.probes_run,
+            expansion.probes_allowed,
+            expansion.stopped_because,
+            if expansion.converged {
+                ""
+            } else {
+                " (a ceiling, not convergence)"
+            }
+        ));
+        for finding in &expansion.findings {
+            // The reason is appended rather than replacing the shape, so a
+            // reader sees both that the probe did not answer and why.
+            let answer = match finding.unavailable_reason {
+                Some(reason) => format!("unavailable ({reason})"),
+                None => finding.finding.to_string(),
+            };
+            lines.push(format!(
+                "  round {} probe {} of {} -> {answer}",
+                finding.round, finding.probe_id, finding.subject_ref
+            ));
+        }
+    }
 
     match &report.profile {
         Some(profile) => {
@@ -1754,8 +1880,15 @@ fn workspace_plan_lines(report: &WorkspacePlanReport) -> Vec<String> {
     }
 
     for request in &report.evidence_requests {
+        // What "not run" means depends on whether any round could have run it:
+        // with no expansion this command never runs a probe, and with one it
+        // ran until a ceiling or a convergence that this request came after.
+        let why = match &report.expansion {
+            Some(expansion) => format!("not run — the run stopped: {}", expansion.stopped_because),
+            None => "not run by this command".to_string(),
+        };
         lines.push(format!(
-            "model asks for probe {} of {} — not run by this command",
+            "model asks for probe {} of {} — {why}",
             request.probe_id, request.subject_ref
         ));
         if let Some(reason) = &request.reason {
@@ -3393,6 +3526,134 @@ mod tests {
             SystemTime::UNIX_EPOCH,
             0,
         )
+    }
+
+    /// HORO-1549. A run that was never asked for and a one-round run that
+    /// probed nothing are the same empty finding list and must not be the same
+    /// report — the first has no `expansion` at all, and the second says a
+    /// round ran, converged, and asked for nothing.
+    #[test]
+    fn no_expansion_and_an_expansion_that_probed_nothing_are_different_reports() {
+        let (dir, candidates) = v2_auto_safe_candidate("no-expansion");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,"items":[]}"#.to_string()),
+        };
+
+        let plain = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+        let single = build_workspace_plan_report_expanded(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+            crate::planner::EvidenceBounds::SINGLE_ROUND,
+            SystemTime::UNIX_EPOCH,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            plain.expansion, None,
+            "a report claimed a run nobody asked for"
+        );
+        let expansion = single.expansion.expect("a single-round run reports itself");
+        assert_eq!(expansion.rounds_run, 1);
+        assert_eq!(expansion.probes_run, 0);
+        assert_eq!(expansion.probes_allowed, 0, "SINGLE_ROUND allowed a probe");
+        assert_eq!(expansion.stopped_because, "nothing_more_asked");
+        assert!(expansion.converged);
+        // Everything else about the two is the same round, so the plan is too.
+        assert_eq!(plain.items, single.items);
+        assert_eq!(plain.dropped, single.dropped);
+    }
+
+    /// HORO-1549. The end-to-end wiring, against the real host probes: a model
+    /// that asks about a subject it was shown gets a locally run, read-only
+    /// answer, and the answer is reported beside what it cost.
+    ///
+    /// `tool_liveness` because it accepts a resource alias, so this needs no
+    /// git repository — and because its answer on this machine is whatever it
+    /// is. What is asserted is that the probe *ran and was attributed*, not
+    /// what cargo happened to be doing.
+    #[test]
+    fn an_expanded_report_runs_the_probe_the_model_asked_for_and_says_what_it_cost() {
+        let (dir, candidates) = v2_auto_safe_candidate("expanded");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"ask_user","confidence":"unknown"}],
+                "evidence_requests":[{"probe_id":"tool_liveness",
+                                      "subject_ref":"resource_1",
+                                      "reason":"is cargo building right now"}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report_expanded(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+            crate::planner::EvidenceBounds::for_rounds(3),
+            SystemTime::UNIX_EPOCH,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let expansion = report.expansion.clone().expect("an expansion ran");
+        assert_eq!(expansion.findings.len(), 1, "{:?}", expansion.findings);
+        let finding = &expansion.findings[0];
+        assert_eq!(
+            finding.round, 2,
+            "a finding was attributed to the round that asked"
+        );
+        assert_eq!(finding.probe_id, "tool_liveness");
+        assert_eq!(finding.subject_ref, "resource_1");
+        // Two rounds, not three: the second round repeats a question already
+        // answered, so there is nothing left to ask and the ceiling is not
+        // what stopped it.
+        assert_eq!(expansion.rounds_run, 2);
+        assert_eq!(expansion.rounds_allowed, 3);
+        assert_eq!(expansion.stopped_because, "nothing_more_asked");
+        assert!(expansion.converged);
+        // A probe that could not answer says so, and a probe that answered
+        // carries no reason — the two cannot both be true.
+        assert_eq!(
+            finding.unavailable_reason.is_some(),
+            finding.finding == "unavailable",
+            "{finding:?} disagrees with itself about whether it answered"
+        );
+
+        // And the host probe genuinely ran. `tool_liveness` is a
+        // `Reported<bool>` either way, so an `unavailable` here would mean the
+        // runner never reached `SystemToolLivenessProbe` — which would make
+        // every assertion above true of a run that probed nothing.
+        assert_eq!(
+            finding.finding, "tool_liveness",
+            "the host probe was not reached: {finding:?}"
+        );
+        assert_eq!(finding.unavailable_reason, None);
+
+        let text = workspace_plan_lines(&report).join("\n");
+        assert!(
+            text.contains("evidence rounds: 2 of 3 allowed, 1 probes of 12"),
+            "{text}"
+        );
+        assert!(
+            text.contains("round 2 probe tool_liveness of resource_1 -> "),
+            "{text}"
+        );
+        assert!(
+            !text.contains("a ceiling, not convergence"),
+            "a converged run was reported as a ceiling: {text}"
+        );
     }
 
     /// HORO-1548. A version 2 row carries the local finding and the policy
