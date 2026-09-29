@@ -847,7 +847,7 @@ enum GlomerisVocabulary {
                          "Docker reported this as in use — a running container, or "
                              + "something a running container depends on.")
         case "docker_activity_unknown":
-            return prose(token, reasonAxis, "Docker did not say whether this is in use",
+            return prose(token, reasonAxis, "Docker did not say if it's in use",
                          "Docker could not be asked, or did not answer. Unanswered is "
                              + "not the same as unused.")
         case "evidence_fresh_and_complete":
