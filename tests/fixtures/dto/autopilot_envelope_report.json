@@ -28,7 +28,15 @@
     "node_modules",
     "node_package_manager_cache",
     "docker_build_cache",
-    "docker_image_cache"
+    "docker_image_cache",
+    "pip_cache",
+    "uv_cache",
+    "go_build_cache",
+    "go_module_cache",
+    "gradle_cache",
+    "maven_local_repository",
+    "swiftpm_cache",
+    "swiftpm_build_dir"
   ],
   "never_allowlistable_kinds": ["unknown"],
   "preauthorizable_reasons": ["rebuild_cost_high"],
@@ -46,6 +54,8 @@
     "evidence_probe_failed",
     "resource_in_active_use",
     "git_worktree_dirty",
+    "regenerability_unknown",
+    "recoverability_irreversible",
     "owning_tool_live"
   ],
   "pressure_states": ["HEALTHY", "WARN", "PRESSURED", "CRITICAL", "EMERGENCY"],

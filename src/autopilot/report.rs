@@ -155,7 +155,7 @@ fn is_allowlistable(kind: ResourceKind) -> bool {
 /// `protected_credential_material` would present a reader with warnings about
 /// nothing and bury the ones that matter.
 ///
-/// Written as an exhaustive `match` rather than a list, so a nineteenth reason
+/// Written as an exhaustive `match` rather than a list, so a further reason
 /// code cannot be added without someone deciding which side it falls on — the
 /// build stops here until they do.
 fn is_refusal_reason(reason: ReasonCode) -> bool {
@@ -178,6 +178,8 @@ fn is_refusal_reason(reason: ReasonCode) -> bool {
         | ReasonCode::ResourceInActiveUse
         | ReasonCode::GitWorktreeDirty
         | ReasonCode::RebuildCostHigh
+        | ReasonCode::RegenerabilityUnknown
+        | ReasonCode::RecoverabilityIrreversible
         | ReasonCode::OwningToolLive => true,
     }
 }

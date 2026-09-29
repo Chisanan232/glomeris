@@ -46,6 +46,14 @@ impl ToolLivenessProbe for PgrepToolLivenessProbe {
 /// resident. These are structurally, permanently "not running as a
 /// daemon", not an unknown — so `None` here, not a guess at a process
 /// name that would never realistically match.
+///
+/// The same reasoning covers every tool added by HORO-1543. `pip`, `uv`,
+/// `go`, `mvn` and `swift build` all run and exit. Gradle is the one that
+/// invites a guess, because it really does leave a long-lived daemon
+/// behind — but a Gradle daemon is per-project and named for a JVM, not
+/// for the shared `~/.gradle/caches` directory this would be asked about,
+/// so matching on it would report liveness of something other than the
+/// resource in question.
 fn daemon_process_name(tool: OwningTool) -> Option<&'static str> {
     match tool {
         OwningTool::Xcode => Some("Xcode"),
@@ -58,6 +66,12 @@ fn daemon_process_name(tool: OwningTool) -> Option<&'static str> {
         | OwningTool::Npm
         | OwningTool::Pnpm
         | OwningTool::Yarn
+        | OwningTool::Pip
+        | OwningTool::Uv
+        | OwningTool::Go
+        | OwningTool::Gradle
+        | OwningTool::Maven
+        | OwningTool::SwiftPm
         | OwningTool::None => None,
     }
 }

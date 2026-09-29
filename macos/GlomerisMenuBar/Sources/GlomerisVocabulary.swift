@@ -729,6 +729,33 @@ enum GlomerisVocabulary {
         case "docker_image_cache":
             return prose(token, kindAxis, "Docker images",
                          "Pulled and built images held by the Docker daemon.")
+        case "pip_cache":
+            return prose(token, kindAxis, "pip cache",
+                         "Wheels and downloads pip can fetch again.")
+        case "uv_cache":
+            return prose(token, kindAxis, "uv cache",
+                         "Python packages uv has already downloaded.")
+        case "go_build_cache":
+            return prose(token, kindAxis, "Go build cache",
+                         "Compiled Go objects, rebuilt on the next `go build`.")
+        case "go_module_cache":
+            return prose(token, kindAxis, "Go module cache",
+                         "Go dependencies that can be downloaded again.")
+        case "gradle_cache":
+            return prose(token, kindAxis, "Gradle cache",
+                         "Gradle's downloaded dependencies and build caches. Not your "
+                             + "Gradle settings, which live beside it and are never touched.")
+        case "maven_local_repository":
+            return prose(token, kindAxis, "Maven local repository",
+                         "Where Maven keeps dependencies — and where `mvn install` puts "
+                             + "artifacts you built yourself, which may exist nowhere else. "
+                             + "Glomeris cannot tell the two apart, so it always asks.")
+        case "swiftpm_cache":
+            return prose(token, kindAxis, "Swift package cache",
+                         "Swift packages fetched by `swift build`.")
+        case "swiftpm_build_dir":
+            return prose(token, kindAxis, "Swift build output",
+                         "A `.build` directory: compiled artifacts for one Swift package.")
         case "unknown":
             return prose(token, kindAxis, "Unrecognised kind",
                          "Glomeris does not recognise this resource, so it is protected.")
@@ -744,7 +771,7 @@ enum GlomerisVocabulary {
 
     static let reasonAxis = "Reason"
 
-    /// The 18 `ReasonCode` values, as prose. These are the "why" behind a
+    /// The 20 `ReasonCode` values, as prose. These are the "why" behind a
     /// safety class and read best as a short list of sentences, so they
     /// carry no symbol and no tone of their own — the safety badge above
     /// them already carries the tone, and repeating it per reason would
@@ -795,6 +822,13 @@ enum GlomerisVocabulary {
         case "rebuild_cost_high":
             return prose(token, reasonAxis, "Expensive to rebuild",
                          "Recreating this would cost you real time.")
+        case "regenerability_unknown":
+            return prose(token, reasonAxis, "Not known to be reproducible",
+                         "Glomeris could not establish that this can be downloaded "
+                             + "or built again, so it will not clean it on its own.")
+        case "recoverability_irreversible":
+            return prose(token, reasonAxis, "Cannot be recreated",
+                         "Nothing can bring this back once it is gone.")
         case "owning_tool_live":
             return prose(token, reasonAxis, "Owning tool is running",
                          "The tool that manages this is currently running.")

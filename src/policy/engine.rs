@@ -2,7 +2,7 @@
 
 use std::time::SystemTime;
 
-use crate::evidence::{Completeness, Evidence, Regenerability, ResourceKind};
+use crate::evidence::{Completeness, Evidence, Recoverability, Regenerability, ResourceKind};
 
 use super::class::{PolicyClass, ReasonCode};
 use super::config::PolicyConfig;
@@ -91,17 +91,49 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         return decision(PolicyClass::Ask, active_use_reasons);
     }
 
-    // 7-8. Complete evidence, no active use: the per-instance regenerability
+    // 7. Recoverability: a detector that has positively established that
+    // deleting this resource is permanent — no tool can refetch it, no
+    // rebuild can recreate it — has said the one thing that must reach a
+    // human every time (HORO-1553). `Ask` rather than `Protected`: consent
+    // is possible, it just cannot be given in advance (see
+    // `crate::autopilot::is_preauthorizable`).
+    match ev.recoverability {
+        Recoverability::Irreversible => {
+            return decision(
+                PolicyClass::Ask,
+                vec![ReasonCode::RecoverabilityIrreversible],
+            );
+        }
+        Recoverability::RegenerableByTool | Recoverability::RegenerableByRebuild => {}
+    }
+
+    // 8. Complete evidence, no active use: the per-instance regenerability
     // judgment on the Evidence itself decides (not the kind's static
     // default — a detector may have determined something more specific
     // about this instance). NotRegenerable is never auto-deleted,
     // regardless of how clean the rest of the evidence looks.
-    if ev.regenerability == Regenerability::NotRegenerable {
-        return decision(PolicyClass::Ask, vec![ReasonCode::RebuildCostHigh]);
-    }
+    //
+    // Exhaustive `match` rather than the equality comparisons this used to
+    // be (HORO-1553): `if ev.regenerability == NotRegenerable { ... }`
+    // diverted exactly one variant and let every other one — including
+    // `Unknown` — reach AUTO_SAFE through the implicit else. Unknown is not
+    // false: a detector reporting that it could not establish
+    // reproducibility must not be read as reporting that reproducibility is
+    // fine. Matching exhaustively also means a future fifth variant stops
+    // the compiler here instead of silently inheriting AUTO_SAFE.
+    let regenerable_by_tool = match ev.regenerability {
+        Regenerability::NotRegenerable => {
+            return decision(PolicyClass::Ask, vec![ReasonCode::RebuildCostHigh]);
+        }
+        Regenerability::Unknown => {
+            return decision(PolicyClass::Ask, vec![ReasonCode::RegenerabilityUnknown]);
+        }
+        Regenerability::RegenerableByTool => true,
+        Regenerability::RegenerableByRebuild => false,
+    };
 
     let mut auto_safe_reasons = vec![ReasonCode::EvidenceFreshAndComplete];
-    if ev.regenerability == Regenerability::RegenerableByTool {
+    if regenerable_by_tool {
         auto_safe_reasons.push(ReasonCode::RegenerableByTool);
     }
     auto_safe_reasons.push(ReasonCode::NoActiveUseObserved);
@@ -375,6 +407,90 @@ mod tests {
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::RebuildCostHigh]);
+    }
+
+    /// HORO-1553. The defect this pins: `Regenerability::Unknown` used to
+    /// reach `AUTO_SAFE` through the implicit else of
+    /// `if ev.regenerability == NotRegenerable`, carrying the reason set
+    /// `evidence_fresh_and_complete` + `no_active_use_observed` — a set that
+    /// positively asserts the classification is well-founded.
+    ///
+    /// Mutation control: reverting the `Regenerability::Unknown` arm in
+    /// `classify` to fall through fails this test on the first assertion,
+    /// naming `AutoSafe` where `Ask` was required. It is not an
+    /// off-by-one-in-a-reason-count assertion that would also fail for
+    /// unrelated edits.
+    #[test]
+    fn unknown_regenerability_is_ask_not_auto_safe_however_clean_the_rest_is() {
+        let mut ev = complete_evidence(ResourceKind::CargoRegistryCache, NOW);
+        // Everything else about this evidence is the AutoSafe happy path:
+        // fresh, complete, nothing open, no dirty git state, tool idle.
+        // `CargoRegistryCache`'s own static regenerability is
+        // RegenerableByTool, so the only thing standing between this and
+        // AUTO_SAFE is the per-instance judgment below.
+        ev.regenerability = Regenerability::Unknown;
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(
+            decision.class,
+            PolicyClass::Ask,
+            "unknown reproducibility must not be read as safe"
+        );
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::RegenerabilityUnknown],
+            "an absence of knowledge must not be reported as a rebuild-cost judgment"
+        );
+        assert!(
+            !decision
+                .reasons
+                .contains(&ReasonCode::EvidenceFreshAndComplete),
+            "fresh-and-complete evidence is not a reason to act on a resource \
+             whose reproducibility was never established"
+        );
+    }
+
+    /// HORO-1553. `Evidence::recoverability` was read by no decision
+    /// anywhere before this ticket, so a detector that had positively
+    /// established permanent loss had no way to say so.
+    ///
+    /// Mutation control: deleting the `Recoverability::Irreversible` arm in
+    /// `classify` makes this fail with `AutoSafe` (the evidence is otherwise
+    /// clean), naming the class rather than a count.
+    #[test]
+    fn irreversible_recoverability_is_ask_even_when_regenerability_says_otherwise() {
+        let mut ev = complete_evidence(ResourceKind::CargoRegistryCache, NOW);
+        // Deliberately contradictory: the static per-kind property says a
+        // tool can refetch this, the per-instance judgment says removal is
+        // permanent. The more severe axis has to win, or the field is
+        // decorative again.
+        assert_eq!(ev.regenerability, Regenerability::RegenerableByTool);
+        ev.recoverability = Recoverability::Irreversible;
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::RecoverabilityIrreversible]
+        );
+    }
+
+    /// The two new `Ask` reasons must not be consentable in advance, or the
+    /// `Ask` classification above becomes a formality Autopilot walks past.
+    #[test]
+    fn neither_new_ask_reason_can_be_preauthorized() {
+        for reason in [
+            ReasonCode::RegenerabilityUnknown,
+            ReasonCode::RecoverabilityIrreversible,
+        ] {
+            assert!(
+                !crate::autopilot::envelope::is_preauthorizable(reason),
+                "{} must never be pre-authorizable",
+                reason.as_str()
+            );
+        }
     }
 
     #[test]

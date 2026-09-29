@@ -14,15 +14,16 @@
 //! own doc comment for what happens if that budget is hit before the walk
 //! finishes (a truthful lower bound, never a precision guarantee).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::evidence::{
     NativeCleanup, Recoverability, Regenerability, ResourceId, ResourceKind, ResourceLocator,
 };
 
 use super::{
-    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
-    DetectorId, DetectorStatus, DiscoveryContext,
+    cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
+    query_tool_single_path, size_estimate_budget, Detector, DetectorId, DetectorStatus,
+    DiscoveryContext, RootAbsence, ToolQuery,
 };
 
 pub struct NodeDetector;
@@ -90,6 +91,97 @@ impl Detector for NodeDetector {
     }
 }
 
+/// Detector for npm's content-addressable package cache (HORO-1543).
+///
+/// The location comes from `npm config get cache`, not from `~/.npm`: npm
+/// resolves it through `.npmrc` files, `npm_config_cache` and
+/// `$XDG_CACHE_HOME`, and a path guessed from `$HOME` would be wrong for
+/// anyone who has moved it.
+///
+/// The resource is `<cache>/_cacache` rather than the cache directory npm
+/// names. That directory also holds `_logs` — npm's debug logs, which are
+/// diagnostic history rather than a cache — and
+/// `_update-notifier-last-checked`. `_cacache` is what `npm cache clean`
+/// itself operates on.
+///
+/// ## Why pnpm and yarn are not covered here
+///
+/// [`ResourceKind::NodePackageManagerCache`]'s
+/// [`owning_tool`](ResourceKind::owning_tool) is statically
+/// [`OwningTool::Npm`](crate::evidence::OwningTool::Npm). Reporting a pnpm
+/// store or a yarn cache under this kind would therefore attribute it to npm
+/// — a false statement about who owns a directory, and one that would flow
+/// straight into the tool-liveness reasoning and the GUI.
+///
+/// Covering them honestly needs either their own `ResourceKind` variants or a
+/// per-instance owning tool on `Evidence`, both of which are changes to the
+/// shared evidence model rather than to a detector. That is deliberately
+/// deferred rather than approximated: pnpm's store is also structurally
+/// different (content-addressed and *hard-linked into* every
+/// `node_modules` that references it), so deleting it is not the same
+/// operation as deleting a download cache, and it needs its own reasoning
+/// about reclaimable bytes before anything claims a figure for it.
+pub struct NodePackageManagerCacheDetector;
+
+const CACHE_KINDS: &[ResourceKind] = &[ResourceKind::NodePackageManagerCache];
+
+/// The one subdirectory of npm's cache directory this detector will name.
+/// See [`NodePackageManagerCacheDetector`] for the siblings it must not.
+const CACACHE_SUBDIR: &str = "_cacache";
+
+/// Asking npm where its cache is, without npm writing a log about it
+/// (HORO-1556).
+///
+/// `npm` writes `<cache>/_logs/<timestamp>-debug-0.log` on every invocation,
+/// including one that only reads a config value. That put a new file inside the
+/// directory this detector measures each time `glomeris detect` ran — growing
+/// the resource being reported on, and writing to the user's disk from a
+/// command whose help says "Read-only — changes nothing." `--logs-max=0` is
+/// npm's own documented control for retaining no log files, and it applies to
+/// the invocation that would create one.
+const NPM_CACHE_QUERY: &[&str] = &["config", "get", "cache", "--logs-max=0"];
+
+/// Narrows the directory `npm config get cache` reports to the cache proper.
+///
+/// A separate function so the boundary is testable: a test that joined
+/// `_cacache` itself would be asserting a property of
+/// [`estimate_logical_bytes`], not of this detector's choice of resource.
+fn npm_cacache_dir(reported_cache_dir: &str) -> PathBuf {
+    Path::new(reported_cache_dir.trim()).join(CACACHE_SUBDIR)
+}
+
+impl Detector for NodePackageManagerCacheDetector {
+    fn id(&self) -> DetectorId {
+        DetectorId("npm_cache")
+    }
+
+    fn resource_kinds(&self) -> &'static [ResourceKind] {
+        CACHE_KINDS
+    }
+
+    fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+        match query_tool_single_path("npm", NPM_CACHE_QUERY) {
+            ToolQuery::Lines(lines) => cache_root_status(
+                self.id(),
+                ResourceKind::NodePackageManagerCache,
+                &npm_cacache_dir(&lines[0]),
+                // Downloaded package tarballs and their metadata, which npm
+                // refetches on the next install given network access and,
+                // for a private registry, credentials.
+                Regenerability::RegenerableByTool,
+                Recoverability::RegenerableByTool,
+                "npm's package cache, under the directory reported by \
+                 `npm config get cache`",
+                RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
+            ),
+            ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
+            // The shim that stalled in HORO-1559 was this probe's. A timeout
+            // is a failed probe — not an absent npm, and not an empty cache.
+            ToolQuery::Failed(msg) | ToolQuery::TimedOut(msg) => DetectorStatus::Failed(msg),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,5 +240,86 @@ mod tests {
         }
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn npm_cache_detector_id_and_kinds_are_stable() {
+        assert_eq!(
+            NodePackageManagerCacheDetector.id(),
+            DetectorId("npm_cache")
+        );
+        assert_eq!(
+            NodePackageManagerCacheDetector.resource_kinds(),
+            &[ResourceKind::NodePackageManagerCache]
+        );
+    }
+
+    /// Positive control for the `_cacache` boundary: an npm cache directory
+    /// holding both `_logs` and `_cacache` yields evidence measuring only the
+    /// latter. If the detector ever named the directory npm reports, the
+    /// observed byte count would include the debug logs and this would fail.
+    #[test]
+    fn npm_debug_logs_are_not_part_of_the_cache_resource() {
+        // `cache_root_status` with the path the detector would build, rather
+        // than `discover`: `discover` runs the real `npm`, which answers with
+        // this machine's own cache.
+        let npm_cache = make_temp_dir("npm-cache-fixture");
+        fs::create_dir_all(npm_cache.join("_cacache/content-v2")).unwrap();
+        fs::create_dir_all(npm_cache.join("_logs")).unwrap();
+        fs::write(
+            npm_cache.join("_logs/2026-01-01T00_00_00_000Z-debug.log"),
+            vec![b'x'; 3_000],
+        )
+        .unwrap();
+        fs::write(npm_cache.join("_cacache/content-v2/blob"), vec![0u8; 6_144]).unwrap();
+
+        let status = cache_root_status(
+            NodePackageManagerCacheDetector.id(),
+            ResourceKind::NodePackageManagerCache,
+            &npm_cacache_dir(npm_cache.to_str().unwrap()),
+            Regenerability::RegenerableByTool,
+            Recoverability::RegenerableByTool,
+            "test fixture",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
+        );
+
+        match status {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(6_144),
+                    "only the _cacache subtree may be measured"
+                );
+                match &ev.resource.locator {
+                    ResourceLocator::Path(named) => assert!(named.ends_with(CACACHE_SUBDIR)),
+                    other => panic!("expected a path locator, got {other:?}"),
+                }
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&npm_cache).ok();
+    }
+
+    /// An npm that answers with a cache directory it has not populated yet is
+    /// installed: that is `Found(vec![])`, never `ToolAbsent`, and never a
+    /// zero-byte resource.
+    #[test]
+    fn an_unpopulated_npm_cache_is_no_resource_and_not_tool_absent() {
+        let npm_cache = make_temp_dir("npm-cache-empty");
+        let status = cache_root_status(
+            NodePackageManagerCacheDetector.id(),
+            ResourceKind::NodePackageManagerCache,
+            &npm_cacache_dir(npm_cache.to_str().unwrap()),
+            Regenerability::RegenerableByTool,
+            Recoverability::RegenerableByTool,
+            "test fixture",
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
+        );
+        assert_eq!(status, DetectorStatus::Found(Vec::new()));
+
+        fs::remove_dir_all(&npm_cache).ok();
     }
 }

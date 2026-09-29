@@ -16,15 +16,16 @@
 //! own doc comment for what happens if that budget is hit before the walk
 //! finishes (a truthful lower bound, never a precision guarantee).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::evidence::{
     NativeCleanup, Recoverability, Regenerability, ResourceId, ResourceKind, ResourceLocator,
 };
 
 use super::{
-    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
-    DetectorId, DetectorStatus, DiscoveryContext,
+    cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
+    size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence,
+    ToolHomeVar,
 };
 
 pub struct CargoDetector;
@@ -90,6 +91,78 @@ impl Detector for CargoDetector {
         }
 
         DetectorStatus::Found(evidence)
+    }
+}
+
+/// Detector for the shared Cargo registry cache (HORO-1543).
+///
+/// The resource is `<cargo home>/registry`, and deliberately never the Cargo
+/// home itself. `$CARGO_HOME` also holds `credentials.toml` — registry
+/// publish tokens — and `bin/`, the binaries `cargo install` put on the
+/// user's `PATH`. Naming the parent would put both inside a reclaimable
+/// resource, and no later policy class could make that safe again.
+///
+/// `<cargo home>/git` is also deliberately excluded. It holds checkouts of
+/// git dependencies, which can pin a commit that has since been force-pushed
+/// away — the same unprovable-reproducibility problem as Maven's local
+/// repository, and not something this ticket's evidence can settle. It is
+/// simply not claimed rather than claimed with a guess.
+pub struct CargoRegistryCacheDetector;
+
+const REGISTRY_KINDS: &[ResourceKind] = &[ResourceKind::CargoRegistryCache];
+
+/// The one subdirectory of the Cargo home this detector will ever name. See
+/// [`CargoRegistryCacheDetector`] for the two it must not.
+const REGISTRY_SUBDIR: &str = "registry";
+
+/// Resolves the registry cache root from `CARGO_HOME` and `$HOME`, applying
+/// Cargo's own two rules.
+///
+/// Pure so it is testable: the `CARGO_HOME` override arrives through
+/// [`DiscoveryContext::tool_home`] rather than from the process environment,
+/// so a fixture context can exercise both rules. Reading it here directly
+/// would make this detector answer from the developer's real registry even
+/// under a fixture `home_dir` — see [`super::ToolHomeVar`], which exists
+/// because that is exactly what happened.
+///
+/// An empty or whitespace-only `CARGO_HOME` falls back to `~/.cargo` rather
+/// than resolving to a relative `registry` or to `/registry` — an exported
+/// but unset variable is a common shell accident, and treating it as an
+/// answer would name a directory belonging to something else.
+fn cargo_registry_dir(cargo_home: Option<&str>, home: &Path) -> PathBuf {
+    let cargo_home = match cargo_home.map(str::trim) {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => home.join(".cargo"),
+    };
+    cargo_home.join(REGISTRY_SUBDIR)
+}
+
+impl Detector for CargoRegistryCacheDetector {
+    fn id(&self) -> DetectorId {
+        DetectorId("cargo_registry_cache")
+    }
+
+    fn resource_kinds(&self) -> &'static [ResourceKind] {
+        REGISTRY_KINDS
+    }
+
+    fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        let registry = cargo_registry_dir(ctx.tool_home(ToolHomeVar::CargoHome), &ctx.home_dir);
+
+        cache_root_status(
+            self.id(),
+            ResourceKind::CargoRegistryCache,
+            &registry,
+            // Downloaded `.crate` files and their extracted sources: cargo
+            // refetches these on the next build, given network access and,
+            // for a private registry, credentials — the same caveat the Go
+            // module cache carries.
+            Regenerability::RegenerableByTool,
+            Recoverability::RegenerableByTool,
+            "Cargo registry cache under the Cargo home \
+             (CARGO_HOME if set, otherwise ~/.cargo)",
+            RootAbsence::NothingObservedAboutTheTool,
+        )
     }
 }
 
@@ -178,5 +251,163 @@ mod tests {
         }
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn registry_detector_id_and_kinds_are_stable() {
+        assert_eq!(
+            CargoRegistryCacheDetector.id(),
+            DetectorId("cargo_registry_cache")
+        );
+        assert_eq!(
+            CargoRegistryCacheDetector.resource_kinds(),
+            &[ResourceKind::CargoRegistryCache]
+        );
+    }
+
+    #[test]
+    fn cargo_home_wins_over_the_default() {
+        assert_eq!(
+            cargo_registry_dir(Some("/opt/cargo"), Path::new("/Users/dev")),
+            PathBuf::from("/opt/cargo/registry")
+        );
+        assert_eq!(
+            cargo_registry_dir(None, Path::new("/Users/dev")),
+            PathBuf::from("/Users/dev/.cargo/registry")
+        );
+    }
+
+    /// An exported-but-empty `CARGO_HOME` must not become an answer: `""`
+    /// would otherwise resolve to `registry` (relative) or `/registry`.
+    #[test]
+    fn an_empty_cargo_home_falls_back_rather_than_naming_a_stray_path() {
+        for value in ["", "   ", "\t"] {
+            assert_eq!(
+                cargo_registry_dir(Some(value), Path::new("/Users/dev")),
+                PathBuf::from("/Users/dev/.cargo/registry"),
+                "CARGO_HOME={value:?} should have fallen back"
+            );
+        }
+    }
+
+    /// The credential/binary-safety invariant, asserted rather than
+    /// commented: the resolved root is never the Cargo home, under either
+    /// rule.
+    #[test]
+    fn the_cargo_home_itself_is_never_the_resource() {
+        let from_env = cargo_registry_dir(Some("/opt/cargo"), Path::new("/Users/dev"));
+        assert_ne!(from_env, PathBuf::from("/opt/cargo"));
+        assert!(from_env.ends_with(REGISTRY_SUBDIR));
+
+        let from_home = cargo_registry_dir(None, Path::new("/Users/dev"));
+        assert_ne!(from_home, PathBuf::from("/Users/dev/.cargo"));
+        assert!(from_home.ends_with(REGISTRY_SUBDIR));
+    }
+
+    /// Positive control for the same invariant end to end: a Cargo home
+    /// holding `credentials.toml`, an installed binary, a git-dependency
+    /// checkout and `registry/` yields evidence measuring only `registry/`.
+    /// If the detector ever named the parent, the observed byte count would
+    /// include the publish token and this assertion would fail.
+    #[test]
+    fn credentials_binaries_and_git_checkouts_are_not_part_of_the_resource() {
+        let home = make_temp_dir("cargo-home-fixture");
+        let cargo_home = home.join(".cargo");
+        fs::create_dir_all(cargo_home.join("registry/cache/index.crates.io-1234")).unwrap();
+        fs::create_dir_all(cargo_home.join("bin")).unwrap();
+        fs::create_dir_all(cargo_home.join("git/db/some-dep-5678")).unwrap();
+        fs::write(cargo_home.join("credentials.toml"), vec![b'x'; 200]).unwrap();
+        fs::write(cargo_home.join("bin/some-tool"), vec![0u8; 100_000]).unwrap();
+        fs::write(
+            cargo_home.join("git/db/some-dep-5678/packed-refs"),
+            vec![0u8; 700],
+        )
+        .unwrap();
+        fs::write(
+            cargo_home.join("registry/cache/index.crates.io-1234/serde-1.0.0.crate"),
+            vec![0u8; 8_192],
+        )
+        .unwrap();
+
+        // The real `discover`, through a hermetic `DiscoveryContext`: with no
+        // `CargoHome` tool home set, the detector resolves from `home_dir`
+        // and cannot see this machine's own registry (HORO-1543).
+        match CargoRegistryCacheDetector.discover(&DiscoveryContext::new(&home)) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(8_192),
+                    "only the registry subtree may be measured"
+                );
+                match &ev.resource.locator {
+                    ResourceLocator::Path(named) => {
+                        assert!(named.ends_with(REGISTRY_SUBDIR));
+                        assert!(!named.ends_with(".cargo"));
+                    }
+                    other => panic!("expected a path locator, got {other:?}"),
+                }
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A Cargo home with no `registry` yet reports nothing, never a
+    /// zero-byte resource.
+    #[test]
+    fn a_missing_registry_is_tool_absent_not_zero_bytes() {
+        let home = make_temp_dir("cargo-home-empty");
+        assert_eq!(
+            CargoRegistryCacheDetector.discover(&DiscoveryContext::new(&home)),
+            DetectorStatus::ToolAbsent
+        );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The `CargoHome` override has to reach `discover`, not merely
+    /// `cargo_registry_dir`: the pure test above would still pass if
+    /// `discover` ignored `ctx.tool_home` and always resolved from
+    /// `home_dir`. So the fixture registry lives somewhere `home_dir` cannot
+    /// reach, and `home_dir` points at a decoy that holds a *different* number
+    /// of bytes — a detector reading the wrong one reports 1_024 and fails.
+    #[test]
+    fn the_cargo_home_override_reaches_the_detector() {
+        let relocated = make_temp_dir("cargo-relocated");
+        fs::create_dir_all(relocated.join("registry/cache")).unwrap();
+        fs::write(
+            relocated.join("registry/cache/serde.crate"),
+            vec![0u8; 2_048],
+        )
+        .unwrap();
+
+        let decoy_home = make_temp_dir("cargo-decoy-home");
+        fs::create_dir_all(decoy_home.join(".cargo/registry")).unwrap();
+        fs::write(
+            decoy_home.join(".cargo/registry/decoy.crate"),
+            vec![0u8; 1_024],
+        )
+        .unwrap();
+
+        let ctx = DiscoveryContext::new(&decoy_home)
+            .with_tool_home(ToolHomeVar::CargoHome, relocated.to_str().unwrap());
+
+        match CargoRegistryCacheDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                assert_eq!(
+                    evidence[0].logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(2_048),
+                    "the relocated registry is the one CARGO_HOME names; \
+                     1024 would mean the override never reached `discover`"
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&relocated).ok();
+        fs::remove_dir_all(&decoy_home).ok();
     }
 }

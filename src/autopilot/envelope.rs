@@ -108,6 +108,18 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         | ReasonCode::EvidenceStale
         | ReasonCode::EvidenceProbeFailed => false,
 
+        // Also absence of knowledge (HORO-1553), and the most tempting kind
+        // to wave through because it looks adjacent to `RebuildCostHigh`.
+        // It is not: pre-authorizing "Glomeris could not establish whether
+        // this can be reproduced" is indistinguishable from switching the
+        // reproducibility check off.
+        ReasonCode::RegenerabilityUnknown => false,
+
+        // Permanent loss (HORO-1553). The cost of being wrong is unbounded
+        // and unrecoverable, which is the one shape a standing "yes" must
+        // never cover.
+        ReasonCode::RecoverabilityIrreversible => false,
+
         // Live use. True at classification time, possibly false a second
         // later, and vice versa — not a thing anybody can consent to in
         // advance.

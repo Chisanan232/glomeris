@@ -504,7 +504,7 @@ final class AutopilotPreferencesTests: XCTestCase {
         }
     }
 
-    /// The fourteen rows behind the "things you cannot answer in advance"
+    /// The sixteen rows behind the "things you cannot answer in advance"
     /// disclosure, same shape and same defect as the status card.
     ///
     /// Driven from the fixture's own reason list rather than from a chosen
@@ -513,7 +513,7 @@ final class AutopilotPreferencesTests: XCTestCase {
     func testEveryNeverPreauthorizableRowIsSpokenAsSentences() throws {
         let reasons = try enabledReport().neverPreauthorizableReasons
         XCTAssertEqual(
-            reasons.count, 14,
+            reasons.count, 16,
             "the disclosure's own label counts these; a change belongs in both places"
         )
 

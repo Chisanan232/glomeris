@@ -250,7 +250,8 @@ fn discover_and_classify_now(
     use glomeris::policy::PolicyConfig;
     use std::time::SystemTime;
 
-    let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots);
+    let ctx =
+        DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
     let collector = DefaultEvidenceCollector::default();
     let cfg = PolicyConfig::default();
@@ -291,7 +292,8 @@ fn discover_pass_now(
     use glomeris::policy::PolicyConfig;
     use std::time::SystemTime;
 
-    let ctx = DiscoveryContext::new(home_dir()).with_known_project_roots(project_roots);
+    let ctx =
+        DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
     let collector = DefaultEvidenceCollector::default();
     let cfg = PolicyConfig::default();
@@ -471,7 +473,7 @@ fn run_emergency_command(args: &[String]) {
     // right at all is HORO-1468.
     let self_state_path = home_dir.join("Library/Application Support/Glomeris/history.tsv");
 
-    let ctx = DiscoveryContext::new(home_dir);
+    let ctx = DiscoveryContext::from_process_env(home_dir);
     let registry = DetectorRegistry::builtin();
     let actions = ActionRegistry::builtin();
     let collector = DefaultEvidenceCollector::default();
@@ -3126,7 +3128,8 @@ fn free_run(
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
-    let discovery_ctx = DiscoveryContext::new(home_dir).with_known_project_roots(project_roots);
+    let discovery_ctx =
+        DiscoveryContext::from_process_env(home_dir).with_known_project_roots(project_roots);
 
     let config = RecoveryConfig {
         target,
