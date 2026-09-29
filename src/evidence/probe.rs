@@ -20,6 +20,19 @@ pub enum ProbeReason {
     ToolNotRunning,
     PermissionDenied,
     TimedOut,
+    /// The thing being asked answered, and refused because it is being asked
+    /// too often. Distinct from [`Self::Failed`] and from
+    /// [`Self::PermissionDenied`] because the three imply different next
+    /// steps and, more importantly, different amounts of trust: a quota
+    /// refusal means the tool is present, reachable and willing — it has
+    /// simply said "later". Folded into `Failed` it would read as a broken
+    /// setup, and folded into `PermissionDenied` as a bad credential, and a
+    /// user would go and change something that was never wrong.
+    ///
+    /// Added by HORO-1546 for the external providers, which are the first
+    /// probes on a metered interface, but not restricted to them: any
+    /// rate-limited tool may use it.
+    RateLimited,
     Failed,
     NotAttempted,
 }
@@ -38,6 +51,7 @@ impl ProbeReason {
             Self::ToolNotRunning => "tool_not_running",
             Self::PermissionDenied => "permission_denied",
             Self::TimedOut => "timed_out",
+            Self::RateLimited => "rate_limited",
             Self::Failed => "failed",
             Self::NotAttempted => "not_attempted",
         }
@@ -45,11 +59,12 @@ impl ProbeReason {
 
     /// Every reason, in declaration order. Lets a test cover the enum
     /// without being edited when a variant is added.
-    pub const ALL: [ProbeReason; 6] = [
+    pub const ALL: [ProbeReason; 7] = [
         Self::ToolAbsent,
         Self::ToolNotRunning,
         Self::PermissionDenied,
         Self::TimedOut,
+        Self::RateLimited,
         Self::Failed,
         Self::NotAttempted,
     ];
@@ -93,12 +108,24 @@ mod tests {
     #[test]
     fn every_reason_has_a_distinct_non_empty_tag() {
         let mut tags: Vec<&str> = ProbeReason::ALL.iter().map(|r| r.tag()).collect();
-        assert_eq!(tags.len(), 6, "ALL must list every variant");
+        assert_eq!(tags.len(), 7, "ALL must list every variant");
         for tag in &tags {
             assert!(!tag.is_empty());
         }
         tags.sort_unstable();
         tags.dedup();
         assert_eq!(tags.len(), ProbeReason::ALL.len());
+    }
+
+    /// A quota refusal is still an absence of an answer. The reason exists so
+    /// a *reader* can tell "later" from "broken"; it must not become a third
+    /// thing `ProbeOutcome` treats as an observation, because the provider
+    /// said nothing about the subject at all.
+    #[test]
+    fn a_rate_limited_probe_yields_no_value() {
+        let outcome: ProbeOutcome<bool> = ProbeOutcome::Unavailable(ProbeReason::RateLimited);
+        assert_eq!(outcome.observed(), None);
+        assert!(!outcome.is_observed());
+        assert_eq!(ProbeReason::RateLimited.tag(), "rate_limited");
     }
 }
