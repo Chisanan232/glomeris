@@ -1121,14 +1121,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "workflow-profile",
         group: Group::Observe,
         safety: Safety::WritesOwnState,
-        summary: "How this machine has been used, over more than one look.",
+        summary: "How this machine has been used, over several looks.",
         usage: &["workflow-profile [show] [--json]", "workflow-profile record [--json]"],
         details: "A single look at this machine cannot honestly say how you usually work. \
                   Running six working trees of one repository today might be this week's \
                   shape or this afternoon's. So `record` takes one bounded observation — how \
                   many working trees each repository has, and whether a lone checkout has \
                   moved branch since the last look — and `show` reports what several \
-                  observations together support.                   \n\nNothing is claimed from one observation. Until at least three exist the \
+                  observations together support.\n\nNothing is claimed from one observation. Until at least three exist the \
                   shape is `unknown` and the confidence is `insufficient`, and the counts \
                   behind that verdict are printed so you can see whether it is thin or merely \
                   young. A baseline that could not be read says so, which is a different \
@@ -1165,8 +1165,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         examples: &[
             ExampleSpec {
                 command: "glomeris workflow-profile",
-                purpose: "What does Glomeris think my workspace layout looks like, and on \
-                          what basis?",
+                purpose: "What layout does Glomeris think this machine has, and why?",
             },
             ExampleSpec {
                 command: "glomeris workflow-profile record",

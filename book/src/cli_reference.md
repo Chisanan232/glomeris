@@ -1447,7 +1447,7 @@ treated it as an error would retry at poll speed forever.
 
 ## `glomeris workflow-profile [show|record] [--json] [--project-root <path>]`
 
-How this machine has been used, over more than one look. `show` reports the
+How this machine has been used, over several looks. `show` reports the
 stored baseline and is the default; `record` takes one observation and adds it.
 
 A single look cannot honestly say how you usually work. Six working trees of one
