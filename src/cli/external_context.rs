@@ -250,7 +250,7 @@ pub fn describe_external_context_preview(report: &ExternalContextPreviewReport) 
         } else {
             "not configured".to_string()
         };
-        lines.push(format!("{:<18} {state}", format!("{}:", provider.source)));
+        lines.push(format!("{:<21} {state}", format!("{}:", provider.source)));
         if let Some(host) = &provider.repository_host {
             lines.push(format!(
                 "  asked only about working trees whose remote is on {host}"
