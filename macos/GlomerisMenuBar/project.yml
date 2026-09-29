@@ -302,6 +302,20 @@ targets:
       # where that number is about to be acted on. The presenter itself is compiled
       # but never constructed; everything it does is NSWindow and NSApp.
       - path: Sources/RecoveryDeepLinkWindow.swift
+      # HORO-1550: the recorded-habit and optional-lookup card. Compiled in
+      # because every claim it makes is a claim about an *absence*, and an absence
+      # is exactly what a rendering check cannot see. Four of them:
+      # `WorkspaceContextInterpretation` has to tell "the installed CLI has no
+      # such command" apart from "nothing is configured" — both are exit-2-adjacent
+      # silences, and conflating them is AC 4's whole failure mode;
+      # `patternSentence` has to render a baseline still short of its minimum as a
+      # measurement in progress rather than as "workflow: unknown";
+      # `providerStateSentence` has to keep not-set-up, ready and refused as three
+      # states from three fields rather than one status word; and the two
+      # always-visible sentences (history does not outrank today, silence is not an
+      # answer) have to survive every failure state, which is checkable only by
+      # driving the states.
+      - path: Sources/WorkspaceIntelligenceSectionView.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
