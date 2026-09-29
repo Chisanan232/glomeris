@@ -177,8 +177,12 @@ trait_body="$(awk '
   /^pub trait ReadOnlyHttp \{/ { inside = 1; next }
   inside && /^\}/ { exit }
   inside { print }
-' "$abs_http")"
+' "$abs_http" || true)"
 
+# `|| true` so that the emptiness check below can actually run: under `set -e` a
+# failing substitution ends the script here, and the diagnostic written for that
+# case would be dead code reporting itself as a red step with an empty log.
+# scripts/check-failure-diagnostics-are-reachable.sh caught exactly that here.
 if [[ -z "$trait_body" ]]; then
   echo "VIOLATION: ${HTTP_FILE}: could not find the body of 'pub trait ReadOnlyHttp' — it was renamed, reshaped or removed, and checks 2 and 3 now constrain nothing."
   violations=$((violations + 1))
