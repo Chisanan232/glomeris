@@ -21,6 +21,43 @@
 //  confident" can never be mistaken on a glance for "Glomeris agreed".
 //
 //  ---------------------------------------------------------------------
+//  HORO-1550: why this card asks for contract version 2
+//  ---------------------------------------------------------------------
+//  Version 1 gave a row one sentence from the model and nothing else. That is
+//  enough to rank and not enough to *explain*, and HORO-1550's whole subject is
+//  explaining — which working trees look finished, which look active, and, most
+//  of all, which the evidence does not settle. Version 2 is where the model's
+//  reading of the workspace lives: a `disposition` (recommend now / ask / defer
+//  / keep), a `model_confidence` that distinguishes observed from inferred from
+//  unknown, the `uncertainties` it could not resolve, the `evidence_refs` it
+//  claims to have read, plus a workspace `profile`, `observations` and the
+//  read-only `evidence_requests` it wanted answered. So this card asks for
+//  version 2 and version 2 only.
+//
+//  The visual rule above gets stricter as a result, because there is now much
+//  more model text on the row. Everything the model produced — including its
+//  disposition and its confidence — goes inside ONE attributed block, under one
+//  `sparkles` heading, in italic secondary text. None of it becomes a
+//  `GlomerisBadgeView`: a chip is this app's grammar for "a verdict was
+//  reached", and `disposition` is the single field most likely to be mistaken
+//  for the policy verdict if it were ever chipped next to one. The machine's
+//  badges and sentences stay above it, unchanged and unmixed (§17).
+//
+//  `disposition` also gains no authority anywhere. It cannot make a row
+//  executable, and the only place it changes behaviour at all is in the
+//  direction of doing less: `ApplyPlanView` is handed the `recommend_now` items
+//  only, so a bulk Apply never sweeps up something the model itself declined to
+//  recommend now. The machine gate inside that view is unchanged and is still
+//  what decides whether anything may run.
+//
+//  A `glomeris` that predates version 2 rejects the flag at argument-parse
+//  time, before any provider is contacted and before anything is billed. That
+//  is its own outcome — `contractUnsupported` — rather than a silent downgrade
+//  to version 1, because a downgrade would drop every explanation above with no
+//  visible reason and leave the user reading a thinner answer as if it were the
+//  whole one.
+//
+//  ---------------------------------------------------------------------
 //  Why there is no rank number on a row
 //  ---------------------------------------------------------------------
 //  `plan_with_llm` pushes validated items in the order the provider returned
@@ -89,14 +126,20 @@ import SwiftUI
 ///     reports what it managed, and so does this card;
 ///   - `notConfigured` is not a failure at all. Nothing was sent, nothing was
 ///     charged, and the remedy is a setting;
+///   - `contractUnsupported` means the installed `glomeris` does not implement
+///     the plan format this app asks for. Also not the user's fault, also
+///     nothing sent — the flag is rejected while arguments are being parsed —
+///     but the remedy is a CLI update rather than a setting, which is why it is
+///     not folded into either neighbour;
 ///   - `malformedOutput` means the CLI exited 0 with something this app
 ///     cannot decode, which is a version skew between the app and the
 ///     `glomeris` on `PATH` — a different problem from the provider's;
 ///   - `failed` is everything else, carrying the CLI's own stderr rather than
 ///     a sentence invented here.
 enum AiPlanOutcome: Equatable {
-    case plan(LlmPlanReportDto)
+    case plan(WorkspacePlanReportDto)
     case notConfigured
+    case contractUnsupported
     case malformedOutput
     case failed(String)
 }
@@ -123,12 +166,35 @@ enum AiPlanInterpretation {
     /// would silently reclassify "no provider configured" as a hard failure.
     static let missingConfigurationMarker = "missing LLM configuration"
 
+    /// The exact sentence a `glomeris` older than HORO-1548 emits for the flag
+    /// this app now always passes (`src/main.rs`'s `unrecognized argument
+    /// '{other}'`), spelled with the flag inside it rather than matched on
+    /// "unrecognized argument" alone — that broader marker would also swallow a
+    /// genuine usage bug in this app, which is a different problem with a
+    /// different remedy and must stay a `failed`.
+    ///
+    /// Argument parsing happens before any provider is contacted, so reaching
+    /// this state costs nothing and sends nothing.
+    static let unsupportedContractMarker = "unrecognized argument '\(Self.contractVersionFlag)'"
+
+    /// Named once so the detector above and the invocation below cannot drift
+    /// apart: a rename in the argument array that missed the marker would turn
+    /// "your CLI is too old" back into an opaque failure.
+    static let contractVersionFlag = "--contract-version"
+
+    /// The one plan format this card can render. Passed to the CLI and checked
+    /// on the way back, so the two are the same claim in one place.
+    static let expectedContractVersion: UInt32 = 2
+
     static func interpret(exitCode: Int32, stdout: Data, stderr: Data) -> AiPlanOutcome {
         let stderrText = Self.trimmedText(stderr)
 
         if exitCode == 2 {
             if stderrText.contains(Self.missingConfigurationMarker) {
                 return .notConfigured
+            }
+            if stderrText.contains(Self.unsupportedContractMarker) {
+                return .contractUnsupported
             }
             return .failed(
                 stderrText.isEmpty
@@ -140,7 +206,15 @@ enum AiPlanInterpretation {
         // Tried before the exit code is judged, because exit 1 prints a full
         // report and throwing it away would discard the only structured
         // description of the provider failure.
-        if let report = try? JSONDecoder().decode(LlmPlanReportDto.self, from: stdout) {
+        if let report = try? JSONDecoder().decode(WorkspacePlanReportDto.self, from: stdout),
+            report.contractVersion == Self.expectedContractVersion {
+            // The version is checked as well as the shape. A build that grew a
+            // version 3 could emit something version-2-decodable whose fields
+            // mean something else, and reading that as a version 2 plan is the
+            // exact mistake `--contract-version`'s refusal path exists to
+            // prevent (`src/main.rs`: "they will read a version 1 report as a
+            // version 2 one"). A mismatch falls through to `malformedOutput`,
+            // whose copy already says the app and the CLI disagree.
             return .plan(report)
         }
 
@@ -206,7 +280,14 @@ enum AiPlanStateMessages {
                     "Your AI provider did not return a usable plan: \(providerError)"
                 )
             }
-            if report.items.isEmpty {
+            // HORO-1550: "no rows" stopped meaning "no answer" when the
+            // contract grew a profile, observations and evidence requests. A
+            // reply that proposes nothing but reports two conflicts and asks
+            // for a branch probe IS an answer, and covering it with "had
+            // nothing to propose" would hide the most useful thing the model
+            // said. So the empty message is reserved for a reply that carried
+            // nothing at all, and the explanation block speaks for the rest.
+            if report.items.isEmpty && !report.saidSomethingBesidesItems {
                 return .empty(
                     "No suggestions",
                     detail: "Your provider answered, but had nothing to propose for what "
@@ -227,6 +308,16 @@ enum AiPlanStateMessages {
                 detail: "Glomeris found no provider settings, so it sent nothing. Set one up in "
                     + "Settings — note that this app does not inherit your shell environment, "
                     + "so variables exported in a terminal are not visible here."
+            )
+
+        case .contractUnsupported:
+            // A failure, but a truthful one about whose problem it is, and it
+            // states the two facts a user would otherwise have to guess: that
+            // nothing left the machine, and that no provider charged for it.
+            return .failure(
+                "The installed glomeris cannot produce the plan format this app needs. Nothing "
+                    + "was sent to your AI provider and nothing was charged — update the "
+                    + "glomeris CLI, then ask again."
             )
 
         case .malformedOutput:
@@ -275,6 +366,16 @@ struct AiPlanRowViewModel: Equatable {
     /// The provider's sentence, or `nil` when it gave none. Already bounded
     /// and control-character-stripped in Rust.
     let modelReason: String?
+
+    /// Everything else the model said, when this row came from a
+    /// contract-version-2 wrapper; `nil` when it came from a bare version 1
+    /// item.
+    ///
+    /// Kept as a separate value rather than flattened into the fields above so
+    /// that a surface reading "what Glomeris determined" and a surface reading
+    /// "what the model read into it" cannot draw from the same properties — see
+    /// `AiPlanModelReadingViewModel`.
+    let modelReading: AiPlanModelReadingViewModel?
 
     /// What Glomeris itself says about acting on this suggestion, in reading
     /// order. Usually one line; two for a refusal that has both an
@@ -325,7 +426,16 @@ struct AiPlanRowViewModel: Equatable {
         for (index, line) in machineVerdictLines.enumerated() {
             clauses.append(index == 0 ? SpokenLabel.clause(CandidateActionability.axis, line) : line)
         }
-        if let modelReason {
+        if let modelReading {
+            // HORO-1550: the reading's own clauses, which open with the same
+            // attribution the single-sentence form carried and then add the
+            // disposition, the confidence, the uncertainties and the cited
+            // aliases. Every one of those is spoken, because AC 6 is that a
+            // VoiceOver user reaches all the evidence, conflict and uncertainty
+            // text — and an uncertainty only a sighted user can read was not
+            // disclosed.
+            clauses.append(contentsOf: modelReading.accessibilityClauses.map { Optional($0) })
+        } else if let modelReason {
             // Attribution and quotation are ONE clause on purpose. Split into
             // two they would be two sentences, and a listener arriving at the
             // second one late would hear the model's opinion in the same
@@ -336,7 +446,17 @@ struct AiPlanRowViewModel: Equatable {
         return SpokenLabel.compose(clauses)
     }
 
+    /// The contract-version-2 wrapper: the same machine row, plus the model's
+    /// reading of it kept beside rather than inside.
+    init(_ dto: WorkspacePlanItemReportDto) {
+        self.init(dto.item, reading: AiPlanModelReadingViewModel(dto))
+    }
+
     init(_ dto: LlmPlanItemReportDto) {
+        self.init(dto, reading: nil)
+    }
+
+    private init(_ dto: LlmPlanItemReportDto, reading: AiPlanModelReadingViewModel?) {
         let candidate = dto.candidate
         resourceId = candidate.resourceId
         kindTerm = GlomerisVocabulary.kind(candidate.kind)
@@ -349,6 +469,7 @@ struct AiPlanRowViewModel: Equatable {
         completenessTerm = GlomerisVocabulary.completeness(dto.completeness)
         confidenceTerm = GlomerisVocabulary.confidence(dto.confidence)
         modelReason = dto.modelReason
+        modelReading = reading
         machineVerdictLines = Self.verdictLines(dto)
     }
 
@@ -400,6 +521,118 @@ struct AiPlanRowViewModel: Equatable {
         }
 
         return lines
+    }
+}
+
+/// Pure formatting step from the contract-version-2 wrapper around a plan item
+/// to the one attributed block that renders everything the model said about it.
+///
+/// A separate type from `AiPlanRowViewModel` on purpose, and the separation is
+/// the point rather than a tidiness preference. §17 of this campaign requires a
+/// local fact, a model inference and a policy verdict to be impossible to
+/// mistake for one another on screen; the wire format already keeps them apart
+/// by nesting the machine's row *inside* the model's wrapper instead of
+/// flattening the two together. Mirroring that split in two view models means a
+/// surface renders "what Glomeris determined" and "what the model read into it"
+/// from two different values, so merging them would take a deliberate edit
+/// rather than an oversight.
+///
+/// Nothing here can gate anything. Every property is a sentence or a list of
+/// sentences, and the only reader is a `Text`.
+struct AiPlanModelReadingViewModel: Equatable {
+    /// What the model recommends doing, in plain language.
+    ///
+    /// Not a `GlomerisTerm`, and this is the single most important omission in
+    /// the file: a vocabulary term becomes a `GlomerisBadgeView`, a badge is
+    /// this app's grammar for "a verdict was reached", and a `recommend_now`
+    /// chip sitting beside an `ASK` chip would read as two verdicts that
+    /// disagree rather than as an opinion under a ruling.
+    let dispositionSentence: String
+
+    /// How well the model says it knows its own claim — `observed`, `inferred`
+    /// or `unknown` from §13's vocabulary. Deliberately worded as reported
+    /// speech ("it says"), because the alternative phrasing states the model's
+    /// epistemic position as a fact about the resource.
+    let confidenceSentence: String
+
+    /// The provider's sentence, or `nil` when it gave none. Already bounded and
+    /// control-character-stripped in Rust.
+    let quote: String?
+
+    /// What the model says it could not settle. Rendered in full rather than
+    /// counted: an uncertainty a user cannot read is an uncertainty that was
+    /// not disclosed, and §13's rule is that missing evidence must never become
+    /// negative evidence — which starts with it being visible at all.
+    let uncertainties: [String]
+
+    /// The opaque, request-scoped aliases the model cites — `resource_1`,
+    /// `workspace_1`, `machine`, `workflow_history`. Shown because they are what
+    /// makes the reply auditable, and safe to show precisely because they are
+    /// aliases: §5 keeps real paths, repository names and task keys out of the
+    /// payload, so there is nothing here to leak back onto the screen.
+    let evidenceRefs: [String]
+
+    /// Clauses appended to the row's spoken label, after every machine verdict.
+    ///
+    /// Attribution is carried inside the clauses rather than by their position,
+    /// because position is exactly what a listener who arrives late does not
+    /// have. A user who tabs into the middle of this list must still hear that
+    /// what follows is the model's reading.
+    var accessibilityClauses: [String] {
+        var clauses: [String] = ["The model's reading, which is advice and not a verdict"]
+        clauses.append(dispositionSentence)
+        clauses.append(confidenceSentence)
+        if let quote {
+            clauses.append("Its reason: \(quote)")
+        }
+        if !uncertainties.isEmpty {
+            clauses.append(
+                "It says it could not settle: \(uncertainties.joined(separator: "; "))"
+            )
+        }
+        if !evidenceRefs.isEmpty {
+            clauses.append("It cites: \(evidenceRefs.joined(separator: ", "))")
+        }
+        return clauses
+    }
+
+    init(_ dto: WorkspacePlanItemReportDto) {
+        dispositionSentence = Self.dispositionSentence(dto.disposition)
+        confidenceSentence = Self.confidenceSentence(dto.modelConfidence)
+        quote = dto.item.modelReason
+        uncertainties = dto.uncertainties
+        evidenceRefs = dto.evidenceRefs
+    }
+
+    /// `planner::contract::Disposition`'s four tags.
+    ///
+    /// The default arm exists although Rust drops unrecognised dispositions
+    /// (`dropped.unknown_disposition` counts them), because "this build cannot
+    /// produce that" is not the same claim as "no build can", and a newer CLI
+    /// paired with this app is exactly the pairing `contractUnsupported` cannot
+    /// catch. Naming the token is more honest than rendering nothing, which
+    /// would silently drop the model's recommendation from the one place a user
+    /// looks for it.
+    private static func dispositionSentence(_ raw: String) -> String {
+        switch raw {
+        case "recommend_now": return "Recommends reclaiming this now."
+        case "ask_user": return "Wants you to decide about this one."
+        case "defer": return "Suggests leaving this for now."
+        case "keep": return "Suggests keeping this."
+        default: return "Gave a recommendation this app does not recognise: “\(raw)”."
+        }
+    }
+
+    /// `planner::contract::ClaimConfidence`'s three tags — §13's
+    /// observed/inferred/unknown distinction, which is the whole reason the
+    /// version 2 contract exists.
+    private static func confidenceSentence(_ raw: String) -> String {
+        switch raw {
+        case "observed": return "It says this rests on evidence it was given."
+        case "inferred": return "It says this is inferred rather than observed."
+        case "unknown": return "It says it does not know."
+        default: return "Reported a confidence this app does not recognise: “\(raw)”."
+        }
     }
 }
 
@@ -595,9 +828,15 @@ struct AiPlanSectionView: View {
                 rows(report.items)
             }
 
-            if let droppedText = Self.droppedText(report) {
+            // HORO-1550. Below the rows, because a per-row reading is what a
+            // user came for and this is the model's account of the workspace as
+            // a whole — and because reading it first would frame every row
+            // beneath it as following from it.
+            workspaceReadingBlock(report)
+
+            ForEach(Self.discardedTexts(report), id: \.self) { text in
                 Divider()
-                Text(droppedText)
+                Text(text)
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -611,9 +850,18 @@ struct AiPlanSectionView: View {
             // because a user should read the suggestions before being offered a
             // way to act on all of them, and the decision about whether to offer
             // one at all is made inside it from the items themselves.
+            //
+            // HORO-1550 hands it `recommend_now` items only. `disposition`
+            // gains no authority by that — it cannot make anything executable,
+            // and the machine gate inside `ApplyPlanView` is untouched and is
+            // still the only thing that decides what may run. The filter moves
+            // in one direction only: a bulk Apply never sweeps up a resource the
+            // model itself declined to recommend now. Anything it holds back is
+            // still reachable one row at a time through the detail view, which
+            // is where a single deliberate decision belongs anyway.
             ApplyPlanView(
                 plan: plan,
-                items: report.items,
+                items: Self.recommendedNowItems(report),
                 client: client,
                 projectRootsStore: projectRootsStore
             )
@@ -633,29 +881,112 @@ struct AiPlanSectionView: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    /// The suggestions Rust refused to validate, stated rather than swallowed.
+    /// The items given to `ApplyPlanView`: `recommend_now` and nothing else.
+    ///
+    /// Pure and `static` so the filter is assertable without a view, because the
+    /// assertion worth having is the negative one — that a `keep` or a `defer`
+    /// never reaches a bulk Apply.
+    static func recommendedNowItems(_ report: WorkspacePlanReportDto) -> [LlmPlanItemReportDto] {
+        report.items
+            .filter { $0.disposition == Self.recommendNowDisposition }
+            .map(\.item)
+    }
+
+    /// `planner::contract::Disposition::RecommendNow`'s tag. One spelling, so
+    /// the filter above and its test cannot disagree about it.
+    static let recommendNowDisposition = "recommend_now"
+
+    /// What the model said that never made it onto the screen, stated rather
+    /// than swallowed — and sorted into the three things that can actually have
+    /// happened to it, because they are three different reasons to trust a
+    /// provider differently.
     ///
     /// Pure and `static` so the wording is assertable without a view. A plan
-    /// with three rows and two silently discarded items is not a three-row
-    /// plan, and a user deciding how much to trust a provider is entitled to
-    /// know it asked for things that do not exist.
-    static func droppedText(_ report: LlmPlanReportDto) -> String? {
-        var parts: [String] = []
-        if report.droppedUnknownResource > 0 {
-            parts.append(
-                "\(report.droppedUnknownResource) named a resource Glomeris never found"
-            )
-        }
-        if report.droppedUnknownAction > 0 {
-            parts.append(
-                "\(report.droppedUnknownAction) asked for an action Glomeris does not have"
-            )
-        }
-        guard !parts.isEmpty else { return nil }
+    /// with three rows and two silently discarded items is not a three-row plan,
+    /// and a user deciding how much to trust a provider is entitled to know it
+    /// asked for things that do not exist.
+    ///
+    /// HORO-1550 replaced a single sentence over two counters with three
+    /// sentences over seventeen, and the split is not cosmetic. *Discarded* means
+    /// validation refused the thing outright. *Read as unknown* means it was
+    /// kept, with a claim downgraded rather than believed — reporting that as
+    /// "discarded" would be a lie in the direction of making the model look
+    /// worse, and reporting it as nothing at all would be a lie in the direction
+    /// of making it look better. *Cut short* means Glomeris's own bound stopped
+    /// reading, which is Glomeris's doing and not the provider's, and blaming it
+    /// on the provider would be the least honest reading of the three.
+    static func discardedTexts(_ report: WorkspacePlanReportDto) -> [String] {
+        let dropped = report.dropped
+        var texts: [String] = []
 
-        let total = report.droppedUnknownResource + report.droppedUnknownAction
-        let subject = total == 1 ? "1 suggestion was" : "\(total) suggestions were"
-        return "\(subject) discarded before reaching this list: \(parts.joined(separator: ", "))."
+        let refused: [(UInt32, String)] = [
+            (dropped.unknownResource, "named a resource Glomeris never found"),
+            (dropped.unofferedAction, "asked for an action Glomeris does not offer for it"),
+            (dropped.unknownDisposition, "gave a recommendation that is not in the contract"),
+            (dropped.duplicateItem, "named a resource the reply had already covered"),
+            (dropped.unknownObservationKind, "reported an observation of an unknown kind"),
+            (dropped.unknownProbe, "asked for a check Glomeris does not run"),
+            (dropped.unknownProbeSubject, "asked about something Glomeris never mentioned"),
+            (dropped.incompatibleProbeSubject, "asked a check about the wrong kind of subject"),
+            (dropped.duplicateEvidenceRequest, "asked the same question twice"),
+            (dropped.uncitedEvidenceRef, "cited evidence that was never sent to it"),
+        ]
+        if let sentence = Self.tally(
+            refused,
+            singular: "1 part of the reply was discarded before reaching this card",
+            plural: "parts of the reply were discarded before reaching this card"
+        ) {
+            texts.append(sentence)
+        }
+
+        let degraded: [(UInt32, String)] = [
+            (dropped.degradedUnknownConfidence, "a confidence that is not in the contract"),
+            (dropped.degradedUnknownWorkflowMode, "a workflow shape that is not in the contract"),
+        ]
+        if let sentence = Self.tally(
+            degraded,
+            singular: "1 claim was read as unknown rather than taken at face value",
+            plural: "claims were read as unknown rather than taken at face value"
+        ) {
+            texts.append(sentence)
+        }
+
+        let truncated: [(UInt32, String)] = [
+            (dropped.truncatedItems, "suggestions"),
+            (dropped.truncatedObservations, "observations"),
+            (dropped.truncatedEvidenceRequests, "requests for more evidence"),
+            (dropped.truncatedUncertainties, "uncertainties on a suggestion"),
+            (dropped.truncatedEvidenceRefs, "evidence citations"),
+        ]
+        if let sentence = Self.tally(
+            truncated,
+            singular: "1 entry was cut short by Glomeris's own limit on how much a reply may say",
+            plural: "entries were cut short by Glomeris's own limit on how much a reply may say"
+        ) {
+            texts.append(sentence)
+        }
+
+        return texts
+    }
+
+    /// One sentence over a family of counters, or `nil` when every one is zero.
+    ///
+    /// The total is stated as well as the breakdown, and it is summed from the
+    /// same array the breakdown is built from rather than passed in separately,
+    /// so a counter that is added to one and forgotten in the other cannot make
+    /// the total and the reasons disagree.
+    private static func tally(
+        _ counters: [(UInt32, String)],
+        singular: String,
+        plural: String
+    ) -> String? {
+        let present = counters.filter { $0.0 > 0 }
+        guard !present.isEmpty else { return nil }
+
+        let total = present.reduce(UInt32(0)) { $0 + $1.0 }
+        let subject = total == 1 ? singular : "\(total) \(plural)"
+        let parts = present.map { "\($0.0) \($0.1)" }
+        return "\(subject): \(parts.joined(separator: ", "))."
     }
 
     /// Rows are keyed by position, not by `resourceId`: a provider may name
@@ -663,7 +994,7 @@ struct AiPlanSectionView: View {
     /// misrenders. Position is also the honest identity here, since the order
     /// is the model's.
     @ViewBuilder
-    private func rows(_ items: [LlmPlanItemReportDto]) -> some View {
+    private func rows(_ items: [WorkspacePlanItemReportDto]) -> some View {
         ForEach(Array(items.enumerated()), id: \.offset) { index, item in
             if index > 0 {
                 Divider()
@@ -681,7 +1012,7 @@ struct AiPlanSectionView: View {
     /// grammar for "a verdict was reached", and putting a model's sentence in
     /// one would launder an opinion into a finding.
     @ViewBuilder
-    private func rowView(_ item: LlmPlanItemReportDto) -> some View {
+    private func rowView(_ item: WorkspacePlanItemReportDto) -> some View {
         let row = AiPlanRowViewModel(item)
 
         Button {
@@ -689,7 +1020,7 @@ struct AiPlanSectionView: View {
             // leads to. That view makes its own `explain` call and reads its
             // own `executable`/`requiresConfirmation`/`fingerprintToken`, so
             // the plan cannot shortcut consent — see file header.
-            onOpenDetail(item.candidate.resourceId)
+            onOpenDetail(item.item.candidate.resourceId)
         } label: {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
@@ -727,8 +1058,8 @@ struct AiPlanSectionView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                if let modelReason = row.modelReason {
-                    modelQuote(modelReason)
+                if let modelReading = row.modelReading {
+                    modelQuote(modelReading)
                 }
 
                 GlomerisPathText(path: row.resourceId)
@@ -746,14 +1077,23 @@ struct AiPlanSectionView: View {
         .accessibilityHint("Opens the evidence and the available actions for this resource.")
     }
 
-    /// The provider's sentence, attributed and set apart: a leading rule, a
-    /// `sparkles` label naming who said it, and italic secondary text. Three
-    /// signals rather than one, so the attribution survives a user who cannot
-    /// distinguish italics, a narrow popover that clips the rule, and
-    /// VoiceOver — which gets the attribution in words from the row's own
-    /// label.
+    /// Everything the model said about one row, attributed and set apart: a
+    /// leading rule, a `sparkles` label naming who said it, and italic secondary
+    /// text. Three signals rather than one, so the attribution survives a user
+    /// who cannot distinguish italics, a narrow popover that clips the rule, and
+    /// VoiceOver — which gets the attribution in words from the row's own label.
+    ///
+    /// HORO-1550 widened this from the single sentence to the whole reading, and
+    /// the widening is why the three signals matter more than they did. The
+    /// disposition inside here is the field a user is most likely to read as a
+    /// ruling, because it is phrased as a recommendation and it sits on a row
+    /// that also carries a real one — so it renders in the same italic secondary
+    /// text as the quote, inside the same rule, under the same heading, and never
+    /// as a chip. The uncertainties are the reason the block can be tall: §13's
+    /// rule is that missing evidence must never become negative evidence, and a
+    /// count in place of the text would be exactly that.
     @ViewBuilder
-    private func modelQuote(_ reason: String) -> some View {
+    private func modelQuote(_ reading: AiPlanModelReadingViewModel) -> some View {
         HStack(alignment: .top, spacing: GlomerisDesign.inlineSpacing) {
             RoundedRectangle(cornerRadius: 1)
                 .fill(.tertiary)
@@ -766,14 +1106,243 @@ struct AiPlanSectionView: View {
                         .font(GlomerisDesign.badgeFont)
                 }
                 .foregroundStyle(.secondary)
-                Text(reason)
-                    .font(GlomerisDesign.captionFont)
-                    .italic()
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+
+                modelSentence(reading.dispositionSentence)
+                modelSentence(reading.confidenceSentence)
+                if let quote = reading.quote {
+                    modelSentence(quote)
+                }
+
+                if !reading.uncertainties.isEmpty {
+                    Text("It could not settle:")
+                        .font(GlomerisDesign.badgeFont)
+                        .foregroundStyle(.tertiary)
+                    ForEach(reading.uncertainties, id: \.self) { uncertainty in
+                        modelSentence("• \(uncertainty)")
+                    }
+                }
+
+                if !reading.evidenceRefs.isEmpty {
+                    // The aliases, not the things they stand for. They are what
+                    // makes the reply auditable and they are safe to show for
+                    // the same reason they were safe to send: `resource_1` names
+                    // nothing outside this one request.
+                    Text("Cites \(reading.evidenceRefs.joined(separator: ", "))")
+                        .font(GlomerisDesign.badgeFont)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// One line of model text. Factored out so every sentence in the block above
+    /// is demonstrably styled the same way — a disposition that quietly acquired
+    /// a heavier font would be the start of it reading as a verdict.
+    private func modelSentence(_ text: String) -> some View {
+        Text(text)
+            .font(GlomerisDesign.captionFont)
+            .italic()
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// The model's account of the workspace as a whole, rather than of one
+    /// resource: the workflow shape it thinks it is looking at, the conflicts and
+    /// gaps it noticed, the read-only checks it wanted run, and — when a bounded
+    /// expansion ran — what those checks actually came back with.
+    ///
+    /// One attributed block, same grammar as a row's: same rule, same `sparkles`
+    /// heading, same italic secondary text. §17 forbids this becoming a second
+    /// control plane, and there is nothing in it to press; it explains, and the
+    /// Recovery Goal above stays the thing a user acts on.
+    ///
+    /// The probe findings are the part most easily got wrong, and the mistake
+    /// would be cheap to make: a check that could not run reports a *reason*, and
+    /// rendering that as silence — or worse, as an answer — is precisely the
+    /// "failed probe becomes idle" confusion HORO-1551 has a mutation test for.
+    /// So an unavailable finding says so, in words, naming the reason.
+    @ViewBuilder
+    private func workspaceReadingBlock(_ report: WorkspacePlanReportDto) -> some View {
+        let profile = report.profile
+        let hasContent =
+            profile != nil
+            || !report.observations.isEmpty
+            || !report.evidenceRequests.isEmpty
+            || report.expansion != nil
+
+        if hasContent {
+            Divider()
+            HStack(alignment: .top, spacing: GlomerisDesign.inlineSpacing) {
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(.tertiary)
+                    .frame(width: 2)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "sparkles")
+                            .imageScale(.small)
+                        Text("The model's reading of this workspace")
+                            .font(GlomerisDesign.badgeFont)
+                    }
+                    .foregroundStyle(.secondary)
+
+                    if let profile {
+                        modelSentence(Self.profileSentence(profile))
+                        if let summary = profile.summary {
+                            modelSentence(summary)
+                        }
+                    }
+
+                    ForEach(Array(report.observations.enumerated()), id: \.offset) { _, item in
+                        modelSentence("• \(Self.observationSentence(item))")
+                    }
+
+                    ForEach(Array(report.evidenceRequests.enumerated()), id: \.offset) { _, item in
+                        modelSentence("• \(Self.evidenceRequestSentence(item))")
+                    }
+
+                    if let expansion = report.expansion {
+                        Text(Self.expansionSentence(expansion))
+                            .font(GlomerisDesign.badgeFont)
+                            .foregroundStyle(.tertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(Array(expansion.findings.enumerated()), id: \.offset) { _, finding in
+                            modelSentence("• \(Self.findingSentence(finding))")
+                        }
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// The workflow shape the model believes it is looking at, with its own
+    /// confidence in that belief attached — never stated flat. §12's vocabulary,
+    /// and §12's rule that this describes a *workspace* and never a person: there
+    /// is no wording here that could be read as ranking the user.
+    static func profileSentence(_ profile: WorkspaceProfileReportDto) -> String {
+        let shape: String
+        switch profile.mode {
+        case "serial_single_checkout":
+            shape = "one checkout at a time"
+        case "serial_multi_branch":
+            shape = "one checkout, moved between branches"
+        case "parallel_multi_worktree":
+            shape = "several working trees in parallel"
+        case "mixed":
+            shape = "a mix of one-at-a-time and parallel working trees"
+        case "unknown":
+            shape = "a shape it could not determine"
+        default:
+            shape = "a shape this app does not recognise (“\(profile.mode)”)"
+        }
+
+        let standing: String
+        switch profile.confidence {
+        case "observed": standing = "from evidence it was given"
+        case "inferred": standing = "inferred rather than observed"
+        case "unknown": standing = "and it says it does not know"
+        default: standing = "with a confidence this app does not recognise"
+        }
+
+        return "It reads this machine as \(shape) — \(standing)."
+    }
+
+    /// One observation. The kind is spelled out rather than shown raw, because
+    /// `conflicting_evidence` is the single most useful thing a reply can contain
+    /// and a user should not have to learn the contract to read it.
+    static func observationSentence(_ observation: WorkspaceObservationReportDto) -> String {
+        let lead: String
+        switch observation.kind {
+        case "conflicting_evidence": lead = "Evidence that disagrees with itself"
+        case "missing_evidence": lead = "Evidence it says it did not get"
+        case "workflow_shape": lead = "On how this machine is used"
+        case "resource_lifecycle": lead = "On where something is in its life"
+        case "recovery_outlook": lead = "On how much there is to reclaim"
+        default: lead = "An observation of a kind this app does not recognise"
+        }
+        // A detail-less observation still says something — that the model raised
+        // this kind of point at all — so the kind is stated either way rather
+        // than the whole entry disappearing.
+        guard let detail = observation.detail else { return "\(lead)." }
+        return "\(lead): \(detail)"
+    }
+
+    /// A read-only check the model asked for. Phrased as a request that was
+    /// *made*, with no claim about whether it was granted: whether it ran at all
+    /// is the expansion's business, and conflating the two would let "it asked"
+    /// read as "it found out".
+    static func evidenceRequestSentence(_ request: WorkspaceEvidenceRequestReportDto) -> String {
+        let subject = "on \(request.subjectRef)"
+        guard let reason = request.reason else {
+            return "It asked Glomeris to check \(Self.probeName(request.probeId)) \(subject)."
+        }
+        return "It asked Glomeris to check \(Self.probeName(request.probeId)) \(subject): \(reason)"
+    }
+
+    /// `planner::contract::ProbeId`'s seven tags, in words.
+    static func probeName(_ probeId: String) -> String {
+        switch probeId {
+        case "git_branch_state": return "a branch's state"
+        case "git_patch_equivalence": return "whether the commits exist elsewhere"
+        case "process_activity": return "whether anything is using it"
+        case "tool_liveness": return "whether the owning tool is running"
+        case "github_pr_state": return "any pull request"
+        case "jira_task_state": return "any tracked task"
+        case "workspace_history_summary": return "this machine's own history"
+        default: return "something this app does not recognise (“\(probeId)”)"
+        }
+    }
+
+    /// How far the bounded loop got, and why it stopped. Both halves, always:
+    /// "3 of 3 rounds" without "it still had questions" would read as a run that
+    /// finished, and §16's bounds exist precisely because one might not.
+    static func expansionSentence(_ expansion: WorkspaceExpansionReportDto) -> String {
+        let stop: String
+        switch expansion.stoppedBecause {
+        case "nothing_more_asked": stop = "it had nothing more to ask"
+        case "round_limit": stop = "it reached Glomeris's limit on rounds, still asking"
+        case "probe_limit": stop = "it reached Glomeris's limit on checks, still asking"
+        case "time_limit": stop = "Glomeris's time limit ran out, with it still asking"
+        case "provider_error": stop = "the provider call failed partway"
+        default: stop = "of a reason this app does not recognise"
+        }
+        return "Glomeris answered \(expansion.probesRun) of an allowed "
+            + "\(expansion.probesAllowed) checks over \(expansion.roundsRun) of "
+            + "\(expansion.roundsAllowed) rounds, then stopped because \(stop)."
+    }
+
+    /// What one answered check came back with — or, when it could not be
+    /// answered, that it could not be, and why.
+    ///
+    /// The `unavailableReason` branch is the load-bearing one. A check that
+    /// timed out, hit a missing tool or was never attempted has told Glomeris
+    /// nothing, and the one thing this line must never do is let that read as a
+    /// negative finding (§13).
+    static func findingSentence(_ finding: WorkspaceProbeFindingReportDto) -> String {
+        let subject = "\(Self.probeName(finding.probeId)) on \(finding.subjectRef)"
+        guard let reason = finding.unavailableReason else {
+            return "Round \(finding.round): checked \(subject) — \(finding.finding)."
+        }
+        return "Round \(finding.round): could not check \(subject) — "
+            + "\(Self.unavailableReasonPhrase(reason)). That is not an answer either way."
+    }
+
+    /// `planner::probe::ProbeReason`'s seven tags, in words. Every one of them
+    /// means "no information", and none of them means "no".
+    static func unavailableReasonPhrase(_ reason: String) -> String {
+        switch reason {
+        case "tool_absent": return "the tool that would answer it is not installed"
+        case "tool_not_running": return "the tool that owns it is not running"
+        case "permission_denied": return "Glomeris was not allowed to look"
+        case "timed_out": return "it took too long"
+        case "rate_limited": return "the service asked Glomeris to slow down"
+        case "failed": return "the check itself failed"
+        case "not_attempted": return "Glomeris did not run it"
+        default: return "of a reason this app does not recognise (“\(reason)”)"
+        }
     }
 
     // MARK: - The one call site
@@ -830,7 +1399,20 @@ struct AiPlanSectionView: View {
             let raw = try await client
                 .withEnvironment(await settingsStore.resolvedChildEnvironment())
                 .runRaw(
-                    projectRootsStore.scoped(["llm-plan", "--json", "--progress-json"]),
+                    // HORO-1550: version 2, always. Not "2 if available" — a
+                    // fallback would ask a provider twice for one question, and
+                    // a silent downgrade would render a thinner answer as if it
+                    // were the whole one. `--evidence-rounds` is deliberately
+                    // absent: a multi-round expansion is several billed calls,
+                    // and a button labelled "Ask AI for a plan" must not decide
+                    // to make more than one of them.
+                    projectRootsStore.scoped([
+                        "llm-plan",
+                        AiPlanInterpretation.contractVersionFlag,
+                        "\(AiPlanInterpretation.expectedContractVersion)",
+                        "--json",
+                        "--progress-json",
+                    ]),
                     progressType: ProgressEventDto.self,
                     onProgress: { event in
                         Task { @MainActor in

@@ -52,6 +52,43 @@ final class AiPlanSectionViewTests: XCTestCase {
         try JSONDecoder().decode(LlmPlanReportDto.self, from: Data(json.utf8))
     }
 
+    /// HORO-1550: the contract-version-2 golden fixture, which is what the card
+    /// now asks for and renders.
+    ///
+    /// The version 1 helpers above stay, and are still used by every row test
+    /// below, because `AiPlanRowViewModel`'s version 1 initializer is still a
+    /// real entry point and the version 1 fixture is where the PROTECTED
+    /// SSH-key item lives — the single most valuable input in this file.
+    private static let workspacePlanFixture = "tests/fixtures/dto/workspace_plan_report.json"
+
+    private func goldenWorkspacePlanData() throws -> Data {
+        try Data(contentsOf: Self.repoRoot.appendingPathComponent(Self.workspacePlanFixture))
+    }
+
+    private func goldenWorkspacePlan() throws -> WorkspacePlanReportDto {
+        try JSONDecoder().decode(
+            WorkspacePlanReportDto.self,
+            from: try goldenWorkspacePlanData()
+        )
+    }
+
+    private func decodeWorkspaceReport(_ json: String) throws -> WorkspacePlanReportDto {
+        try JSONDecoder().decode(WorkspacePlanReportDto.self, from: Data(json.utf8))
+    }
+
+    /// Every `dropped` counter at zero, spelled out rather than built with a
+    /// helper: this is the wire format, all seventeen keys are always present on
+    /// it, and a constant that quietly omitted one would stop being a test of
+    /// what Rust actually sends.
+    private static let noDroppedJSON = """
+    {"unknown_resource":0,"unoffered_action":0,"unknown_disposition":0,"duplicate_item":0,
+     "unknown_observation_kind":0,"unknown_probe":0,"unknown_probe_subject":0,
+     "incompatible_probe_subject":0,"duplicate_evidence_request":0,"uncited_evidence_ref":0,
+     "degraded_unknown_confidence":0,"degraded_unknown_workflow_mode":0,"truncated_items":0,
+     "truncated_observations":0,"truncated_evidence_requests":0,"truncated_uncertainties":0,
+     "truncated_evidence_refs":0}
+    """
+
     private static func readSource() throws -> String {
         let sourceURL = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent() // Tests
@@ -98,14 +135,36 @@ final class AiPlanSectionViewTests: XCTestCase {
 
     /// An empty plan with no provider error — the "your provider had nothing
     /// to say" shape, which the golden fixture cannot also be.
+    ///
+    /// Empty in every field, not just in `items`. Under the version 2 contract
+    /// those are two different replies: a reply with no suggestions but two
+    /// observations HAS something to say, and this constant exists to be the
+    /// other one.
     private static let emptyPlanJSON = """
-    {"items":[],"dropped_unknown_resource":0,"dropped_unknown_action":0,"provider_error":null}
+    {"contract_version":2,"contract_declared":true,"profile":null,"items":[],
+     "observations":[],"evidence_requests":[],"dropped":\(AiPlanSectionViewTests.noDroppedJSON),
+     "expansion":null,"provider_error":null}
     """
 
     /// A provider that failed mid-call. Rust prints exactly this and exits 1.
     private static let providerErrorPlanJSON = """
-    {"items":[],"dropped_unknown_resource":0,"dropped_unknown_action":0,
-     "provider_error":"HTTP 429 from provider"}
+    {"contract_version":2,"contract_declared":false,"profile":null,"items":[],
+     "observations":[],"evidence_requests":[],"dropped":\(AiPlanSectionViewTests.noDroppedJSON),
+     "expansion":null,"provider_error":"HTTP 429 from provider"}
+    """
+
+    /// No suggestions, but a workspace reading and two observations. HORO-1550:
+    /// the shape that must NOT read as "your provider had nothing to propose".
+    private static let observationsOnlyPlanJSON = """
+    {"contract_version":2,"contract_declared":true,
+     "profile":{"mode":"parallel_multi_worktree","confidence":"inferred",
+       "evidence_refs":["workflow_history"],"summary":null},
+     "items":[],
+     "observations":[{"kind":"conflicting_evidence","evidence_refs":["workspace_1"],
+       "detail":"A working tree reports no upstream and also reports merged commits."}],
+     "evidence_requests":[{"probe_id":"git_branch_state","subject_ref":"workspace_1",
+       "reason":null}],
+     "dropped":\(AiPlanSectionViewTests.noDroppedJSON),"expansion":null,"provider_error":null}
     """
 
     /// A non-executable item with NEITHER a skip reason nor a refusal reason.
@@ -495,14 +554,97 @@ final class AiPlanSectionViewTests: XCTestCase {
     func testExitZeroWithAReportIsAPlan() throws {
         let outcome = AiPlanInterpretation.interpret(
             exitCode: 0,
-            stdout: try goldenPlanData(),
+            stdout: try goldenWorkspacePlanData(),
             stderr: Data()
         )
         guard case .plan(let report) = outcome else {
             return XCTFail("exit 0 with a report must be a plan, got \(outcome)")
         }
-        XCTAssertEqual(report.items.count, 3)
+        XCTAssertEqual(report.items.count, 2)
         XCTAssertNil(report.providerError)
+        XCTAssertEqual(report.contractVersion, 2)
+    }
+
+    /// HORO-1550. A version 1 report is a perfectly valid thing for a CLI to
+    /// print, and it is not a version 2 one. Reading it as a version 2 plan
+    /// would show a user a plan with no dispositions, no confidences and no
+    /// uncertainties and give them no reason to doubt it — which is the exact
+    /// mistake `--contract-version`'s own refusal path exists to prevent.
+    func testAVersionOneReportIsNotReadAsAVersionTwoPlan() throws {
+        XCTAssertEqual(
+            AiPlanInterpretation.interpret(
+                exitCode: 0,
+                stdout: try goldenPlanData(),
+                stderr: Data()
+            ),
+            .malformedOutput
+        )
+    }
+
+    /// The version is checked, not just the shape. A future contract could be
+    /// decodable as this one and mean something else.
+    func testAReportDeclaringAnotherContractVersionIsNotRead() throws {
+        let json = Self.emptyPlanJSON.replacingOccurrences(
+            of: "\"contract_version\":2",
+            with: "\"contract_version\":3"
+        )
+        XCTAssertNotEqual(json, Self.emptyPlanJSON, "nothing to substitute — the constant changed")
+        XCTAssertEqual(
+            AiPlanInterpretation.interpret(exitCode: 0, stdout: Data(json.utf8), stderr: Data()),
+            .malformedOutput
+        )
+    }
+
+    /// HORO-1550: a `glomeris` older than the flag rejects it while parsing
+    /// arguments — before any provider is contacted, so nothing was sent and
+    /// nothing was billed. Its own outcome, because the remedy is a CLI update
+    /// rather than a setting or a bug report.
+    func testAnOlderCliRejectingTheContractFlagIsItsOwnOutcome() {
+        let stderr = "glomeris llm-plan: unrecognized argument '--contract-version'\n"
+        XCTAssertEqual(
+            AiPlanInterpretation.interpret(exitCode: 2, stdout: Data(), stderr: Data(stderr.utf8)),
+            .contractUnsupported
+        )
+    }
+
+    /// Anti-vacuity for the test above, and the reason the marker names the flag
+    /// instead of matching "unrecognized argument" on its own: this app sending
+    /// an argument the CLI does not know is this app's bug, and it must stay a
+    /// failure rather than become "your CLI is too old".
+    func testAnUnrecognizedArgumentThatIsNotTheContractFlagStaysAFailure() {
+        let stderr = "glomeris llm-plan: unrecognized argument '--evidence-rounds'\n"
+        guard
+            case .failed = AiPlanInterpretation.interpret(
+                exitCode: 2,
+                stdout: Data(),
+                stderr: Data(stderr.utf8)
+            )
+        else {
+            return XCTFail("a different unrecognized argument must not read as an old CLI")
+        }
+    }
+
+    /// Drift guard across the language boundary, the same shape as the
+    /// missing-configuration one below: the sentence this app matches on has to
+    /// be the sentence Rust emits, and the flag has to be one Rust accepts. If
+    /// `--contract-version` is ever renamed, the card must fail loudly here
+    /// rather than start reporting every current CLI as too old.
+    func testTheContractFlagAndItsRejectionSentenceMatchTheRustSource() throws {
+        let mainRs = Self.repoRoot.appendingPathComponent("src/main.rs")
+        let source = try String(contentsOf: mainRs, encoding: .utf8)
+
+        XCTAssertTrue(
+            source.contains("\"\(AiPlanInterpretation.contractVersionFlag)\" => {"),
+            "src/main.rs no longer handles \(AiPlanInterpretation.contractVersionFlag)"
+        )
+        XCTAssertTrue(
+            source.contains("unrecognized argument '{other}'"),
+            "the sentence `unsupportedContractMarker` is built from is gone from src/main.rs"
+        )
+        XCTAssertEqual(
+            AiPlanInterpretation.unsupportedContractMarker,
+            "unrecognized argument '\(AiPlanInterpretation.contractVersionFlag)'"
+        )
     }
 
     /// The case worth the most: exit 1 means the provider call failed, and the
@@ -639,8 +781,27 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertEqual(message.kind, .failure)
     }
 
+    /// Not the user's fault, but still a failure: the card cannot answer the
+    /// question. The copy has to carry the two facts a user would otherwise
+    /// assume the worst about — that nothing was sent and nothing was charged.
+    func testAnOlderCliIsAFailureThatStatesNothingWasSentOrCharged() throws {
+        let message = try XCTUnwrap(
+            AiPlanStateMessages.message(for: .contractUnsupported, isPlanning: false)
+        )
+        XCTAssertEqual(message.kind, .failure)
+        XCTAssertTrue(message.title.contains("Nothing was sent"))
+        XCTAssertTrue(message.title.contains("nothing was charged"))
+        XCTAssertNotEqual(
+            message.title,
+            try XCTUnwrap(
+                AiPlanStateMessages.message(for: .malformedOutput, isPlanning: false)
+            ).title,
+            "a CLI too old to answer and a CLI whose answer cannot be read have different remedies"
+        )
+    }
+
     func testAProviderErrorIsPresentedAsAFailureAndQuotesIt() throws {
-        let report = try decodeReport(Self.providerErrorPlanJSON)
+        let report = try decodeWorkspaceReport(Self.providerErrorPlanJSON)
         let message = try XCTUnwrap(
             AiPlanStateMessages.message(for: .plan(report), isPlanning: false)
         )
@@ -652,7 +813,7 @@ final class AiPlanSectionViewTests: XCTestCase {
     /// also yields zero items, and "No suggestions" would report a call that
     /// never completed as a considered answer.
     func testAProviderErrorOutranksTheEmptyPlanMessage() throws {
-        let report = try decodeReport(Self.providerErrorPlanJSON)
+        let report = try decodeWorkspaceReport(Self.providerErrorPlanJSON)
         XCTAssertTrue(report.items.isEmpty)
 
         let message = try XCTUnwrap(
@@ -663,7 +824,7 @@ final class AiPlanSectionViewTests: XCTestCase {
     }
 
     func testAnEmptyPlanFromAHealthyProviderIsNotAFailure() throws {
-        let report = try decodeReport(Self.emptyPlanJSON)
+        let report = try decodeWorkspaceReport(Self.emptyPlanJSON)
         let message = try XCTUnwrap(
             AiPlanStateMessages.message(for: .plan(report), isPlanning: false)
         )
@@ -671,8 +832,45 @@ final class AiPlanSectionViewTests: XCTestCase {
         XCTAssertEqual(message.title, "No suggestions")
     }
 
+    /// HORO-1550, and the reason `saidSomethingBesidesItems` exists. Under the
+    /// version 1 contract "no items" and "no answer" were one fact. They are not
+    /// under version 2: a reply that proposes nothing, names a workflow shape,
+    /// reports a conflict and asks for a branch check has said the most useful
+    /// thing in the whole feature, and covering it with "had nothing to propose"
+    /// would hide exactly that.
+    func testAReplyWithNoSuggestionsButRealObservationsIsNotCalledEmpty() throws {
+        let report = try decodeWorkspaceReport(Self.observationsOnlyPlanJSON)
+        XCTAssertTrue(report.items.isEmpty)
+        XCTAssertTrue(report.saidSomethingBesidesItems)
+        XCTAssertNil(
+            AiPlanStateMessages.message(for: .plan(report), isPlanning: false),
+            "the explanation block is the answer here; a state message would talk over it"
+        )
+    }
+
+    /// Anti-vacuity for the test above: a reply whose every suggestion was
+    /// *discarded* proposed nothing usable, and counting validation failures as
+    /// "it said something" would dress them up as findings.
+    func testDiscardedSuggestionsDoNotCountAsHavingSaidSomething() throws {
+        let json = Self.emptyPlanJSON.replacingOccurrences(
+            of: "\"unknown_resource\":0",
+            with: "\"unknown_resource\":4"
+        )
+        XCTAssertNotEqual(json, Self.emptyPlanJSON, "nothing to substitute — the constant changed")
+
+        let report = try decodeWorkspaceReport(json)
+        XCTAssertEqual(report.dropped.unknownResource, 4)
+        XCTAssertFalse(report.saidSomethingBesidesItems)
+        XCTAssertEqual(
+            try XCTUnwrap(
+                AiPlanStateMessages.message(for: .plan(report), isPlanning: false)
+            ).title,
+            "No suggestions"
+        )
+    }
+
     func testAPlanWithRowsShowsNoMessageAtAll() throws {
-        let report = try goldenPlan()
+        let report = try goldenWorkspacePlan()
         XCTAssertNil(AiPlanStateMessages.message(for: .plan(report), isPlanning: false))
     }
 
@@ -681,38 +879,101 @@ final class AiPlanSectionViewTests: XCTestCase {
             AiPlanStateMessages.message(for: nil, isPlanning: false)?.title,
             AiPlanStateMessages.message(for: nil, isPlanning: true)?.title,
             AiPlanStateMessages.message(for: .notConfigured, isPlanning: false)?.title,
+            AiPlanStateMessages.message(for: .contractUnsupported, isPlanning: false)?.title,
             AiPlanStateMessages.message(for: .malformedOutput, isPlanning: false)?.title,
             AiPlanStateMessages.message(for: .failed("boom"), isPlanning: false)?.title,
             AiPlanStateMessages.message(
-                for: .plan(try decodeReport(Self.emptyPlanJSON)),
+                for: .plan(try decodeWorkspaceReport(Self.emptyPlanJSON)),
                 isPlanning: false
             )?.title,
         ].compactMap { $0 }
 
-        XCTAssertEqual(titles.count, 6)
-        XCTAssertEqual(Set(titles).count, 6, "two situations share one sentence: \(titles)")
+        XCTAssertEqual(titles.count, 7)
+        XCTAssertEqual(Set(titles).count, 7, "two situations share one sentence: \(titles)")
     }
 
     // MARK: - Discarded suggestions are stated, not swallowed
 
     func testDroppedSuggestionsAreReportedWithBothReasonsAndATotal() throws {
-        let text = try XCTUnwrap(AiPlanSectionView.droppedText(try goldenPlan()))
-        XCTAssertTrue(text.contains("3 suggestions were discarded"))
-        XCTAssertTrue(text.contains("1 named a resource Glomeris never found"))
-        XCTAssertTrue(text.contains("2 asked for an action Glomeris does not have"))
+        // The golden fixture's `dropped` deliberately spans all three families:
+        // two refusals, one degraded claim and two truncated uncertainties.
+        let texts = AiPlanSectionView.discardedTexts(try goldenWorkspacePlan())
+        let discarded = try XCTUnwrap(texts.first { $0.contains("discarded") })
+
+        XCTAssertTrue(discarded.contains("3 parts of the reply were discarded"))
+        XCTAssertTrue(discarded.contains("1 named a resource Glomeris never found"))
+        XCTAssertTrue(discarded.contains("1 asked for an action Glomeris does not offer for it"))
+        XCTAssertTrue(discarded.contains("1 asked for a check Glomeris does not run"))
+    }
+
+    /// HORO-1550. Three families, three sentences, and the split is the test:
+    /// a *degraded* claim was kept with its confidence downgraded, and a
+    /// *truncated* list was cut by Glomeris's own bound rather than by anything
+    /// the provider did. Reporting either as "discarded" would misattribute it —
+    /// the first makes the model look worse than it was, the second blames the
+    /// provider for Glomeris's limit.
+    func testADegradedClaimAndAGlomerisLimitAreNotReportedAsDiscardedSuggestions() throws {
+        let texts = AiPlanSectionView.discardedTexts(try goldenWorkspacePlan())
+        XCTAssertEqual(texts.count, 3, "expected one sentence per family: \(texts)")
+
+        let degraded = try XCTUnwrap(texts.first { $0.contains("read as unknown") })
+        XCTAssertTrue(degraded.contains("1 claim was read as unknown"))
+        XCTAssertTrue(degraded.contains("a confidence that is not in the contract"))
+        XCTAssertFalse(degraded.contains("discarded"))
+
+        let truncated = try XCTUnwrap(texts.first { $0.contains("cut short") })
+        XCTAssertTrue(truncated.contains("2 entries were cut short by Glomeris's own limit"))
+        XCTAssertTrue(truncated.contains("2 uncertainties on a suggestion"))
+        XCTAssertFalse(truncated.contains("discarded"))
     }
 
     func testNothingIsSaidWhenNothingWasDropped() throws {
-        XCTAssertNil(AiPlanSectionView.droppedText(try decodeReport(Self.emptyPlanJSON)))
+        XCTAssertTrue(
+            AiPlanSectionView.discardedTexts(
+                try decodeWorkspaceReport(Self.emptyPlanJSON)
+            ).isEmpty
+        )
     }
 
     func testASingleDroppedSuggestionIsPhrasedInTheSingular() throws {
-        let json = """
-        {"items":[],"dropped_unknown_resource":1,"dropped_unknown_action":0,"provider_error":null}
-        """
-        let text = try XCTUnwrap(AiPlanSectionView.droppedText(try decodeReport(json)))
-        XCTAssertTrue(text.contains("1 suggestion was discarded"))
-        XCTAssertFalse(text.contains("suggestions were"))
+        let json = Self.emptyPlanJSON.replacingOccurrences(
+            of: "\"unknown_resource\":0",
+            with: "\"unknown_resource\":1"
+        )
+        XCTAssertNotEqual(json, Self.emptyPlanJSON, "nothing to substitute — the constant changed")
+
+        let texts = AiPlanSectionView.discardedTexts(try decodeWorkspaceReport(json))
+        XCTAssertEqual(texts.count, 1)
+        XCTAssertTrue(texts[0].contains("1 part of the reply was discarded"))
+        XCTAssertFalse(texts[0].contains("parts of the reply were"))
+    }
+
+    /// Every counter Rust can set has a phrase, and the total is summed from the
+    /// same list the phrases come from.
+    ///
+    /// This is the guard for the failure mode a seventeen-counter struct invites:
+    /// a counter added in Rust, mirrored in the DTO, and forgotten here — which
+    /// would silently discard part of a reply and tell the user nothing. It works
+    /// by setting every counter to 1 and requiring the three totals to add up to
+    /// seventeen, so an unmentioned counter shows up as arithmetic rather than as
+    /// missing prose nobody notices.
+    func testEveryDroppedCounterIsAccountedForInSomeSentence() throws {
+        let json = Self.emptyPlanJSON.replacingOccurrences(of: "\":0", with: "\":1")
+        let report = try decodeWorkspaceReport(json)
+        let texts = AiPlanSectionView.discardedTexts(report)
+        XCTAssertEqual(texts.count, 3, "all three families should be present: \(texts)")
+
+        let totals = texts.compactMap { text -> Int? in
+            // The leading integer of each sentence, which `tally` builds from the
+            // same array as the breakdown that follows it.
+            let digits = text.prefix { $0.isNumber }
+            return digits.isEmpty ? 1 : Int(digits)
+        }
+        XCTAssertEqual(
+            totals.reduce(0, +), 17,
+            "a `dropped` counter has no phrase in `discardedTexts` — it would be discarded "
+                + "silently. Totals were \(totals) across: \(texts)"
+        )
     }
 
     // MARK: - Mechanical source invariants
@@ -725,7 +986,21 @@ final class AiPlanSectionViewTests: XCTestCase {
 
         let occurrences = code.components(separatedBy: "\"llm-plan\"").count - 1
         XCTAssertEqual(occurrences, 1, "llm-plan must be constructed in exactly one place")
-        XCTAssertTrue(code.contains("[\"llm-plan\", \"--json\", \"--progress-json\"]"))
+
+        // HORO-1550: version 2 and nothing else, built from the same constants
+        // the interpreter matches on so the request and the rejection detector
+        // cannot drift apart.
+        XCTAssertTrue(code.contains("AiPlanInterpretation.contractVersionFlag,"))
+        XCTAssertTrue(code.contains("\"\\(AiPlanInterpretation.expectedContractVersion)\","))
+        XCTAssertTrue(code.contains("\"--json\","))
+        XCTAssertTrue(code.contains("\"--progress-json\","))
+
+        // A multi-round expansion is several billed provider calls. One button
+        // press must never decide to make more than one.
+        XCTAssertFalse(
+            code.contains("--evidence-rounds"),
+            "the Ask button must not request a multi-round expansion"
+        )
 
         XCTAssertFalse(code.contains("Timer("), "no code path may ask for a plan on a Timer")
         XCTAssertFalse(code.contains("Task.sleep"), "no code path may retry in a sleep loop")
@@ -849,17 +1124,21 @@ final class AiPlanSectionViewTests: XCTestCase {
     func testTheModelQuoteIsNotRenderedAsABadge() throws {
         let source = try Self.readSource()
         let afterSignature = try XCTUnwrap(
-            source.range(of: "private func modelQuote(_ reason: String) -> some View {")
+            source.range(
+                of: "private func modelQuote(_ reading: AiPlanModelReadingViewModel) -> some View {"
+            ),
+            "no `modelQuote(_ reading:)` — renamed, or no longer a function"
         )
-        // The function is short and is the last `@ViewBuilder` before
-        // `runLlmPlan()`, so ending the window at that definition reads the
-        // whole body and nothing after it.
+        // Ends at the next `private func`, which is `modelSentence`. HORO-1550
+        // widened this block from one sentence to the whole reading, so it is no
+        // longer the last `@ViewBuilder` in the file and windowing to
+        // `runLlmPlan()` would swallow the workspace block and the wording
+        // helpers with it.
         let rest = source[afterSignature.upperBound...]
-        // Matched without an access modifier: HORO-1365 made `runLlmPlan`
-        // `internal` so the tests can drive it, and the `?? rest.endIndex`
-        // fallback below would have silently widened this window to the rest of
-        // the file rather than failing loudly.
-        let end = rest.range(of: "func runLlmPlan()")?.lowerBound ?? rest.endIndex
+        let end = try XCTUnwrap(
+            rest.range(of: "\n    private func ")?.lowerBound,
+            "could not find the end of modelQuote"
+        )
         let functionText = String(rest[..<end])
 
         XCTAssertFalse(
@@ -867,6 +1146,318 @@ final class AiPlanSectionViewTests: XCTestCase {
             "the model's words must be a quotation, not a verdict chip"
         )
         XCTAssertTrue(functionText.contains("The model says"), "the quote must be attributed")
+
+        // HORO-1550: the disposition is the field most likely to be mistaken for
+        // the policy verdict, so it renders through the same helper as the quote
+        // rather than through anything of its own.
+        XCTAssertTrue(
+            functionText.contains("modelSentence(reading.dispositionSentence)"),
+            "the model's recommendation must be styled exactly like its quote"
+        )
+    }
+
+    // MARK: - HORO-1550: the model's reading is a tier, not a verdict
+
+    /// AC 3. The wire format keeps the machine's row nested inside the model's
+    /// wrapper, and the view models keep the same split — so a surface rendering
+    /// "what Glomeris determined" and a surface rendering "what the model read
+    /// into it" cannot draw from the same properties.
+    func testTheModelsRecommendationNeverBecomesAPolicyVerdict() throws {
+        let report = try goldenWorkspacePlan()
+        let asked = report.items[1]
+        XCTAssertEqual(asked.disposition, "recommend_now")
+        XCTAssertEqual(asked.item.candidate.policyLabel, "ASK")
+
+        let row = AiPlanRowViewModel(asked)
+
+        // The machine's side is untouched by the model's enthusiasm.
+        XCTAssertEqual(row.safetyTerm, GlomerisVocabulary.safety("ASK"))
+        XCTAssertTrue(
+            row.machineVerdictLines.joined(separator: " ").lowercased().contains("ask"),
+            "the machine verdict must still say Glomeris asks first: \(row.machineVerdictLines)"
+        )
+
+        // And the model's side is nowhere in it.
+        let reading = try XCTUnwrap(row.modelReading)
+        XCTAssertEqual(reading.dispositionSentence, "Recommends reclaiming this now.")
+        for line in row.machineVerdictLines {
+            XCTAssertFalse(
+                line.contains("Recommends reclaiming"),
+                "the model's recommendation leaked into a machine verdict line"
+            )
+        }
+    }
+
+    /// A `defer` against an `AUTO_SAFE` resource: the disposition disagrees with
+    /// the policy class in the other direction. Neither one moves.
+    func testAModelThatDefersDoesNotDowngradeTheMachinesVerdictEither() throws {
+        let report = try goldenWorkspacePlan()
+        let deferred = report.items[0]
+        XCTAssertEqual(deferred.disposition, "defer")
+        XCTAssertEqual(deferred.item.candidate.policyLabel, "AUTO_SAFE")
+
+        let row = AiPlanRowViewModel(deferred)
+        XCTAssertEqual(row.safetyTerm, GlomerisVocabulary.safety("AUTO_SAFE"))
+        XCTAssertEqual(
+            try XCTUnwrap(row.modelReading).dispositionSentence,
+            "Suggests leaving this for now."
+        )
+    }
+
+    /// §15: the model may recommend, and its recommendation may only ever reduce
+    /// what a bulk action sweeps up. A `defer` stays out of Apply; nothing the
+    /// model says can put anything *into* it.
+    func testOnlyRecommendNowItemsReachABulkApply() throws {
+        let report = try goldenWorkspacePlan()
+        let applied = AiPlanSectionView.recommendedNowItems(report)
+
+        XCTAssertEqual(applied.count, 1)
+        XCTAssertEqual(applied[0].candidate.resourceId, report.items[1].item.candidate.resourceId)
+        XCTAssertFalse(
+            applied.contains { $0.candidate.resourceId == report.items[0].item.candidate.resourceId },
+            "a resource the model deferred must not be in a one-click batch"
+        )
+    }
+
+    /// AC 6, and §13's rule at the level a user actually meets it: every
+    /// uncertainty the model reported is spoken, attributed, and audibly not a
+    /// finding.
+    func testEveryUncertaintyIsSpokenAndAttributedToTheModel() throws {
+        let report = try goldenWorkspacePlan()
+        let item = report.items[1]
+        XCTAssertEqual(item.uncertainties.count, 2)
+
+        let label = AiPlanRowViewModel(item).accessibilityLabel
+        XCTAssertTrue(label.contains("The model's reading, which is advice and not a verdict"))
+        for uncertainty in item.uncertainties {
+            XCTAssertTrue(label.contains(uncertainty), "an uncertainty is not spoken: \(uncertainty)")
+        }
+        XCTAssertTrue(label.contains("It says it does not know."))
+        XCTAssertTrue(label.contains("It cites: resource_2, workflow_history"))
+    }
+
+    /// The machine's verdict is heard before the model's reading, which is the
+    /// same priority the badges give a sighted user.
+    func testTheSpokenRowPutsTheMachineVerdictBeforeTheModelsReading() throws {
+        let label = AiPlanRowViewModel(try goldenWorkspacePlan().items[1]).accessibilityLabel
+        let verdict = try XCTUnwrap(label.range(of: CandidateActionability.axis))
+        let reading = try XCTUnwrap(label.range(of: "The model's reading"))
+        XCTAssertTrue(
+            verdict.lowerBound < reading.lowerBound,
+            "a listener hears the model's opinion before Glomeris's verdict: \(label)"
+        )
+    }
+
+    /// A version 1 row has no reading, and its single-sentence attribution is
+    /// unchanged — the two initializers do not bleed into each other.
+    func testAVersionOneRowStillCarriesNoReadingAndKeepsItsOwnAttribution() throws {
+        let row = AiPlanRowViewModel(try goldenPlan().items[0])
+        XCTAssertNil(row.modelReading)
+        XCTAssertTrue(
+            row.accessibilityLabel.contains("The model's reason, which is advice and not a verdict")
+        )
+    }
+
+    /// Unrecognised vocabulary is named, never rendered as nothing. A newer CLI
+    /// paired with this app is the one skew `contractUnsupported` cannot catch,
+    /// and dropping the model's recommendation from the one place a user looks
+    /// for it would be the worst way to meet it.
+    func testAnUnrecognisedDispositionOrConfidenceIsNamedRatherThanSwallowed() throws {
+        let report = try goldenWorkspacePlan()
+        let data = try goldenWorkspacePlanData()
+        let mutated = String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "\"disposition\": \"defer\"", with: "\"disposition\": \"nope\"")
+            .replacingOccurrences(
+                of: "\"model_confidence\": \"inferred\"",
+                with: "\"model_confidence\": \"maybe\""
+            )
+        XCTAssertNotEqual(
+            mutated, String(decoding: data, as: UTF8.self),
+            "nothing to substitute — the fixture's formatting changed"
+        )
+
+        let item = try JSONDecoder()
+            .decode(WorkspacePlanReportDto.self, from: Data(mutated.utf8))
+            .items[0]
+        XCTAssertNotEqual(item.disposition, report.items[0].disposition)
+
+        let reading = AiPlanModelReadingViewModel(item)
+        XCTAssertTrue(reading.dispositionSentence.contains("nope"))
+        XCTAssertTrue(reading.dispositionSentence.contains("does not recognise"))
+        XCTAssertTrue(reading.confidenceSentence.contains("maybe"))
+        XCTAssertTrue(reading.confidenceSentence.contains("does not recognise"))
+    }
+
+    // MARK: - HORO-1550: a check that could not run is not an answer
+
+    /// §13's most important sentence, at the one place on screen where breaking
+    /// it would be invisible: a probe that timed out, hit a missing tool or was
+    /// never attempted has told Glomeris nothing, and must not read as a
+    /// negative finding.
+    func testAnUnansweredCheckSaysSoRatherThanReadingAsANegativeFinding() throws {
+        let expansion = try XCTUnwrap(try goldenWorkspacePlan().expansion)
+        let unavailable = try XCTUnwrap(expansion.findings.first { $0.unavailableReason != nil })
+        XCTAssertEqual(unavailable.unavailableReason, "not_attempted")
+
+        let sentence = AiPlanSectionView.findingSentence(unavailable)
+        XCTAssertTrue(sentence.contains("could not check"))
+        XCTAssertTrue(sentence.contains("Glomeris did not run it"))
+        XCTAssertTrue(
+            sentence.contains("That is not an answer either way"),
+            "an unavailable probe must state that it is not evidence: \(sentence)"
+        )
+    }
+
+    /// And an answered one reads as an answer, so the sentence above is a real
+    /// distinction rather than a disclaimer on everything.
+    func testAnAnsweredCheckReadsAsAnAnswer() throws {
+        let expansion = try XCTUnwrap(try goldenWorkspacePlan().expansion)
+        let answered = try XCTUnwrap(expansion.findings.first { $0.unavailableReason == nil })
+
+        let sentence = AiPlanSectionView.findingSentence(answered)
+        XCTAssertTrue(sentence.contains("checked"))
+        XCTAssertFalse(sentence.contains("could not check"))
+        XCTAssertFalse(sentence.contains("not an answer"))
+    }
+
+    /// Every `ProbeReason` tag means "no information" and none of them means
+    /// "no". Asserted over the whole vocabulary because the wording is what
+    /// carries it, and one phrase drifting into a negative claim is exactly the
+    /// regression this guard is for.
+    func testNoUnavailableReasonPhraseAssertsAnAbsence() {
+        let reasons = [
+            "tool_absent", "tool_not_running", "permission_denied", "timed_out",
+            "rate_limited", "failed", "not_attempted",
+        ]
+        var phrases: Set<String> = []
+        for reason in reasons {
+            let phrase = AiPlanSectionView.unavailableReasonPhrase(reason)
+            XCTAssertFalse(phrase.contains("does not recognise"), "\(reason) has no phrase")
+            for forbidden in ["nothing is", "no pull request", "no task", "idle", "not in use"] {
+                XCTAssertFalse(
+                    phrase.lowercased().contains(forbidden),
+                    "\(reason) reads as a negative finding: \(phrase)"
+                )
+            }
+            phrases.insert(phrase)
+        }
+        XCTAssertEqual(phrases.count, reasons.count, "two reasons share one phrase: \(phrases)")
+    }
+
+    /// §12. The profile describes a workspace and never a person, and it never
+    /// states a shape without the model's own confidence in it attached.
+    func testTheWorkflowProfileSentenceRanksNobodyAndCarriesItsOwnConfidence() throws {
+        let profile = try XCTUnwrap(try goldenWorkspacePlan().profile)
+        let sentence = AiPlanSectionView.profileSentence(profile)
+
+        XCTAssertTrue(sentence.contains("a mix of one-at-a-time and parallel working trees"))
+        XCTAssertTrue(
+            sentence.contains("inferred rather than observed"),
+            "a shape must never be stated flat: \(sentence)"
+        )
+        for judgement in ["advanced", "beginner", "expert", "good", "bad", "should", "you are"] {
+            XCTAssertFalse(
+                sentence.lowercased().contains(judgement),
+                "the profile judges the user: \(sentence)"
+            )
+        }
+    }
+
+    /// Asking is not finding out. The two live in different parts of the report
+    /// and must read differently, or "it wanted to check" becomes "it checked".
+    func testARequestForEvidenceDoesNotReadAsAnAnswer() throws {
+        let request = try XCTUnwrap(try goldenWorkspacePlan().evidenceRequests.first)
+        let sentence = AiPlanSectionView.evidenceRequestSentence(request)
+
+        XCTAssertTrue(sentence.contains("It asked Glomeris to check"))
+        XCTAssertTrue(sentence.contains("any pull request"))
+        XCTAssertTrue(sentence.contains("workspace_1"))
+        XCTAssertFalse(sentence.contains("checked"), "a request must not read as a finding")
+    }
+
+    /// §16's bounds exist because a bounded loop may stop with questions
+    /// outstanding, so the sentence has to carry both halves: how far it got AND
+    /// that it had not finished.
+    func testTheExpansionSentenceSaysBothHowFarItGotAndThatItWasStillAsking() throws {
+        let expansion = try XCTUnwrap(try goldenWorkspacePlan().expansion)
+        XCTAssertFalse(expansion.converged)
+
+        let sentence = AiPlanSectionView.expansionSentence(expansion)
+        XCTAssertTrue(sentence.contains("2 of an allowed 12 checks"))
+        XCTAssertTrue(sentence.contains("3 of 3 rounds"))
+        XCTAssertTrue(
+            sentence.contains("still asking"),
+            "a run that stopped at a limit must not read as one that finished: \(sentence)"
+        )
+    }
+
+    /// The converged case, so the clause above is a distinction and not boilerplate.
+    func testARunThatRanOutOfQuestionsDoesNotClaimItWasCutOff() throws {
+        let data = try goldenWorkspacePlanData()
+        let mutated = String(decoding: data, as: UTF8.self).replacingOccurrences(
+            of: "\"stopped_because\": \"round_limit\"",
+            with: "\"stopped_because\": \"nothing_more_asked\""
+        )
+        XCTAssertNotEqual(
+            mutated, String(decoding: data, as: UTF8.self),
+            "nothing to substitute — the fixture's formatting changed"
+        )
+
+        let expansion = try XCTUnwrap(
+            try JSONDecoder()
+                .decode(WorkspacePlanReportDto.self, from: Data(mutated.utf8))
+                .expansion
+        )
+        let sentence = AiPlanSectionView.expansionSentence(expansion)
+        XCTAssertTrue(sentence.contains("it had nothing more to ask"))
+        XCTAssertFalse(sentence.contains("still asking"))
+    }
+
+    /// An observation with no detail still says that the model raised that kind
+    /// of point. Dropping the entry would be the tidier rendering and the less
+    /// honest one.
+    func testAnObservationWithNoDetailStillNamesWhatKindItWas() throws {
+        let observations = try goldenWorkspacePlan().observations
+        let detailed = try XCTUnwrap(observations.first { $0.detail != nil })
+        let bare = try XCTUnwrap(observations.first { $0.detail == nil })
+
+        XCTAssertEqual(
+            AiPlanSectionView.observationSentence(detailed),
+            "Evidence that disagrees with itself: \(try XCTUnwrap(detailed.detail))"
+        )
+        XCTAssertEqual(
+            AiPlanSectionView.observationSentence(bare),
+            "Evidence it says it did not get."
+        )
+    }
+
+    /// The explanation block explains and offers nothing to press. §17: Workspace
+    /// Intelligence supports the Recovery Goal rather than becoming a second
+    /// control plane.
+    func testTheWorkspaceReadingBlockHasNoControlsInIt() throws {
+        let source = try Self.readCode()
+        let start = try XCTUnwrap(
+            source.range(of: "private func workspaceReadingBlock(")?.upperBound,
+            "no `workspaceReadingBlock(` — renamed, or no longer a function"
+        )
+        let rest = source[start...]
+        let end = try XCTUnwrap(
+            rest.range(of: "\n    static func profileSentence(")?.lowerBound,
+            "could not find the end of workspaceReadingBlock"
+        )
+        let body = String(rest[..<end])
+
+        for control in ["Button", "Toggle", "GlomerisSettingsButton", "onTapGesture", "Menu("] {
+            XCTAssertFalse(body.contains(control), "the explanation block grew a control: \(control)")
+        }
+        XCTAssertTrue(
+            body.contains("The model's reading of this workspace"),
+            "the block must attribute itself"
+        )
+        XCTAssertFalse(
+            body.contains("GlomerisBadgeView"),
+            "nothing the model inferred may be chipped"
+        )
     }
 
     /// The standing rule of the product, on screen before anything is asked
