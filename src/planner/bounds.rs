@@ -90,6 +90,18 @@ impl EvidenceBounds {
         max_total_duration: Duration::from_secs(30),
     };
 
+    /// The most rounds a caller may ask for.
+    ///
+    /// Not a safety bound — [`Self::max_probes_total`] and
+    /// [`Self::max_total_duration`] are what actually stop the loop, and they
+    /// stop it whatever this says. This is a sanity bound on the *request*: a
+    /// caller who typed `--evidence-rounds 500` has almost certainly made a
+    /// mistake, and finding out is better than watching a run end on a
+    /// duration ceiling thirty seconds later and wondering which ceiling it
+    /// was. Eight because [`Self::DEFAULT`] allows twelve probes, and a run
+    /// asking fewer than two questions per round has stopped learning.
+    pub const MAX_ROUNDS: u32 = 8;
+
     /// `max_rounds`, floored at 1. See the field doc for why 0 is not honoured.
     pub fn rounds_allowed(self) -> u32 {
         self.max_rounds.max(1)
@@ -166,6 +178,27 @@ mod tests {
 
     /// A zero is a caller's mistake, and the plan a zero-round run would
     /// produce is no plan at all.
+    /// The request bound is not the safety bound, and the test says so: asking
+    /// for the maximum leaves the probe and duration ceilings exactly where
+    /// they were.
+    #[test]
+    fn the_most_rounds_a_caller_may_ask_for_changes_no_other_ceiling() {
+        let most = EvidenceBounds::for_rounds(EvidenceBounds::MAX_ROUNDS);
+        assert_eq!(most.rounds_allowed(), EvidenceBounds::MAX_ROUNDS);
+        assert_eq!(
+            most.max_probes_total,
+            EvidenceBounds::DEFAULT.max_probes_total
+        );
+        assert_eq!(
+            most.max_total_duration,
+            EvidenceBounds::DEFAULT.max_total_duration
+        );
+        assert_eq!(
+            most.per_probe_timeout,
+            EvidenceBounds::DEFAULT.per_probe_timeout
+        );
+    }
+
     #[test]
     fn zero_rounds_still_plans_once() {
         assert_eq!(EvidenceBounds::for_rounds(0).rounds_allowed(), 1);
