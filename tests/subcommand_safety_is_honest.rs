@@ -39,6 +39,42 @@
 //!   after. "Changes nothing" is a claim about behaviour, and the only
 //!   honest way to assert it is to observe it.
 //!
+//! # Whose writes the comparison is about (HORO-1556)
+//!
+//! `detect` asks installed build tools where their caches are, by running
+//! them: `npm config get cache`, `go env GOCACHE`, `pip cache dir`,
+//! `uv cache dir`, `brew --cache`, `docker system df`. Several of those write
+//! to `$HOME` as a side effect of being asked anything at all —
+//! observed on the workstation this was written on:
+//!
+//! * `npm` wrote `.npm/_logs/<timestamp>-debug-0.log`, i.e. a log file
+//!   *inside the cache directory being measured*. This one is Glomeris's to
+//!   fix and is fixed: the probe passes `--logs-max=0`.
+//! * `go env` wrote a telemetry counter under
+//!   `Library/Application Support/go/telemetry/local/`. `go help telemetry`
+//!   documents the mode as settable only by `go telemetry off` — a user
+//!   preference — and `GOTELEMETRY` as a *non-settable* `go env` variable.
+//!   No environment Glomeris can construct suppresses it.
+//! * `pip`, `uv` and `npm` each populated
+//!   `Library/Caches/BytecodeAlliance.wasmtime/`, because on this machine
+//!   they are `proto` shims and `proto` compiles its WASM plugins on first
+//!   use. That is a property of the user's installation, not of the tool.
+//!
+//! So "running a read-only surface leaves `$HOME` byte-identical" is not a
+//! property Glomeris can have once it executes third-party programs, and a
+//! test asserting it passes or fails according to which build tools the
+//! machine running it happens to have. The two tests below split the claim
+//! along the line that decides it — who wrote — rather than weakening it:
+//!
+//! * with no tool reachable on `PATH`, nothing but Glomeris can write, and
+//!   `$HOME` must be byte-identical. Deterministic on any machine, and it is
+//!   the claim `Safety::ReadOnly` actually makes.
+//! * with the real `PATH`, and therefore real tools running, no
+//!   Glomeris-owned state may appear. That is what catches the regressions
+//!   this file was written for — `settings show` writing out the defaults it
+//!   just reported, `pressure show` opening an episode — in the configuration
+//!   a user actually runs.
+//!
 //! # What is deliberately not executed, and why
 //!
 //! The mutating declarations are not verified by running them. `daemon
@@ -301,6 +337,37 @@ fn run_with_home(args: &[String], home: &Path) -> std::process::Output {
         .expect("failed to spawn glomeris binary")
 }
 
+/// The same run, with a `PATH` holding no executables at all, so that no tool
+/// a detector consults can start (HORO-1556).
+///
+/// Every detector that shells out does so by program name, so an empty `PATH`
+/// makes each one report `ToolAbsent` — a real answer, and one that leaves
+/// Glomeris as the only process that could have written anything. That is what
+/// makes the byte-for-byte comparison below a statement about Glomeris rather
+/// than about the machine's build tools.
+fn run_with_home_and_no_tools(
+    args: &[String],
+    home: &Path,
+    empty_path: &Path,
+) -> std::process::Output {
+    Command::new(glomeris_bin())
+        .args(args)
+        .env("HOME", home)
+        .env("PATH", empty_path)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn glomeris binary")
+}
+
+/// Paths under `$HOME` that belong to Glomeris and to nothing else.
+///
+/// Used by the real-`PATH` half of the read-only claim, where a third-party
+/// tool may legitimately have written its own files but Glomeris may not have
+/// written any of its own. Every state file the binary owns lives under the
+/// first of these — `history.tsv`, `actions.jsonl`, `heartbeat.json`, the
+/// episode store, the settings file and the Autopilot envelope.
+const GLOMERIS_OWNED_PREFIXES: &[&str] = &["Library/Application Support/Glomeris"];
+
 /// Every surface the table declares `ReadOnly`, as the argv that exercises it.
 ///
 /// Derived from `help::COMMANDS` rather than listed, so a command or verb that
@@ -394,10 +461,16 @@ fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
 /// AC 2 and AC 3, observed: every surface labelled "Read-only — changes
 /// nothing." leaves the tree it would write to byte-for-byte identical, and
 /// `daemon status` is among them rather than having been relabelled away.
+///
+/// Runs with no tool reachable on `PATH`, so Glomeris is the only thing that
+/// could write — see this file's header for what the build tools `detect`
+/// consults do to `$HOME` when they are reachable, and for the companion test
+/// that covers that configuration.
 #[test]
 fn read_only_surfaces_leave_a_disposable_home_untouched() {
     let scratch = make_temp_dir("horo1485-scratch");
     fs::write(scratch.join("a-file"), vec![0u8; 1024]).expect("write scratch file");
+    let no_tools = make_temp_dir("horo1485-no-tools");
 
     let invocations = read_only_invocations(&scratch);
 
@@ -413,7 +486,7 @@ fn read_only_surfaces_leave_a_disposable_home_untouched() {
         let home = make_temp_dir("horo1485-home");
         let before = snapshot(&home);
 
-        let output = run_with_home(args, &home);
+        let output = run_with_home_and_no_tools(args, &home, &no_tools);
         // Not asserted to succeed: `daemon status` exits non-zero off macOS,
         // and `explain` exits non-zero when nothing matches. What is under
         // test is that the process wrote nothing, whatever it concluded.
@@ -437,14 +510,64 @@ fn read_only_surfaces_leave_a_disposable_home_untouched() {
     }
 }
 
-/// The control that makes the test above mean something.
+/// The other half of the read-only claim (HORO-1556): with the machine's real
+/// `PATH`, and therefore the real `npm`, `go`, `pip`, `uv`, `brew` and
+/// `docker` running, no read-only surface creates any state Glomeris owns.
+///
+/// This is the configuration a user runs in, and the one the test above
+/// deliberately does not use — see this file's header for the writes the build
+/// tools make on their own account, and why no environment can stop them.
+/// What remains provable there, and is proved here, is that none of those
+/// writes are Glomeris's: a surface that reported your settings by writing
+/// them out, or answered "is a notification owed?" by opening an episode,
+/// would put a file under `Library/Application Support/Glomeris` and fail.
+#[test]
+fn read_only_surfaces_create_no_glomeris_state_even_with_real_tools_on_path() {
+    let scratch = make_temp_dir("horo1556-scratch");
+    fs::write(scratch.join("a-file"), vec![0u8; 1024]).expect("write scratch file");
+
+    for (surface, args) in &read_only_invocations(&scratch) {
+        let home = make_temp_dir("horo1556-home");
+
+        let output = run_with_home(args, &home);
+        assert!(
+            output.status.code().is_some(),
+            "`glomeris {}` was killed by a signal rather than exiting",
+            args.join(" ")
+        );
+
+        let owned: Vec<PathBuf> = snapshot(&home)
+            .into_keys()
+            .filter(|path| {
+                GLOMERIS_OWNED_PREFIXES
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix))
+            })
+            .collect();
+        assert!(
+            owned.is_empty(),
+            "'{surface}' is declared read-only but `glomeris {}` created state \
+             Glomeris owns (exit {:?}): {owned:?}",
+            args.join(" "),
+            output.status.code()
+        );
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    fs::remove_dir_all(&scratch).ok();
+}
+
+/// The control that makes both tests above mean something.
 ///
 /// If the binary resolved its state directory from anything other than `HOME`
 /// — a hardcoded path, a cached value, `NSHomeDirectory()` — then every
 /// assertion above would pass while the commands wrote to the real home
 /// directory, and this suite would be certifying the opposite of what it
 /// claims. So a surface that is *declared* to write is run the same way, and
-/// the disposable `HOME` is required to change.
+/// the disposable `HOME` is required to change — under
+/// [`GLOMERIS_OWNED_PREFIXES`], which is also what makes the real-`PATH`
+/// test's filter non-vacuous.
 ///
 /// `autopilot enable` is the only mutating surface that can be run safely
 /// here: it writes one file under the `HOME`-derived state directory and
@@ -480,12 +603,14 @@ fn a_surface_declared_to_write_does_write_into_the_disposable_home() {
         .keys()
         .filter(|path| !before.contains_key(*path))
         .collect();
+    // The same prefix the real-`PATH` test filters on, so the two cannot
+    // drift: this is what proves that filter can actually catch something.
     assert!(
-        written.iter().all(
-            |path| path.starts_with("Library/Application Support/Glomeris")
-                || path == &&PathBuf::from("Library")
-                || path == &&PathBuf::from("Library/Application Support")
-        ),
+        written.iter().all(|path| GLOMERIS_OWNED_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+            || path == &&PathBuf::from("Library")
+            || path == &&PathBuf::from("Library/Application Support")),
         "`autopilot enable` wrote outside Glomeris's own state directory: {written:?}"
     );
     assert!(
