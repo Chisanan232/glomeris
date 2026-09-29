@@ -18,6 +18,7 @@
 //! exercised directly by unit tests. The macOS-only, exit-code-mapping
 //! wiring (including the HORO-1054 execution lock) stays in `main.rs`.
 
+pub mod external_context;
 pub mod help;
 pub mod pressure;
 pub mod recovery;
