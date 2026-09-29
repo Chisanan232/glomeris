@@ -96,6 +96,13 @@ fn parse_build_cache_reclaimable_bytes(stdout: &str) -> Option<u64> {
 /// Shared with [`super::docker_objects`], which reads the same renderings out
 /// of the same `docker system df` report — one parser, so a suffix Docker
 /// starts printing cannot be understood by one detector and not the other.
+///
+/// Rounded, not truncated (HORO-1544). `2.07GB` is exactly what Docker prints
+/// for a real image on the dev host, and `2.07 * 1e9` is `2069999999.9999998`
+/// in binary floating point — truncating that reports 2069999999 bytes, which
+/// is not a more conservative answer than 2070000000, just a wrong one. The
+/// input carries three significant digits either way; the arithmetic should not
+/// add an error the rendering did not have.
 pub(super) fn parse_human_size(s: &str) -> Option<u64> {
     let s = s.trim();
     let split_at = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
@@ -109,7 +116,7 @@ pub(super) fn parse_human_size(s: &str) -> Option<u64> {
         "TB" => 1_000_000_000_000.0,
         _ => return None,
     };
-    Some((value * multiplier) as u64)
+    Some((value * multiplier).round() as u64)
 }
 
 /// Signatures a Docker client prints when it is installed and cannot reach a
@@ -346,6 +353,21 @@ mod tests {
         assert_eq!(parse_human_size("0B"), Some(0));
         assert_eq!(parse_human_size("512MB"), Some(512_000_000));
         assert_eq!(parse_human_size("1.2GB"), Some(1_200_000_000));
+    }
+
+    /// The truncation defect, by the exact values a live daemon prints. Each
+    /// product below is not representable in binary floating point and lands
+    /// just under the whole number; truncating reported one byte less than the
+    /// rendering states. The `2.1GB`/`1.5GB` cases are the anti-vacuity half:
+    /// their products land just *over*, so a fix that subtracted an epsilon
+    /// rather than rounding would fail here.
+    #[test]
+    fn parse_human_size_rounds_rather_than_truncating() {
+        assert_eq!(parse_human_size("2.07GB"), Some(2_070_000_000));
+        assert_eq!(parse_human_size("75.9MB"), Some(75_900_000));
+        assert_eq!(parse_human_size("2.361GB"), Some(2_361_000_000));
+        assert_eq!(parse_human_size("2.1GB"), Some(2_100_000_000));
+        assert_eq!(parse_human_size("1.5GB"), Some(1_500_000_000));
     }
 
     #[test]
