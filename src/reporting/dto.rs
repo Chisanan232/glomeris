@@ -73,9 +73,9 @@ pub enum ProgressEvent {
     /// code) is about to run its bounded probe.
     DetectorStarted { detector: &'static str },
     /// The same detector's probe has returned. `candidates_found` is `0`
-    /// for `DetectorStatus::ToolAbsent`/`Failed` as well as a genuine
-    /// empty `Found(vec![])`, so `outcome` says which of the three
-    /// happened and `reason` carries a failure's own message.
+    /// for every non-`Found` `DetectorStatus` as well as for a genuine
+    /// empty `Found(vec![])`, so `outcome` says which of them happened and
+    /// `reason` carries a failure's own message.
     ///
     /// `outcome`/`reason` were added by HORO-1484. Until then this event
     /// was the count alone, and its doc comment sent a consumer that
@@ -85,12 +85,12 @@ pub enum ProgressEvent {
     /// probe that looked and found nothing did.
     ///
     /// Both values come from [`crate::cli::DetectorOutcome`], which is the
-    /// one producer of the three tags this stream and `detect --json`
-    /// share.
+    /// one producer of the tags this stream and `detect --json` share.
     DetectorFinished {
         detector: &'static str,
         candidates_found: usize,
-        /// `"found"`, `"tool_absent"` or `"failed"`.
+        /// `"found"`, `"tool_absent"`, `"tool_not_running"` or
+        /// `"failed"`.
         outcome: &'static str,
         /// The probe's failure message. Present only for
         /// `outcome: "failed"`, and omitted from the JSON otherwise
@@ -421,14 +421,14 @@ impl DetectCandidateReport {
 pub struct DetectorHealthReport {
     /// The detector's registered id, e.g. `cargo_target_dir`.
     pub detector: String,
-    /// `"found"`, `"tool_absent"` or `"failed"` — produced by
-    /// [`crate::cli::DetectorOutcome::tag`], the same one producer the
-    /// `--progress-json` stream uses.
+    /// `"found"`, `"tool_absent"`, `"tool_not_running"` or `"failed"` —
+    /// produced by [`crate::cli::DetectorOutcome::tag`], the same one
+    /// producer the `--progress-json` stream uses.
     pub status: &'static str,
-    /// Evidences this detector contributed to `candidates`. `0` for
-    /// `tool_absent` and for `failed` alike, which is precisely why
-    /// `status` is a separate field rather than something a consumer could
-    /// infer from this number.
+    /// Evidences this detector contributed to `candidates`. `0` for every
+    /// non-`found` status alike, which is precisely why `status` is a
+    /// separate field rather than something a consumer could infer from
+    /// this number.
     pub candidates_found: usize,
     /// The probe's own failure message, for `"failed"` only. Omitted from
     /// the JSON rather than serialized as `null` when there is none.

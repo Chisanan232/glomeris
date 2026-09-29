@@ -531,6 +531,9 @@ fn run_detect_command(args: &[String]) {
                 DetectorOutcome::ToolAbsent => {
                     println!("{:<24} tool_absent", id.0);
                 }
+                DetectorOutcome::ToolNotRunning => {
+                    println!("{:<24} tool_not_running", id.0);
+                }
                 DetectorOutcome::Failed(reason) => {
                     println!("{:<24} failed: {reason}", id.0);
                 }

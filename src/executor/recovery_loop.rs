@@ -529,7 +529,7 @@ fn candidates_with_actions(
     for (id, status) in statuses {
         match status {
             DetectorStatus::Found(found) => evidences.extend(found),
-            DetectorStatus::ToolAbsent => {}
+            DetectorStatus::ToolAbsent | DetectorStatus::ToolNotRunning => {}
             DetectorStatus::Failed(reason) => failures.push(format!("{}: {reason}", id.0)),
         }
     }

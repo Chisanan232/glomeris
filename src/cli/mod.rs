@@ -227,9 +227,15 @@ pub enum DetectorOutcome {
     /// The probe succeeded and produced `candidates` evidences, all of
     /// which are in the pass's candidate list.
     Found { candidates: usize },
-    /// The detector's tool is not installed, or is installed but
-    /// unreachable. Normal, expected state.
+    /// The detector's tool is not installed. Normal, expected state.
+    ///
+    /// No longer doubles as "installed but unreachable" — that is
+    /// [`DetectorOutcome::ToolNotRunning`] since HORO-1544.
     ToolAbsent,
+    /// The tool is installed but not answering. Normal state too, and a
+    /// different fact: the resources are presumably still there, and this
+    /// pass could not see them.
+    ToolNotRunning,
     /// The probe itself failed. Not evidence of "nothing to clean up".
     Failed(String),
 }
@@ -237,26 +243,34 @@ pub enum DetectorOutcome {
 impl DetectorOutcome {
     /// The tag every serialized surface uses for this outcome.
     ///
-    /// One producer for all three strings (HORO-1484), so `detect --json`,
+    /// One producer for all four strings (HORO-1484), so `detect --json`,
     /// the `--progress-json` stream and the book cannot drift into
     /// describing the same probe with different words.
+    ///
+    /// `tool_not_running` is spelled the same here as
+    /// [`crate::evidence::ProbeReason::ToolNotRunning`] spells it, on purpose:
+    /// the two answer the same question about the same tool from two layers,
+    /// and a reader should not have to learn that they are the same fact.
     pub fn tag(&self) -> &'static str {
         match self {
             DetectorOutcome::Found { .. } => "found",
             DetectorOutcome::ToolAbsent => "tool_absent",
+            DetectorOutcome::ToolNotRunning => "tool_not_running",
             DetectorOutcome::Failed(_) => "failed",
         }
     }
 
     /// How many evidences this detector contributed.
     ///
-    /// `0` for `ToolAbsent` and for `Failed` — which is the whole reason
+    /// `0` for every non-`Found` outcome — which is the whole reason
     /// [`DetectorOutcome::tag`] exists. A count alone cannot tell a probe
     /// that looked and found nothing from one that never looked.
     pub fn candidates_found(&self) -> usize {
         match self {
             DetectorOutcome::Found { candidates } => *candidates,
-            DetectorOutcome::ToolAbsent | DetectorOutcome::Failed(_) => 0,
+            DetectorOutcome::ToolAbsent
+            | DetectorOutcome::ToolNotRunning
+            | DetectorOutcome::Failed(_) => 0,
         }
     }
 
@@ -264,7 +278,9 @@ impl DetectorOutcome {
     pub fn failure_reason(&self) -> Option<&str> {
         match self {
             DetectorOutcome::Failed(reason) => Some(reason),
-            DetectorOutcome::Found { .. } | DetectorOutcome::ToolAbsent => None,
+            DetectorOutcome::Found { .. }
+            | DetectorOutcome::ToolAbsent
+            | DetectorOutcome::ToolNotRunning => None,
         }
     }
 }
@@ -285,6 +301,7 @@ impl From<&DetectorStatus> for DetectorOutcome {
                 candidates: evidences.len(),
             },
             DetectorStatus::ToolAbsent => DetectorOutcome::ToolAbsent,
+            DetectorStatus::ToolNotRunning => DetectorOutcome::ToolNotRunning,
             DetectorStatus::Failed(reason) => DetectorOutcome::Failed(reason.clone()),
         }
     }
@@ -368,7 +385,9 @@ pub fn discover_and_classify_pass(
             }
             // Nothing further to do for either: the outcome recorded above
             // already carries which one it was, and a failure's reason.
-            DetectorStatus::ToolAbsent | DetectorStatus::Failed(_) => {}
+            DetectorStatus::ToolAbsent
+            | DetectorStatus::ToolNotRunning
+            | DetectorStatus::Failed(_) => {}
         }
     }
 
@@ -1855,6 +1874,7 @@ mod tests {
             match &self.result {
                 DetectorStatus::Found(evidences) => DetectorStatus::Found(evidences.clone()),
                 DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
+                DetectorStatus::ToolNotRunning => DetectorStatus::ToolNotRunning,
                 DetectorStatus::Failed(reason) => DetectorStatus::Failed(reason.clone()),
             }
         }
@@ -1917,7 +1937,9 @@ mod tests {
             .iter()
             .map(|(_, outcome)| match outcome {
                 DetectorOutcome::Found { candidates } => *candidates,
-                DetectorOutcome::ToolAbsent | DetectorOutcome::Failed(_) => 0,
+                DetectorOutcome::ToolAbsent
+                | DetectorOutcome::ToolNotRunning
+                | DetectorOutcome::Failed(_) => 0,
             })
             .sum();
         assert_eq!(claimed, pass.candidates.len());
@@ -1957,6 +1979,45 @@ mod tests {
             ]
         );
         assert!(pass.candidates.is_empty());
+    }
+
+    /// A tool that is installed but not answering is its own outcome, all the
+    /// way to the serialized tag (HORO-1544). The three assertions are the
+    /// three ways it could have been lost: folded into `ToolAbsent`, which
+    /// would tell a developer their images are not there; folded into
+    /// `Failed`, which would tell them something broke; or given a tag that
+    /// some other outcome also uses.
+    #[test]
+    fn a_tool_that_is_not_running_is_neither_absent_nor_failed() {
+        let (stopped, _) = CountingDetector::new("stopped", DetectorStatus::ToolNotRunning);
+        let (absent, _) = CountingDetector::new("absent", DetectorStatus::ToolAbsent);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(stopped), Box::new(absent)]);
+
+        let pass = discover_and_classify_pass(
+            &registry,
+            &ctx(),
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+            |_| {},
+        );
+
+        assert_eq!(
+            pass.detectors,
+            vec![
+                (DetectorId("stopped"), DetectorOutcome::ToolNotRunning),
+                (DetectorId("absent"), DetectorOutcome::ToolAbsent),
+            ]
+        );
+        assert_eq!(DetectorOutcome::ToolNotRunning.tag(), "tool_not_running");
+        assert_ne!(
+            DetectorOutcome::ToolNotRunning.tag(),
+            DetectorOutcome::ToolAbsent.tag()
+        );
+        // Not a failure, so it must not claim a failure message — a reason
+        // here would print as `failed: ...` on `detect`'s human output.
+        assert_eq!(DetectorOutcome::ToolNotRunning.failure_reason(), None);
+        assert_eq!(DetectorOutcome::ToolNotRunning.candidates_found(), 0);
     }
 
     /// The candidates-only wrappers are the same pipeline, not a second

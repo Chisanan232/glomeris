@@ -76,11 +76,17 @@ fn write_shim(path: &Path, script: &str) {
 /// * succeeding — prints a cache directory that exists and holds one file,
 ///   which it reports as `Found`.
 ///
-/// `docker` always exits 1, which `DockerDetector` treats as "daemon
-/// unreachable" and reports as `ToolAbsent`. That is the whole point of the
-/// fixture: one run contains a detector that failed *and* a detector whose
-/// tool is absent, so a report that renders them identically fails these
-/// tests.
+/// `docker` always exits 1 with the message a real client prints when no
+/// daemon is listening, which `DockerDetector` reports as `ToolNotRunning`
+/// (HORO-1544). That is the whole point of the fixture: one run contains a
+/// detector that failed *and* a detector whose tool is installed but not
+/// answering, so a report that renders them identically fails these tests.
+///
+/// Until HORO-1544 this shim was a bare `exit 1` and the detector answered
+/// `ToolAbsent` — "Docker is not installed" about a machine where it plainly
+/// was. The shim now says what the client says, and a bare `exit 1` is
+/// covered by the detector's own unit tests as `Failed`, since an
+/// unattributable exit is not a fact about the daemon.
 struct Fixture {
     shim_dir: PathBuf,
     home: PathBuf,
@@ -104,7 +110,11 @@ impl Fixture {
             format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", cache_dir.display())
         };
         write_shim(&shim_dir.join("brew"), &brew_script);
-        write_shim(&shim_dir.join("docker"), "#!/bin/sh\nexit 1\n");
+        write_shim(
+            &shim_dir.join("docker"),
+            "#!/bin/sh\necho 'Cannot connect to the Docker daemon at \
+             unix:///var/run/docker.sock. Is the docker daemon running?' >&2\nexit 1\n",
+        );
 
         let home = root.join("home");
         fs::create_dir_all(&home).expect("create empty home");
@@ -225,12 +235,13 @@ fn detect_json_distinguishes_a_failed_detector_from_an_absent_tool() {
     let docker = detector_entry(&report, "docker_build_cache");
     assert_eq!(
         docker.get("status").and_then(|v| v.as_str()),
-        Some("tool_absent"),
-        "an unreachable docker daemon is a tool-absent answer, not a failure; got: {docker}"
+        Some("tool_not_running"),
+        "an unreachable docker daemon is its own answer — neither a failure nor \
+         an absent tool; got: {docker}"
     );
     assert!(
         docker.get("reason").is_none(),
-        "`tool_absent` is not a failure and carries no failure reason; got: {docker}"
+        "`tool_not_running` is not a failure and carries no failure reason; got: {docker}"
     );
 
     // The completeness claim.
@@ -374,12 +385,12 @@ fn progress_stream_carries_each_detectors_outcome_not_only_its_count() {
     );
     assert_eq!(
         docker.get("outcome").and_then(|v| v.as_str()),
-        Some("tool_absent"),
-        "an absent tool must not be reported as a failure; got: {docker}"
+        Some("tool_not_running"),
+        "a daemon that is not answering must not be reported as a failure; got: {docker}"
     );
     assert!(
         docker.get("reason").is_none(),
-        "an absent tool has no failure reason; got: {docker}"
+        "a tool that is not running has no failure reason; got: {docker}"
     );
 
     fixture.cleanup();

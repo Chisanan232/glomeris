@@ -44,10 +44,22 @@ pub struct DetectorId(pub &'static str);
 /// evidence of "nothing to clean up", it is evidence of "we don't know."
 /// This ticket's code only constructs the variant; enforcing that
 /// distinction end-to-end is the future policy layer's job.
+///
+/// `ToolNotRunning` is HORO-1544's addition, for the client/daemon tools
+/// where "installed" and "answering" are different questions. Docker is the
+/// case that forced it: `docker` on `PATH` with no daemon listening is
+/// neither of the other two — reporting `ToolAbsent` tells a developer their
+/// 21 GB of images are not there, and reporting `Failed` tells them
+/// something broke when nothing did. It is a third fact and it needs a third
+/// word.
 #[derive(Debug, PartialEq)]
 pub enum DetectorStatus {
     Found(Vec<Evidence>),
     ToolAbsent,
+    /// The tool is installed but not answering: a daemon that is not
+    /// running, or a client that cannot reach one. Says nothing about how
+    /// much this detector would have found.
+    ToolNotRunning,
     Failed(String),
 }
 
@@ -1090,6 +1102,7 @@ mod tests {
             match &self.0 {
                 DetectorStatus::Found(evidence) => DetectorStatus::Found(evidence.clone()),
                 DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
+                DetectorStatus::ToolNotRunning => DetectorStatus::ToolNotRunning,
                 DetectorStatus::Failed(msg) => DetectorStatus::Failed(msg.clone()),
             }
         }

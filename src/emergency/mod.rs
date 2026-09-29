@@ -373,6 +373,12 @@ pub fn run_emergency(
             // A detector's tool being absent is normal, expected state,
             // never an error (see `crate::detectors` module docs).
             DetectorStatus::ToolAbsent => {}
+            // Likewise a tool that is installed but not answering: normal
+            // state, and not a failure to report (HORO-1544). It does mean
+            // this run saw none of that tool's resources, which is why the
+            // outcome stays visible on the discovery surfaces rather than
+            // being folded into `ToolAbsent`.
+            DetectorStatus::ToolNotRunning => {}
             // A failure goes to its own field, not to the bounded advisory
             // `errors` list: it names which detector did not answer, and it
             // must not be droppable by a run that also had eight unrelated
