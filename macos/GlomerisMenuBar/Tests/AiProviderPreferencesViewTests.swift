@@ -58,6 +58,23 @@ final class AiProviderPreferencesViewTests: XCTestCase {
             .joined(separator: "\n")
     }
 
+    /// `readCode()` with concatenated string literals joined back together, so a
+    /// copy assertion is about the sentence a user reads and not about where the
+    /// formatter happened to break the line. The same helper
+    /// `AiPlanSectionViewTests` added in HORO-1367, after a guard failed on copy
+    /// that was perfectly correct.
+    ///
+    /// Requires a closing quote, then only whitespace, a `+`, more whitespace and
+    /// an opening quote — so it joins literals and cannot reach across an
+    /// argument list, where a comma intervenes.
+    private static func readJoinedCopy() throws -> String {
+        try readCode().replacingOccurrences(
+            of: "\"\\s*\\+\\s*\"",
+            with: "",
+            options: .regularExpression
+        )
+    }
+
     private func data(_ text: String) -> Data { Data(text.utf8) }
 
     // MARK: - LlmCheckInterpretation
@@ -401,9 +418,56 @@ final class AiProviderPreferencesViewTests: XCTestCase {
 
         XCTAssertFalse(declaration.contains("notConfigured"))
         XCTAssertFalse(declaration.contains("misconfigured"))
+        // Four since HORO-1550. `contractUnsupported` is the CLI refusing an
+        // argument while parsing it, so strictly less left the machine than in
+        // any other case here — it is not the credential-shaped fourth case this
+        // guard exists to catch. A fifth still needs the same look.
         XCTAssertEqual(
-            declaration.components(separatedBy: "case ").count - 1, 3,
-            "three cases, and adding a fourth is a claim about egress that needs a look")
+            declaration.components(separatedBy: "case ").count - 1, 4,
+            "four cases, and adding a fifth is a claim about egress that needs a look")
+    }
+
+    /// The preview's half of the version-skew story. An older CLI rejects
+    /// `--contract-version` while parsing arguments, so this is not a provider
+    /// failure, not a malformed report, and — the part that matters on a privacy
+    /// screen — not a request that went anywhere.
+    func testAnOlderCliRejectingTheContractFlagIsItsOwnPreviewOutcome() {
+        let outcome = LlmPayloadPreviewInterpretation.interpret(
+            exitCode: 2,
+            stdout: Data(),
+            stderr: data(
+                "glomeris llm-plan: unrecognized argument '--contract-version'\n\nUsage: glomeris "
+                    + "llm-plan [--json]\n")
+        )
+
+        XCTAssertEqual(outcome, .contractUnsupported)
+    }
+
+    /// And a usage mistake of this app's own stays a plain failure carrying the
+    /// CLI's sentence, so the detector above is about one specific skew rather
+    /// than about exit 2.
+    func testAnyOtherRejectedArgumentStaysAPlainPreviewFailure() {
+        let outcome = LlmPayloadPreviewInterpretation.interpret(
+            exitCode: 2,
+            stdout: Data(),
+            stderr: data("glomeris llm-plan: unrecognized argument '--nope'\n")
+        )
+
+        XCTAssertEqual(outcome, .failed("glomeris llm-plan: unrecognized argument '--nope'"))
+    }
+
+    /// The sentence a user actually reads. On a privacy screen the claim that
+    /// nothing was sent is the load-bearing half, because the alternative
+    /// reading of "could not preview" is "it went out unpreviewed".
+    func testThePreviewSaysNothingWasSentWhenTheCliIsTooOld() throws {
+        let copy = try Self.readJoinedCopy()
+
+        XCTAssertTrue(
+            copy.contains("does not understand the request format this app sends"),
+            "the older-CLI case must name what is missing")
+        XCTAssertTrue(
+            copy.contains("Nothing was sent anywhere"),
+            "and must say so about egress, on this screen above all")
     }
 
     // MARK: - AiProviderCommands
@@ -417,7 +481,45 @@ final class AiProviderPreferencesViewTests: XCTestCase {
     func testThePreviewPassesPrintPayload() {
         let arguments = AiProviderCommands.payloadPreview(projectRootArguments: [])
 
-        XCTAssertEqual(arguments, ["llm-plan", "--print-payload", "--json"])
+        XCTAssertEqual(
+            arguments, ["llm-plan", "--contract-version", "2", "--print-payload", "--json"])
+    }
+
+    /// AC 5, as an equality rather than a description: the preview and the live
+    /// plan must ask for the *same* contract version, because the two versions
+    /// build their request from different sources and therefore send different
+    /// bytes. A preview showing the version 1 payload would be showing a user
+    /// something this app no longer sends — the one failure this screen cannot
+    /// afford, since verifying what leaves the machine is its whole purpose.
+    ///
+    /// Read off the same two constants the card's own argument vector uses, so
+    /// changing the card's version without changing the preview's cannot compile
+    /// to something that passes.
+    func testThePreviewAsksForTheSameContractVersionAsTheLivePlan() throws {
+        let arguments = AiProviderCommands.payloadPreview(projectRootArguments: [])
+        let flagIndex = try XCTUnwrap(
+            arguments.firstIndex(of: AiPlanInterpretation.contractVersionFlag),
+            "the preview does not pin a contract version: \(arguments)"
+        )
+
+        XCTAssertEqual(
+            arguments[arguments.index(after: flagIndex)],
+            "\(AiPlanInterpretation.expectedContractVersion)",
+            "the preview previews a different contract version than the card requests"
+        )
+    }
+
+    /// And it is still free. `--print-payload` is what stops the version 2
+    /// branch after `build_workspace_request`, so a user can inspect the request
+    /// without a provider, a credential, or a charge.
+    func testAskingForVersionTwoDidNotMakeThePreviewABilledRequest() {
+        let arguments = AiProviderCommands.payloadPreview(projectRootArguments: [])
+
+        XCTAssertTrue(arguments.contains("--print-payload"))
+        XCTAssertFalse(
+            arguments.contains("--evidence-rounds"),
+            "an evidence-request loop would call the provider, which a preview must never do"
+        )
     }
 
     /// Scoped identically to what `AiPlanSectionView` sends a live `llm-plan`.

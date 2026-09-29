@@ -272,8 +272,15 @@ struct LlmCheckResultViewModel: Equatable {
 /// about, and it is visible right here in the shape of this type — a preview
 /// that could report "no provider configured" would be a preview that had
 /// tried to use one.
+/// HORO-1550 added `contractUnsupported`, which is not a fourth egress claim:
+/// it is the CLI refusing an argument while parsing it, so strictly less left
+/// this machine than in any other case here. It exists because the preview now
+/// pins a contract version, and an older CLI would otherwise answer with its own
+/// usage text — accurate, and useless to the person who came here to check what
+/// gets sent.
 enum LlmPayloadPreviewOutcome: Equatable {
     case payload(LlmPayloadReportDto)
+    case contractUnsupported
     case malformedOutput
     case failed(String)
 }
@@ -294,6 +301,14 @@ enum LlmPayloadPreviewInterpretation {
 
         if exitCode == 0 {
             return .malformedOutput
+        }
+
+        // Keyed on the flag name rather than on "unrecognized argument" alone, so
+        // a genuine usage bug in this app stays a plain failure with the CLI's own
+        // sentence. Same detector as `AiPlanInterpretation`, from the same
+        // constants, because it is the same skew.
+        if stderrText.contains(AiPlanInterpretation.unsupportedContractMarker) {
+            return .contractUnsupported
         }
 
         return .failed(
@@ -325,8 +340,32 @@ enum AiProviderCommands {
     /// differently from the real call would disclose the wrong payload, which
     /// is worse than disclosing none. Both are the same command, so both get
     /// the same answer out of `GlomerisCliProjectRootScope` (HORO-1501).
+    ///
+    /// # HORO-1550, and why the contract version is here too
+    ///
+    /// The two contract versions build their request from different sources —
+    /// version 1 from the candidate list, version 2 from the workspace graph
+    /// projection — so they are two different payloads, with two different
+    /// system prompts and two different user prompts. `AiPlanSectionView` asks
+    /// for version 2, and a preview that printed the version 1 request would be
+    /// showing a user something this app no longer sends. AC 5 is that the
+    /// privacy preview reflects the version 2 payload *exactly*, and the flag
+    /// that decides which one gets built belongs in the same place as
+    /// `--print-payload`: in the argument vector, as data, next to the assertion
+    /// that pins it.
+    ///
+    /// `--print-payload` still makes this free. The version 2 branch calls
+    /// `build_workspace_payload_report`, which runs `build_workspace_request`
+    /// and stops — no provider, no credential, no charge — and returns the same
+    /// three-field report, so nothing downstream of the decode changes.
     static func payloadPreview(projectRootArguments: [String]) -> [String] {
-        ["llm-plan", "--print-payload", "--json"] + projectRootArguments
+        [
+            "llm-plan",
+            AiPlanInterpretation.contractVersionFlag,
+            "\(AiPlanInterpretation.expectedContractVersion)",
+            "--print-payload",
+            "--json",
+        ] + projectRootArguments
     }
 }
 
@@ -1345,6 +1384,16 @@ struct AiProviderPreferencesView: View {
                     }
                 }
             }
+
+        case .contractUnsupported:
+            // Says what is missing and what it means, and does not imply that
+            // anything was sent: the CLI rejected the argument before it built a
+            // request at all.
+            GlomerisStateMessageView(
+                message: .failure(
+                    "The installed glomeris does not understand the request format this app "
+                        + "sends, so there is nothing to preview. Nothing was sent anywhere — "
+                        + "update the glomeris CLI to see the payload."))
 
         case .malformedOutput:
             GlomerisStateMessageView(
