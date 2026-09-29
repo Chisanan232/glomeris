@@ -1035,6 +1035,96 @@ mod tests {
         );
     }
 
+    /// Companion structural guard (HORO-1543): a detector must not read the
+    /// process environment, and production must not build a
+    /// [`DiscoveryContext`] that cannot see it.
+    ///
+    /// Both halves of that come from one incident. The Cargo registry and
+    /// Gradle detectors originally called `std::env::var` inside
+    /// `discover()`, which made them answer from `CARGO_HOME` /
+    /// `GRADLE_USER_HOME` no matter what `DiscoveryContext::home_dir` said.
+    /// Because `cargo test` exports `CARGO_HOME` into every process it
+    /// spawns, an integration test that carefully pointed `$HOME` at an
+    /// empty temporary directory still measured the developer's real
+    /// `~/.cargo/registry`. The env-var back-channel is the defect;
+    /// [`ToolHomeVar`] plus [`DiscoveryContext::from_process_env`] is the
+    /// fix, and this test is what stops the back-channel coming back.
+    ///
+    /// Same lightweight source-text technique as the guard above, and the
+    /// same reason: an AST pass would be a lot of machinery to answer a
+    /// question about two identifiers.
+    #[test]
+    fn no_detector_reads_the_process_environment() {
+        // Split so this test's own source never contains either needle.
+        let env_read = format!("{}{}", "env::", "var");
+        let hermetic_ctor = format!("{}{}", "DiscoveryContext::", "new(");
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // `mod.rs` holds `DiscoveryContext::from_process_env`, which is the
+        // one place in this module tree that legitimately reads the
+        // environment: it is not a detector, it is the boundary that keeps
+        // detectors from having to be one.
+        let env_read_allowlist: &[(&str, usize)] = &[("src/detectors/mod.rs", 1)];
+
+        let mut offenders: Vec<String> = Vec::new();
+        scan_rs_files(&manifest_dir.join("src/detectors"), &mut |path, content| {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            // Production code only: a detector *test* may read the
+            // environment (several use `std::env::temp_dir`), and a test
+            // cannot smuggle host state into a production probe.
+            let production = match content.split_once("#[cfg(test)]") {
+                Some((before, _)) => before,
+                None => content,
+            };
+            let count = production
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .filter(|line| line.contains(&env_read))
+                .count();
+            let expected = env_read_allowlist
+                .iter()
+                .find(|(p, _)| *p == rel)
+                .map(|(_, n)| *n)
+                .unwrap_or(0);
+            if count != expected {
+                offenders.push(format!(
+                    "{rel} ({count} occurrence(s), expected {expected})"
+                ));
+            }
+        });
+
+        assert!(
+            offenders.is_empty(),
+            "detector production code must not read the process environment: \
+             {offenders:?} — a detector that does answers from the host machine \
+             even under a fixture DiscoveryContext. Carry the variable on \
+             DiscoveryContext as a ToolHomeVar instead (HORO-1543)"
+        );
+
+        // The other half: every production DiscoveryContext must be built
+        // with `from_process_env`, or a relocated tool home is invisible to
+        // the product while remaining perfectly visible to its tests.
+        let main_rs = fs::read_to_string(manifest_dir.join("src/main.rs"))
+            .expect("failed to read src/main.rs");
+        let hermetic_uses = main_rs
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains(&hermetic_ctor))
+            .count();
+        assert_eq!(
+            hermetic_uses, 0,
+            "src/main.rs builds a DiscoveryContext with the hermetic \
+             constructor, so a user who has relocated CARGO_HOME or \
+             GRADLE_USER_HOME gets tool_absent for a cache that exists; use \
+             DiscoveryContext::from_process_env (HORO-1543)"
+        );
+    }
+
     /// Returns the portion of `content` that is actually test code: for
     /// an integration test file under `tests/`, the whole file (every
     /// integration test file is test-only by construction); for a `src/`
