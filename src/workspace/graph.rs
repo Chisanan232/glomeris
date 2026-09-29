@@ -769,6 +769,68 @@ impl WorkspaceEvidenceGraph {
     pub fn resource_count(&self) -> usize {
         self.resources().count()
     }
+
+    /// Fills in each working tree's [`ExternalContext`] from whichever providers
+    /// are configured, and reports what happened for each attempt.
+    ///
+    /// Separate from [`Self::build`] on purpose. `build` is pure — no I/O, no
+    /// clock, no network — and every caller relies on being able to assemble a
+    /// picture of the machine offline. This is the one method here that can reach
+    /// a service, so it is the one method a reader has to look at to know whether
+    /// a command talks to anything, and it does nothing at all when no provider
+    /// exists: not a request, not a `git` process, not a traversal.
+    ///
+    /// What it changes is one field per working tree. It does not touch
+    /// [`BranchLifecycle`], [`ActivityFacts`], any [`ResourceNode`]'s policy
+    /// decision, or anything a [`crate::actions::Action`] can read — a merged
+    /// pull request is context for a person and for a model, never authority.
+    pub fn attach_external_context(
+        &mut self,
+        resolver: &super::external::ExternalContextResolver<'_>,
+        now: SystemTime,
+    ) -> Vec<ExternalContextAttempt> {
+        if !resolver.is_enabled() {
+            return Vec::new();
+        }
+
+        let mut attempts = Vec::new();
+        for repository in &mut self.repositories {
+            for worktree in &mut repository.worktrees {
+                // The branch name comes from the local probe that already ran,
+                // never from a second reading and never from the directory name.
+                // Its three states are carried across intact; see
+                // `resolve_branch_outcome`.
+                let branch = match &worktree.lifecycle.branch {
+                    ProbeOutcome::Observed(state) => {
+                        ProbeOutcome::Observed(state.branch.as_deref())
+                    }
+                    ProbeOutcome::Unavailable(reason) => ProbeOutcome::Unavailable(*reason),
+                };
+                let resolved = resolver.resolve_branch_outcome(&worktree.root, branch, now);
+                attempts.push(ExternalContextAttempt {
+                    worktree: worktree.root.clone(),
+                    pull_request_detail: resolved.pull_request_detail,
+                    task_detail: resolved.task_detail,
+                });
+                worktree.external = resolved.context;
+            }
+        }
+        attempts
+    }
+}
+
+/// What one working tree's external lookup did, for a local report.
+///
+/// The [`super::external::ExternalDetail`]s stay here rather than on
+/// [`WorktreeNode`] because they are diagnostics for whoever is setting the
+/// feature up — "the token was refused", "this remote is on another host" — and
+/// the graph is what a model projection is built from. A field on the node would
+/// be a field somebody could serialise by accident.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalContextAttempt {
+    pub worktree: PathBuf,
+    pub pull_request_detail: super::external::ExternalDetail,
+    pub task_detail: super::external::ExternalDetail,
 }
 
 /// Mutable state while one working tree's resources are collected.

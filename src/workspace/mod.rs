@@ -53,10 +53,11 @@ pub use branch::{
     MergedState, PatchEquivalence, UpstreamState, WorktreeBranchState,
 };
 pub use graph::{
-    ActivityFacts, BranchLifecycle, ExternalContext, ExternalFact, ExternalSource,
-    GlobalResourceNode, HistoryConfidence, MachineContext, PullRequestState, RepositoryNode,
-    ResourceNode, TaskState, UniqueWork, UnplacedResourceNode, WorkflowHistorySummary,
-    WorkflowMode, WorkspaceEvidenceGraph, WorktreeNode, MIN_OBSERVATIONS_FOR_A_PATTERN,
+    ActivityFacts, BranchLifecycle, ExternalContext, ExternalContextAttempt, ExternalFact,
+    ExternalSource, GlobalResourceNode, HistoryConfidence, MachineContext, PullRequestState,
+    RepositoryNode, ResourceNode, TaskState, UniqueWork, UnplacedResourceNode,
+    WorkflowHistorySummary, WorkflowMode, WorkspaceEvidenceGraph, WorktreeNode,
+    MIN_OBSERVATIONS_FOR_A_PATTERN,
 };
 pub use group::{
     group_families, ActivityState, WorkspaceFamily, WorkspaceMember, WorkspaceSurvey,
