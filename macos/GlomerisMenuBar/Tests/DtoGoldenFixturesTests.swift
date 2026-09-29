@@ -248,6 +248,13 @@ final class DtoGoldenFixturesTests: XCTestCase {
     /// is on the distinction rather than on decoding succeeding: a mirror that
     /// collapsed `"unknown"` into `"idle"`, or read an unreadable branch as a
     /// detached HEAD, would decode all three without throwing.
+    ///
+    /// Since HORO-1545 that includes the integration evidence, where the
+    /// distinction that matters is between an observed zero and an absent
+    /// count. The merged checkout has three zeroes because nothing is absent
+    /// from the branch it was compared against; the unreadable one has three
+    /// `nil`s and a reason. A mirror that defaulted the counts would decode
+    /// both and report the second as a worktree with no commits of its own.
     func testWorkspaceWorktreesEachKeepTheirOwnAnswer() throws {
         let dto = try decodeFixture(
             "workspace_family_report.json", as: WorkspaceFamilyReportDto.self)
@@ -261,6 +268,15 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(main.behind, 12)
         XCTAssertEqual(main.merged, "merged")
         XCTAssertEqual(main.mergedInto, "origin/main")
+        XCTAssertEqual(
+            main.patchEquivalence, "not_applicable",
+            "merged outright, so there was no separate question to ask"
+        )
+        XCTAssertNil(main.equivalenceMethod, "nothing was established, so no method established it")
+        XCTAssertEqual(main.commitsUniqueToHead, 0, "an observed zero, not an absent count")
+        XCTAssertEqual(main.commitsUnclassified, 0)
+        XCTAssertNil(main.divergenceUnavailableReason)
+        XCTAssertEqual(main.headTipCommittedAtUnix, 1_725_000_000)
         XCTAssertFalse(
             main.holdsWorkInProgress,
             "clean, idle, nothing unpushed — the only worktree here with nothing outstanding"
@@ -272,7 +288,22 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertFalse(feature.untracked)
         XCTAssertEqual(feature.ahead, 3, "three commits no remote has")
         XCTAssertEqual(feature.merged, "not_merged")
-        XCTAssertTrue(feature.holdsWorkInProgress)
+        // The shape HORO-1545 exists for: every commit here has landed on the
+        // default branch as a squash, and the worktree is still dirty. Both
+        // facts decode, and the second is not overridden by the first.
+        XCTAssertEqual(feature.patchEquivalence, "equivalent")
+        XCTAssertEqual(feature.equivalenceMethod, "content_identical")
+        XCTAssertEqual(feature.commitsUniqueToHead, 3)
+        XCTAssertEqual(feature.commitsEquivalentElsewhere, 0)
+        XCTAssertEqual(feature.headTipCommittedAtUnix, 1_726_500_000)
+        XCTAssertEqual(
+            feature.comparisonTipCommittedAtUnix, 1_725_000_000,
+            "its tip is newer than the branch it was measured against"
+        )
+        XCTAssertTrue(
+            feature.holdsWorkInProgress,
+            "a squash covers the commits it was made from, not the file still open"
+        )
         XCTAssertEqual(
             feature.memberResourceIds,
             [
@@ -292,6 +323,17 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(hotfix.mergedInto)
         XCTAssertNil(hotfix.ahead)
         XCTAssertNil(hotfix.behind)
+        XCTAssertEqual(hotfix.patchEquivalence, "unknown")
+        XCTAssertEqual(hotfix.equivalenceUnknownReason, "not_attempted")
+        XCTAssertNil(
+            hotfix.commitsUniqueToHead,
+            "a nil count, never a zero — a zero would read as no commits of its own"
+        )
+        XCTAssertNil(hotfix.commitsUnclassified)
+        XCTAssertEqual(hotfix.divergenceUnavailableReason, "not_attempted")
+        XCTAssertNil(hotfix.headTipCommittedAtUnix)
+        XCTAssertEqual(hotfix.headTipUnavailableReason, "not_attempted")
+        XCTAssertEqual(hotfix.comparisonTipUnavailableReason, "not_attempted")
         XCTAssertTrue(hotfix.holdsWorkInProgress)
     }
 

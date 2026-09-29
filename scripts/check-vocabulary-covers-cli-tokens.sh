@@ -63,7 +63,7 @@
 # src/executor/lock.rs, which is why a repo-wide grep was never a
 # substitute for a producer here.
 #
-# Exit 0 = the twenty checked vocabularies match. Exit 1 = drift, or an
+# Exit 0 = the twenty-two checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -180,12 +180,32 @@ VOCABULARIES=(
   'worktreeActivity;;src/workspace/group.rs;;ActivityState::tag;;ActivityState'
   'worktreeUpstream;;src/workspace/branch.rs;;UpstreamState::tag;;UpstreamState'
   'worktreeMerged;;src/workspace/branch.rs;;MergedState::tag;;MergedState'
+  # HORO-1545. Two more from the same file, scoped for the same reason: three
+  # `fn tag(` now live in src/workspace/branch.rs and an unscoped anchor would
+  # take the first every time.
+  #
+  # `PatchEquivalence` is the one vocabulary on this surface whose strongest
+  # token comes close to sounding like permission — "the same work is already
+  # on the other branch" — and it is four tokens precisely so it cannot be read
+  # as a boolean. `not_applicable` means there was no question to ask, and
+  # wording that let it read as "no" would turn a merged branch into an
+  # unintegrated one on the way to the screen. The dangerous direction here is
+  # the same as for the three rows above, and worse: a token missing from Rust
+  # but present in Swift would mean the app has a sentence for an integration
+  # state that cannot happen, sitting beside three that can.
+  #
+  # `EquivalenceMethod` is two tokens and exists because they are not equally
+  # strong — one matched every commit, the other only found the files the same.
+  # It has no `unknown`: there is no method when there is no equivalence, and
+  # the field is absent rather than tagged in that case.
+  'worktreeEquivalence;;src/workspace/branch.rs;;PatchEquivalence::tag;;PatchEquivalence'
+  'worktreeEquivalenceMethod;;src/workspace/branch.rs;;EquivalenceMethod::tag;;EquivalenceMethod'
 )
 
 # One more than the number of rows above: `outcome` has no producer to diff
 # against (see this script's header). Cross-checked against the rows actually
 # walked, at the end.
-TOTAL_VOCABULARIES=21
+TOTAL_VOCABULARIES=23
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent

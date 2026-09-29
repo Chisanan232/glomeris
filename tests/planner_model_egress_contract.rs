@@ -46,9 +46,9 @@ use glomeris::evidence::{
 use glomeris::planner::GraphProjection;
 use glomeris::policy::{PolicyClass, PolicyDecision, ReasonCode};
 use glomeris::workspace::{
-    ExternalFact, ExternalSource, MachineContext, MergedState, PullRequestState, TaskState,
-    UpstreamState, WorkflowHistorySummary, WorkflowMode, WorkspaceEvidenceGraph, WorkspaceSurvey,
-    WorktreeBranchState,
+    ExternalFact, ExternalSource, IntegrationEvidence, MachineContext, MergedState,
+    PullRequestState, TaskState, UpstreamState, WorkflowHistorySummary, WorkflowMode,
+    WorkspaceEvidenceGraph, WorkspaceSurvey, WorktreeBranchState,
 };
 
 use serde_json::Value;
@@ -302,6 +302,7 @@ fn projection() -> GraphProjection {
         merged: MergedState::NotMerged {
             into: MERGE_AXIS.to_string(),
         },
+        integration: IntegrationEvidence::not_attempted(),
     });
     worktree.external.pull_request = ExternalFact::observed(
         ExternalSource::GitHubPullRequests,
@@ -515,6 +516,17 @@ fn pinned_paths() -> BTreeSet<String> {
     paths.extend(reported(&format!("{branch}.merged_state")));
     paths.extend(reported(&format!("{branch}.merge_comparison_known")));
     paths.extend(reported(&format!("{branch}.detached_head")));
+    // HORO-1545. Every one of these is a shape: a count, an age in days or a
+    // closed vocabulary token. Written out by hand, like the rest, because
+    // the point of this list is that adding a field to `BranchView` fails
+    // until somebody has looked at the field and decided it may go.
+    paths.extend(reported(&format!("{branch}.patch_equivalence")));
+    paths.extend(reported(&format!("{branch}.equivalence_method")));
+    paths.extend(reported(&format!("{branch}.commits_unique_to_head")));
+    paths.extend(reported(&format!("{branch}.commits_equivalent_elsewhere")));
+    paths.extend(reported(&format!("{branch}.commits_unclassified")));
+    paths.extend(reported(&format!("{branch}.head_tip_age_days")));
+    paths.extend(reported(&format!("{branch}.comparison_tip_age_days")));
 
     for external in [
         "repositories[].worktrees[].pull_request",
@@ -700,6 +712,8 @@ fn the_pinned_set_covers_every_view_type() {
     for required in [
         "machine.free_bytes.status",
         "repositories[].worktrees[].branch.unique_work",
+        "repositories[].worktrees[].branch.patch_equivalence.unavailable_reason",
+        "repositories[].worktrees[].branch.commits_unclassified.value",
         "repositories[].worktrees[].activity.unanswered_probe_count",
         "repositories[].worktrees[].pull_request.state.unavailable_reason",
         "repositories[].worktrees[].task.observed_age_days.value",

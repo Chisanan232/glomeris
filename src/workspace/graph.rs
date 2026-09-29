@@ -831,6 +831,9 @@ mod tests {
         GitState, NativeCleanup, Recoverability, ResourceFingerprint, ResourceKind, ResourceLocator,
     };
     use crate::policy::{PolicyClass, ReasonCode};
+    use crate::workspace::branch::{
+        Divergence, EquivalenceMethod, IntegrationEvidence, PatchEquivalence,
+    };
     use crate::workspace::branch::{MergedState, UpstreamState};
     use crate::workspace::group::WorkspaceSurvey;
     use std::time::Duration;
@@ -982,6 +985,7 @@ mod tests {
             merged: MergedState::Merged {
                 into: "origin/main".to_string(),
             },
+            integration: IntegrationEvidence::not_attempted(),
         };
         let graph = build(
             &[candidate(
@@ -1318,6 +1322,7 @@ mod tests {
             merged: MergedState::Merged {
                 into: "origin/main".to_string(),
             },
+            integration: IntegrationEvidence::not_attempted(),
         };
         let mut graph = build(&[c], &surveyed("/w/a", merged_and_pushed));
 
@@ -1532,6 +1537,7 @@ mod tests {
                 merged: MergedState::Merged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(
@@ -1549,6 +1555,7 @@ mod tests {
                 merged: MergedState::Merged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(
@@ -1564,6 +1571,7 @@ mod tests {
                 branch: None,
                 upstream: UpstreamState::Unknown,
                 merged: MergedState::Unknown,
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(unknown_upstream.unique_work(), UniqueWork::Present);
@@ -1581,9 +1589,100 @@ mod tests {
                 merged: MergedState::NotMerged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(settled.unique_work(), UniqueWork::Absent);
+    }
+
+    /// AC 2 of HORO-1545, as a control on the evidence that ticket added.
+    ///
+    /// `IntegrationEvidence` exists to say "this work is already over there
+    /// in some form", which is a more persuasive sentence than `merged`
+    /// manages, and it is *still* not an answer to whether this working
+    /// tree holds anything of its own. A squash that landed last week
+    /// covers the commits it was made from and nothing written since.
+    ///
+    /// Each case below pairs the strongest integration answer the probe can
+    /// produce with a reason the tree is not settled, and asserts the
+    /// integration answer loses. The pairing matters: an assertion that
+    /// `Equivalent` yields `Present` proves nothing on a tree that is dirty
+    /// for unrelated reasons unless the same shape without the integration
+    /// evidence yields `Present` too — which
+    /// `unique_work_ignores_merged_state_and_reads_the_upstream` above
+    /// establishes.
+    #[test]
+    fn unique_work_ignores_patch_equivalence() {
+        let integrated = |unique: u32| IntegrationEvidence {
+            divergence: ProbeOutcome::Observed(Divergence {
+                unique_commits: unique,
+                equivalent_commits: 0,
+                unclassified_commits: 0,
+            }),
+            equivalence: PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
+            tip_committed_at: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+            comparison_tip_committed_at: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+        };
+
+        let equivalent_but_ahead = BranchLifecycle {
+            dirty: false,
+            untracked: false,
+            branch: ProbeOutcome::Observed(WorktreeBranchState {
+                branch: Some("x".to_string()),
+                upstream: UpstreamState::Tracking {
+                    ahead: 2,
+                    behind: 0,
+                },
+                merged: MergedState::NotMerged {
+                    into: "origin/main".to_string(),
+                },
+                integration: integrated(2),
+            }),
+        };
+        assert_eq!(
+            equivalent_but_ahead.unique_work(),
+            UniqueWork::Present,
+            "a squash covers the commits it was made from, not the ones written after it"
+        );
+
+        let equivalent_but_dirty = BranchLifecycle {
+            dirty: true,
+            untracked: false,
+            branch: ProbeOutcome::Observed(WorktreeBranchState {
+                branch: Some("x".to_string()),
+                upstream: UpstreamState::Tracking {
+                    ahead: 0,
+                    behind: 0,
+                },
+                merged: MergedState::Merged {
+                    into: "origin/main".to_string(),
+                },
+                integration: integrated(0),
+            }),
+        };
+        assert_eq!(
+            equivalent_but_dirty.unique_work(),
+            UniqueWork::Present,
+            "every commit landed and the file on disk still differs from all of them"
+        );
+
+        let equivalent_but_unpublished = BranchLifecycle {
+            dirty: false,
+            untracked: false,
+            branch: ProbeOutcome::Observed(WorktreeBranchState {
+                branch: Some("x".to_string()),
+                upstream: UpstreamState::Untracked,
+                merged: MergedState::Merged {
+                    into: "origin/main".to_string(),
+                },
+                integration: integrated(0),
+            }),
+        };
+        assert_eq!(
+            equivalent_but_unpublished.unique_work(),
+            UniqueWork::Present,
+            "equivalence is measured against one branch this machine happens to have"
+        );
     }
 
     /// A dirty tree is `Present` even when the branch probe failed, so the

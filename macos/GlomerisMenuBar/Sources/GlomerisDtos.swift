@@ -241,6 +241,42 @@ struct WorkspaceWorktreeReportDto: Decodable, Equatable, Identifiable {
     /// at `main`, so neither may a surface.
     let merged: String
     let mergedInto: String?
+    /// `"equivalent"`, `"not_equivalent"`, `"not_applicable"` or
+    /// `"unknown"` — whether the work here has landed on `mergedInto` by some
+    /// route other than ancestry: a squash, a rebase, a cherry-pick
+    /// (HORO-1545).
+    ///
+    /// `"not_applicable"` means the branch is merged outright so there was no
+    /// separate question to ask. It is not a quieter `"not_equivalent"`, and
+    /// `GlomerisVocabulary.worktreeEquivalence` keeps the two apart.
+    let patchEquivalence: String
+    /// `"per_commit_patch_id"` or `"content_identical"`, present only beside
+    /// `"equivalent"`. The two are not equally strong — see the vocabulary.
+    let equivalenceMethod: String?
+    /// Why `patchEquivalence` is `"unknown"`, present only for that value.
+    let equivalenceUnknownReason: String?
+    /// Commits `mergedInto` does not contain, split by whether an equivalent
+    /// patch is already there and by whether the per-commit method could
+    /// classify them at all.
+    ///
+    /// All three present together or all three `nil` with
+    /// `divergenceUnavailableReason` set. A `nil` is never a zero: "no commits
+    /// of its own" is the one reading an unanswered probe must not produce.
+    let commitsUniqueToHead: UInt32?
+    let commitsEquivalentElsewhere: UInt32?
+    let commitsUnclassified: UInt32?
+    let divergenceUnavailableReason: String?
+    /// When the newest commit here was written, and the same for the branch it
+    /// was compared against, as seconds since the Unix epoch.
+    ///
+    /// Instants rather than ages because the CLI reads no clock; a surface
+    /// showing an age does the subtraction itself. Each carries its own reason
+    /// when absent — a repository with no recorded default branch has a
+    /// readable tip and nothing to compare it against.
+    let headTipCommittedAtUnix: UInt64?
+    let headTipUnavailableReason: String?
+    let comparisonTipCommittedAtUnix: UInt64?
+    let comparisonTipUnavailableReason: String?
     /// Whether this worktree holds something that should stop a person
     /// treating it as spent: uncommitted work, untracked files, something
     /// using it, or commits no remote has.
@@ -266,6 +302,17 @@ struct WorkspaceWorktreeReportDto: Decodable, Equatable, Identifiable {
         case branch
         case merged
         case mergedInto = "merged_into"
+        case patchEquivalence = "patch_equivalence"
+        case equivalenceMethod = "equivalence_method"
+        case equivalenceUnknownReason = "equivalence_unknown_reason"
+        case commitsUniqueToHead = "commits_unique_to_head"
+        case commitsEquivalentElsewhere = "commits_equivalent_elsewhere"
+        case commitsUnclassified = "commits_unclassified"
+        case divergenceUnavailableReason = "divergence_unavailable_reason"
+        case headTipCommittedAtUnix = "head_tip_committed_at_unix"
+        case headTipUnavailableReason = "head_tip_unavailable_reason"
+        case comparisonTipCommittedAtUnix = "comparison_tip_committed_at_unix"
+        case comparisonTipUnavailableReason = "comparison_tip_unavailable_reason"
         case holdsWorkInProgress = "holds_work_in_progress"
         case memberResourceIds = "member_resource_ids"
     }

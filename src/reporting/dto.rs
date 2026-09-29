@@ -7,6 +7,8 @@
 //! field to `Evidence`/`PolicyDecision` upstream has no effect on what a
 //! `--json` report shows until a human explicitly adds it here.
 
+use std::time::SystemTime;
+
 use serde::Serialize;
 
 use crate::actions::Action;
@@ -16,8 +18,24 @@ use crate::policy::PolicyDecision;
 use super::bytes::human_bytes;
 use super::impact::{classify_impact, ImpactContext, ImpactThresholds};
 use super::policy_label::{label_for, PolicyLabel};
-use crate::evidence::probe::ProbeOutcome;
+use crate::evidence::probe::{ProbeOutcome, ProbeReason};
 use crate::workspace::{UpstreamState, WorkspaceFamily, WorkspaceWorktree};
+
+/// A commit instant as seconds since the Unix epoch, or the reason there is
+/// none (HORO-1545).
+///
+/// A time before the epoch is not expressible here and reports `failed`
+/// rather than a zero, which a reader would take for 1970 rather than for a
+/// subtraction nobody can do.
+fn commit_instant(at: &ProbeOutcome<SystemTime>) -> (Option<u64>, Option<&'static str>) {
+    match at {
+        ProbeOutcome::Observed(at) => match at.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(since) => (Some(since.as_secs()), None),
+            Err(_) => (None, Some(ProbeReason::Failed.tag())),
+        },
+        ProbeOutcome::Unavailable(reason) => (None, Some(reason.tag())),
+    }
+}
 
 fn regenerability_tag(r: Regenerability) -> &'static str {
     match r {
@@ -474,6 +492,60 @@ pub struct WorkspaceWorktreeReport {
     pub merged: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merged_into: Option<String>,
+    /// `"equivalent"`, `"not_equivalent"`, `"not_applicable"` or
+    /// `"unknown"` — whether this branch's work has landed on `merged_into`
+    /// in some form other than ancestry (HORO-1545).
+    ///
+    /// `"not_applicable"` means ancestry already contains HEAD, so there was
+    /// nothing to ask. It is the answer a merged branch gets, and it is not
+    /// `"not_equivalent"`.
+    pub patch_equivalence: &'static str,
+    /// `"per_commit_patch_id"` or `"content_identical"`, for
+    /// `"equivalent"` only. Which method answered is worth showing: the
+    /// first found every commit's patch already on the other branch, the
+    /// second found the *files* identical and says nothing about how they
+    /// came to be.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equivalence_method: Option<&'static str>,
+    /// Why `patch_equivalence` is `"unknown"`, for that value only. Present
+    /// so a reader is never left to guess whether the question was refused,
+    /// timed out or never asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub equivalence_unknown_reason: Option<&'static str>,
+    /// Commits on this branch that `merged_into` does not contain, split
+    /// three ways: with no equivalent patch there, with one under a
+    /// different commit id, and left unclassified because the per-commit
+    /// method says nothing about merge commits.
+    ///
+    /// All three together or none — see `divergence_unavailable_reason`. The
+    /// third is not a count of commits known to hold nothing; it is there so
+    /// the first two cannot be read as a complete account.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_unique_to_head: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_equivalent_elsewhere: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits_unclassified: Option<u32>,
+    /// Why the three counts above are absent, when they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub divergence_unavailable_reason: Option<&'static str>,
+    /// When the newest commit on this branch was written, and the same for
+    /// the branch it was compared against, as seconds since the Unix epoch.
+    ///
+    /// Instants rather than ages because nothing in this module reads a
+    /// clock — the same discipline `crate::policy::classify` keeps — so the
+    /// consumer that has one does the subtraction. Each carries its own
+    /// reason when absent: a repository with no recorded default branch has a
+    /// readable tip of its own and nothing to compare it against, and those
+    /// two absences have different causes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_tip_committed_at_unix: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_tip_unavailable_reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison_tip_committed_at_unix: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison_tip_unavailable_reason: Option<&'static str>,
     /// Whether this worktree holds something that should stop it being
     /// treated as spent: uncommitted work, untracked files, something using
     /// it, or commits no remote has. A *sentence*, not a gate — the executor
@@ -623,6 +695,19 @@ impl WorkspaceWorktreeReport {
             Some(UpstreamState::Tracking { ahead, behind }) => (Some(*ahead), Some(*behind)),
             _ => (None, None),
         };
+        let integration = branch.map(|s| &s.integration);
+        let divergence = match integration.map(|i| &i.divergence) {
+            Some(ProbeOutcome::Observed(divergence)) => Some(divergence),
+            _ => None,
+        };
+        let (head_tip, head_tip_reason) = match integration {
+            Some(i) => commit_instant(&i.tip_committed_at),
+            None => (None, Some(ProbeReason::NotAttempted.tag())),
+        };
+        let (comparison_tip, comparison_tip_reason) = match integration {
+            Some(i) => commit_instant(&i.comparison_tip_committed_at),
+            None => (None, Some(ProbeReason::NotAttempted.tag())),
+        };
         Self {
             root: worktree.root.display().to_string(),
             linked_worktree: worktree.linked,
@@ -637,6 +722,30 @@ impl WorkspaceWorktreeReport {
             merged_into: branch
                 .and_then(|s| s.merged.compared_against())
                 .map(str::to_string),
+            patch_equivalence: integration.map_or("unknown", |i| i.equivalence.tag()),
+            equivalence_method: integration
+                .and_then(|i| i.equivalence.method())
+                .map(|m| m.tag()),
+            // An unread branch probe leaves `patch_equivalence` at
+            // `"unknown"` with `not_attempted` as the reason, which is the
+            // same shape the probe itself produces when it declines. Both
+            // are honest; neither is an empty field.
+            equivalence_unknown_reason: match integration {
+                Some(i) => i.equivalence.reason().map(|r| r.tag()),
+                None => Some(ProbeReason::NotAttempted.tag()),
+            },
+            commits_unique_to_head: divergence.map(|d| d.unique_commits),
+            commits_equivalent_elsewhere: divergence.map(|d| d.equivalent_commits),
+            commits_unclassified: divergence.map(|d| d.unclassified_commits),
+            divergence_unavailable_reason: match integration.map(|i| &i.divergence) {
+                Some(ProbeOutcome::Observed(_)) => None,
+                Some(ProbeOutcome::Unavailable(reason)) => Some(reason.tag()),
+                None => Some(ProbeReason::NotAttempted.tag()),
+            },
+            head_tip_committed_at_unix: head_tip,
+            head_tip_unavailable_reason: head_tip_reason,
+            comparison_tip_committed_at_unix: comparison_tip,
+            comparison_tip_unavailable_reason: comparison_tip_reason,
             holds_work_in_progress: worktree.holds_work_in_progress(),
             member_resource_ids: worktree
                 .members
@@ -1864,7 +1973,7 @@ pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     use super::*;
     use crate::detectors::DetectorId;
@@ -1873,7 +1982,10 @@ mod tests {
         ResourceId, ResourceKind, ResourceLocator,
     };
     use crate::policy::{PolicyClass, ReasonCode};
-    use crate::workspace::{ActivityState, MergedState, WorkspaceMember, WorktreeBranchState};
+    use crate::workspace::{
+        ActivityState, Divergence, EquivalenceMethod, IntegrationEvidence, MergedState,
+        PatchEquivalence, WorkspaceMember, WorktreeBranchState,
+    };
 
     // --- HORO-1327: RefusalReason is the sole producer of execute's tokens ---
 
@@ -2496,6 +2608,7 @@ mod tests {
                 merged: MergedState::Merged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
             members,
         }
@@ -2611,11 +2724,17 @@ mod tests {
         assert_eq!(report.requires_confirmation_bytes, 2);
     }
 
-    /// An unread branch is reported as unread. Three `"unknown"` tags and no
+    /// An unread branch is reported as unread. `"unknown"` tags and no
     /// names — not a detached HEAD with no upstream and no merge answer,
     /// which would be three assertions manufactured from one failure. And it
     /// still counts as work in progress: "the probe timed out" is not
     /// evidence that a worktree is spent.
+    ///
+    /// The integration fields keep the same rule (HORO-1545): absent counts
+    /// with a stated reason rather than zeroes, and `"unknown"` equivalence
+    /// rather than `"not_equivalent"`. A zero here would read as "no commits
+    /// of its own", which is the negative-evidence trap on a worktree nobody
+    /// managed to read.
     #[test]
     fn an_unread_branch_reports_unknown_everywhere_and_names_nothing() {
         let mut worktree = settled_worktree(
@@ -2632,8 +2751,156 @@ mod tests {
         assert_eq!(only.merged_into, None);
         assert_eq!(only.ahead, None);
         assert_eq!(only.behind, None);
+        assert_eq!(only.patch_equivalence, "unknown");
+        assert_eq!(only.equivalence_method, None);
+        assert_eq!(only.equivalence_unknown_reason, Some("not_attempted"));
+        assert_eq!(only.commits_unique_to_head, None);
+        assert_eq!(only.commits_equivalent_elsewhere, None);
+        assert_eq!(only.commits_unclassified, None);
+        assert_eq!(only.divergence_unavailable_reason, Some("not_attempted"));
+        assert_eq!(only.head_tip_committed_at_unix, None);
+        assert_eq!(only.head_tip_unavailable_reason, Some("not_attempted"));
+        assert_eq!(only.comparison_tip_committed_at_unix, None);
+        assert_eq!(
+            only.comparison_tip_unavailable_reason,
+            Some("not_attempted")
+        );
         assert!(only.holds_work_in_progress);
         assert_eq!(report.worktrees_holding_work_in_progress, 1);
+    }
+
+    /// HORO-1545 in the local report: the integration evidence is published
+    /// beside `holds_work_in_progress` and does not touch it.
+    ///
+    /// The worktree here is the awkward one the campaign is about — every
+    /// commit it holds has landed on the default branch as a squash, which is
+    /// as strong a "this is finished" signal as this product can observe, and
+    /// the working tree is dirty. The report says both. It does not resolve
+    /// them, and `holds_work_in_progress` stays `true`.
+    #[test]
+    fn integration_evidence_is_published_without_settling_the_worktree() {
+        let mut worktree = settled_worktree(
+            "/work/proj-feature",
+            vec![member("m", Some(1_000), PolicyLabel::AutoSafe)],
+        );
+        worktree.dirty = true;
+        worktree.branch = ProbeOutcome::Observed(WorktreeBranchState {
+            branch: Some("feature/squashed".to_string()),
+            upstream: UpstreamState::Tracking {
+                ahead: 3,
+                behind: 0,
+            },
+            merged: MergedState::NotMerged {
+                into: "origin/main".to_string(),
+            },
+            integration: IntegrationEvidence {
+                divergence: ProbeOutcome::Observed(Divergence {
+                    unique_commits: 3,
+                    equivalent_commits: 0,
+                    unclassified_commits: 0,
+                }),
+                equivalence: PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
+                tip_committed_at: ProbeOutcome::Observed(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_726_500_000),
+                ),
+                comparison_tip_committed_at: ProbeOutcome::Observed(
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1_725_000_000),
+                ),
+            },
+        });
+        let report = family_of(vec![worktree]);
+        let only = &report.worktrees[0];
+
+        assert_eq!(only.patch_equivalence, "equivalent");
+        assert_eq!(only.equivalence_method, Some("content_identical"));
+        assert_eq!(only.equivalence_unknown_reason, None);
+        assert_eq!(only.commits_unique_to_head, Some(3));
+        assert_eq!(only.head_tip_committed_at_unix, Some(1_726_500_000));
+        assert_eq!(only.comparison_tip_committed_at_unix, Some(1_725_000_000));
+        assert!(
+            only.holds_work_in_progress,
+            "a squash covers the commits it was made from, not the file still open in the editor"
+        );
+    }
+
+    /// A merged branch had no equivalence question to answer, and says so
+    /// with `"not_applicable"` rather than `"not_equivalent"`.
+    ///
+    /// Its three divergence counts are observed zeroes, which the `Some(0)`
+    /// assertions below are about: nothing is absent from the comparison
+    /// branch, so nothing is absent-but-unclassified either. That is a
+    /// measurement, and the test above is the control showing the same fields
+    /// go absent when there was no measurement.
+    #[test]
+    fn a_merged_branch_reports_not_applicable_rather_than_not_equivalent() {
+        let mut worktree = settled_worktree(
+            "/work/proj",
+            vec![member("m", Some(1_000), PolicyLabel::AutoSafe)],
+        );
+        let ProbeOutcome::Observed(state) = &mut worktree.branch else {
+            unreachable!("settled_worktree observes a branch");
+        };
+        state.integration = IntegrationEvidence {
+            divergence: ProbeOutcome::Observed(Divergence {
+                unique_commits: 0,
+                equivalent_commits: 0,
+                unclassified_commits: 0,
+            }),
+            equivalence: PatchEquivalence::NotApplicable,
+            tip_committed_at: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+            comparison_tip_committed_at: ProbeOutcome::Unavailable(ProbeReason::Failed),
+        };
+        let report = family_of(vec![worktree]);
+        let only = &report.worktrees[0];
+
+        assert_eq!(only.patch_equivalence, "not_applicable");
+        assert_eq!(only.equivalence_method, None);
+        assert_eq!(only.equivalence_unknown_reason, None);
+        assert_eq!(only.commits_unique_to_head, Some(0));
+        assert_eq!(only.commits_unclassified, Some(0));
+        assert_eq!(only.divergence_unavailable_reason, None);
+        // One tip readable and the other not, from one probe. Two fields,
+        // two answers — the failure does not spread to the half that worked.
+        assert_eq!(only.head_tip_committed_at_unix, Some(0));
+        assert_eq!(only.head_tip_unavailable_reason, None);
+        assert_eq!(only.comparison_tip_committed_at_unix, None);
+        assert_eq!(only.comparison_tip_unavailable_reason, Some("failed"));
+    }
+
+    /// A commit dated before the Unix epoch has no instant this report can
+    /// express, and says why rather than reporting a zero — which would place
+    /// it *at* the epoch, the one value a reader would take for a real
+    /// timestamp instead of for a missing one.
+    ///
+    /// Not hypothetical: a repository imported with fabricated dates, or a
+    /// machine whose clock was wrong when the commit was written, is enough.
+    /// The second tip is the control — the failure belongs to the one
+    /// subtraction that has no answer.
+    #[test]
+    fn a_pre_epoch_commit_has_no_instant_rather_than_zero() {
+        let mut worktree = settled_worktree(
+            "/work/proj",
+            vec![member("m", Some(1_000), PolicyLabel::AutoSafe)],
+        );
+        let ProbeOutcome::Observed(state) = &mut worktree.branch else {
+            unreachable!("settled_worktree observes a branch");
+        };
+        state.integration = IntegrationEvidence {
+            tip_committed_at: ProbeOutcome::Observed(
+                SystemTime::UNIX_EPOCH - Duration::from_secs(1),
+            ),
+            comparison_tip_committed_at: ProbeOutcome::Observed(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ),
+            ..IntegrationEvidence::not_attempted()
+        };
+        let report = family_of(vec![worktree]);
+        let only = &report.worktrees[0];
+
+        assert_eq!(only.head_tip_committed_at_unix, None);
+        assert_eq!(only.head_tip_unavailable_reason, Some("failed"));
+        assert_eq!(only.comparison_tip_committed_at_unix, Some(1));
+        assert_eq!(only.comparison_tip_unavailable_reason, None);
     }
 
     /// The report carries member ids and nothing a caller could act on. The
