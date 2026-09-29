@@ -716,6 +716,85 @@ mod tests {
         );
     }
 
+    /// HORO-1552 AC 4: every `ResourceKind` a detector could ever declare
+    /// must actually be declared by one, in the registry that production
+    /// wires up.
+    ///
+    /// A kind that nothing can discover still has an `owning_tool()`, a
+    /// `regenerability()`, a policy class, a GUI word and — the reason this
+    /// guard exists — acceptance by `AutopilotEnvelope::allow_kind`. A user
+    /// can put such a kind into an Autopilot allowlist, see no error, have it
+    /// persisted, and have authorized nothing at all, because no code path
+    /// can construct a resource of that kind for the permission to apply to.
+    /// That is a control reporting "configured" over zero real surface.
+    ///
+    /// `ResourceKind::Unknown` is exempt by construction: it is the
+    /// fail-closed sink for a kind this build does not recognise, and a
+    /// detector that *could* emit it would itself be the bug.
+    ///
+    /// `NOT_YET_DETECTABLE` is a self-retiring exemption, not a permanent
+    /// one — its exact contents are asserted below, so the ticket that adds
+    /// the missing detector is forced to empty it in the same change.
+    ///
+    /// Only reads `resource_kinds()` and `id()`, never `discover()`, which is
+    /// why this is safe to allowlist in
+    /// `no_unreviewed_test_code_wires_up_the_real_detector_registry` below.
+    #[test]
+    fn every_resource_kind_except_unknown_has_a_detector() {
+        use crate::evidence::ResourceKind;
+
+        /// Kinds with no detector yet, each with the ticket that owns it.
+        /// `DockerImageCache` is HORO-1544's: images, build cache and volumes
+        /// are distinct lifecycle evidence, and collapsing them into the
+        /// existing build-cache detector merely to satisfy this guard is
+        /// exactly what that ticket forbids.
+        const NOT_YET_DETECTABLE: &[ResourceKind] = &[ResourceKind::DockerImageCache];
+
+        // Pinned, so this exemption cannot quietly grow. A kind added here
+        // without its ticket, or one left behind after its detector landed,
+        // both fail on this line.
+        assert_eq!(
+            NOT_YET_DETECTABLE,
+            &[ResourceKind::DockerImageCache],
+            "the not-yet-detectable exemption changed — add the ticket that \
+             owns the new kind to this test's doc comment, or remove a kind \
+             whose detector now exists"
+        );
+
+        let registry = DetectorRegistry::builtin();
+        let declared: Vec<ResourceKind> = registry
+            .detectors
+            .iter()
+            .flat_map(|d| d.resource_kinds().iter().copied())
+            .collect();
+
+        let undeclared: Vec<&str> = ResourceKind::ALL
+            .iter()
+            .filter(|kind| **kind != ResourceKind::Unknown)
+            .filter(|kind| !NOT_YET_DETECTABLE.contains(kind))
+            .filter(|kind| !declared.contains(kind))
+            .map(|kind| kind.tag())
+            .collect();
+
+        assert!(
+            undeclared.is_empty(),
+            "these ResourceKind variants are policy-classified and \
+             Autopilot-allowlistable but no detector in the production \
+             registry declares them, so authorizing them authorizes \
+             nothing: {undeclared:?}"
+        );
+
+        // A kind exempted *and* declared means the exemption is stale.
+        for kind in NOT_YET_DETECTABLE {
+            assert!(
+                !declared.contains(kind),
+                "{} is exempted as not-yet-detectable but a detector now \
+                 declares it — remove it from NOT_YET_DETECTABLE",
+                kind.tag()
+            );
+        }
+    }
+
     struct StubDetector(DetectorStatus);
 
     impl Detector for StubDetector {
@@ -785,11 +864,16 @@ mod tests {
     ///
     /// A small, explicit allowlist covers the tests already reviewed and
     /// known safe:
-    /// - `builtin_registry_registers_all_five_detectors` directly above,
-    ///   which only asserts the registered detector count and never
-    ///   calls `.discover()`/`.execute()` on anything; the sibling
+    /// - the two tests directly above —
+    ///   `builtin_registry_registers_every_builtin_detector`, which reads
+    ///   only `id()`, and `every_resource_kind_except_unknown_has_a_detector`
+    ///   (HORO-1552 AC 4), which reads only `resource_kinds()` and `id()`.
+    ///   Neither calls `.discover()` or `.execute()` on anything, so
+    ///   neither can reach a real host tool: they inspect the registry's
+    ///   *shape*, which is the whole point of asserting it against the
+    ///   production wiring rather than a stub. The sibling
     ///   `discover_all_returns_one_status_per_detector` test deliberately
-    ///   proves that invariant with fake detectors instead, so it does
+    ///   proves its invariant with fake detectors instead, so it does
     ///   not appear here;
     /// - `tests/golden_chain_execute.rs` and
     ///   `tests/reclaimable_bytes_reaches_auto_safe.rs`, which do use the
@@ -826,7 +910,7 @@ mod tests {
         // (path relative to the manifest dir, exact expected occurrence
         // count in that file's test code)
         let allowlist: &[(&str, usize)] = &[
-            ("src/detectors/mod.rs", 1),
+            ("src/detectors/mod.rs", 2),
             ("tests/golden_chain_execute.rs", 1),
             ("tests/reclaimable_bytes_reaches_auto_safe.rs", 1),
             ("tests/cli_project_root_wiring.rs", 2),
