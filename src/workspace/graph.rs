@@ -286,21 +286,45 @@ impl ActivityFacts {
     where
         I: IntoIterator<Item = &'a ProcessProbePair>,
     {
+        Self::fold(
+            probes
+                .into_iter()
+                .flat_map(|(open_by, cwd_match)| [open_by, cwd_match]),
+        )
+    }
+
+    /// The same fold over one probe rather than a pair (HORO-1549).
+    ///
+    /// A `process_activity` evidence request runs one probe over one working
+    /// tree, so there is no second outcome to supply. Passing
+    /// `ProbeOutcome::Unavailable(NotAttempted)` as a stand-in would reach
+    /// [`Self::from_probes`] as a probe that *failed*, and the tree would
+    /// report `unanswered_probes: 1` about a probe nobody ran — inventing the
+    /// one number a reader uses to judge how much the answer is worth.
+    ///
+    /// Both constructors are this fold so that "a tree with an unanswered
+    /// probe can never be reported idle" has exactly one implementation.
+    pub fn from_one_probe(probe: &ProbeOutcome<Vec<ProcessRef>>) -> Self {
+        Self::fold(std::iter::once(probe))
+    }
+
+    fn fold<'a, I>(probes: I) -> Self
+    where
+        I: IntoIterator<Item = &'a ProbeOutcome<Vec<ProcessRef>>>,
+    {
         let mut observed: Vec<ProcessRef> = Vec::new();
         let mut unanswered = 0usize;
 
-        for (open_by, cwd_match) in probes {
-            for probe in [open_by, cwd_match] {
-                match probe {
-                    ProbeOutcome::Observed(processes) => {
-                        for process in processes {
-                            if !observed.iter().any(|seen| seen.pid == process.pid) {
-                                observed.push(process.clone());
-                            }
+        for probe in probes {
+            match probe {
+                ProbeOutcome::Observed(processes) => {
+                    for process in processes {
+                        if !observed.iter().any(|seen| seen.pid == process.pid) {
+                            observed.push(process.clone());
                         }
                     }
-                    ProbeOutcome::Unavailable(_) => unanswered += 1,
                 }
+                ProbeOutcome::Unavailable(_) => unanswered += 1,
             }
         }
 
@@ -1705,6 +1729,46 @@ mod tests {
         assert_eq!(facts.state, ActivityState::InUse);
         assert_eq!(facts.unanswered_probes, 1);
         assert_eq!(facts.observed_processes.len(), 1);
+    }
+
+    /// One probe is one probe (HORO-1549). A `process_activity` evidence
+    /// request runs a single probe, and the count that says how much its
+    /// answer is worth must describe what actually ran.
+    ///
+    /// The comparison is the point: passing a `NotAttempted` stand-in to
+    /// `from_probes` — the obvious way to reuse the pair fold — reports a
+    /// failed probe and downgrades an answered `Idle` to `Unknown`, which is
+    /// the invented-evidence failure this constructor exists to avoid.
+    #[test]
+    fn one_process_probe_does_not_invent_a_second_unanswered_one() {
+        let empty: ProbeOutcome<Vec<ProcessRef>> = ProbeOutcome::Observed(Vec::new());
+
+        let alone = ActivityFacts::from_one_probe(&empty);
+        assert_eq!(alone.unanswered_probes, 0);
+        assert_eq!(alone.state, ActivityState::Idle);
+
+        let padded = ActivityFacts::from_probes([&(
+            empty.clone(),
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        )]);
+        assert_eq!(padded.unanswered_probes, 1);
+        assert_eq!(padded.state, ActivityState::Unknown);
+
+        // And the shared fold still holds for one probe: a probe that failed
+        // is not a tree that is idle.
+        let failed = ActivityFacts::from_one_probe(&ProbeOutcome::Unavailable(
+            ProbeReason::PermissionDenied,
+        ));
+        assert_eq!(failed.unanswered_probes, 1);
+        assert_ne!(failed.state, ActivityState::Idle);
+
+        // An observed process through the single-probe path is still InUse.
+        let seen = ActivityFacts::from_one_probe(&ProbeOutcome::Observed(vec![ProcessRef {
+            pid: 11,
+            command: "cargo".to_string(),
+        }]));
+        assert_eq!(seen.state, ActivityState::InUse);
+        assert_eq!(seen.observed_processes.len(), 1);
     }
 
     /// One process holding two resources in one tree open is one process.
