@@ -407,8 +407,8 @@ mod tests {
     };
     use crate::policy::{PolicyClass, ReasonCode};
     use crate::workspace::{
-        ExternalSource, MachineContext, MergedState, PullRequestState, TaskState,
-        WorkflowHistorySummary, WorkflowMode, WorkspaceSurvey, WorktreeBranchState,
+        ExternalSource, IntegrationEvidence, MachineContext, MergedState, PullRequestState,
+        TaskState, WorkflowHistorySummary, WorkflowMode, WorkspaceSurvey, WorktreeBranchState,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -759,6 +759,7 @@ mod tests {
                 branch: Some("wip".to_string()),
                 upstream: UpstreamState::Untracked,
                 merged: MergedState::Unknown,
+                integration: IntegrationEvidence::not_attempted(),
             });
         let projection = GraphProjection::build(
             &graph,
@@ -798,6 +799,7 @@ mod tests {
                 merged: MergedState::NotMerged {
                     into: "origin/acme-release-train".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             });
         let projection = GraphProjection::build(
             &graph,

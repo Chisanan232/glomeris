@@ -1873,7 +1873,9 @@ mod tests {
         ResourceId, ResourceKind, ResourceLocator,
     };
     use crate::policy::{PolicyClass, ReasonCode};
-    use crate::workspace::{ActivityState, MergedState, WorkspaceMember, WorktreeBranchState};
+    use crate::workspace::{
+        ActivityState, IntegrationEvidence, MergedState, WorkspaceMember, WorktreeBranchState,
+    };
 
     // --- HORO-1327: RefusalReason is the sole producer of execute's tokens ---
 
@@ -2496,6 +2498,7 @@ mod tests {
                 merged: MergedState::Merged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
             members,
         }

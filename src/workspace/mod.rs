@@ -47,7 +47,10 @@ pub mod branch;
 mod graph;
 mod group;
 
-pub use branch::{BranchProbe, GitCliBranchProbe, MergedState, UpstreamState, WorktreeBranchState};
+pub use branch::{
+    BranchProbe, Divergence, EquivalenceMethod, GitCliBranchProbe, IntegrationEvidence,
+    MergedState, PatchEquivalence, UpstreamState, WorktreeBranchState,
+};
 pub use graph::{
     ActivityFacts, BranchLifecycle, ExternalContext, ExternalFact, ExternalSource,
     GlobalResourceNode, HistoryConfidence, MachineContext, PullRequestState, RepositoryNode,

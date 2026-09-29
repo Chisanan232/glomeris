@@ -46,9 +46,9 @@ use glomeris::evidence::{
 use glomeris::planner::GraphProjection;
 use glomeris::policy::{PolicyClass, PolicyDecision, ReasonCode};
 use glomeris::workspace::{
-    ExternalFact, ExternalSource, MachineContext, MergedState, PullRequestState, TaskState,
-    UpstreamState, WorkflowHistorySummary, WorkflowMode, WorkspaceEvidenceGraph, WorkspaceSurvey,
-    WorktreeBranchState,
+    ExternalFact, ExternalSource, IntegrationEvidence, MachineContext, MergedState,
+    PullRequestState, TaskState, UpstreamState, WorkflowHistorySummary, WorkflowMode,
+    WorkspaceEvidenceGraph, WorkspaceSurvey, WorktreeBranchState,
 };
 
 use serde_json::Value;
@@ -302,6 +302,7 @@ fn projection() -> GraphProjection {
         merged: MergedState::NotMerged {
             into: MERGE_AXIS.to_string(),
         },
+        integration: IntegrationEvidence::not_attempted(),
     });
     worktree.external.pull_request = ExternalFact::observed(
         ExternalSource::GitHubPullRequests,

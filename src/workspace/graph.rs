@@ -831,6 +831,7 @@ mod tests {
         GitState, NativeCleanup, Recoverability, ResourceFingerprint, ResourceKind, ResourceLocator,
     };
     use crate::policy::{PolicyClass, ReasonCode};
+    use crate::workspace::branch::IntegrationEvidence;
     use crate::workspace::branch::{MergedState, UpstreamState};
     use crate::workspace::group::WorkspaceSurvey;
     use std::time::Duration;
@@ -982,6 +983,7 @@ mod tests {
             merged: MergedState::Merged {
                 into: "origin/main".to_string(),
             },
+            integration: IntegrationEvidence::not_attempted(),
         };
         let graph = build(
             &[candidate(
@@ -1318,6 +1320,7 @@ mod tests {
             merged: MergedState::Merged {
                 into: "origin/main".to_string(),
             },
+            integration: IntegrationEvidence::not_attempted(),
         };
         let mut graph = build(&[c], &surveyed("/w/a", merged_and_pushed));
 
@@ -1532,6 +1535,7 @@ mod tests {
                 merged: MergedState::Merged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(
@@ -1549,6 +1553,7 @@ mod tests {
                 merged: MergedState::Merged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(
@@ -1564,6 +1569,7 @@ mod tests {
                 branch: None,
                 upstream: UpstreamState::Unknown,
                 merged: MergedState::Unknown,
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(unknown_upstream.unique_work(), UniqueWork::Present);
@@ -1581,6 +1587,7 @@ mod tests {
                 merged: MergedState::NotMerged {
                     into: "origin/main".to_string(),
                 },
+                integration: IntegrationEvidence::not_attempted(),
             }),
         };
         assert_eq!(settled.unique_work(), UniqueWork::Absent);

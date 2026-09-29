@@ -70,8 +70,8 @@ use glomeris::reporting::dto::{
 use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
 use glomeris::workspace::{
-    ActivityState, MergedState, UpstreamState, WorkspaceFamily, WorkspaceMember, WorkspaceWorktree,
-    WorktreeBranchState,
+    ActivityState, IntegrationEvidence, MergedState, UpstreamState, WorkspaceFamily,
+    WorkspaceMember, WorkspaceWorktree, WorktreeBranchState,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -720,6 +720,7 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                     merged: MergedState::Merged {
                         into: "origin/main".to_string(),
                     },
+                    integration: IntegrationEvidence::not_attempted(),
                 }),
                 members: vec![WorkspaceMember {
                     resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
@@ -748,6 +749,7 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                     merged: MergedState::NotMerged {
                         into: "origin/main".to_string(),
                     },
+                    integration: IntegrationEvidence::not_attempted(),
                 }),
                 members: vec![
                     WorkspaceMember {

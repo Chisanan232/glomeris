@@ -339,6 +339,7 @@ mod tests {
     };
     use crate::evidence::{ProbeReason, ResourceId};
     use crate::policy::{PolicyClass, ReasonCode};
+    use crate::workspace::branch::IntegrationEvidence;
     use crate::workspace::branch::{MergedState, UpstreamState};
 
     /// One worktree's git facts, as the probe would have reported them.
@@ -588,6 +589,7 @@ mod tests {
                         merged: MergedState::Merged {
                             into: "origin/main".to_string(),
                         },
+                        integration: IntegrationEvidence::not_attempted(),
                     }),
                 ),
                 (
@@ -601,6 +603,7 @@ mod tests {
                         merged: MergedState::Merged {
                             into: "origin/main".to_string(),
                         },
+                        integration: IntegrationEvidence::not_attempted(),
                     }),
                 ),
                 (
@@ -611,6 +614,7 @@ mod tests {
                         merged: MergedState::NotMerged {
                             into: "origin/main".to_string(),
                         },
+                        integration: IntegrationEvidence::not_attempted(),
                     }),
                 ),
                 (
@@ -624,6 +628,7 @@ mod tests {
                         merged: MergedState::Merged {
                             into: "origin/main".to_string(),
                         },
+                        integration: IntegrationEvidence::not_attempted(),
                     }),
                 ),
             ]

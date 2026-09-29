@@ -8,24 +8,27 @@
 //! probe is not part of [`crate::evidence`] and these facts never reach
 //! [`crate::policy`].
 //!
-//! Three read-only `git` invocations per worktree root, run once per
-//! *root* rather than once per candidate — a repository with forty
-//! discovered build directories under one worktree asks these three
-//! questions once. All three are local: nothing here fetches, and a
-//! branch is compared against the remote-tracking refs this machine
-//! already has.
+//! Up to eleven read-only `git` invocations per worktree root, run once
+//! per *root* rather than once per candidate — a repository with forty
+//! discovered build directories under one worktree asks these questions
+//! once. Every one is local: nothing here fetches, and a branch is
+//! compared against the remote-tracking refs this machine already has.
+//!
+//! "Up to" because the expensive half is skipped when a cheaper answer
+//! already settles the question — see [`IntegrationEvidence`], which is
+//! also where the bound on the expensive half is written down (HORO-1545).
 
 use std::path::Path;
 use std::process::{Command, Output};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::evidence::correlate::timeout::{run_with_timeout, CommandOutcome};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
 
-/// What one worktree's HEAD looks like, as three separate answers.
+/// What one worktree's HEAD looks like, as separate answers.
 ///
-/// Three and not one boolean: "safe to remove" is not a question this type
-/// answers, and collapsing these into one would be exactly the delete
+/// Separate and not one boolean: "safe to remove" is not a question this
+/// type answers, and collapsing these into one would be exactly the delete
 /// authority HORO-1511 forbids a group summary from having.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeBranchState {
@@ -35,6 +38,9 @@ pub struct WorktreeBranchState {
     pub branch: Option<String>,
     pub upstream: UpstreamState,
     pub merged: MergedState,
+    /// Everything about HEAD's relationship to the default branch that
+    /// plain ancestry cannot express (HORO-1545).
+    pub integration: IntegrationEvidence,
 }
 
 /// How this worktree's branch stands against the remote it tracks.
@@ -118,6 +124,178 @@ impl MergedState {
     }
 }
 
+/// How much work HEAD holds that the comparison branch does not contain,
+/// split by whether an equivalent patch is already over there.
+///
+/// Both counts are about commits the comparison branch does **not**
+/// contain. A merged branch therefore reports `0` and `0`: nothing is
+/// absent, so nothing is absent-but-equivalent either. That is an observed
+/// zero from ancestry, not a probe that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Divergence {
+    /// Commits absent from the comparison branch with no equivalent patch
+    /// there — `git cherry`'s `+` lines.
+    pub unique_commits: u32,
+    /// Commits absent from the comparison branch whose patch *is* already
+    /// there, under a different commit id — `git cherry`'s `-` lines. This
+    /// is what a cherry-pick or a rebase leaves behind.
+    pub equivalent_commits: u32,
+}
+
+/// Whether the work on this branch has already landed on the comparison
+/// branch in some form other than ancestry.
+///
+/// # Why this is not a boolean
+///
+/// AC 4 of HORO-1545, and the reason is the same one [`MergedState`] gives:
+/// "this has already landed" is the most persuasive sentence this module
+/// can produce about a worktree, and a boolean has nowhere to put the two
+/// answers that are not "yes" or "no". [`Self::NotApplicable`] and
+/// [`Self::Unknown`] are the ones that matter — a question that could not
+/// be asked and a question that has no subject are different facts, and
+/// neither is a quiet `NotEquivalent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchEquivalence {
+    /// The comparison branch already contains this work, by the named
+    /// method. Evidence of integration — **not** a claim that ancestry
+    /// holds, and not authority to delete anything (AC 3, AC 7).
+    Equivalent(EquivalenceMethod),
+    /// Both methods ran and neither found this work over there.
+    NotEquivalent,
+    /// There is nothing for equivalence to be a question about: ancestry
+    /// already contains HEAD, so no commit is absent from the comparison
+    /// branch.
+    ///
+    /// Distinct from [`Self::Unknown`] on the HORO-1561 grounds — a
+    /// question that does not apply was not a question that failed.
+    NotApplicable,
+    /// The question applies and has no answer: no recorded default branch
+    /// to compare against ([`ProbeReason::NotAttempted`]), more divergence
+    /// than the bound below allows (also `NotAttempted`), or git could not
+    /// answer ([`ProbeReason::Failed`] and friends).
+    Unknown(ProbeReason),
+}
+
+/// How an [`PatchEquivalence::Equivalent`] answer was reached.
+///
+/// Reported rather than hidden because the two methods support different
+/// weights of conclusion, and a reader told only "equivalent" cannot tell
+/// which one they were given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EquivalenceMethod {
+    /// `git cherry`: every absent commit has a patch-id match on the
+    /// comparison branch. The strong answer — it is per commit, and it
+    /// catches cherry-picks, rebases and a single-commit squash.
+    PerCommitPatchId,
+    /// Every file this branch touched since the merge base has identical
+    /// content on the comparison branch. The weaker answer, and the only
+    /// one that survives a multi-commit squash: a squashed combination has
+    /// no per-commit patch-id match by construction, so `git cherry`
+    /// reports every one of its commits as unique.
+    ContentIdentical,
+}
+
+impl PatchEquivalence {
+    /// Stable token for JSON and for the app's vocabulary.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::Equivalent(_) => "equivalent",
+            Self::NotEquivalent => "not_equivalent",
+            Self::NotApplicable => "not_applicable",
+            Self::Unknown(_) => "unknown",
+        }
+    }
+
+    /// The method, for the one state that has one.
+    pub fn method(&self) -> Option<EquivalenceMethod> {
+        match self {
+            Self::Equivalent(method) => Some(*method),
+            _ => None,
+        }
+    }
+
+    /// Why there is no answer, for the one state that has a reason. A
+    /// caller rendering `unknown` without this is repeating the mistake
+    /// HORO-1542 fixed everywhere else.
+    pub fn reason(&self) -> Option<ProbeReason> {
+        match self {
+            Self::Unknown(reason) => Some(*reason),
+            _ => None,
+        }
+    }
+}
+
+impl EquivalenceMethod {
+    pub fn tag(&self) -> &'static str {
+        match self {
+            Self::PerCommitPatchId => "per_commit_patch_id",
+            Self::ContentIdentical => "content_identical",
+        }
+    }
+}
+
+/// HEAD's relationship to the default branch beyond plain ancestry, plus
+/// the freshness of both sides of that comparison.
+///
+/// # What this exists to prevent
+///
+/// Two opposite mistakes, and the ticket names both. Ancestry alone calls
+/// squashed, rebased and cherry-picked work "not merged", which understates
+/// how much has landed. And a branch that once merged may have commits
+/// written since, which the merge answer keeps calling "merged" — hence the
+/// two commit timestamps, so "merged" and "the branch tip is newer than the
+/// branch it merged into" can be seen at the same time.
+///
+/// # None of it is authority
+///
+/// Nothing here reaches [`crate::policy`], and
+/// [`crate::workspace::BranchLifecycle::unique_work`] deliberately does not
+/// consult it. `Equivalent` is evidence that work landed somewhere else; it
+/// is not evidence that this working tree has nothing newer in it (AC 7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntegrationEvidence {
+    pub divergence: ProbeOutcome<Divergence>,
+    pub equivalence: PatchEquivalence,
+    /// When HEAD's commit was made.
+    pub tip_committed_at: ProbeOutcome<SystemTime>,
+    /// When the comparison branch's tip commit was made. `NotAttempted`
+    /// when there is no recorded default branch to have a tip.
+    pub comparison_tip_committed_at: ProbeOutcome<SystemTime>,
+}
+
+/// How many commits may diverge before the patch-equivalence work is
+/// skipped rather than attempted.
+///
+/// `git cherry` computes a patch id for every commit on both sides, which
+/// on a branch that forked a year ago is minutes of work for a question
+/// asked while someone waits. AC 6 says bounded, so the bound is a number
+/// here and a refusal in the output: past it,
+/// [`PatchEquivalence::Unknown`] carries [`ProbeReason::NotAttempted`] and
+/// says so, rather than the timeout silently producing `Failed` and
+/// reading like a broken repository.
+const MAX_DIVERGENT_COMMITS: u32 = 200;
+
+/// How many changed paths may be passed to the content comparison.
+///
+/// The second method's argv grows with the number of files the branch
+/// touched. Past this, no attempt — the honest answer is that the question
+/// was not asked.
+const MAX_COMPARED_PATHS: usize = 512;
+
+impl IntegrationEvidence {
+    /// Every field unanswered, because nothing was asked. The state a
+    /// fixture or a caller with no git access starts from — never a state
+    /// this module returns to describe a repository it *did* look at.
+    pub fn not_attempted() -> Self {
+        Self {
+            divergence: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            equivalence: PatchEquivalence::Unknown(ProbeReason::NotAttempted),
+            tip_committed_at: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            comparison_tip_committed_at: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        }
+    }
+}
+
 /// Reads [`WorktreeBranchState`] for a worktree root.
 pub trait BranchProbe {
     /// `Unavailable(reason)` means the probe could not run — not that the
@@ -155,10 +333,19 @@ impl BranchProbe for GitCliBranchProbe {
         };
         let branch = if head == "HEAD" { None } else { Some(head) };
 
+        // Resolved once and threaded through: `merged` needs the ref to
+        // compare against and so does everything in `integration`, and
+        // asking `symbolic-ref` twice would make the invocation count in
+        // this module's header a lie for no gain.
+        let axis = default_ref(worktree_root, timeout);
+        let merged = containment(worktree_root, axis.as_deref(), timeout);
+        let integration = integration_evidence(worktree_root, axis.as_deref(), &merged, timeout);
+
         ProbeOutcome::Observed(WorktreeBranchState {
             branch,
             upstream: upstream_state(worktree_root, timeout),
-            merged: merged_state(worktree_root, timeout),
+            merged,
+            integration,
         })
     }
 }
@@ -199,29 +386,37 @@ fn parse_left_right_count(stdout: &[u8]) -> Option<UpstreamState> {
     Some(UpstreamState::Tracking { ahead, behind })
 }
 
-/// Whether HEAD is already contained in the default branch.
+/// The full ref this repository records as its default branch, or `None`.
 ///
-/// The default branch comes from `refs/remotes/origin/HEAD`, the pointer
-/// `git clone` writes and `git remote set-head` maintains. A repository
-/// without it reports [`MergedState::Unknown`]; see that variant's doc for
-/// why no fallback name is tried.
-fn merged_state(worktree_root: &Path, timeout: Duration) -> MergedState {
-    let default_ref = match run_git(
+/// It comes from `refs/remotes/origin/HEAD`, the pointer `git clone` writes
+/// and `git remote set-head` maintains. Nothing is guessed when it is
+/// missing; see [`MergedState::Unknown`] for why.
+fn default_ref(worktree_root: &Path, timeout: Duration) -> Option<String> {
+    let resolved = match run_git(
         worktree_root,
         &["symbolic-ref", "refs/remotes/origin/HEAD"],
         timeout,
     ) {
         Ok(output) if output.status.success() => trimmed(&output.stdout),
-        _ => return MergedState::Unknown,
+        _ => return None,
     };
-    if default_ref.is_empty() {
-        return MergedState::Unknown;
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(resolved)
     }
-    let into = short_ref(&default_ref);
+}
+
+/// Whether HEAD is already contained in the default branch.
+fn containment(worktree_root: &Path, default_ref: Option<&str>, timeout: Duration) -> MergedState {
+    let Some(default_ref) = default_ref else {
+        return MergedState::Unknown;
+    };
+    let into = short_ref(default_ref);
 
     match run_git(
         worktree_root,
-        &["merge-base", "--is-ancestor", "HEAD", &default_ref],
+        &["merge-base", "--is-ancestor", "HEAD", default_ref],
         timeout,
     ) {
         // Exit 0: every commit on HEAD is already in the default branch.
@@ -230,6 +425,229 @@ fn merged_state(worktree_root: &Path, timeout: Duration) -> MergedState {
         // an unmerged branch must not be reported as merged either way.
         Ok(output) if output.status.code() == Some(1) => MergedState::NotMerged { into },
         _ => MergedState::Unknown,
+    }
+}
+
+/// Everything ancestry cannot say, for one worktree.
+///
+/// # The order of the work, and why the cheap answers come first
+///
+/// Reading down: HEAD's own commit time needs no comparison branch and is
+/// always asked. With no default branch recorded, nothing else can be
+/// asked at all, and every field says `not_attempted` rather than
+/// `failed` — no probe ran, so no probe failed. When ancestry already
+/// contains HEAD there is nothing absent to be equivalent, so the two
+/// counts are an observed zero and equivalence is `NotApplicable` — and
+/// the expensive half is skipped entirely, which is the common case on a
+/// tidy machine. Only a genuinely unmerged branch pays for `git cherry`,
+/// and only past a bound.
+fn integration_evidence(
+    worktree_root: &Path,
+    default_ref: Option<&str>,
+    merged: &MergedState,
+    timeout: Duration,
+) -> IntegrationEvidence {
+    let tip_committed_at = commit_time(worktree_root, "HEAD", timeout);
+
+    let Some(default_ref) = default_ref else {
+        return IntegrationEvidence {
+            tip_committed_at,
+            ..IntegrationEvidence::not_attempted()
+        };
+    };
+    let comparison_tip_committed_at = commit_time(worktree_root, default_ref, timeout);
+
+    let (divergence, equivalence) = match merged {
+        // Contained, so nothing is absent from the comparison branch —
+        // which makes both counts zero as a fact rather than as a default,
+        // and makes equivalence a question with no subject.
+        MergedState::Merged { .. } => (
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 0,
+                equivalent_commits: 0,
+            }),
+            PatchEquivalence::NotApplicable,
+        ),
+        // The ref is recorded but the comparison itself did not answer — a
+        // default branch this machine does not have, most often. The
+        // question applies; git could not answer it.
+        MergedState::Unknown => (
+            ProbeOutcome::Unavailable(ProbeReason::Failed),
+            PatchEquivalence::Unknown(ProbeReason::Failed),
+        ),
+        MergedState::NotMerged { .. } => {
+            divergence_and_equivalence(worktree_root, default_ref, timeout)
+        }
+    };
+
+    IntegrationEvidence {
+        divergence,
+        equivalence,
+        tip_committed_at,
+        comparison_tip_committed_at,
+    }
+}
+
+/// The two methods, for a branch ancestry says is not merged.
+fn divergence_and_equivalence(
+    worktree_root: &Path,
+    default_ref: &str,
+    timeout: Duration,
+) -> (ProbeOutcome<Divergence>, PatchEquivalence) {
+    let unanswered = |reason: ProbeReason| {
+        (
+            ProbeOutcome::Unavailable(reason),
+            PatchEquivalence::Unknown(reason),
+        )
+    };
+
+    // Cheap: how many commits `git cherry` would have to compute patch ids
+    // for. Asked first so the bound can refuse *before* the cost, and so
+    // the refusal is a stated `not_attempted` rather than a timeout.
+    let ahead = match run_git(
+        worktree_root,
+        &["rev-list", "--count", &format!("{default_ref}..HEAD")],
+        timeout,
+    ) {
+        Ok(output) if output.status.success() => match trimmed(&output.stdout).parse::<u32>() {
+            Ok(count) => count,
+            Err(_) => return unanswered(ProbeReason::Failed),
+        },
+        _ => return unanswered(ProbeReason::Failed),
+    };
+    if ahead == 0 {
+        // Ancestry said not merged and yet nothing is ahead. Some ref moved
+        // under us between the two invocations. Reporting either answer
+        // would be reporting a repository that no longer exists.
+        return unanswered(ProbeReason::Failed);
+    }
+    if ahead > MAX_DIVERGENT_COMMITS {
+        return unanswered(ProbeReason::NotAttempted);
+    }
+
+    let divergence = match run_git(worktree_root, &["cherry", default_ref, "HEAD"], timeout) {
+        Ok(output) if output.status.success() => parse_cherry(&output.stdout),
+        _ => return unanswered(ProbeReason::Failed),
+    };
+
+    let equivalence = match divergence.unique_commits {
+        // Every absent commit has a patch-id twin over there. The strong
+        // answer, and the only one reached without further work.
+        0 if divergence.equivalent_commits > 0 => {
+            PatchEquivalence::Equivalent(EquivalenceMethod::PerCommitPatchId)
+        }
+        // `rev-list` counted commits ahead and `cherry` accounted for none
+        // of them. That happens for merge commits, which have no single
+        // patch to have an id. Calling this `Equivalent` would be the
+        // reassurance this module most needs not to invent.
+        0 => PatchEquivalence::Unknown(ProbeReason::Failed),
+        _ => match content_equivalence(worktree_root, default_ref, timeout) {
+            Some(true) => PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
+            Some(false) => PatchEquivalence::NotEquivalent,
+            None => PatchEquivalence::Unknown(ProbeReason::Failed),
+        },
+    };
+
+    (ProbeOutcome::Observed(divergence), equivalence)
+}
+
+/// `git cherry <upstream> <head>` prints one line per commit on `head`
+/// that `upstream` does not contain: `+ <sha>` when no equivalent patch
+/// exists upstream, `- <sha>` when one does.
+fn parse_cherry(stdout: &[u8]) -> Divergence {
+    let text = String::from_utf8_lossy(stdout);
+    let mut divergence = Divergence {
+        unique_commits: 0,
+        equivalent_commits: 0,
+    };
+    for line in text.lines() {
+        match line.as_bytes().first() {
+            Some(b'+') => divergence.unique_commits += 1,
+            Some(b'-') => divergence.equivalent_commits += 1,
+            _ => {}
+        }
+    }
+    divergence
+}
+
+/// The squash-merge method: does every file this branch touched since the
+/// merge base have identical content on the comparison branch?
+///
+/// `Some(true)` is integration evidence a multi-commit squash cannot
+/// produce any other way — combining commits destroys their individual
+/// patch ids, so [`EquivalenceMethod::PerCommitPatchId`] reports every one
+/// of them as unique. `Some(false)` is a real negative. `None` is "no
+/// answer", and is returned for every condition that would otherwise
+/// become an accidental yes.
+///
+/// # Deliberately conservative in one direction
+///
+/// A rename, or later unrelated edits to the same files on the comparison
+/// branch, both make the content differ and so report `Some(false)` for
+/// work that did land. That is the tolerable error; the intolerable one is
+/// the reverse. Read-only throughout: `git commit-tree`, the usual trick
+/// for this question, writes an object into the repository, which the
+/// ticket forbids.
+fn content_equivalence(worktree_root: &Path, default_ref: &str, timeout: Duration) -> Option<bool> {
+    let base = match run_git(worktree_root, &["merge-base", "HEAD", default_ref], timeout) {
+        Ok(output) if output.status.success() => trimmed(&output.stdout),
+        _ => return None,
+    };
+    if base.is_empty() {
+        return None;
+    }
+
+    let changed = match run_git(
+        worktree_root,
+        &["diff", "--name-only", "-z", &base, "HEAD"],
+        timeout,
+    ) {
+        Ok(output) if output.status.success() => output.stdout,
+        _ => return None,
+    };
+    let paths: Vec<String> = String::from_utf8_lossy(&changed)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    // An empty path list is the trap in this method: `git diff --quiet A B
+    // --` with no pathspec compares the two trees entire, which for a
+    // branch that changed nothing would be a confident `Some(true)` about
+    // a comparison nobody made. There is also nothing to conclude from it.
+    if paths.is_empty() || paths.len() > MAX_COMPARED_PATHS {
+        return None;
+    }
+
+    let mut args: Vec<&str> = vec!["diff", "--quiet", default_ref, "HEAD", "--"];
+    args.extend(paths.iter().map(String::as_str));
+    // Filenames are data here, not patterns: a path containing `*` or a
+    // leading `:` would otherwise be read as a pathspec and silently match
+    // the wrong set of files.
+    match run_git_literal_pathspecs(worktree_root, &args, timeout) {
+        Ok(output) if output.status.success() => Some(true),
+        Ok(output) if output.status.code() == Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// When the commit at `rev` was made.
+///
+/// `%ct` is the committer date in seconds since the epoch — the commit's
+/// own record, so it survives a `git clone` where a file mtime would not.
+fn commit_time(worktree_root: &Path, rev: &str, timeout: Duration) -> ProbeOutcome<SystemTime> {
+    let output = match run_git(worktree_root, &["log", "-1", "--format=%ct", rev], timeout) {
+        Ok(output) if output.status.success() => output,
+        Ok(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
+        // A missing or timed-out `git` keeps its own reason: this is the
+        // one place where the distinction is still recoverable.
+        Err(ProbeOutcome::Unavailable(reason)) => return ProbeOutcome::Unavailable(reason),
+        Err(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
+    };
+    match trimmed(&output.stdout).parse::<u64>() {
+        Ok(seconds) => {
+            ProbeOutcome::Observed(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+        }
+        Err(_) => ProbeOutcome::Unavailable(ProbeReason::Failed),
     }
 }
 
@@ -250,6 +668,23 @@ type BranchRunResult = Result<Output, ProbeOutcome<WorktreeBranchState>>;
 fn run_git(path: &Path, args: &[&str], timeout: Duration) -> BranchRunResult {
     let mut command = Command::new("git");
     command.arg("-C").arg(path).args(args);
+    finish_git(command, timeout)
+}
+
+/// As [`run_git`], with pathspec globbing and magic disabled — for the one
+/// invocation that passes filenames read out of the repository back into
+/// git.
+fn run_git_literal_pathspecs(path: &Path, args: &[&str], timeout: Duration) -> BranchRunResult {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .env("GIT_LITERAL_PATHSPECS", "1");
+    finish_git(command, timeout)
+}
+
+fn finish_git(command: Command, timeout: Duration) -> BranchRunResult {
     match run_with_timeout(command, timeout) {
         CommandOutcome::NotFound => Err(ProbeOutcome::Unavailable(ProbeReason::ToolAbsent)),
         CommandOutcome::TimedOut => Err(ProbeOutcome::Unavailable(ProbeReason::TimedOut)),
@@ -405,6 +840,21 @@ mod tests {
             ],
         );
         root
+    }
+
+    /// The merge answer as the real probe produces it.
+    ///
+    /// Through [`GitCliBranchProbe::state_of`] rather than through
+    /// `default_ref` + `containment` directly, so that these tests cannot
+    /// keep passing against a composition that exists only here — HORO-1545
+    /// split the one `merged_state` function into two, and a test-local
+    /// reassembly of them is exactly the thing that would then be free to
+    /// drift from what the product runs.
+    fn merged_state(root: &Path, timeout: Duration) -> MergedState {
+        match GitCliBranchProbe.state_of(root, timeout) {
+            ProbeOutcome::Observed(state) => state.merged,
+            other => panic!("expected an answer for {root:?}, got {other:?}"),
+        }
     }
 
     fn run(root: &Path, args: &[&str]) {
