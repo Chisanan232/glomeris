@@ -24,8 +24,7 @@
 //! than testable.
 
 use super::contract::{
-    ClaimConfidence, Disposition, ObservationKind, ProbeId, ProbeSubjectKind,
-    PLANNER_CONTRACT_VERSION,
+    ClaimConfidence, Disposition, ObservationKind, ProbeId, PLANNER_CONTRACT_VERSION,
 };
 use crate::workspace::WorkflowMode;
 
@@ -171,6 +170,7 @@ fn tag_list(tags: &[&'static str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planner::contract::ProbeSubjectKind;
 
     /// The reason the prompt is assembled: every word the parser accepts is
     /// offered to the model, and adding a variant to either side cannot
