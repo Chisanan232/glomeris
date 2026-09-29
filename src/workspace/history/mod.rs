@@ -62,6 +62,7 @@
 
 pub mod alias;
 pub mod observation;
+pub mod store;
 
 #[cfg(test)]
 mod fixtures;
@@ -69,4 +70,8 @@ mod fixtures;
 pub use alias::LocalAlias;
 pub use observation::{
     CensusEntry, GitCliWorktreeCensus, RepositoryObservation, WorkspaceObservation, WorktreeCensus,
+};
+pub use store::{
+    default_history_path, read, record, Admission, StoreState, FORMAT_VERSION, MAX_OBSERVATIONS,
+    MIN_ADMISSION_INTERVAL_SECS, RETENTION_WINDOW_SECS,
 };
