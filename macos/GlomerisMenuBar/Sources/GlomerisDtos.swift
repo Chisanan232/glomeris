@@ -1987,6 +1987,23 @@ struct WorkspacePlanReportDto: Decodable, Equatable {
         case expansion
         case providerError = "provider_error"
     }
+
+    /// Whether the reply carried anything at all besides suggestions.
+    ///
+    /// The version 1 contract had only items, so "no items" and "no answer"
+    /// were one fact and the card said "No suggestions". Here they are two: a
+    /// reply can propose nothing and still report a conflict, name a workflow
+    /// shape, or ask for a branch probe — and each of those is the kind of thing
+    /// HORO-1550 exists to put on screen. `dropped` is deliberately NOT counted,
+    /// because a reply whose every suggestion was discarded proposed nothing
+    /// usable and saying otherwise would dress validation failures up as
+    /// findings.
+    var saidSomethingBesidesItems: Bool {
+        profile != nil
+            || !observations.isEmpty
+            || !evidenceRequests.isEmpty
+            || expansion != nil
+    }
 }
 
 /// Mirrors `reporting::dto::ExternalEgressFieldReport` — one field that may
