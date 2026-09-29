@@ -21,7 +21,8 @@ Swift source (`macos/GlomerisMenuBar/Sources/GlomerisMenuBarApp.swift`):
 In practice this means every screen below is a formatting step over one of
 `glomeris`'s own `--json` reports (`status`, `daemon status`, `detect`,
 `explain`, `history`, `actions history`, `execute`, `autopilot
-show|enable|revoke`), spawned as a subprocess. The app never re-derives "is
+show|enable|revoke`, `workflow-profile show`, `external-context`), spawned as a
+subprocess. The app never re-derives "is
 this safe to clean" from
 `policy_label` or `reasons` — it reads the already-computed `executable`,
 `offered_actions`, and `refusal_reason` fields the CLI provides for exactly
@@ -169,6 +170,102 @@ stay selectable so they can be quoted in a bug report.
   rendered from the real `ExecuteReport`/`ExecuteRefusalReport` JSON the
   CLI printed — one specific message per outcome, not a generic
   success/failure toast.
+
+### Workspace intelligence
+
+The one card in the panel that cannot do anything. It answers a question none of
+the cards above it can — what else is known about this machine, beyond what
+today's scan measured — and it has no Clean, no Refresh, no Ask and no setting;
+its only controls open a disclosure. It sits directly above the AI Plan card
+because recorded habit and remote setup are the ground an inference is drawn
+from, so they are worth reading before the inference.
+
+Two halves, from two commands, kept apart because they are two different kinds
+of knowledge:
+
+- **Previously recorded habit** — `glomeris workflow-profile show --json`. The
+  stored local baseline: the workflow shape it has settled on, how many looks it
+  is built from, what those looks counted, and how long observations are kept.
+- **Optional remote context** — `glomeris external-context --json`. Which
+  GitHub and Jira lookups are set up on this machine, which fields could reach a
+  model if they are, and the list of things that never will.
+
+Both are read once, when the card appears. Neither writes anything, neither
+takes `--project-root`, neither costs money, and neither asks a remote service
+anything — `external-context` answers from your configuration file and from the
+vocabularies the code itself serializes, rather than by making the requests it
+describes.
+
+**History never outranks today**, and the card says so above whatever it found:
+*"This is a record of earlier looks at this machine, not a reading of what is
+happening now. Where it disagrees with what was measured today, today's
+measurement is the one that counts."* A working tree that is dirty and in use
+stays protected whatever shape the baseline recorded — and this card could not
+change that in either direction if it wanted to, because it has no control to
+change anything with.
+
+Four claims the habit half can make, and they are four different things:
+
+| State | What it says |
+|---|---|
+| Nothing recorded yet | No observation has been taken. **Not** a finding about how this machine is used. |
+| Recorded, and short of its minimum | Observations exist but too few to name a shape. It says how many more it wants, and that a pattern it has not named is not a finding that this machine has none. |
+| Recorded | Names the shape in the CLI's own vocabulary, and quotes verbatim the CLI's own statement of what a baseline may and may not do. The counts it was read from — how many looks, over how many days, how many repositories, and how many working trees were seen at once — sit behind a **What that was read from** disclosure, with the retention window and when the baseline was last written. |
+| Unreadable | The stored baseline could not be read, and it names the reason. Nothing about how this machine is used can be read off that, in either direction. |
+
+A state this app does not recognise — a newer CLI paired with an older app — is
+named rather than guessed at, and states nothing about the machine either way.
+
+None of the shapes is the good one, and nothing here ranks whoever uses the
+machine. The card describes a *workspace* — "one checkout, moved between
+branches", "several working trees at once" — and has no vocabulary for advanced,
+beginner, heavy or casual; `scripts/check-workflow-history-labels-no-one.sh` is
+what keeps it that way. The [CLI Reference](cli_reference.md)'s
+`glomeris workflow-profile` section lists the shapes themselves and says why
+they are unordered.
+
+The remote half's rule is the mirror image: **silence is not an answer.** Off,
+not set up and unreachable all mean the same thing — Glomeris learned nothing —
+and the card says in those words that none of them means no pull request and no
+task exist. So each provider reads as one of three states rather than as a
+checkbox:
+
+| The card says | What it means |
+|---|---|
+| Not set up on this machine | No configuration for it. Nothing was asked and nothing was sent. |
+| Set up, and its credential variable is present | It would be asked, about working trees whose remote is on the host named beside it. |
+| Set up, but not usable | Configured and refused, with the CLI's own refusal quoted verbatim — a missing variable, or a service that answered 401 — rather than paraphrased into "unavailable". |
+
+A provider names the environment variable its credential is read from, never its
+value, and — for GitHub — the one repository host in scope. With nothing
+configured the card says that Glomeris asked GitHub and Jira nothing and sent
+them nothing, which is a fact about the shipped product rather than a
+hypothetical.
+
+Under the providers, two disclosures. The first is labelled with the count *and*
+the bound — "N fields may reach a model, and nothing else" — and lists every one
+of those fields with the vocabulary its value is drawn from, or says why it has
+none. The second is **Never sent, to a provider or to a model**, and lists each
+entry rather than counting them: a list of what is withheld is worth nothing if
+it is itself abridged. If the configuration file cannot be parsed, the card says
+the setup is therefore unknown rather than empty.
+
+Four outcomes per read, and the fourth is the one a thin client usually gets
+wrong: a `glomeris` old enough not to have the subcommand exits 2 with `unknown
+command`, and the card reports that as a missing command — *"That is a missing
+command, not a machine with no recorded habit"* — rather than as an empty answer.
+Exit 0 with output the app cannot decode is a version skew, and anything else
+carries the CLI's own words. Each half has its own slot, so neither read can
+erase the other's result, and both load-bearing sentences above are drawn
+outside the branch that can fail, so a failed read never takes them off screen
+with it.
+
+Each half is introduced by a heading VoiceOver announces as one, so the two can
+be jumped between rather than walked through. The two sentences that make up a
+recorded reading are read as a single phrase rather than as two fragments, and
+each provider is one element carrying its name, its state, its refusal and the
+host or variable beside it — so the state and the reason it is in that state
+cannot be separated by navigation.
 
 ### AI Plan
 
@@ -502,6 +599,8 @@ anywhere the app looks.
 | Disk space | `glomeris status --json` |
 | Background monitor | `glomeris daemon status --json` |
 | Reclaimable space + Refresh | `glomeris detect --json --progress-json` |
+| Workspace intelligence — Previously recorded habit | `glomeris workflow-profile show --json` |
+| Workspace intelligence — Optional remote context | `glomeris external-context --json` (asks no remote service) |
 | AI Plan — Ask AI for a plan | `glomeris llm-plan --json --progress-json` |
 | Settings → AI Provider — Test connection | `glomeris llm-check --json` |
 | Settings → AI Provider — Show what would be sent | `glomeris llm-plan --print-payload --json` (no provider contacted) |
