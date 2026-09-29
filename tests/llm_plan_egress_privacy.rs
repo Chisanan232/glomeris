@@ -106,7 +106,21 @@ fn read_one_request(stream: &mut TcpStream) -> (String, String) {
 /// stays about the request rather than about response handling (which
 /// `actions::llm`'s own tests cover).
 fn write_empty_plan_response(stream: &mut TcpStream) {
-    let completion = r#"{"choices":[{"message":{"content":"{\"items\": []}"}}]}"#;
+    write_plan_response(stream, r#"{\"items\": []}"#);
+}
+
+/// The version 2 equivalent (HORO-1548). The contract version is declared
+/// explicitly rather than left to be inferred from an empty document: a
+/// reply that could be read as either shape would leave this test unable to
+/// say which parser accepted it.
+fn write_empty_workspace_plan_response(stream: &mut TcpStream) {
+    write_plan_response(stream, r#"{\"contract_version\": 2, \"items\": []}"#);
+}
+
+/// `content` is the plan document already escaped for embedding in the
+/// completion's JSON string.
+fn write_plan_response(stream: &mut TcpStream, content: &str) {
+    let completion = format!(r#"{{"choices":[{{"message":{{"content":"{content}"}}}}]}}"#);
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{completion}",
         completion.len()
@@ -266,6 +280,185 @@ fn print_payload_needs_no_provider_configuration() {
         stdout.contains("resource_1 = xcode_derived_data:"),
         "expected the wire alias to be shown against its real resource id, got: {stdout}"
     );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// The version 2 contract sends strictly more about this machine — whole
+/// repositories, working trees, branch state, a usage baseline — so the
+/// property that made HORO-1298 a fix has to be re-proved against the wire,
+/// not inherited from version 1's test above (HORO-1548).
+///
+/// Same loopback listener, same marked `$HOME`, same three assertions on the
+/// captured body. The non-vacuity control is the same too: the marked
+/// DerivedData tree must appear in the payload by kind, so a build that
+/// simply sent nothing could not pass.
+#[test]
+fn live_version_two_request_body_contains_no_path_home_or_account_name() {
+    let home = make_marked_home();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    let port = listener.local_addr().expect("read bound address").port();
+
+    let (tx, rx) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _peer) = listener.accept().expect("accept one connection");
+        let captured = read_one_request(&mut stream);
+        write_empty_workspace_plan_response(&mut stream);
+        tx.send(captured).expect("send captured request");
+    });
+
+    let output = run_llm_plan(
+        &home,
+        &["--contract-version", "2"],
+        &[
+            (
+                "GLOMERIS_LLM_BASE_URL",
+                format!("http://127.0.0.1:{port}/v1"),
+            ),
+            (
+                "GLOMERIS_LLM_API_KEY",
+                "not-a-real-key-loopback-only".to_string(),
+            ),
+            ("GLOMERIS_LLM_MODEL", "test-model".to_string()),
+        ],
+    );
+
+    let (head, body) = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("provider request must arrive");
+    server.join().expect("listener thread must not panic");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "llm-plan --contract-version 2 against the loopback provider must succeed (exit {:?}); \
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status.code()
+    );
+
+    // Non-vacuity first: the marked tree was discovered and is in the
+    // request, under its wire alias.
+    assert!(
+        body.contains("xcode_derived_data"),
+        "the marked DerivedData resource must be in the version 2 payload, or this test proves \
+         nothing"
+    );
+    assert!(
+        body.contains("resource_1"),
+        "the version 2 payload must identify resources by positional wire alias"
+    );
+    // And the version 2 request is genuinely the richer one, not version 1's
+    // payload under a new flag — otherwise this test would be re-proving the
+    // property for the same bytes.
+    assert!(
+        body.contains("workflow_history") && body.contains("repositories"),
+        "the version 2 payload must carry the workspace projection, got: {body}"
+    );
+
+    assert!(
+        !body.contains(MARKER),
+        "version 2 request body must not contain the account-name marker"
+    );
+    assert!(
+        !body.contains('/'),
+        "version 2 request body must contain no path separator at all"
+    );
+    assert!(
+        !body.contains("DerivedData") && !body.contains("Library"),
+        "version 2 request body must not name a directory"
+    );
+    assert!(
+        !head.contains(MARKER),
+        "version 2 request headers must not contain the account-name marker"
+    );
+
+    // Control: the real path was available locally the whole time.
+    let payload = run_llm_plan(
+        &home,
+        &["--contract-version", "2", "--print-payload", "--json"],
+        &[],
+    );
+    let payload_stdout = String::from_utf8_lossy(&payload.stdout);
+    assert!(
+        payload.status.success(),
+        "llm-plan --contract-version 2 --print-payload must succeed; stderr: {}",
+        String::from_utf8_lossy(&payload.stderr)
+    );
+    assert!(
+        payload_stdout.contains(MARKER),
+        "the local alias table must still carry the real path"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// The preview has to work without a credential for version 2 for the same
+/// reason it does for version 1: it is how an operator decides whether to
+/// configure a provider at all, and version 2 is the request they will most
+/// want to read before agreeing to it (HORO-1548).
+#[test]
+fn version_two_print_payload_needs_no_provider_configuration() {
+    let home = make_marked_home();
+
+    let output = run_llm_plan(&home, &["--contract-version", "2", "--print-payload"], &[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        output.status.success(),
+        "--contract-version 2 --print-payload must not require provider configuration \
+         (exit {:?}); stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("nothing is sent by this command"),
+        "expected the explicit not-sent banner, got: {stdout}"
+    );
+    // Not pinned to `resource_1`: the version 2 projection aliases every
+    // resource in the graph, including the global tool caches that
+    // `--project-root` does not bound, so which ordinal the marked tree
+    // lands on depends on what else this machine has. What must hold is
+    // that the alias is shown against the real, marker-bearing path.
+    let alias_line = stdout
+        .lines()
+        .find(|line| line.contains("= xcode_derived_data:"))
+        .unwrap_or_else(|| panic!("expected an alias line for the marked tree, got: {stdout}"));
+    assert!(
+        alias_line.contains(MARKER),
+        "the alias must be shown against the real resource id, got: {alias_line}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
+
+/// A version this build does not implement is refused rather than rounded
+/// to the nearest one it does. Silently serving version 1 to a caller who
+/// asked for 3 would hand them a report in a shape they did not ask for and
+/// cannot detect — which is the failure AC1 exists to prevent (HORO-1548).
+#[test]
+fn an_unimplemented_contract_version_is_refused_not_rounded() {
+    let home = make_marked_home();
+
+    for value in ["3", "0", "two", ""] {
+        let output = run_llm_plan(&home, &["--contract-version", value, "--schema"], &[]);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "--contract-version {value:?} must be a usage error; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).is_empty(),
+            "a refused version must print no document on stdout"
+        );
+    }
+
+    // And the flag genuinely requires a value, rather than consuming the
+    // next argument as one.
+    let output = run_llm_plan(&home, &["--contract-version"], &[]);
+    assert_eq!(output.status.code(), Some(2));
 
     std::fs::remove_dir_all(&home).ok();
 }

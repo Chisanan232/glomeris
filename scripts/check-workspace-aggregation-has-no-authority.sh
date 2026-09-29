@@ -425,6 +425,102 @@ for needle in 'pub struct ModelGraphView' 'pub struct Reported' 'pub struct Exte
   fi
 done
 
+# ---------------------------------------------------------------------------
+# Check 8: the response parser cannot name a path, an action, or a command.
+# ---------------------------------------------------------------------------
+#
+# HORO-1548. Campaign section 15 draws the authority boundary: a model may
+# rank and explain, and may not invent an action id, invent a resource id,
+# name a filesystem path or produce a command. Section 16 says the same of a
+# probe request — "it must NEVER provide: executable program; argv; shell
+# string; filesystem path; URL; credential".
+#
+# Those are properties of the *parser*, not of the prompt, because prompt text
+# is not a security boundary. `response.rs` holds the only types a provider's
+# bytes are ever deserialized into, and every field on them is a `String` or a
+# number that `validate.rs` then has to resolve against this request's own
+# alias table and this build's own registries. A field typed
+# `crate::evidence::ResourceId` or `PathBuf` would skip that step by
+# construction: serde would build the real thing straight from the wire, and no
+# amount of downstream validation would be able to tell it apart from one this
+# machine computed.
+#
+# So the check is on what the module can *name*. A module that cannot name a
+# path type cannot deserialize into one.
+
+RESPONSE_FILE="src/planner/response.rs"
+abs_response="${REPO_ROOT}/${RESPONSE_FILE}"
+
+if [[ ! -f "$abs_response" ]]; then
+  echo "FAIL: ${RESPONSE_FILE} is missing."
+  echo "It holds every type a provider's bytes are deserialized into. If it moved, update RESPONSE_FILE."
+  exit 1
+fi
+
+FORBIDDEN_IN_RESPONSE=(
+  '\bPathBuf\b;;names an owned path type, so a provider could deserialize a filesystem path directly'
+  '\bPath\b;;names a path type'
+  'std::path;;imports the path module'
+  '\bResourceId\b;;names the real resource identity, so a provider could construct one instead of selecting an alias this request issued'
+  '\bActionId\b;;names the real action identity, so a provider could construct one instead of selecting an id this build registered'
+  '\bPolicyClass\b;;names the policy vocabulary, and a response that could carry one would be assigning a class rather than requesting a disposition'
+  '\bCommand\b;;names a process builder, which is the one thing a parsed response must never be able to become'
+  '\bEvidence\b;;names the local evidence type, which a response reports references to and never contains'
+)
+
+for entry in "${FORBIDDEN_IN_RESPONSE[@]}"; do
+  pattern="${entry%%;;*}"
+  why="${entry#*;;}"
+
+  compile_error="$(grep -E "$pattern" /dev/null 2>&1 || true)"
+  if [[ -n "$compile_error" ]]; then
+    echo "FAIL: forbidden-pattern regex does not compile: ${pattern}"
+    echo "    grep said: ${compile_error}"
+    exit 1
+  fi
+
+  while IFS= read -r match; do
+    [[ -n "$match" ]] || continue
+    echo "VIOLATION: ${RESPONSE_FILE}:${match%%:*}: ${why}"
+    echo "    ${match#*:}"
+    violations=$((violations + 1))
+  done < <(grep -nE "$pattern" "$abs_response" | strip_comments)
+done
+
+# Non-vacuity, twice over. The list above passes over an empty file, and it
+# also passes over a parser that accepts anything — which is the failure mode
+# that matters here, because a claim type without `deny_unknown_fields` lets a
+# provider attach a field nobody reviewed and have it silently ignored rather
+# than refused. Section 14: "Never accept provider-generated arbitrary fields
+# silently."
+# Anchored with a word boundary rather than `grep -F`: renaming
+# `read_planner_response` to `read_planner_response_v3` and leaving a
+# permissive parser behind would satisfy a substring match.
+for needle in 'pub struct PlanItemClaim\b' 'pub struct EvidenceRequestClaim\b' 'pub fn read_planner_response\b'; do
+  if ! grep -nE "$needle" "$abs_response" | strip_comments | grep -q .; then
+    echo "VIOLATION: ${RESPONSE_FILE}: '${needle}' is gone — the checks above would now pass over a stub."
+    violations=$((violations + 1))
+  fi
+done
+
+# Counted against the number of structs rather than against a fixed floor, so
+# dropping the attribute from one claim type fails even though four others
+# still carry it. `VersionProbe` is the single deliberate exemption — it has to
+# read `contract_version` out of a document before strict parsing can know what
+# an unknown field even is — so the expected count is one fewer than the number
+# of structs. Both greps are anchored to column zero to count declarations and
+# attributes, never the prose that discusses them.
+struct_count="$(grep -cE '^(pub )?struct ' "$abs_response" || true)"
+deny_count="$(grep -cE '^#\[serde\(deny_unknown_fields\)\]$' "$abs_response" || true)"
+expected_deny=$(( ${struct_count:-0} - 1 ))
+if [[ "${deny_count:-0}" -ne "$expected_deny" ]]; then
+  echo "VIOLATION: ${RESPONSE_FILE}: ${struct_count:-0} struct(s) but ${deny_count:-0} deny_unknown_fields, expected ${expected_deny}"
+  echo "    every claim type a provider can populate must refuse a field nobody reviewed rather than"
+  echo "    ignoring it (campaign section 14). VersionProbe is the one deliberate exemption; if a"
+  echo "    second struct genuinely needs one, say why here and raise the exemption count."
+  violations=$((violations + 1))
+fi
+
 if [[ "$violations" -gt 0 ]]; then
   echo ""
   echo "FAIL: found ${violations} line(s) breaking HORO-1511's no-authority boundary."
@@ -439,4 +535,5 @@ fi
 echo "PASS: crate::workspace and crate::planner are unreachable from ${DECIDING_PATHS[*]}, and crate::workspace carries no permission-shaped field."
 echo "PASS: the developer-projects card has nothing to act with and still reads each member's own verdict."
 echo "PASS: ${DTO_FILE} cannot name a path type or an external-context domain type, so the model-facing types cannot serialize one."
+echo "PASS: ${RESPONSE_FILE} cannot name a path, a resource id, an action id, a policy class or a command, so a provider's bytes cannot deserialize into one."
 exit 0

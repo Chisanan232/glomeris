@@ -1008,6 +1008,176 @@ pub struct LlmPlanReport {
     pub provider_error: Option<String>,
 }
 
+/// One row of a version 2 workspace plan (HORO-1548): the version 1 row
+/// verbatim, plus the four things version 2 lets the model say about it.
+///
+/// ## Why the version 1 row is nested rather than extended
+///
+/// [`LlmPlanItemReport`] already draws the line this campaign's §17 asks for:
+/// every field of it except `priority` and `model_reason` is this machine's own
+/// finding, and `candidate.executable` / `candidate.offered_actions` /
+/// `candidate.refusal_reason` — the three a UI must read to decide what may be
+/// done — have no input path from the model's bytes. Nesting it keeps that
+/// property intact by construction: the four fields added here sit *outside*
+/// the local finding rather than among its fields, so a surface rendering
+/// "LOCAL FACT" and a surface rendering "AI INFERENCE" read from two different
+/// values and cannot accidentally merge them. Flattening would put
+/// `disposition` next to `policy_label` in one flat object, which is exactly
+/// the presentation §17 forbids.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspacePlanItemReport {
+    /// LOCAL FACT and POLICY VERDICT, built by
+    /// `crate::cli::build_llm_plan_item_report` from the evidence and the real
+    /// policy decision — the same function that builds a version 1 row.
+    pub item: LlmPlanItemReport,
+    /// AI INFERENCE. One of `"recommend_now"`, `"ask_user"`, `"defer"` or
+    /// `"keep"`, from the closed vocabulary in `crate::planner::contract`.
+    ///
+    /// A *request*, never a permission: `"recommend_now"` on a row whose
+    /// `item.candidate.executable` is `false` stays unexecutable, and a UI must
+    /// read the latter to decide what to offer. It is here so a surface can
+    /// order and group suggestions, and so "the model wanted to ask you" is
+    /// distinguishable from "the model wanted to act" — which is the whole
+    /// reason version 1's flat ranking was not enough.
+    pub disposition: &'static str,
+    /// AI INFERENCE. `"observed"`, `"inferred"` or `"unknown"` — the model's
+    /// own three-valued claim about how well-founded its suggestion is.
+    ///
+    /// Named `model_confidence` and not `confidence` because
+    /// `item.confidence` is already the *evidence* confidence this machine
+    /// computed, and two fields called `confidence` in one row is a
+    /// misattribution waiting to happen.
+    pub model_confidence: &'static str,
+    /// AI INFERENCE. What the model said it could not establish, bounded and
+    /// sanitized upstream by `crate::planner::validate`.
+    ///
+    /// Empty is not reassurance. A model that mentioned nothing it was unsure
+    /// about produces `[]` here, and so does a model that was genuinely sure;
+    /// the two are not distinguishable from this field, and a surface must not
+    /// render an empty list as "no uncertainties".
+    pub uncertainties: Vec<String>,
+    /// The evidence references the model cited for this item — every one of
+    /// them a reference Glomeris itself supplied in the request, since
+    /// `crate::planner::validate` drops any that was not
+    /// (HORO-1548 AC5).
+    pub evidence_refs: Vec<String>,
+}
+
+/// The model's reading of how this machine is used (HORO-1548): AI INFERENCE
+/// over the bounded local baseline, and nothing else.
+///
+/// `None` on a [`WorkspacePlanReport`] when the model claimed no profile, or
+/// claimed one in words this build does not accept. Absent is not
+/// `serial_single_checkout`.
+///
+/// `Serialize` only, never `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceProfileReport {
+    /// One of `crate::workspace::WorkflowMode`'s tags. `"unknown"` is a real
+    /// answer here and the honest one for a machine with no history collected.
+    pub mode: &'static str,
+    pub confidence: &'static str,
+    pub evidence_refs: Vec<String>,
+    pub summary: Option<String>,
+}
+
+/// Something the model noticed that is not about one resource (HORO-1548) —
+/// conflicting evidence, a gap, a pattern across worktrees.
+///
+/// `Serialize` only, never `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceObservationReport {
+    pub kind: &'static str,
+    pub evidence_refs: Vec<String>,
+    pub detail: Option<String>,
+}
+
+/// A read-only probe the model asked for (HORO-1548), named from the compiled
+/// allowlist in `crate::planner::contract`.
+///
+/// Reported, not run: nothing in this build executes an evidence request yet
+/// (that is HORO-1549), and showing the asks is how an operator sees what the
+/// model thought it was missing. `probe_id` and `subject_ref` are the only two
+/// fields there are — a request carries no command, no argv, no path and no
+/// URL, and a response supplying one is unreadable rather than powerful.
+///
+/// `Serialize` only, never `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceEvidenceRequestReport {
+    pub probe_id: &'static str,
+    pub subject_ref: String,
+    pub reason: Option<String>,
+}
+
+/// Everything one version 2 response was reduced to, and everything that was
+/// dropped reducing it (HORO-1548).
+///
+/// Every field is a count or a bounded string; the counts are the
+/// anti-vacuity surface. A response naming resources that do not exist, an
+/// action that was not offered, or a probe this build does not implement
+/// produces an empty `items` list and non-zero counters — which is a
+/// materially different report from a provider that had nothing to suggest,
+/// and the difference is visible without reading a log.
+///
+/// `Serialize` only, never `Deserialize`.
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct WorkspacePlanDroppedReport {
+    pub unknown_resource: u32,
+    pub unoffered_action: u32,
+    pub unknown_disposition: u32,
+    pub duplicate_item: u32,
+    pub unknown_observation_kind: u32,
+    pub unknown_probe: u32,
+    pub unknown_probe_subject: u32,
+    pub uncited_evidence_ref: u32,
+    /// A claim whose confidence word this build does not accept is not
+    /// discarded — it is kept and reported as `"unknown"`, which is counted
+    /// here. Degrading rather than dropping is deliberate: an item whose
+    /// confidence is unreadable is still an item about a real resource, and
+    /// dropping it would lose the suggestion to keep a word.
+    pub degraded_unknown_confidence: u32,
+    pub degraded_unknown_workflow_mode: u32,
+    pub truncated_items: u32,
+    pub truncated_observations: u32,
+    pub truncated_evidence_requests: u32,
+    pub truncated_uncertainties: u32,
+    pub truncated_evidence_refs: u32,
+}
+
+/// `glomeris llm-plan --contract-version 2` report (HORO-1548): the version 2
+/// planner contract's answer, reduced to what exists on this machine.
+///
+/// **ADVISORY ONLY**, exactly as [`LlmPlanReport`] is. A richer contract is
+/// not a more powerful one: nothing here authorizes anything, `disposition`
+/// is a request rather than a permission, and every resource named must be
+/// re-judged against freshly collected evidence before anything executes.
+///
+/// `contract_version` is always this build's supported version, since a
+/// response declaring another one is refused; `contract_declared` records
+/// whether the provider said so, which distinguishes a provider following the
+/// contract from one that happened to produce a conforming shape.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspacePlanReport {
+    pub contract_version: u32,
+    pub contract_declared: bool,
+    pub profile: Option<WorkspaceProfileReport>,
+    pub items: Vec<WorkspacePlanItemReport>,
+    pub observations: Vec<WorkspaceObservationReport>,
+    pub evidence_requests: Vec<WorkspaceEvidenceRequestReport>,
+    pub dropped: WorkspacePlanDroppedReport,
+    /// `Some(..)` when the round produced nothing usable — unreachable
+    /// provider, unreadable answer, or an answer in another contract version.
+    /// The rest of the report is empty in that case, and the caller falls back
+    /// to rule-only ranking exactly as it does when no provider is configured.
+    pub provider_error: Option<String>,
+}
+
 /// One wire-id -> real-resource mapping of a `glomeris llm-plan
 /// --print-payload` report (HORO-1298).
 ///

@@ -34,11 +34,14 @@ use crate::detectors::{
     DetectorId, DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext,
 };
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
-use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
+use crate::evidence::model::{
+    ActionId, Evidence, NativeCleanup, ResourceFingerprint, ResourceId, ResourceLocator,
+};
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{
     ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
 };
+use crate::planner::GraphProjection;
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
@@ -46,13 +49,18 @@ use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
     DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport,
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    ProgressEvent, StatusReport, WorkspaceFamilyReport,
+    ProgressEvent, StatusReport, WorkspaceEvidenceRequestReport, WorkspaceFamilyReport,
+    WorkspaceObservationReport, WorkspacePlanDroppedReport, WorkspacePlanItemReport,
+    WorkspacePlanReport, WorkspaceProfileReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
 use crate::reporting::ranking;
-use crate::workspace::history::{GitCliWorktreeCensus, WorkspaceObservation};
-use crate::workspace::{group_families, GitCliBranchProbe, WorkspaceFamily, WorkspaceSurvey};
+use crate::workspace::history::{GitCliWorktreeCensus, StoreState, WorkspaceObservation};
+use crate::workspace::{
+    group_families, GitCliBranchProbe, MachineContext, WorkspaceEvidenceGraph, WorkspaceFamily,
+    WorkspaceSurvey,
+};
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
 /// `executor::recovery_loop::CANDIDATE_CORRELATION_TIMEOUT`'s reasoning
@@ -585,6 +593,60 @@ pub fn observe_workspace_now(
     )
 }
 
+/// Assembles the workspace evidence graph for an already-discovered pass
+/// (HORO-1548).
+///
+/// The third sibling of [`group_workspaces_now`] and [`observe_workspace_now`],
+/// built the same way and for the same reason: the survey costs one `git`
+/// subprocess per worktree root, so it is paid for here rather than inside
+/// discovery.
+///
+/// `machine` and `history` are parameters rather than read here. Reading free
+/// space is a platform call and reading the baseline is a file open, and a
+/// caller that did neither must be able to say so — [`MachineContext::unmeasured`]
+/// and [`StoreState::NeverCollected`] are both honest values, where a default
+/// assembled inside this function would claim measurements nobody took.
+///
+/// What this deliberately does **not** do is call
+/// [`WorkspaceEvidenceGraph::attach_external_context`]. That is the one method
+/// on the graph that can reach a network, and keeping it out of here means a
+/// reader can tell from the call site whether a command talks to anything.
+pub fn build_workspace_graph_now(
+    candidates: &[(Evidence, PolicyDecision)],
+    machine: MachineContext,
+    history: &StoreState,
+    now: SystemTime,
+    now_unix_secs: u64,
+) -> WorkspaceEvidenceGraph {
+    let survey = WorkspaceSurvey::survey(
+        repository_roots_of(candidates),
+        &GitCliBranchProbe,
+        CLI_CORRELATION_TIMEOUT,
+    );
+    WorkspaceEvidenceGraph::build(candidates, &survey, machine, now)
+        .with_history(history, now_unix_secs)
+}
+
+/// The privacy-safe projection of that graph — what a version 2 planning round
+/// sends, and the only thing it sends (HORO-1548).
+///
+/// Thin on purpose. It exists so a caller needs no `use` of
+/// [`crate::workspace`] or [`crate::planner::GraphProjection`]'s inputs to
+/// obtain a projection, and so there is exactly one composition of
+/// [`build_workspace_graph_now`] with [`GraphProjection::build`] rather than
+/// one per command.
+pub fn build_workspace_projection_now(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    machine: MachineContext,
+    history: &StoreState,
+    now: SystemTime,
+    now_unix_secs: u64,
+) -> GraphProjection {
+    let graph = build_workspace_graph_now(candidates, machine, history, now, now_unix_secs);
+    GraphProjection::build(&graph, candidates, actions, now)
+}
+
 /// Builds an [`ExplainReport`] for one already-classified candidate.
 /// `actions` is consulted only via [`resolve_action_for`] (HORO-1053) to
 /// populate `executable`/`offered_actions`/`refusal_reason` — no policy
@@ -807,101 +869,17 @@ pub fn build_llm_plan_report(
 
     let mut items = Vec::with_capacity(result.validated_items.len());
     for validated in result.validated_items {
-        let Some((ev, decision)) = candidates
-            .iter()
-            .find(|(ev, _)| ev.resource == validated.resource)
-        else {
-            // Unreachable in practice: `resource` came from `evidences`,
-            // which is itself derived from `candidates` — but never panic
-            // on a defensive fallback, matching this module's style.
-            continue;
-        };
-
-        let resource_id = ev.resource.to_string();
-        let policy_label = crate::reporting::label_for(decision).as_str();
-        let priority = validated.priority;
-        let model_reason = validated.model_reason;
-        // Built from `ev` and `decision` only — the local evidence and the
-        // real policy verdict. Note what is NOT an input: anything from
-        // `validated`. The model cannot influence `executable`,
-        // `offered_actions` or `refusal_reason` even by naming a different
-        // action than the one policy would resolve.
-        let candidate = DetectCandidateReport::from_evidence_and_decision(
-            ev,
-            decision,
-            resolve_action_for(ev, actions),
+        if let Some(item) = build_llm_plan_item_report(
+            &validated.resource,
+            validated.action_id,
+            validated.priority,
+            validated.model_reason,
+            candidates,
+            actions,
             impact,
-        );
-        let completeness = crate::reporting::dto::completeness_tag(&ev.completeness());
-        let confidence = crate::reporting::dto::confidence_tag(ev.confidence());
-
-        if decision.class == PolicyClass::Protected {
-            items.push(LlmPlanItemReport {
-                resource_id,
-                policy_label,
-                requested_action_id: None,
-                priority,
-                model_reason,
-                explain: None,
-                skip_reason: Some(
-                    "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
-                ),
-                candidate,
-                completeness,
-                confidence,
-            });
-            continue;
+        ) {
+            items.push(item);
         }
-
-        items.push(match actions.get(validated.action_id.0) {
-            // `dry_run_explain` rather than `dry_run` (HORO-1359). The
-            // commonest refusal here is still a model naming a registered
-            // action that does not apply to the resource it named, which is
-            // the plan-error arm; the arm this change adds is the one where
-            // the plan builds and execution would refuse the step anyway. In
-            // that case `candidate.executable` was already `false` with a
-            // truthful `refusal_reason`, while this row's own `explain`
-            // rendered the action as a live proposal — one JSON object
-            // disagreeing with itself.
-            Some(action) => match crate::actionability::dry_run_explain(action, ev) {
-                Ok(explain) => LlmPlanItemReport {
-                    resource_id,
-                    policy_label,
-                    requested_action_id: Some(action.id().0),
-                    priority,
-                    model_reason,
-                    explain: Some(explain),
-                    skip_reason: None,
-                    candidate,
-                    completeness,
-                    confidence,
-                },
-                Err(reason) => LlmPlanItemReport {
-                    resource_id,
-                    policy_label,
-                    requested_action_id: Some(action.id().0),
-                    priority,
-                    model_reason,
-                    explain: None,
-                    skip_reason: Some(reason),
-                    candidate,
-                    completeness,
-                    confidence,
-                },
-            },
-            None => LlmPlanItemReport {
-                resource_id,
-                policy_label,
-                requested_action_id: None,
-                priority,
-                model_reason,
-                explain: None,
-                skip_reason: Some("no registered action for this action id".to_string()),
-                candidate,
-                completeness,
-                confidence,
-            },
-        });
     }
 
     LlmPlanReport {
@@ -917,6 +895,262 @@ pub fn build_llm_plan_report(
         // or a `--json` field.
         provider_error: result.provider_error.map(|e| e.to_string()),
     }
+}
+
+/// One row of a plan report: the local evidence, the real policy verdict, and
+/// the four things the model claimed about that resource.
+///
+/// Extracted from [`build_llm_plan_report`] unchanged (HORO-1548) so the
+/// version 2 report renders a row through exactly this code rather than
+/// through a second copy of it. A second copy is where the `Protected` early
+/// return would eventually be omitted, and that early return — not a test —
+/// is what guarantees no action is ever rendered for a protected resource.
+///
+/// `None` when `resource` is not among `candidates`. Unreachable in practice,
+/// because a validated resource came from the candidate set in the first
+/// place, but never a panic: this module does not panic on a defensive
+/// fallback.
+fn build_llm_plan_item_report(
+    resource: &ResourceId,
+    action_id: ActionId,
+    priority: Option<u32>,
+    model_reason: Option<String>,
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    impact: ImpactContext,
+) -> Option<LlmPlanItemReport> {
+    let (ev, decision) = candidates.iter().find(|(ev, _)| &ev.resource == resource)?;
+
+    let resource_id = ev.resource.to_string();
+    let policy_label = crate::reporting::label_for(decision).as_str();
+    // Built from `ev` and `decision` only — the local evidence and the real
+    // policy verdict. Note what is NOT an input: anything the model said. It
+    // cannot influence `executable`, `offered_actions` or `refusal_reason`
+    // even by naming a different action than the one policy would resolve.
+    let candidate = DetectCandidateReport::from_evidence_and_decision(
+        ev,
+        decision,
+        resolve_action_for(ev, actions),
+        impact,
+    );
+    let completeness = crate::reporting::dto::completeness_tag(&ev.completeness());
+    let confidence = crate::reporting::dto::confidence_tag(ev.confidence());
+
+    if decision.class == PolicyClass::Protected {
+        return Some(LlmPlanItemReport {
+            resource_id,
+            policy_label,
+            requested_action_id: None,
+            priority,
+            model_reason,
+            explain: None,
+            skip_reason: Some(
+                "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
+            ),
+            candidate,
+            completeness,
+            confidence,
+        });
+    }
+
+    Some(match actions.get(action_id.0) {
+        // `dry_run_explain` rather than `dry_run` (HORO-1359). The commonest
+        // refusal here is still a model naming a registered action that does
+        // not apply to the resource it named, which is the plan-error arm; the
+        // arm this change adds is the one where the plan builds and execution
+        // would refuse the step anyway. In that case `candidate.executable`
+        // was already `false` with a truthful `refusal_reason`, while this
+        // row's own `explain` rendered the action as a live proposal — one
+        // JSON object disagreeing with itself.
+        Some(action) => match crate::actionability::dry_run_explain(action, ev) {
+            Ok(explain) => LlmPlanItemReport {
+                resource_id,
+                policy_label,
+                requested_action_id: Some(action.id().0),
+                priority,
+                model_reason,
+                explain: Some(explain),
+                skip_reason: None,
+                candidate,
+                completeness,
+                confidence,
+            },
+            Err(reason) => LlmPlanItemReport {
+                resource_id,
+                policy_label,
+                requested_action_id: Some(action.id().0),
+                priority,
+                model_reason,
+                explain: None,
+                skip_reason: Some(reason),
+                candidate,
+                completeness,
+                confidence,
+            },
+        },
+        None => LlmPlanItemReport {
+            resource_id,
+            policy_label,
+            requested_action_id: None,
+            priority,
+            model_reason,
+            explain: None,
+            skip_reason: Some("no registered action for this action id".to_string()),
+            candidate,
+            completeness,
+            confidence,
+        },
+    })
+}
+
+/// Builds a [`WorkspacePlanReport`] — one version 2 planning round against
+/// `provider`, rendered (HORO-1548).
+///
+/// **ADVISORY ONLY — never executes anything and never authorizes
+/// anything**, exactly as [`build_llm_plan_report`] is. The version 2
+/// contract carries more: a workspace profile, per-item dispositions and
+/// confidences, observations, and requests for further read-only evidence.
+/// None of that is authority. Every row's local finding and policy verdict
+/// come from [`build_llm_plan_item_report`] — the same function version 1
+/// uses, including its [`PolicyClass::Protected`] early return — and the four
+/// model-attributed fields are added beside that finding rather than into it.
+///
+/// `projection` is a parameter rather than built here for two reasons. It is
+/// what `--print-payload` prints, so a preview and a real call must be able to
+/// use one value and cannot then disagree. And building it requires a
+/// [`MachineContext`] and a [`StoreState`] that only the caller knows how to
+/// obtain honestly — see [`build_workspace_projection_now`], and note that
+/// neither [`MachineContext::unmeasured`] nor [`StoreState::NeverCollected`]
+/// is a value this function could invent on a caller's behalf without
+/// claiming measurements nobody took.
+pub fn build_workspace_plan_report(
+    projection: &GraphProjection,
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    provider: &dyn LlmProvider,
+    impact: ImpactContext,
+) -> WorkspacePlanReport {
+    let result = crate::planner::plan_workspace(provider, projection, actions);
+    let plan = result.plan;
+
+    let mut items = Vec::with_capacity(plan.items.len());
+    for validated in plan.items {
+        // A validated item that resolves to no candidate is dropped rather
+        // than reported with an invented row. Unreachable in practice — the
+        // resource came out of the alias table, which was built from these
+        // same candidates — and not worth a panic if the two ever diverge.
+        if let Some(item) = build_llm_plan_item_report(
+            &validated.resource,
+            validated.action_id,
+            validated.priority,
+            validated.model_reason,
+            candidates,
+            actions,
+            impact,
+        ) {
+            items.push(WorkspacePlanItemReport {
+                item,
+                disposition: validated.disposition.tag(),
+                model_confidence: validated.confidence.tag(),
+                uncertainties: validated.uncertainties,
+                evidence_refs: validated.evidence_refs,
+            });
+        }
+    }
+
+    let counters = plan.counters;
+    WorkspacePlanReport {
+        contract_version: crate::planner::PLANNER_CONTRACT_VERSION,
+        contract_declared: result.contract_declared,
+        profile: plan.profile.map(|profile| WorkspaceProfileReport {
+            mode: profile.mode.tag(),
+            confidence: profile.confidence.tag(),
+            evidence_refs: profile.evidence_refs,
+            summary: profile.summary,
+        }),
+        items,
+        observations: plan
+            .observations
+            .into_iter()
+            .map(|observation| WorkspaceObservationReport {
+                kind: observation.kind.tag(),
+                evidence_refs: observation.evidence_refs,
+                detail: observation.detail,
+            })
+            .collect(),
+        evidence_requests: plan
+            .evidence_requests
+            .into_iter()
+            .map(|request| WorkspaceEvidenceRequestReport {
+                probe_id: request.probe_id.tag(),
+                subject_ref: request.subject_ref,
+                reason: request.reason,
+            })
+            .collect(),
+        dropped: WorkspacePlanDroppedReport {
+            unknown_resource: counters.dropped_unknown_resource,
+            unoffered_action: counters.dropped_unoffered_action,
+            unknown_disposition: counters.dropped_unknown_disposition,
+            duplicate_item: counters.dropped_duplicate_item,
+            unknown_observation_kind: counters.dropped_unknown_observation_kind,
+            unknown_probe: counters.dropped_unknown_probe,
+            unknown_probe_subject: counters.dropped_unknown_probe_subject,
+            uncited_evidence_ref: counters.dropped_uncited_evidence_ref,
+            degraded_unknown_confidence: counters.degraded_unknown_confidence,
+            degraded_unknown_workflow_mode: counters.degraded_unknown_workflow_mode,
+            truncated_items: counters.truncated_items,
+            truncated_observations: counters.truncated_observations,
+            truncated_evidence_requests: counters.truncated_evidence_requests,
+            truncated_uncertainties: counters.truncated_uncertainties,
+            truncated_evidence_refs: counters.truncated_evidence_refs,
+        },
+        // `Display`, not `Debug` — see [`build_llm_plan_report`] for why.
+        provider_error: result.provider_error.map(|e| e.to_string()),
+    }
+}
+
+/// Builds an [`LlmPayloadReport`] for the version 2 contract — the exact
+/// request a live `llm-plan --contract-version 2` run would send for
+/// `projection`, without sending it and without needing a provider or a
+/// credential (HORO-1548).
+///
+/// Calls [`crate::planner::build_workspace_request`], the same function
+/// [`crate::planner::plan_workspace`] calls, for the reason
+/// [`build_llm_payload_report`] gives: a preview that could drift from the
+/// real request would be worse than no preview, since verifying what leaves
+/// this machine is its entire purpose.
+///
+/// Reuses [`LlmPayloadReport`] rather than introducing a second payload type.
+/// Its three fields are exactly what there is to show — the two outbound
+/// strings and the local alias table that stays behind — and that split is
+/// the same in both contract versions.
+pub fn build_workspace_payload_report(
+    projection: &GraphProjection,
+) -> Result<LlmPayloadReport, crate::actions::llm::LlmError> {
+    let request = crate::planner::build_workspace_request(projection)?;
+
+    let mut resource_aliases: Vec<LlmPayloadResourceAlias> = projection
+        .aliases
+        .issued()
+        .filter_map(|wire_resource_id| {
+            let resource = projection.aliases.resolve(wire_resource_id)?;
+            Some(LlmPayloadResourceAlias {
+                wire_resource_id: wire_resource_id.to_string(),
+                local_resource_id: resource.to_string(),
+            })
+        })
+        .collect();
+    // Sorted so two runs over the same machine print the same table. The
+    // alias table's own iteration order is not part of its contract, and an
+    // operator diffing a payload preview against yesterday's should see the
+    // request change, not the ordering.
+    resource_aliases.sort_by(|a, b| a.wire_resource_id.cmp(&b.wire_resource_id));
+
+    Ok(LlmPayloadReport {
+        system_prompt: request.system_prompt,
+        user_prompt: request.user_prompt,
+        resource_aliases,
+    })
 }
 
 /// Builds an [`LlmPayloadReport`] — the exact request a live `llm-plan`
@@ -1087,6 +1321,66 @@ pub fn llm_plan_schema_example() -> String {
                 "action_id": "cargo.clean.target_dir",
                 "priority": 1,
                 "reason": "stale build artifacts, not modified in 30 days"
+            }
+        ]
+    });
+    serde_json::to_string_pretty(&value).expect("static example JSON value always serializes")
+}
+
+/// Renders an example, syntactically valid version 2 planner response
+/// (HORO-1548) — `glomeris llm-plan --contract-version 2 --schema`'s entire
+/// stdout.
+///
+/// Serves the purpose [`llm_plan_schema_example`] serves and one more. Version
+/// 2 is a richer contract, and the only way to exercise it without a
+/// credential is a `--plan-file` fixture; a fixture a human can only write by
+/// reading `src/planner/response.rs` is the founder-dogfood finding HORO-1048
+/// already fixed once for version 1.
+///
+/// Two deliberate differences from the version 1 example. Its `resource_id` is
+/// a wire alias — `resource_1`, the form a live model is actually handed — and
+/// not a `ResourceId::to_string()`-shaped value, because version 2 resolves
+/// aliases against the request's own alias table and nothing else: a fixture
+/// naming a local path would be dropped as an unknown resource, which is the
+/// correct behaviour and a confusing first experience. And every vocabulary
+/// word here is interpolated from [`crate::planner::contract`] rather than
+/// written out, so an example advertising a word the parser stopped accepting
+/// cannot be shipped.
+pub fn workspace_plan_schema_example() -> String {
+    use crate::planner::{ClaimConfidence, Disposition, ObservationKind, ProbeId};
+
+    let value = serde_json::json!({
+        "contract_version": crate::planner::PLANNER_CONTRACT_VERSION,
+        "workspace_profile": {
+            "mode": crate::workspace::WorkflowMode::Unknown.tag(),
+            "confidence": ClaimConfidence::Unknown.tag(),
+            "evidence_refs": [crate::planner::WORKFLOW_HISTORY_EVIDENCE_REF],
+            "summary": "no baseline has been collected on this machine yet"
+        },
+        "items": [
+            {
+                "resource_id": "resource_1",
+                "action_id": "cargo.clean.target_dir",
+                "disposition": Disposition::AskUser.tag(),
+                "confidence": ClaimConfidence::Inferred.tag(),
+                "priority": 1,
+                "evidence_refs": ["resource_1"],
+                "uncertainties": ["no process probe was attempted for this resource"],
+                "reason": "large, regenerable, and not modified in 30 days"
+            }
+        ],
+        "observations": [
+            {
+                "kind": ObservationKind::MissingEvidence.tag(),
+                "evidence_refs": [crate::planner::MACHINE_EVIDENCE_REF],
+                "detail": "free space was not measured, so recovery headroom is unknown"
+            }
+        ],
+        "evidence_requests": [
+            {
+                "probe_id": ProbeId::ProcessActivity.tag(),
+                "subject_ref": "resource_1",
+                "reason": "to tell an idle build directory from one in active use"
             }
         ]
     });
@@ -1361,6 +1655,173 @@ pub fn print_llm_plan_report(report: &LlmPlanReport) {
             (None, None) => println!("  (no plan rendered)"),
         }
     }
+}
+
+/// Prints a [`WorkspacePlanReport`] as concise, human-readable text
+/// (HORO-1548).
+///
+/// Every line the model is responsible for is prefixed `model` — the
+/// disposition, the confidence, the rationale, the uncertainties, the profile
+/// and the observations. Every unprefixed line is this machine's own finding.
+/// That prefix is the whole of §17's separation in the text surface: a reader
+/// must be able to tell a claim from a finding without knowing which fields of
+/// which DTO came from where, and a plan output that reads `AUTO_SAFE …
+/// recommend_now` on one line has merged exactly the two things it must not.
+pub fn print_workspace_plan_report(report: &WorkspacePlanReport) {
+    for line in workspace_plan_lines(report) {
+        println!("{line}");
+    }
+}
+
+/// The lines [`print_workspace_plan_report`] prints, returned rather than
+/// printed so the attribution prefixes are testable. A property asserted over
+/// captured stdout would be a test of the test harness; a property asserted
+/// over this is a test of the rendering.
+fn workspace_plan_lines(report: &WorkspacePlanReport) -> Vec<String> {
+    let mut lines = vec![format!(
+        "WORKSPACE PLAN (contract v{}) — advisory only, nothing is executed by this command",
+        report.contract_version
+    )];
+    if !report.contract_declared && report.provider_error.is_none() {
+        lines.push(
+            "note: the provider did not declare the contract version it answered".to_string(),
+        );
+    }
+    if let Some(err) = &report.provider_error {
+        lines.push(format!("provider error: {err}"));
+    }
+    if let Some(dropped) = rendered_dropped(&report.dropped) {
+        lines.push(dropped);
+    }
+
+    match &report.profile {
+        Some(profile) => {
+            lines.push(format!(
+                "model workspace profile: {} (confidence {})",
+                profile.mode, profile.confidence
+            ));
+            if let Some(summary) = &profile.summary {
+                lines.push(format!("  model says: {summary}"));
+            }
+            push_citations(&mut lines, &profile.evidence_refs);
+        }
+        // Not "serial_single_checkout", and not silence either: a profile the
+        // model did not claim is a thing the operator should know was not
+        // claimed.
+        None => lines.push("model workspace profile: (none claimed)".to_string()),
+    }
+
+    if report.items.is_empty() {
+        lines.push("no suggestions".to_string());
+    }
+    for row in &report.items {
+        let action = row.item.requested_action_id.unwrap_or("(none)");
+        let priority = row
+            .item
+            .priority
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        lines.push(format!(
+            "[{}] {} action={} priority={}",
+            row.item.policy_label, row.item.resource_id, action, priority
+        ));
+        lines.push(format!(
+            "  model wants: {} (confidence {})",
+            row.disposition, row.model_confidence
+        ));
+        if let Some(reason) = &row.item.model_reason {
+            lines.push(format!("  model says: {reason}"));
+        }
+        for uncertainty in &row.uncertainties {
+            lines.push(format!("  model unsure: {uncertainty}"));
+        }
+        push_citations(&mut lines, &row.evidence_refs);
+        match (&row.item.explain, &row.item.skip_reason) {
+            (Some(explain), _) => lines.push(format!("  {explain}")),
+            (None, Some(reason)) => lines.push(format!("  skipped: {reason}")),
+            (None, None) => lines.push("  (no plan rendered)".to_string()),
+        }
+    }
+
+    for observation in &report.observations {
+        lines.push(format!("model observation [{}]", observation.kind));
+        if let Some(detail) = &observation.detail {
+            lines.push(format!("  model says: {detail}"));
+        }
+        push_citations(&mut lines, &observation.evidence_refs);
+    }
+
+    for request in &report.evidence_requests {
+        lines.push(format!(
+            "model asks for probe {} of {} — not run by this command",
+            request.probe_id, request.subject_ref
+        ));
+        if let Some(reason) = &request.reason {
+            lines.push(format!("  model says: {reason}"));
+        }
+    }
+
+    lines
+}
+
+fn push_citations(lines: &mut Vec<String>, refs: &[String]) {
+    if !refs.is_empty() {
+        lines.push(format!("  model cites: {}", refs.join(", ")));
+    }
+}
+
+/// One line naming only the non-zero counts, or `None`. A report with nothing
+/// dropped should not spend fifteen lines saying so — but a report that dropped
+/// something must never be silent about it, which is why this is not gated
+/// behind a verbosity flag.
+fn rendered_dropped(dropped: &WorkspacePlanDroppedReport) -> Option<String> {
+    let counts: [(&str, u32); 15] = [
+        ("unknown resource", dropped.unknown_resource),
+        ("unoffered action", dropped.unoffered_action),
+        ("unknown disposition", dropped.unknown_disposition),
+        ("duplicate item", dropped.duplicate_item),
+        ("unknown observation kind", dropped.unknown_observation_kind),
+        ("unknown probe", dropped.unknown_probe),
+        ("unknown probe subject", dropped.unknown_probe_subject),
+        ("uncited evidence ref", dropped.uncited_evidence_ref),
+        (
+            "confidence degraded to unknown",
+            dropped.degraded_unknown_confidence,
+        ),
+        (
+            "workflow mode degraded to unknown",
+            dropped.degraded_unknown_workflow_mode,
+        ),
+        ("items over the bound", dropped.truncated_items),
+        (
+            "observations over the bound",
+            dropped.truncated_observations,
+        ),
+        (
+            "evidence requests over the bound",
+            dropped.truncated_evidence_requests,
+        ),
+        (
+            "uncertainties over the bound",
+            dropped.truncated_uncertainties,
+        ),
+        (
+            "evidence refs over the bound",
+            dropped.truncated_evidence_refs,
+        ),
+    ];
+    let rendered: Vec<String> = counts
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect();
+    if rendered.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "dropped from the response: {}",
+        rendered.join(", ")
+    ))
 }
 
 /// Outcome of resolving `glomeris execute`'s `--resource-id`/`--action-id`
@@ -2124,6 +2585,42 @@ mod tests {
         assert_eq!(report.candidates.len(), 2);
     }
 
+    /// HORO-1548. The projection a version 2 planning round sends covers every
+    /// candidate, and the two things the caller did not measure arrive as
+    /// unmeasured rather than as zeros — a machine reported with `free_bytes: 0`
+    /// and a workflow mode of `serial_single_checkout` would be two fabricated
+    /// findings, and both are the convenient default.
+    #[test]
+    fn build_workspace_projection_now_covers_every_candidate_without_inventing_context() {
+        let ev1 = evidence("/tmp/a/target", ResourceKind::CargoTargetDir, Some(100));
+        let ev2 = evidence("/tmp/b/node_modules", ResourceKind::NodeModules, Some(9999));
+        let cfg = PolicyConfig::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let candidates = vec![
+            (ev1.clone(), classify(&ev1, &cfg, now)),
+            (ev2.clone(), classify(&ev2, &cfg, now)),
+        ];
+
+        let projection = build_workspace_projection_now(
+            &candidates,
+            &ActionRegistry::builtin(),
+            MachineContext::unmeasured(),
+            &StoreState::NeverCollected,
+            now,
+            0,
+        );
+
+        assert_eq!(projection.aliases.len(), 2);
+        for alias in ["resource_1", "resource_2"] {
+            assert!(
+                projection.resource_view(alias).is_some(),
+                "{alias} was issued but projects nothing"
+            );
+        }
+        assert_eq!(projection.view.machine.free_bytes.value, None);
+        assert_eq!(projection.view.workflow_history.mode.value, None);
+    }
+
     /// HORO-1049: `format_size_field` — the shared text-rendering helper
     /// both `print_detect_report` and `print_explain_report` use — marks a
     /// lower-bound size with the `"≥ ... (lower bound — scan truncated)"`
@@ -2843,6 +3340,353 @@ mod tests {
         assert!(report.items.is_empty());
         assert_eq!(report.dropped_unknown_resource, 1);
         assert_eq!(report.dropped_unknown_action, 1);
+    }
+
+    /// A real cargo project on disk, so `cargo.clean.target_dir` is genuinely
+    /// on offer for it — `eligible_action_ids` runs the action's own
+    /// `plan_refusal`, so a made-up path offers nothing and a version 2 item
+    /// naming one is refused before it can be rendered.
+    fn v2_auto_safe_candidate(label: &str) -> (PathBuf, Vec<(Evidence, PolicyDecision)>) {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-v2-plan-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target_dir = dir.join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+
+        let mut ev = evidence(
+            target_dir.to_str().unwrap(),
+            ResourceKind::CargoTargetDir,
+            Some(4096),
+        );
+        ev.open_by_process = ProbeOutcome::Observed(Vec::new());
+        ev.process_cwd_match = ProbeOutcome::Observed(Vec::new());
+        ev.git_state = ProbeOutcome::Observed(None);
+        ev.tool_liveness = ProbeOutcome::Observed(false);
+
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+        (dir, vec![(ev, decision)])
+    }
+
+    fn v2_projection(candidates: &[(Evidence, PolicyDecision)]) -> GraphProjection {
+        build_workspace_projection_now(
+            candidates,
+            &ActionRegistry::builtin(),
+            MachineContext::unmeasured(),
+            &StoreState::NeverCollected,
+            SystemTime::UNIX_EPOCH,
+            0,
+        )
+    }
+
+    /// HORO-1548. A version 2 row carries the local finding and the policy
+    /// verdict in the same nested shape version 1 reports, and the four
+    /// model-attributed fields beside it rather than among them.
+    #[test]
+    fn build_workspace_plan_report_separates_the_model_claim_from_the_local_finding() {
+        let (dir, candidates) = v2_auto_safe_candidate("rendered");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "workspace_profile":{"mode":"unknown","confidence":"unknown",
+                                     "evidence_refs":["workflow_history"],
+                                     "summary":"no history collected"},
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"ask_user","confidence":"inferred",
+                          "priority":3,"evidence_refs":["resource_1"],
+                          "uncertainties":["no process probe was attempted"],
+                          "reason":"large and untouched"}],
+                "observations":[{"kind":"missing_evidence","evidence_refs":["machine"],
+                                 "detail":"free space was not measured"}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert_eq!(report.provider_error, None);
+        assert_eq!(report.contract_version, 2);
+        assert!(report.contract_declared);
+        assert_eq!(report.items.len(), 1);
+
+        let row = &report.items[0];
+        // AI INFERENCE.
+        assert_eq!(row.disposition, "ask_user");
+        assert_eq!(row.model_confidence, "inferred");
+        assert_eq!(row.uncertainties, vec!["no process probe was attempted"]);
+        assert_eq!(row.evidence_refs, vec!["resource_1"]);
+        // LOCAL FACT and POLICY VERDICT, in the nested version 1 row.
+        assert_eq!(row.item.policy_label, "AUTO_SAFE");
+        assert_eq!(row.item.requested_action_id, Some("cargo.clean.target_dir"));
+        assert!(row.item.explain.is_some());
+        assert!(row.item.skip_reason.is_none());
+
+        let profile = report.profile.as_ref().expect("a profile was claimed");
+        assert_eq!(profile.mode, "unknown");
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.observations[0].kind, "missing_evidence");
+        assert_eq!(report.dropped, WorkspacePlanDroppedReport::default());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// §17. Every line carrying something the model claimed is attributed to
+    /// it, and no line merges a claim with a finding. Asserted over the
+    /// rendered lines rather than eyeballed: the failure this prevents is a
+    /// future line that appends a disposition to the policy-label line, which
+    /// reads as Glomeris having decided to recommend it.
+    #[test]
+    fn the_text_rendering_attributes_every_model_claim_and_merges_none() {
+        let (dir, candidates) = v2_auto_safe_candidate("rendering");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "workspace_profile":{"mode":"unknown","confidence":"unknown",
+                                     "evidence_refs":["workflow_history"],
+                                     "summary":"no history collected"},
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"recommend_now","confidence":"inferred",
+                          "priority":3,"evidence_refs":["resource_1"],
+                          "uncertainties":["no process probe was attempted"],
+                          "reason":"large and untouched"}],
+                "observations":[{"kind":"missing_evidence","evidence_refs":["machine"],
+                                 "detail":"free space was not measured"}]}"#
+                .to_string()),
+        };
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+        let lines = workspace_plan_lines(&report);
+
+        // Every model claim appears, on a line that says whose it is.
+        for claim in [
+            "recommend_now",
+            "inferred",
+            "large and untouched",
+            "no process probe was attempted",
+            "no history collected",
+            "free space was not measured",
+        ] {
+            let carriers: Vec<&String> = lines.iter().filter(|l| l.contains(claim)).collect();
+            assert!(!carriers.is_empty(), "the rendering never shows: {claim}");
+            for line in carriers {
+                assert!(
+                    line.trim_start().starts_with("model "),
+                    "a model claim is rendered as this machine's own: {line}"
+                );
+            }
+        }
+
+        // And the policy verdict's own line carries no model claim with it.
+        let verdict: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.starts_with("[AUTO_SAFE]"))
+            .collect();
+        assert_eq!(verdict.len(), 1, "{lines:?}");
+        for claim in ["recommend_now", "inferred", "large and untouched"] {
+            assert!(
+                !verdict[0].contains(claim),
+                "the policy verdict line merged a model claim: {}",
+                verdict[0]
+            );
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A response that dropped nothing renders no dropped line; a response that
+    /// dropped something names what and how many. Silence about a discarded
+    /// item is the failure mode — it reads as "the model had nothing to say".
+    #[test]
+    fn the_text_rendering_never_stays_silent_about_a_dropped_item() {
+        assert_eq!(
+            rendered_dropped(&WorkspacePlanDroppedReport::default()),
+            None
+        );
+
+        let dropped = WorkspacePlanDroppedReport {
+            unknown_resource: 2,
+            unknown_probe: 1,
+            ..WorkspacePlanDroppedReport::default()
+        };
+        let line = rendered_dropped(&dropped).expect("a dropped count is reported");
+        assert!(line.contains("2 unknown resource"), "{line}");
+        assert!(line.contains("1 unknown probe"), "{line}");
+        assert!(
+            !line.contains("duplicate item"),
+            "a zero count was rendered: {line}"
+        );
+    }
+
+    /// The version 2 `--schema` example is a document that actually works: fed
+    /// back through `--plan-file` against a projection that offered exactly
+    /// what it names, it produces one item and drops nothing. A schema example
+    /// that only *parses* would still be useless, because the alias and the
+    /// action have to match the request.
+    #[test]
+    fn workspace_plan_schema_example_survives_a_real_round_trip() {
+        let (dir, candidates) = v2_auto_safe_candidate("schema");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(workspace_plan_schema_example()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert_eq!(report.provider_error, None);
+        assert!(report.contract_declared);
+        assert_eq!(report.items.len(), 1, "{report:?}");
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.evidence_requests.len(), 1);
+        assert!(report.profile.is_some());
+        assert_eq!(
+            report.dropped,
+            WorkspacePlanDroppedReport::default(),
+            "the documented example is not accepted verbatim"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SAFETY-CRITICAL, and stricter in version 2 than in version 1. A
+    /// `PROTECTED` resource is offered no action at all, so a model naming one
+    /// for a real registered action does not produce a row with an empty
+    /// action — it produces no row, and a counter saying an unoffered action
+    /// was asked for.
+    #[test]
+    fn build_workspace_plan_report_never_renders_a_row_for_a_protected_resource() {
+        let mut ev = evidence(
+            "/Users/x/.ssh/id_ed25519",
+            ResourceKind::CargoTargetDir,
+            Some(1024),
+        );
+        ev.resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/Users/x/.ssh/id_ed25519")),
+        );
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        assert_eq!(decision.class, PolicyClass::Protected);
+        let candidates = vec![(ev, decision)];
+        let projection = v2_projection(&candidates);
+
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"recommend_now","confidence":"observed",
+                          "reason":"looks stale"}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert!(
+            report.items.is_empty(),
+            "a protected resource reached a version 2 plan row"
+        );
+        assert_eq!(report.dropped.unoffered_action, 1);
+        assert_eq!(report.provider_error, None);
+    }
+
+    /// A version 1 response to a version 2 request is reported as the mismatch
+    /// it is rather than promoted — promoting it would mean inventing the
+    /// disposition and the confidence, which are the two fields that decide
+    /// whether a human is asked before anything happens.
+    #[test]
+    fn build_workspace_plan_report_does_not_promote_a_version_one_response() {
+        let (dir, candidates) = v2_auto_safe_candidate("v1reply");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"items":[{"resource_id":"resource_1",
+                "action_id":"cargo.clean.target_dir","priority":1}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert!(report.items.is_empty());
+        assert!(report.profile.is_none());
+        let error = report.provider_error.expect("the mismatch is reported");
+        assert!(error.contains("version 1"), "got: {error}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1548/§5. The two strings that leave carry no absolute path; the
+    /// alias table, which stays local, is where the operator reads what the
+    /// opaque ids stand for.
+    #[test]
+    fn build_workspace_payload_report_keeps_local_paths_out_of_the_outbound_bytes() {
+        let (dir, candidates) = v2_auto_safe_candidate("payload");
+        let projection = v2_projection(&candidates);
+
+        let report = build_workspace_payload_report(&projection).expect("the request builds");
+
+        let local = dir.to_str().expect("a utf-8 temp path");
+        for (field, bytes) in [
+            ("system_prompt", &report.system_prompt),
+            ("user_prompt", &report.user_prompt),
+        ] {
+            assert!(
+                !bytes.contains(local),
+                "{field} carries the local project path"
+            );
+            assert!(
+                !bytes.contains("/Users/") && !bytes.contains("/private/"),
+                "{field} carries an absolute path shape"
+            );
+        }
+        assert!(report.user_prompt.contains("resource_1"));
+
+        assert_eq!(report.resource_aliases.len(), 1);
+        let alias = &report.resource_aliases[0];
+        assert_eq!(alias.wire_resource_id, "resource_1");
+        assert!(
+            alias.local_resource_id.contains(local),
+            "the local alias table must name the real resource"
+        );
+
+        // And the preview is the request: same bytes, both times.
+        let again = build_workspace_payload_report(&projection).expect("the request builds");
+        assert_eq!(report.system_prompt, again.system_prompt);
+        assert_eq!(report.user_prompt, again.user_prompt);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -43,12 +43,42 @@
 //! action registry, hands out aliases, and keeps the alias table on the
 //! non-serializable side.
 
-pub mod dto;
-pub mod project;
+//! # The planner contract is versioned (HORO-1548)
+//!
+//! [`contract`] holds the closed vocabularies a planner response may use and
+//! the version number that says which set applies. It is deliberately the
+//! smallest module here and depends on nothing: the words a model is allowed
+//! to say should be readable in one sitting, without reading the parser.
+//!
+//! Version 1 — the flat ranking contract in [`crate::actions::llm`] — keeps
+//! working unchanged. It was never versioned on the wire, so a response that
+//! declares no version is read as v1 rather than guessed at.
 
+pub mod contract;
+pub mod dto;
+pub mod plan;
+pub mod project;
+pub mod prompt;
+pub mod response;
+pub mod validate;
+
+pub use contract::{
+    ClaimConfidence, Disposition, ObservationKind, ProbeId, PLANNER_CONTRACT_VERSION,
+};
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
-    Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
-    WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    PlannerRequestView, Reported, RepositoryView, ResourceView, UnplacedResourceView,
+    WorkflowHistoryView, WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF,
+    WORKFLOW_HISTORY_EVIDENCE_REF,
 };
+pub use plan::{build_workspace_request, plan_workspace, WorkspacePlanResult, WorkspaceRequest};
 pub use project::{AliasTable, GraphProjection};
+pub use prompt::system_prompt;
+pub use response::{
+    read_planner_response, EvidenceRequestClaim, ObservationClaim, PlanItemClaim, PlannerResponse,
+    PlannerResponseClaim, ResponseError, WorkspaceProfileClaim,
+};
+pub use validate::{
+    validate_response, PlanValidationCounters, ValidatedEvidenceRequest, ValidatedObservation,
+    ValidatedProfile, ValidatedWorkspaceItem, ValidatedWorkspacePlan,
+};

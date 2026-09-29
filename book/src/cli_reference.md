@@ -419,13 +419,25 @@ Human-readable output only — `clean --dry-run` has no `--json` mode. One
 line per considered resource, either its rendered `ActionPlan.explain` text
 or a `skip_reason` (e.g. `PROTECTED`, no registered action).
 
-## `glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json] [--schema] [--print-payload]`
+## `glomeris llm-plan [--contract-version <1|2>] [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json] [--schema] [--print-payload]`
 
 Not macOS-gated. ADVISORY, NON-EXECUTING (HORO-1008) — never constructs a
 `policy::Approval` and never calls `policy::approval::authorize` or
 `executor::execute`. See [BYOK LLM Planner](byok.md) for the full
 configuration and safety-property writeup.
 
+- `--contract-version <1|2>` (HORO-1548) selects the planner contract.
+  **1 is the default and is what every bullet below describes.** 2 sends a
+  privacy-safe projection of the whole workspace — repositories, working
+  trees, branch and activity state, caches, and a local usage baseline — and
+  asks for a *disposition* and a *confidence* per resource plus what the
+  model could not establish, instead of a ranking. It prints a
+  `WorkspacePlanReport`, whose human-readable form opens with `WORKSPACE PLAN
+  (contract v2)`. Version 2 is not more powerful: it still executes nothing,
+  and still cannot name a path, an action it was not offered, or a command.
+  A version this build does not implement exits `2` rather than being rounded
+  to one it does. See
+  [BYOK LLM Planner](byok.md#planner-contract-version-2-horo-1548).
 - Without `--plan-file`, credentials are read only from
   `GLOMERIS_LLM_API_KEY`/`GLOMERIS_LLM_BASE_URL`/`GLOMERIS_LLM_MODEL` (all
   three required, no default base URL) — never from a CLI flag.
@@ -468,12 +480,16 @@ configuration and safety-property writeup.
   outbound prompts identify resources only by positional alias
   (`resource_1`, …); absolute paths appear in the alias table and nowhere
   else. See [BYOK LLM Planner](byok.md#what-leaves-your-machine).
-- `--schema` (HORO-1048) prints an example, syntactically valid `LlmPlan`
-  JSON document to stdout and exits — a distinct, self-contained mode
-  that never runs discovery, never reads `--plan-file`, and never checks
-  live-mode credentials, regardless of what else is passed alongside it.
+- `--schema` (HORO-1048) prints an example, syntactically valid response
+  document for the selected contract version to stdout and exits — an
+  `LlmPlan` for version 1, a version 2 response document for version 2. It is
+  a distinct, self-contained mode that never runs discovery, never reads
+  `--plan-file`, and never checks live-mode credentials, regardless of what
+  else is passed alongside it.
   See [BYOK LLM Planner](byok.md#llmplan-schema--the-concrete---plan-file-example-horo-1048)
-  for the full example and field table.
+  for the version 1 example and field table, and
+  [Planner contract version 2](byok.md#planner-contract-version-2-horo-1548)
+  for version 2's.
 
 ```sh
 glomeris llm-plan --schema
@@ -499,7 +515,10 @@ the one a human writes by hand in a fixture; a live model is given
 positional wire aliases and answers with those, and both forms resolve.
 
 Human-readable output always opens with `LLM SUGGESTION — advisory only,
-nothing is executed by this command`.
+nothing is executed by this command` under version 1, and `WORKSPACE PLAN
+(contract v2) — advisory only, nothing is executed by this command` under
+version 2. Both forms say it on the first line, because a reader who stops
+there should still know nothing happened.
 
 Exit codes for this subcommand specifically:
 
@@ -509,8 +528,9 @@ Exit codes for this subcommand specifically:
   named an unreadable path, or `--print-payload` could not serialize the
   request.
 - `2` — usage error: an unrecognized argument, `--plan-file` with no value,
-  missing live-mode environment configuration, or an `--api-key`/`--key`/
-  `--token` flag.
+  `--contract-version` with no value or with a version this build does not
+  implement, missing live-mode environment configuration, or an
+  `--api-key`/`--key`/`--token` flag.
 
 ## `glomeris llm-check [--json]`
 

@@ -97,11 +97,18 @@ subcommand.
 ## `glomeris llm-plan` usage
 
 ```
-glomeris llm-plan [--project-root <path>]... [--plan-file <path>] [--json]
-glomeris llm-plan --print-payload [--project-root <path>]... [--json]
-glomeris llm-plan --schema
+glomeris llm-plan [--contract-version <1|2>] [--project-root <path>]... [--plan-file <path>] [--json]
+glomeris llm-plan [--contract-version <1|2>] --print-payload [--project-root <path>]... [--json]
+glomeris llm-plan [--contract-version <1|2>] --schema
 ```
 
+- `--contract-version <1|2>` selects the planner contract. **1 is the
+  default**, and everything above this line describes it. 2 is the
+  workspace-aware contract added by HORO-1548 — see
+  [Planner contract version 2](#planner-contract-version-2-horo-1548). The
+  default does not change with the release: an existing invocation keeps
+  sending the bytes it has always sent, and a version this build does not
+  implement exits `2` rather than being rounded to one it does.
 - Without `--plan-file`, calls a real OpenAI-compatible endpoint via
   `actions::llm::provider_from_env`.
 - `--plan-file <path>` reads the file's raw bytes and treats them exactly
@@ -112,8 +119,9 @@ glomeris llm-plan --schema
 - `--print-payload` prints the outbound request without sending it, and
   returns before a provider is constructed — see "What leaves your
   machine" above. Requires no API key.
-- `--json` prints the `LlmPlanReport` (or, with `--print-payload`, the
-  `LlmPayloadReport`) as JSON instead of the human-readable form.
+- `--json` prints the `LlmPlanReport` — or the `WorkspacePlanReport` under
+  `--contract-version 2`, or the `LlmPayloadReport` under `--print-payload`
+  in either version — as JSON instead of the human-readable form.
 
 Human-readable output always opens with:
 
@@ -373,6 +381,271 @@ discovery run will ever produce, so a round trip against a real evidence
 set still drops it as an unknown resource — that is an expected,
 non-error validation outcome, not a parse failure.)
 
+## Planner contract version 2 (HORO-1548)
+
+Version 1 asks one question: given this list of candidate resources, which
+would you clean first? That is a ranking problem, and it is the wrong shape
+for the question a developer actually has, which is *what is this machine
+doing, and what of it is finished with*. A `target/` directory of 12 GiB is
+not a ranking input; it is 12 GiB belonging to a working tree that may be
+dirty, may have a process in it, may hold commits that exist nowhere else,
+and may have been merged upstream three weeks ago.
+
+So version 2 replaces the flat candidate list with a **projection of the
+workspace** and asks for a disposition per resource instead of a rank. It is
+selected explicitly:
+
+```
+glomeris llm-plan --contract-version 2
+```
+
+It is a **versioned** change, not a silent one. `--contract-version` defaults
+to 1, and the two contracts have separate prompts, separate parsers, separate
+validators and separate report types, so nothing about an existing invocation
+changes.
+
+On the way back in, `contract_version` is read before anything else
+(`src/planner/response.rs`):
+
+- a response declaring a version this build does not implement is **refused**,
+  naming both numbers — never coerced into the shape that happens to be
+  compiled in;
+- a response declaring 2 is parsed as 2;
+- a response declaring nothing is tried as 2 first, and only read as version 1
+  if it does not fit — which is exactly what every response written before the
+  contract was versioned looks like. `contract_declared` records which of
+  those happened, because a provider *following* the contract and a provider
+  that happened to produce a conforming shape are worth telling apart, and not
+  worth refusing over;
+- a version 1 response to a version 2 request is **not promoted**. Its items
+  carry no disposition and no confidence, and supplying either would be the
+  parser inventing the two fields that decide whether a human is asked first.
+
+### The model becomes smarter, not more powerful
+
+This is the line the whole design sits on. Version 2 sends more, asks for
+more, and can say more — and it can do **nothing** version 1 could not:
+
+| A version 2 response may | A version 2 response may not |
+|---|---|
+| rank resources | authorize a deletion |
+| explain a recommendation | assign or imply a `PolicyClass` |
+| point out evidence that conflicts | invent an `ActionId` |
+| infer how this workspace is used | invent a `ResourceId` |
+| recommend now / ask / defer / keep | name a filesystem path |
+| say what it could not establish | produce a command or an argv |
+| request a named read-only probe | turn an ASK or PROTECTED item into an executable one |
+
+Every one of those refusals is enforced in Rust, not in the prompt. The
+prompt says them too, because a model that knows the rules produces better
+answers — but prompt text is not a security boundary, so:
+
+- `src/planner/response.rs` is the only place a provider's bytes are
+  deserialized, every field on its five claim types is a string, a number, or
+  a list of strings, and the guard script forbids the module from *naming*
+  `PathBuf`, `Path`, `ResourceId`, `ActionId`, `PolicyClass` or `Command`.
+- `src/planner/validate.rs` resolves each claim against this request's own
+  alias table and this build's own registries. A `resource_id` that was
+  never issued as an alias resolves to nothing. An `action_id` that
+  `crate::actionability::eligible_action_ids` did not offer *for that
+  resource* resolves to nothing — an action offered for a different resource
+  does not count.
+- A `PROTECTED` resource is offered no action at all, so a model naming one
+  produces no row rather than a refused row. Version 2 is strictly stricter
+  than version 1 here.
+- Every surviving item is still re-classified by `policy::classify` against
+  freshly collected evidence before anything executes. That contract is
+  unchanged and unweakened.
+
+### Missing evidence is never negative evidence
+
+Version 1 had one confidence value: the machine's. Version 2 asks the model
+to label every claim `observed`, `inferred` or `unknown`, and to list what it
+could not establish. The distinction is load-bearing, because the failure
+mode of a storage assistant is not being wrong — it is being confidently
+silent. Encoded in the prompt *and* in tests:
+
+| Not observed | Does **not** mean |
+|---|---|
+| no pull-request data | no pull request exists |
+| no task association | no active task exists |
+| a failed process probe | no process is using the resource |
+| no upstream branch | there is no unique local work |
+| a task marked done | anything is safe to delete |
+| a merged pull request | the working tree contains nothing newer |
+| no history collected | this machine has no usual workflow |
+
+A probe that was never attempted, a probe that failed and a probe that
+returned nothing are three different values all the way through — `Reported`
+in the request, `ProbeOutcome` locally — and none of them is `false`.
+
+### What version 2 sends
+
+The same rule as version 1, applied to a larger structure: a separate,
+explicit model-facing DTO (`src/planner/dto.rs`), never a `Serialize` derive
+on a domain type. Request-scoped opaque aliases only — `repo_1`,
+`workspace_1`, `resource_1` — reissued every run.
+
+Never sent: absolute paths, usernames, account identifiers, repository names,
+branch names, Jira issue keys or titles, pull-request titles or bodies,
+filenames below a resource root, file contents, diffs, or anything
+credential-shaped. What *is* sent, per resource, is its kind, owning tool,
+reclaimable bytes and whether that is a lower bound, age, regenerability,
+evidence completeness, the machine's own policy label, tool liveness and the
+action ids offered for it; per working tree, its branch and activity state as
+bounded tokens; plus the machine's free/total bytes and a bounded workflow
+summary.
+
+Check it the same way, and it costs no credential:
+
+```
+glomeris llm-plan --contract-version 2 --print-payload
+```
+
+`tests/planner_model_egress_contract.rs` pins the complete serialized key
+set, so adding a local domain field cannot widen egress without failing a
+test, and
+`tests/llm_plan_egress_privacy.rs::live_version_two_request_body_contains_no_path_home_or_account_name`
+asserts the property against the bytes captured off a loopback listener —
+the request body contains no path separator at all.
+
+### The response shape
+
+Four parts, all optional, all closed vocabularies
+(`src/planner/contract.rs`):
+
+```
+glomeris llm-plan --contract-version 2 --schema
+```
+
+```json
+{
+  "contract_version": 2,
+  "evidence_requests": [
+    {
+      "probe_id": "process_activity",
+      "reason": "to tell an idle build directory from one in active use",
+      "subject_ref": "resource_1"
+    }
+  ],
+  "items": [
+    {
+      "action_id": "cargo.clean.target_dir",
+      "confidence": "inferred",
+      "disposition": "ask_user",
+      "evidence_refs": [
+        "resource_1"
+      ],
+      "priority": 1,
+      "reason": "large, regenerable, and not modified in 30 days",
+      "resource_id": "resource_1",
+      "uncertainties": [
+        "no process probe was attempted for this resource"
+      ]
+    }
+  ],
+  "observations": [
+    {
+      "detail": "free space was not measured, so recovery headroom is unknown",
+      "evidence_refs": [
+        "machine"
+      ],
+      "kind": "missing_evidence"
+    }
+  ],
+  "workspace_profile": {
+    "confidence": "unknown",
+    "evidence_refs": [
+      "workflow_history"
+    ],
+    "mode": "unknown",
+    "summary": "no baseline has been collected on this machine yet"
+  }
+}
+```
+
+Emitted with sorted keys, and it round-trips unchanged through `glomeris
+llm-plan --contract-version 2 --plan-file <path>` —
+`tests/llm_plan_schema_round_trip.rs` spawns the one command and feeds its
+bytes to the other. Read in the order the contract thinks in:
+
+| Field | Vocabulary | Meaning |
+|---|---|---|
+| `workspace_profile.mode` | `serial_single_checkout`, `serial_multi_branch`, `parallel_multi_worktree`, `mixed`, `unknown` | How this machine appears to be used. Describes the workspace, never the developer — there is no vocabulary for "advanced" or "beginner", deliberately. |
+| `confidence` (profile and item) | `observed`, `inferred`, `unknown` | Which of the three kinds of claim this is. |
+| `items[].disposition` | `recommend_now`, `ask_user`, `defer`, `keep` | What the model suggests happens next. Not permission: an `ask_user` on an `AUTO_SAFE` resource still asks, and a `recommend_now` on a `PROTECTED` one still produces no row. |
+| `items[].resource_id` | an alias from *this* request | Resolved against the request's own alias table and nothing else. |
+| `items[].action_id` | an id from that resource's own `offered_action_ids` | An id offered for a different resource does not count. |
+| `items[].uncertainties` | free text | What the model could not establish about this resource. An empty list is not reassurance, and no surface renders it as "no uncertainties". |
+| `observations[].kind` | `conflicting_evidence`, `missing_evidence`, `workflow_shape`, `resource_lifecycle`, `recovery_outlook` | A remark not attached to one resource. |
+| `evidence_requests[].probe_id` | `git_branch_state`, `git_patch_equivalence`, `process_activity`, `tool_liveness`, `github_pr_state`, `jira_task_state`, `workspace_history_summary` | A named read-only probe the model would like run. **Requesting is not running** — this build records the request and runs nothing; HORO-1549 is the loop that acts on it. |
+
+`#[serde(deny_unknown_fields)]` is on every claim type, so a response
+carrying a field nobody reviewed — `"command"`, `"path"`, `"url"` — fails to
+parse rather than being silently ignored. A word outside a closed vocabulary
+drops the part that used it and is counted, never guessed at. An unknown
+`probe_id` fails closed.
+
+### Nothing is dropped silently
+
+`WorkspacePlanReport.dropped` carries fifteen counters — unknown resource,
+unoffered action, unknown disposition, duplicate item, unknown observation
+kind, unknown probe, unknown probe subject, uncited evidence ref, two
+degradations (confidence and workflow mode), and five truncations — and the text renderer prints
+every non-zero one:
+
+```
+dropped from the response: 1 unoffered action
+```
+
+A report that silently discarded half a response would read as agreement.
+
+### The local finding and the model's claim never merge
+
+The human-readable form prefixes every line the model is responsible for
+with `model `:
+
+```
+WORKSPACE PLAN (contract v2) — advisory only, nothing is executed by this command
+model workspace profile: parallel_multi_worktree (confidence inferred)
+  model says: several working trees of one repository are checked out at once
+  model cites: workflow_history
+[AUTO_SAFE] cargo_target_dir:/path/to/project/target action=cargo.clean.target_dir priority=1
+  model wants: ask_user (confidence inferred)
+  model says: large, regenerable, and not modified recently
+  model unsure: no process probe was attempted for this resource
+  model cites: resource_2
+  Run `cargo clean --manifest-path /path/to/project/Cargo.toml --target-dir /path/to/project/target` to remove /path/to/project/target
+model observation [missing_evidence]
+  model says: free space was not measured, so recovery headroom is unknown
+  model cites: machine
+model asks for probe process_activity of resource_2 — not run by this command
+  model says: to tell an idle build directory from one in active use
+```
+
+The `[AUTO_SAFE]` line is the machine's verdict and carries nothing the model
+said; the indented `model ` lines are the model's and carry no policy word. In
+JSON the same separation is structural: `WorkspacePlanItemReport` nests the
+local finding under `item` and puts `disposition`, `model_confidence`,
+`uncertainties` and `evidence_refs` *beside* it, so a surface rendering
+"LOCAL FACT" and a surface rendering "AI INFERENCE" read two different
+values and cannot accidentally merge them. Flattening would put
+`disposition` next to `policy_label` in one object, which is exactly the
+presentation this is designed to prevent.
+
+### Current coverage
+
+Only three actions are registered in this build — `cargo.clean.target_dir`,
+`node.clean.node_modules` and `homebrew.cleanup.cache` — so only resources
+of those kinds have a non-empty `offered_action_ids`, and only those can
+appear in `items`. Everything else the detectors find (the Python, Go, JVM
+and SwiftPM caches, Xcode DerivedData, and all four Docker resource kinds)
+is projected as evidence and can be reasoned about in `observations` and
+`evidence_requests`, but has no action to recommend. That is deliberate:
+detection does not require cleanup, and inventing an action so a resource
+could appear in a list would be the one thing this contract is built to
+prevent.
+
 ## Configuration
 
 Live mode (no `--plan-file`) reads three environment variables, all
@@ -592,13 +865,22 @@ message, or a PR description.** Treat it as you would any other credential.
   that one item (counted in `dropped_unknown_resource`/
   `dropped_unknown_action`); it never fails or invalidates the rest of the
   plan.
-- `LlmPlan`/`LlmPlanItem` remain the *only* two `#[derive(Deserialize)]`
-  types in the entire crate — `LlmPlanItemReport`/`LlmPlanReport` (the CLI
-  report DTOs) are `Serialize` only. Everything a model response can
-  produce is a `String` resolved against real, already-in-memory data, or a
-  plain `u32`/`Option<String>` used only for display/ranking — never a
-  path, never a shell fragment, never anything that reaches `ActionStep`
-  construction directly.
+- Every `#[derive(Deserialize)]` type a provider's bytes can reach lives in
+  one of two modules — `LlmPlan`/`LlmPlanItem` in `src/actions/llm.rs` for
+  version 1, and the five claim types in `src/planner/response.rs` for
+  version 2. The report DTOs on both sides (`LlmPlanItemReport`/
+  `LlmPlanReport`, `WorkspacePlanReport` and its parts) are `Serialize`
+  only, so nothing a surface renders can be read back in. Everything a
+  model response can produce is a `String` resolved against real,
+  already-in-memory data, or a plain `u32`/`Option<String>` used only for
+  display/ranking — never a path, never a shell fragment, never anything
+  that reaches `ActionStep` construction directly.
+  `scripts/check-workspace-aggregation-has-no-authority.sh` makes that a
+  property of the modules rather than a convention: check 6 forbids
+  `src/planner/dto.rs` naming a path type, and check 8 forbids
+  `src/planner/response.rs` naming `PathBuf`, `Path`, `ResourceId`,
+  `ActionId`, `PolicyClass` or `Command`. A module that cannot name a path
+  type cannot deserialize into one.
 - The response parser handles a raw JSON object, a fenced ` ```json ` block,
   or a bare fenced block, and either produces a well-formed `LlmPlan` or
   nothing — never a partial parse.

@@ -484,6 +484,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         // being encoded in punctuation that was saying the wrong thing.
         usage: &[
             "llm-plan",
+            "[--contract-version <1|2>]",
             "[--schema]",
             "[--print-payload]",
             "[--plan-file <path>]",
@@ -500,8 +501,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
         options: &[
             OptionSpec {
+                syntax: "--contract-version <1|2>",
+                description: "Which planner contract to use. 1 (the default) ranks the \
+                              candidate list. 2 sends a privacy-safe projection of this \
+                              workspace — repositories, working trees, branch and activity \
+                              state, caches, and a local usage baseline — and asks for a \
+                              disposition and a confidence per resource plus what the model \
+                              could not establish. Version 2 is not more powerful: it still \
+                              executes nothing and still cannot name a path, an action it was \
+                              not offered, or a command.",
+            },
+            OptionSpec {
                 syntax: "--schema",
-                description: "Print an example LlmPlan document and exit. Contacts nothing.",
+                description: "Print an example response document for the selected contract \
+                              version and exit. Contacts nothing.",
             },
             OptionSpec {
                 syntax: "--print-payload",
@@ -521,7 +534,8 @@ pub const COMMANDS: &[CommandSpec] = &[
             },
             OptionSpec {
                 syntax: "--json",
-                description: "Print an LlmPlanReport as JSON on stdout.",
+                description: "Print the report for the selected contract version as JSON on \
+                              stdout — an LlmPlanReport for 1, a WorkspacePlanReport for 2.",
             },
             OptionSpec {
                 syntax: "--progress-json",
@@ -537,6 +551,10 @@ pub const COMMANDS: &[CommandSpec] = &[
                 command: "glomeris llm-plan --json",
                 purpose: "Get a suggestion for this machine.",
             },
+            ExampleSpec {
+                command: "glomeris llm-plan --contract-version 2 --print-payload",
+                purpose: "What does the workspace-aware request say about my machine?",
+            },
         ],
         exit_codes: &[
             ExitCodeSpec {
@@ -546,11 +564,12 @@ pub const COMMANDS: &[CommandSpec] = &[
             },
             ExitCodeSpec {
                 code: 2,
-                meaning: "an unrecognized argument, a missing flag value, a credential passed \
-                          as a flag, or no provider configured for a live run.",
+                meaning: "an unrecognized argument, a missing flag value, an unsupported \
+                          contract version, a credential passed as a flag, or no provider \
+                          configured for a live run.",
             },
         ],
-        see_also: &["llm-check", "clean", "execute"],
+        see_also: &["llm-check", "clean", "execute", "workflow-profile"],
     },
     CommandSpec {
         name: "llm-check",

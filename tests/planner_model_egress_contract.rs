@@ -43,7 +43,7 @@ use glomeris::evidence::{
     NativeCleanup, OwningTool, ProbeOutcome, ProbeReason, ProcessRef, Recoverability,
     ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
 };
-use glomeris::planner::GraphProjection;
+use glomeris::planner::{dto::PlannerRequestView, GraphProjection};
 use glomeris::policy::{PolicyClass, PolicyDecision, ReasonCode};
 use glomeris::workspace::{
     ExternalFact, ExternalSource, IntegrationEvidence, MachineContext, MergedState,
@@ -473,6 +473,20 @@ fn docker_lifecycle_view(prefix: &str) -> Vec<String> {
     paths
 }
 
+/// Every key path a whole `PlannerRequestView` may serialize.
+///
+/// Composed from [`pinned_paths`] rather than hand-written a second time, so
+/// the envelope HORO-1548 added cannot become a place where an unpinned key
+/// hides: the only paths this adds are the two the envelope itself introduces,
+/// and every graph key keeps being pinned under its new prefix.
+fn pinned_request_paths() -> BTreeSet<String> {
+    let mut paths: BTreeSet<String> = ["contract_version".to_string(), "graph".to_string()]
+        .into_iter()
+        .collect();
+    paths.extend(pinned_paths().iter().map(|path| format!("graph.{path}")));
+    paths
+}
+
 /// Every key path `ModelGraphView` may serialize. Hand-written.
 fn pinned_paths() -> BTreeSet<String> {
     let mut paths: Vec<String> = vec![
@@ -633,6 +647,17 @@ fn the_model_payload_key_set_is_pinned() {
     ] {
         let body = serde_json::to_value(&projection.view).expect("the projection serializes");
         let actual = key_paths(&body);
+
+        assert_eq!(
+            pinned_request_paths(),
+            key_paths(
+                &serde_json::to_value(PlannerRequestView::of(projection.view.clone()))
+                    .expect("the request serializes")
+            ),
+            "[{label}] the envelope that is actually sent carries keys the pin \
+             does not list. The projection below is pinned on its own, but a \
+             request is what leaves this machine, so the wrapper is pinned too."
+        );
 
         let added: Vec<&String> = actual.difference(&pinned).collect();
         assert!(

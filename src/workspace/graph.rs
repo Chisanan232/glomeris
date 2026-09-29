@@ -722,6 +722,14 @@ pub enum WorkflowMode {
 }
 
 impl WorkflowMode {
+    pub const ALL: [WorkflowMode; 5] = [
+        WorkflowMode::SerialSingleCheckout,
+        WorkflowMode::SerialMultiBranch,
+        WorkflowMode::ParallelMultiWorktree,
+        WorkflowMode::Mixed,
+        WorkflowMode::Unknown,
+    ];
+
     pub fn tag(self) -> &'static str {
         match self {
             Self::SerialSingleCheckout => "serial_single_checkout",
@@ -730,6 +738,24 @@ impl WorkflowMode {
             Self::Mixed => "mixed",
             Self::Unknown => "unknown",
         }
+    }
+
+    /// Exactly one of [`Self::ALL`]'s tags, or `None`.
+    ///
+    /// Here so that a planner response naming a workflow mode is read against
+    /// this vocabulary rather than a second copy of it (HORO-1548). The
+    /// alternative — a `Disposition`-style enum living in
+    /// [`crate::planner::contract`] — would mean two lists of the same five
+    /// words that could drift apart, and the model's answer is about the same
+    /// thing [`WorkflowHistorySummary`] measures.
+    ///
+    /// Not lenient, for the reason
+    /// [`crate::evidence::ResourceKind::from_tag`] is not: `"parallel"` is not
+    /// a shorter `"parallel_multi_worktree"`, and resolving it to one would be
+    /// this parser deciding a developer works in parallel on the strength of a
+    /// truncated string.
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.tag() == tag)
     }
 }
 
@@ -2074,13 +2100,7 @@ mod tests {
         let forbidden = [
             "advanced", "beginner", "expert", "novice", "good", "bad", "poor", "sloppy", "messy",
         ];
-        for mode in [
-            WorkflowMode::SerialSingleCheckout,
-            WorkflowMode::SerialMultiBranch,
-            WorkflowMode::ParallelMultiWorktree,
-            WorkflowMode::Mixed,
-            WorkflowMode::Unknown,
-        ] {
+        for mode in WorkflowMode::ALL {
             let tag = mode.tag();
             for word in forbidden {
                 assert!(
@@ -2088,6 +2108,72 @@ mod tests {
                     "workflow mode {tag:?} grades the developer"
                 );
             }
+        }
+    }
+
+    /// [`WorkflowMode::ALL`] lists every variant exactly once, in declaration
+    /// order.
+    ///
+    /// Compile-time in one direction: the `match` is exhaustive, so a new
+    /// variant that never reaches `ALL` fails to build here. That direction is
+    /// the one that matters, because [`WorkflowMode::from_tag`] searches `ALL`
+    /// — a variant missing from it would be silently unparseable, which for a
+    /// planner response means a mode the model correctly named being dropped
+    /// as if it had made the word up. The length assertion catches the reverse:
+    /// a stale or duplicated entry.
+    #[test]
+    fn workflow_mode_all_lists_every_variant_exactly_once() {
+        for (index, mode) in WorkflowMode::ALL.iter().enumerate() {
+            let expected_index = match mode {
+                WorkflowMode::SerialSingleCheckout => 0,
+                WorkflowMode::SerialMultiBranch => 1,
+                WorkflowMode::ParallelMultiWorktree => 2,
+                WorkflowMode::Mixed => 3,
+                WorkflowMode::Unknown => 4,
+            };
+            assert_eq!(
+                index,
+                expected_index,
+                "{} is at index {index} of WorkflowMode::ALL, expected {expected_index}",
+                mode.tag()
+            );
+        }
+        assert_eq!(
+            WorkflowMode::ALL.len(),
+            5,
+            "WorkflowMode::ALL has gained, lost, or duplicated an entry"
+        );
+    }
+
+    /// Every mode round-trips through its own tag, and a near miss resolves to
+    /// nothing.
+    ///
+    /// The near-miss half is the reason `from_tag` exists at all. A planner
+    /// response claims a workflow mode, and `"parallel"` resolving to
+    /// [`WorkflowMode::ParallelMultiWorktree`] would let a truncated string
+    /// become a claim about how this developer works — which then appears in a
+    /// report as though the local history had established it.
+    #[test]
+    fn workflow_mode_from_tag_round_trips_and_rejects_near_misses() {
+        for mode in WorkflowMode::ALL {
+            assert_eq!(
+                WorkflowMode::from_tag(mode.tag()),
+                Some(mode),
+                "{} did not round-trip",
+                mode.tag()
+            );
+        }
+        for tag in [
+            "parallel",
+            "serial",
+            "parallel-multi-worktree",
+            "ParallelMultiWorktree",
+            "PARALLEL_MULTI_WORKTREE",
+            "unknown ",
+            "advanced",
+            "",
+        ] {
+            assert_eq!(WorkflowMode::from_tag(tag), None, "{tag:?} resolved");
         }
     }
 

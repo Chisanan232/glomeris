@@ -89,6 +89,62 @@ impl<T> Reported<T> {
     }
 }
 
+/// Everything one planner request sends: the contract it is written against,
+/// and the projection.
+///
+/// # Why the version travels in the payload
+///
+/// So that the response can be held to it. A provider that is told
+/// `contract_version: 2` and answers something else has demonstrably not
+/// answered the question asked, and [`super::response`] refuses it rather than
+/// reading its fields as though they were v2's. Without a declared version in
+/// the request there is nothing for a response's version to disagree with, and
+/// the only way to tell contracts apart is to guess from shape — which is the
+/// state version 1 left behind, and the reason a `--plan-file` fixture written
+/// two releases ago is recognisable only by what it omits.
+///
+/// # Why it is a wrapper and not a field on [`ModelGraphView`]
+///
+/// The graph is a description of this machine. The version is a description of
+/// the protocol. Putting the second inside the first would mean the pinned
+/// egress key set and the contract version changing together in one type, and
+/// a reviewer asking "did this commit widen what leaves the machine?" would
+/// have to read past protocol bookkeeping to find out. Two levels keeps the
+/// answer to that question in one place.
+///
+/// Deliberately not [`serde::Deserialize`]: nothing reads a request back, and a
+/// type that could be deserialized is a type a provider's bytes could be
+/// parsed into.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PlannerRequestView {
+    /// Always [`super::PLANNER_CONTRACT_VERSION`].
+    ///
+    /// Private, which is the one place this module departs from the
+    /// build-it-field-by-field style of the views around it. Those are
+    /// assembled by [`super::project`] from many sources; this has exactly one
+    /// correct value, and a `pub` field would let a caller send a version this
+    /// build does not implement — producing a request whose own response would
+    /// then be refused by [`super::response`], for a reason no log would
+    /// explain.
+    contract_version: u32,
+    pub graph: ModelGraphView,
+}
+
+impl PlannerRequestView {
+    /// Stamps this build's contract version onto a projection. The only way to
+    /// make one.
+    pub fn of(graph: ModelGraphView) -> Self {
+        Self {
+            contract_version: super::PLANNER_CONTRACT_VERSION,
+            graph,
+        }
+    }
+
+    pub fn contract_version(&self) -> u32 {
+        self.contract_version
+    }
+}
+
 /// The complete model-facing projection. Serializing this is the only way
 /// local evidence reaches a provider.
 #[derive(Debug, Clone, PartialEq, Serialize)]
