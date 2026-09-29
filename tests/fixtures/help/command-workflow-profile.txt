@@ -1,4 +1,4 @@
-glomeris workflow-profile — How this machine has been used, over more than one look.
+glomeris workflow-profile — How this machine has been used, over several looks.
 
 usage: glomeris workflow-profile [show] [--json]
                 workflow-profile record [--json]
@@ -48,7 +48,7 @@ Options
 
 Examples
   glomeris workflow-profile
-      What does Glomeris think my workspace layout looks like, and on what basis?
+      What layout does Glomeris think this machine has, and why?
   glomeris workflow-profile record
       Add today's look, so the baseline eventually rests on more than one.
 
