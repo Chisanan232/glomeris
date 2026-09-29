@@ -485,6 +485,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         usage: &[
             "llm-plan",
             "[--contract-version <1|2>]",
+            "[--evidence-rounds <n>]",
             "[--schema]",
             "[--print-payload]",
             "[--plan-file <path>]",
@@ -510,6 +511,19 @@ pub const COMMANDS: &[CommandSpec] = &[
                               could not establish. Version 2 is not more powerful: it still \
                               executes nothing and still cannot name a path, an action it was \
                               not offered, or a command.",
+            },
+            OptionSpec {
+                syntax: "--evidence-rounds <n>",
+                description: "Let the model ask for more evidence, up to n planning rounds \
+                              (1 to 8; the default is one round and no probes). Requires \
+                              --contract-version 2. Each round the model may name probes from a \
+                              fixed list this binary compiled in — branch state, patch \
+                              equivalence, process activity, tool liveness, pull-request state, \
+                              task state, usage history — over subjects it was already shown. \
+                              Glomeris runs them locally and read-only, then re-plans with the \
+                              answers. The model supplies a probe name and a subject, never a \
+                              path, a command, or a URL; a probe that cannot answer reports \
+                              that it could not, which is never read as an answer of no.",
             },
             OptionSpec {
                 syntax: "--schema",
@@ -554,6 +568,10 @@ pub const COMMANDS: &[CommandSpec] = &[
             ExampleSpec {
                 command: "glomeris llm-plan --contract-version 2 --print-payload",
                 purpose: "What does the workspace-aware request say about my machine?",
+            },
+            ExampleSpec {
+                command: "glomeris llm-plan --contract-version 2 --evidence-rounds 3",
+                purpose: "Let it check what it is unsure about before advising.",
             },
         ],
         exit_codes: &[
