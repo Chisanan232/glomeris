@@ -355,7 +355,7 @@ impl BranchProbe for GitCliBranchProbe {
             // An empty repository has no HEAD to resolve. That is the
             // probe having no subject, not the probe failing.
             Ok(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
-            Err(outcome) => return outcome,
+            Err(reason) => return ProbeOutcome::Unavailable(reason),
         };
         let branch = if head == "HEAD" { None } else { Some(head) };
 
@@ -693,8 +693,7 @@ fn commit_time(worktree_root: &Path, rev: &str, timeout: Duration) -> ProbeOutco
         Ok(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
         // A missing or timed-out `git` keeps its own reason: this is the
         // one place where the distinction is still recoverable.
-        Err(ProbeOutcome::Unavailable(reason)) => return ProbeOutcome::Unavailable(reason),
-        Err(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
+        Err(reason) => return ProbeOutcome::Unavailable(reason),
     };
     match trimmed(&output.stdout).parse::<u64>() {
         Ok(seconds) => {
@@ -716,7 +715,15 @@ fn trimmed(stdout: &[u8]) -> String {
     String::from_utf8_lossy(stdout).trim().to_string()
 }
 
-type BranchRunResult = Result<Output, ProbeOutcome<WorktreeBranchState>>;
+/// Either git's output, or the reason there is none.
+///
+/// The error is a bare [`ProbeReason`] rather than a ready-made
+/// `ProbeOutcome<WorktreeBranchState>`: one caller in this module returns it
+/// as the whole probe's answer, and the rest discard it for a per-field
+/// unknown, so pre-wrapping it saved that one caller a line and made every
+/// git invocation carry a copy of the growing state type in its `Err`. A
+/// reason is two words wide and says exactly as much.
+type BranchRunResult = Result<Output, ProbeReason>;
 
 fn run_git(path: &Path, args: &[&str], timeout: Duration) -> BranchRunResult {
     let mut command = Command::new("git");
@@ -739,9 +746,9 @@ fn run_git_literal_pathspecs(path: &Path, args: &[&str], timeout: Duration) -> B
 
 fn finish_git(command: Command, timeout: Duration) -> BranchRunResult {
     match run_with_timeout(command, timeout) {
-        CommandOutcome::NotFound => Err(ProbeOutcome::Unavailable(ProbeReason::ToolAbsent)),
-        CommandOutcome::TimedOut => Err(ProbeOutcome::Unavailable(ProbeReason::TimedOut)),
-        CommandOutcome::SpawnFailed => Err(ProbeOutcome::Unavailable(ProbeReason::Failed)),
+        CommandOutcome::NotFound => Err(ProbeReason::ToolAbsent),
+        CommandOutcome::TimedOut => Err(ProbeReason::TimedOut),
+        CommandOutcome::SpawnFailed => Err(ProbeReason::Failed),
         CommandOutcome::Completed(output) => Ok(output),
     }
 }
