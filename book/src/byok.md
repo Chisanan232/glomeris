@@ -578,7 +578,7 @@ bytes to the other. Read in the order the contract thinks in:
 | `items[].action_id` | an id from that resource's own `offered_action_ids` | An id offered for a different resource does not count. |
 | `items[].uncertainties` | free text | What the model could not establish about this resource. An empty list is not reassurance, and no surface renders it as "no uncertainties". |
 | `observations[].kind` | `conflicting_evidence`, `missing_evidence`, `workflow_shape`, `resource_lifecycle`, `recovery_outlook` | A remark not attached to one resource. |
-| `evidence_requests[].probe_id` | `git_branch_state`, `git_patch_equivalence`, `process_activity`, `tool_liveness`, `github_pr_state`, `jira_task_state`, `workspace_history_summary` | A named read-only probe the model would like run. **Requesting is not running** — this build records the request and runs nothing; HORO-1549 is the loop that acts on it. |
+| `evidence_requests[].probe_id` | `git_branch_state`, `git_patch_equivalence`, `process_activity`, `tool_liveness`, `github_pr_state`, `jira_task_state`, `workspace_history_summary` | A named read-only probe the model would like run. **Requesting is not running** — the default run records the request and runs nothing. `--evidence-rounds <n>` is what acts on it; see [Asking for more evidence](#asking-for-more-evidence---evidence-rounds-horo-1549). |
 
 `#[serde(deny_unknown_fields)]` is on every claim type, so a response
 carrying a field nobody reviewed — `"command"`, `"path"`, `"url"` — fails to
@@ -645,6 +645,125 @@ is projected as evidence and can be reasoned about in `observations` and
 detection does not require cleanup, and inventing an action so a resource
 could appear in a list would be the one thing this contract is built to
 prevent.
+
+### Asking for more evidence (`--evidence-rounds`, HORO-1549)
+
+A single round is one question and one answer: the model sees the snapshot it
+was given, and whatever it could not establish from that stays unestablished.
+`evidence_requests` is where it says what it is missing. With
+`--evidence-rounds <n>` those requests are actually run, and the model is asked
+again with the answers:
+
+```sh
+glomeris llm-plan --contract-version 2 --evidence-rounds 3
+```
+
+```
+WORKSPACE PLAN (contract v2) — advisory only, nothing is executed by this command
+model workspace profile: unknown (confidence unknown)
+[AUTO_SAFE] cargo_target_dir:/path/to/project/target action=cargo.clean.target_dir priority=1
+  model wants: ask_user (confidence inferred)
+  model says: regenerable, but I could not tell whether cargo is running
+dropped from the response: 1 unknown probe, 1 unknown probe subject
+evidence rounds: 2 of 3 allowed, 1 probes of 12 — stopped: nothing_more_asked
+  round 2 probe tool_liveness of resource_2 -> answered
+```
+
+The loop is *observe → hypothesize → name the missing evidence → run a
+deterministic read-only probe → re-evaluate*. "Verify" means new evidence
+here. It does not mean asking the model to think harder about the same
+snapshot, which is why a round that asks for nothing is the end of the run
+and a round that asks the same question twice buys nothing.
+
+#### What the model may supply, and what it may not
+
+Two strings: a `probe_id` that must be one of the seven words compiled into
+this build, and a `subject_ref` that must be an alias **this request already
+issued**. That is the whole channel. It may never supply an executable, an
+argv, a shell string, a filesystem path, a URL or a credential — not because
+the system prompt asks it not to, but because there is no field of that shape
+to put one in and no code path that would read it:
+
+- `ProbeId::from_tag` is an exact match over `ProbeId::ALL`. A prefix or
+  case-folded match would resolve `tool_liveness; rm -rf /` to a real probe;
+  the comparison is pinned by
+  `scripts/check-workspace-aggregation-has-no-authority.sh`.
+- A subject is resolved against the request's own alias table, so
+  `/etc/passwd`, `~/.ssh/id_rsa`, `resource_1/../resource_2` and
+  `resource_99` are all simply not aliases. An alias of the wrong kind is
+  refused too — `github_pr_state` of a cache directory is not a question about
+  a cache directory.
+- Every claim type is `#[serde(deny_unknown_fields)]`, so a request carrying
+  `"command"` or `"path"` beside a legitimate one fails to parse and the whole
+  response is refused. There is no partial acceptance.
+- `src/planner/probe.rs` names none of `Command`, `std::process`,
+  `crate::actions`, `crate::policy`, `crate::executor` or
+  `crate::autopilot`. Every probe delegates to the same timeout-bounded
+  probes in `crate::evidence::correlate` that an ordinary snapshot uses, so
+  there is no second place where a subject could become argv and no way for a
+  probe answer to reach an action or a policy class.
+
+`tests/planner_evidence_request_injection.rs` runs all of that as a battery —
+15 hostile `probe_id`s, 20 hostile `subject_ref`s, 8 smuggled fields — against
+a recording runner, and asserts the recorder was *never called*. A refusal that
+still handed the subject to `git` would pass a test that only checked the
+output. The same file pairs every hostile case with one legitimate request that
+*does* reach the runner, because otherwise a broken loop would satisfy every
+hostile assertion for the wrong reason.
+
+#### The bounds
+
+| Bound | `--evidence-rounds` | Default |
+|---|---|---|
+| Rounds | `1`–`8`, your choice | 1 (no expansion) |
+| Probes in total | 12 | — |
+| Per probe | 5s | — |
+| Whole run | 30s | — |
+
+Only the round count is yours; the other three are fixed, and they are what
+actually stops the run — eight rounds of a model asking one question each is
+still twelve probes and thirty seconds. Asking for `0`, or for more than `8`,
+exits `2` rather than being quietly clamped. `--evidence-rounds` is also
+refused under `--contract-version 1`, which has no `evidence_requests` field
+to answer into, and alongside `--print-payload`, whose preview is the first
+round's request only — showing it as if it were the whole run would
+under-report what a multi-round run sends.
+
+The `stopped:` word says which ceiling ended the run, and only
+`nothing_more_asked` means the model was finished:
+
+| `stopped_because` | Meaning |
+|---|---|
+| `nothing_more_asked` | The last round asked for nothing new. The only convergence. |
+| `round_limit` | Your `--evidence-rounds` ran out with questions outstanding. |
+| `probe_limit` | Twelve probes were used. |
+| `time_limit` | Thirty seconds elapsed. |
+| `provider_error` | A round could not be completed. Not retried. |
+
+Anything but the first prints `(a ceiling, not convergence)`, because a plan
+produced by a run that was cut off is a plan built on questions that were
+never answered, and it should not read like a finished one.
+
+#### A probe that could not answer is a finding
+
+Each line under `evidence rounds:` reports `answered` or `unavailable
+(<reason>)`, and the JSON form carries the finding's own shape alongside. The
+distinction is the point. On this build `--evidence-rounds` reaches no network,
+so `github_pr_state` and `jira_task_state` answer *unavailable*, which is a
+different fact from "no pull request exists" and is never rounded into one. A
+`pgrep` that is not installed is `unavailable`, not "nothing is running". A
+failed probe cannot make a resource look idle; missing evidence never becomes
+negative evidence, in the second round exactly as in the first.
+
+#### Nothing about the authority boundary changes
+
+A probe answers a question. It does not confer permission, and neither does
+anything the model concludes from one. Every later round is re-validated
+against the same `offered_action_ids` the first round was given, so a second
+round cannot name an action the first was not offered; the policy class on each
+row is still the machine's; an `ask_user` on an `AUTO_SAFE` resource still
+asks. `--evidence-rounds` makes the model better informed. It does not make it
+more powerful.
 
 ## Configuration
 

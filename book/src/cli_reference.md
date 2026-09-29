@@ -419,7 +419,7 @@ Human-readable output only — `clean --dry-run` has no `--json` mode. One
 line per considered resource, either its rendered `ActionPlan.explain` text
 or a `skip_reason` (e.g. `PROTECTED`, no registered action).
 
-## `glomeris llm-plan [--contract-version <1|2>] [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json] [--schema] [--print-payload]`
+## `glomeris llm-plan [--contract-version <1|2>] [--evidence-rounds <n>] [--project-root <path>]... [--plan-file <path>] [--json] [--progress-json] [--schema] [--print-payload]`
 
 Not macOS-gated. ADVISORY, NON-EXECUTING (HORO-1008) — never constructs a
 `policy::Approval` and never calls `policy::approval::authorize` or
@@ -438,6 +438,17 @@ configuration and safety-property writeup.
   A version this build does not implement exits `2` rather than being rounded
   to one it does. See
   [BYOK LLM Planner](byok.md#planner-contract-version-2-horo-1548).
+- `--evidence-rounds <n>` (HORO-1549) runs the read-only probes the model
+  asked for in `evidence_requests` and asks it again with the answers, up to
+  `n` rounds — `1` to `8`, contract version 2 only. The model supplies a probe
+  name and an alias it was already given, never a path, a command or a URL;
+  a probe that cannot answer reports that, which is never read as an answer of
+  no. Twelve probes, 5s per probe and 30s in total bound the run regardless of
+  `n`, and the report names which ceiling stopped it — only
+  `nothing_more_asked` is convergence. Refused with `--contract-version 1`
+  (nothing to answer into) and with `--print-payload` (whose preview is the
+  first round only). See
+  [Asking for more evidence](byok.md#asking-for-more-evidence---evidence-rounds-horo-1549).
 - Without `--plan-file`, credentials are read only from
   `GLOMERIS_LLM_API_KEY`/`GLOMERIS_LLM_BASE_URL`/`GLOMERIS_LLM_MODEL` (all
   three required, no default base URL) — never from a CLI flag.
@@ -529,8 +540,10 @@ Exit codes for this subcommand specifically:
   request.
 - `2` — usage error: an unrecognized argument, `--plan-file` with no value,
   `--contract-version` with no value or with a version this build does not
-  implement, missing live-mode environment configuration, or an
-  `--api-key`/`--key`/`--token` flag.
+  implement, `--evidence-rounds` with no value, with a count outside `1`–`8`,
+  or combined with `--contract-version 1` or `--print-payload`, missing
+  live-mode environment configuration, or an `--api-key`/`--key`/`--token`
+  flag.
 
 ## `glomeris llm-check [--json]`
 
