@@ -207,12 +207,18 @@ fn detect_report_matches_golden_fixture() {
                 ),
             },
         ],
-        // All three outcomes in one fixture (HORO-1484), because the shape
-        // that matters is the one a consumer has to tell apart: a detector
-        // that found nothing and a detector that failed differ only in
-        // `status`, and `reason` is the field that says why. Pinning them
-        // together is what stops `failed` from quietly serializing as
-        // something a caller would read as a clean result.
+        // All four outcomes in one fixture (HORO-1484, extended by
+        // HORO-1544), because the shape that matters is the one a consumer
+        // has to tell apart: a detector that found nothing and a detector
+        // that failed differ only in `status`, and `reason` is the field that
+        // says why. Pinning them together is what stops `failed` from quietly
+        // serializing as something a caller would read as a clean result.
+        //
+        // `tool_not_running` is the fourth, and the one a client is most
+        // likely to get wrong: it carries no reason, exactly like
+        // `tool_absent`, so the two are distinguishable by `status` alone.
+        // A client collapsing them would tell a developer Docker is not
+        // installed while gigabytes of its images sit on the disk unseen.
         detectors: vec![
             DetectorHealthReport {
                 detector: "cargo_target_dir".to_string(),
@@ -229,6 +235,12 @@ fn detect_report_matches_golden_fixture() {
             DetectorHealthReport {
                 detector: "node_modules".to_string(),
                 status: "tool_absent",
+                candidates_found: 0,
+                reason: None,
+            },
+            DetectorHealthReport {
+                detector: "docker_objects".to_string(),
+                status: "tool_not_running",
                 candidates_found: 0,
                 reason: None,
             },
@@ -614,7 +626,7 @@ fn autopilot_envelope_report_matches_golden_fixture() {
             "node_modules",
             "node_package_manager_cache",
             "docker_build_cache",
-            "docker_image_cache",
+            "docker_image",
             "pip_cache",
             "uv_cache",
             "go_build_cache",

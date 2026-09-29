@@ -125,7 +125,12 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         // advance.
         ReasonCode::ResourceInActiveUse
         | ReasonCode::GitWorktreeDirty
-        | ReasonCode::OwningToolLive => false,
+        | ReasonCode::OwningToolLive
+        | ReasonCode::DockerObjectInUse => false,
+
+        // Absence of knowledge about live use (HORO-1544) — both halves of
+        // the rule above at once, and refused for both reasons.
+        ReasonCode::DockerActivityUnknown => false,
 
         // Protected reasons. `authorize` refuses these unconditionally, so
         // an envelope entry naming one could never do anything except

@@ -529,7 +529,7 @@ fn candidates_with_actions(
     for (id, status) in statuses {
         match status {
             DetectorStatus::Found(found) => evidences.extend(found),
-            DetectorStatus::ToolAbsent => {}
+            DetectorStatus::ToolAbsent | DetectorStatus::ToolNotRunning => {}
             DetectorStatus::Failed(reason) => failures.push(format!("{}: {reason}", id.0)),
         }
     }
@@ -876,6 +876,7 @@ mod select_candidate_tests {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
@@ -2203,6 +2204,7 @@ mod run_tests {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: SystemTime::now(),
             sources: Vec::new(),
         }

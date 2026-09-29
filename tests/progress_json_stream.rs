@@ -72,6 +72,7 @@ const BUILTIN_DETECTOR_IDS: &[&str] = &[
     "cargo_target_dir",
     "node_modules",
     "docker_build_cache",
+    "docker_objects",
 ];
 
 /// Runs the real binary with an isolated, empty `$HOME` (so the

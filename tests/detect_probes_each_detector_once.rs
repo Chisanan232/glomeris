@@ -65,11 +65,18 @@ impl ProbeCounter {
     /// `brew --cache` prints a real, existing directory containing one file,
     /// so the `homebrew_cache` detector reports `Found` with exactly one
     /// evidence — the interesting case, since a `Found` detector is the one
-    /// whose evidence the report also consumes. `docker` exits non-zero,
-    /// which the `docker_build_cache` detector treats as "daemon
-    /// unreachable" and reports as `tool_absent`: a detector contributing no
-    /// candidates still has to be probed exactly once, and that is the case
-    /// a fix which merely moved the evidence around could get wrong.
+    /// whose evidence the report also consumes. `docker` prints what a real
+    /// client prints when no daemon is listening, which both the
+    /// `docker_build_cache` and `docker_objects` detectors report as
+    /// `tool_not_running` (HORO-1544): a detector contributing no candidates
+    /// still has to be probed exactly once, and that is the case a fix which
+    /// merely moved the evidence around could get wrong.
+    ///
+    /// Two detectors invoke this one shim, so [`Self::docker_probes`] is
+    /// expected to be `2` — one each, which is what "exactly once per
+    /// detector" means here. One shared tally rather than one per detector is
+    /// deliberate: the defect this test exists for was a detector probed
+    /// *twice*, and that shows up in the total either way.
     fn new(prefix: &str) -> Self {
         let dir = make_temp_dir(prefix);
         let shim_dir = dir.join("bin");
@@ -94,7 +101,10 @@ impl ProbeCounter {
         write_shim(
             &shim_dir.join("docker"),
             &format!(
-                "#!/bin/sh\nprintf 'probe\\n' >> '{}'\nexit 1\n",
+                "#!/bin/sh\nprintf 'probe\\n' >> '{}'\n\
+                 echo 'Cannot connect to the Docker daemon at \
+                 unix:///var/run/docker.sock. Is the docker daemon running?' >&2\n\
+                 exit 1\n",
                 docker_tally.display()
             ),
         );
@@ -183,9 +193,10 @@ fn detect_human_mode_probes_each_detector_exactly_once() {
     );
     assert_eq!(
         counter.docker_probes(),
-        1,
+        2,
         "a detector that contributes no candidates must still be probed exactly \
-         once per `detect`; stdout was:\n{stdout}"
+         once per `detect` — two detectors invoke `docker`, so two probes total; \
+         stdout was:\n{stdout}"
     );
 }
 
@@ -214,8 +225,8 @@ fn detect_json_mode_probes_each_detector_exactly_once() {
     );
     assert_eq!(
         counter.docker_probes(),
-        1,
-        "one probe per detector in --json mode"
+        2,
+        "one probe per detector in --json mode; two detectors invoke `docker`"
     );
 }
 

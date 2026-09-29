@@ -2,7 +2,9 @@
 
 use std::time::SystemTime;
 
-use crate::evidence::{Completeness, Evidence, Recoverability, Regenerability, ResourceKind};
+use crate::evidence::{
+    Completeness, DockerActivity, Evidence, Recoverability, Regenerability, ResourceKind,
+};
 
 use super::class::{PolicyClass, ReasonCode};
 use super::config::PolicyConfig;
@@ -87,6 +89,28 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         active_use_reasons.push(ReasonCode::OwningToolLive);
     }
 
+    // Docker lifecycle (HORO-1544). `tool_liveness` above answers "is the
+    // daemon up", which is one answer for every Docker object on the
+    // machine and says nothing about which of them is in use. These two
+    // read the per-object fact instead, and the `Unknown` arm is the point:
+    // a Docker object whose activity was never established must not travel
+    // the same path as one Docker positively reported as idle.
+    if let Some(lifecycle) = &ev.docker_lifecycle {
+        match lifecycle.activity {
+            DockerActivity::Active => active_use_reasons.push(ReasonCode::DockerObjectInUse),
+            DockerActivity::Unknown => active_use_reasons.push(ReasonCode::DockerActivityUnknown),
+            DockerActivity::Inactive => {}
+        }
+        // An unanswered reference query is the same class of gap: "nothing
+        // was found to reference this" and "the reference query did not
+        // run" would otherwise both arrive as an empty referrer set.
+        if !lifecycle.references.is_observed() {
+            active_use_reasons.push(ReasonCode::DockerActivityUnknown);
+        }
+    }
+
+    active_use_reasons.dedup();
+
     if !active_use_reasons.is_empty() {
         return decision(PolicyClass::Ask, active_use_reasons);
     }
@@ -148,8 +172,8 @@ mod tests {
 
     use crate::detectors::DetectorId;
     use crate::evidence::{
-        GitState, ProbeOutcome, ProbeReason, Recoverability, ResourceFingerprint, ResourceId,
-        ResourceLocator,
+        DockerLifecycle, GitState, ProbeOutcome, ProbeReason, Recoverability, ResourceFingerprint,
+        ResourceId, ResourceLocator,
     };
 
     use super::*;
@@ -178,6 +202,7 @@ mod tests {
             process_cwd_match: ProbeOutcome::Observed(Vec::new()),
             git_state: ProbeOutcome::Observed(None),
             tool_liveness: ProbeOutcome::Observed(false),
+            docker_lifecycle: None,
             collected_at,
             sources: Vec::new(),
         }
@@ -484,6 +509,192 @@ mod tests {
         for reason in [
             ReasonCode::RegenerabilityUnknown,
             ReasonCode::RecoverabilityIrreversible,
+        ] {
+            assert!(
+                !crate::autopilot::envelope::is_preauthorizable(reason),
+                "{} must never be pre-authorizable",
+                reason.as_str()
+            );
+        }
+    }
+
+    /// A Docker object as a detector will produce it: identified by Docker's
+    /// own id rather than a path, with the three path probes reported
+    /// `NotAttempted` because there is no path to point them at. `Complete`
+    /// regardless, since `required_evidence()` does not ask a tool-owned kind
+    /// for path facts (HORO-1544).
+    fn docker_evidence(kind: ResourceKind, lifecycle: DockerLifecycle) -> Evidence {
+        let mut ev = complete_evidence(kind, NOW);
+        ev.resource = ResourceId::new(
+            kind,
+            ResourceLocator::Tool {
+                tool: crate::evidence::OwningTool::Docker,
+                id: "deadbeef".to_string(),
+            },
+        );
+        ev.open_by_process = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        ev.process_cwd_match = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        ev.git_state = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        ev.docker_lifecycle = Some(lifecycle);
+        ev
+    }
+
+    fn observed_idle() -> DockerLifecycle {
+        DockerLifecycle {
+            activity: DockerActivity::Inactive,
+            persistence: crate::evidence::DockerPersistence::ToolManaged,
+            references: ProbeOutcome::Observed(crate::evidence::DockerReferences::none()),
+        }
+    }
+
+    /// A running container is active-use evidence (HORO-1544 AC4), and it must
+    /// arrive as its own reason rather than as `owning_tool_live` — the daemon
+    /// being up is one fact about every Docker object at once and says nothing
+    /// about which of them anything is using.
+    #[test]
+    fn a_running_docker_container_is_ask_for_being_in_use() {
+        let mut lifecycle = observed_idle();
+        lifecycle.activity = DockerActivity::Active;
+        let ev = docker_evidence(ResourceKind::DockerContainer, lifecycle);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::DockerObjectInUse]);
+    }
+
+    /// An image a running container needs is in use as surely as the container
+    /// is, and `docker system df` calls that same image "Reclaimable (100%)".
+    /// Docker's offer is not authority (HORO-1544 safety requirement).
+    #[test]
+    fn an_image_a_running_container_needs_is_ask_for_being_in_use() {
+        let lifecycle = DockerLifecycle {
+            activity: DockerActivity::Active,
+            persistence: crate::evidence::DockerPersistence::ToolManaged,
+            references: ProbeOutcome::Observed(crate::evidence::DockerReferences {
+                referenced_by: vec![ResourceId::new(
+                    ResourceKind::DockerContainer,
+                    ResourceLocator::Tool {
+                        tool: crate::evidence::OwningTool::Docker,
+                        id: "c0ffee".to_string(),
+                    },
+                )],
+                active_referrers: 1,
+            }),
+        };
+        let ev = docker_evidence(ResourceKind::DockerImage, lifecycle);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::DockerObjectInUse]);
+    }
+
+    /// Unknown is not a quieter `Inactive`. An object whose activity was never
+    /// established must not travel the same path as one Docker positively
+    /// reported as idle, and the distinguishing evidence is the reason code:
+    /// `docker_activity_unknown`, not `docker_object_in_use` and not silence.
+    #[test]
+    fn unknown_docker_activity_is_ask_and_not_spelled_like_in_use() {
+        let ev = docker_evidence(
+            ResourceKind::DockerImage,
+            DockerLifecycle::unknown(ProbeReason::ToolNotRunning),
+        );
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::DockerActivityUnknown]);
+    }
+
+    /// The reference query is its own axis: "Docker was asked and nothing
+    /// references this" and "the reference query did not run" would otherwise
+    /// both arrive as an empty referrer set. The activity axis is `Inactive`
+    /// here, so the reason can only have come from the unanswered query.
+    #[test]
+    fn an_unanswered_reference_query_is_ask_even_when_activity_is_known() {
+        let mut lifecycle = observed_idle();
+        lifecycle.references = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        let ev = docker_evidence(ResourceKind::DockerImage, lifecycle);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::DockerActivityUnknown]);
+    }
+
+    /// The negative control for all four tests above: a fully observed idle
+    /// object adds neither Docker reason, so any of them appearing elsewhere
+    /// came from the lifecycle facts rather than from merely being Docker.
+    ///
+    /// It still does not reach AUTO_SAFE — a stopped container holds its
+    /// writable layer, which `regenerability()` reports `NotRegenerable` — and
+    /// that is the point: the Ask arrives for the honest reason.
+    #[test]
+    fn an_observed_idle_docker_object_adds_no_docker_reason() {
+        let ev = docker_evidence(ResourceKind::DockerContainer, observed_idle());
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::RebuildCostHigh]);
+    }
+
+    /// AC 5, through the whole classifier rather than through
+    /// `protected_reason` alone, and with the evidence stacked as favourably as
+    /// any real snapshot could ever make it: Docker was asked and answered on
+    /// every axis, nothing references the volume, nothing is running, and the
+    /// persistence axis has been set to the most permissive value in the
+    /// vocabulary. This is the exact shape a "surely this one is fine" argument
+    /// would arrive in, and it must still not be executable without asking.
+    ///
+    /// The refusal comes from the kind, not from the evidence — which is why it
+    /// cannot be argued out of by a better-looking snapshot.
+    #[test]
+    fn a_docker_volume_is_never_auto_safe_however_idle_the_evidence_says_it_is() {
+        let mut lifecycle = observed_idle();
+        lifecycle.persistence = crate::evidence::DockerPersistence::ToolManaged;
+        let ev = docker_evidence(ResourceKind::DockerVolume, lifecycle);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_ne!(
+            decision.class,
+            PolicyClass::AutoSafe,
+            "a volume may hold the only copy of the developer's data"
+        );
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedPersistentVolume]
+        );
+    }
+
+    /// A non-Docker resource carries `docker_lifecycle: None`, which must mean
+    /// "the concept does not apply" and not "the facts are unknown". If the
+    /// `None` arm ever started defaulting to `Unknown`, every Cargo target dir
+    /// on the machine would become an Ask.
+    #[test]
+    fn absent_docker_lifecycle_does_not_read_as_unknown_activity() {
+        let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        assert!(ev.docker_lifecycle.is_none());
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+        assert!(!decision
+            .reasons
+            .contains(&ReasonCode::DockerActivityUnknown));
+    }
+
+    /// Both new reasons are refusals, so neither may be consented to in
+    /// advance — an Autopilot run must not silently pre-authorize a running
+    /// container or an unanswered question.
+    #[test]
+    fn neither_docker_reason_can_be_preauthorized() {
+        for reason in [
+            ReasonCode::DockerObjectInUse,
+            ReasonCode::DockerActivityUnknown,
         ] {
             assert!(
                 !crate::autopilot::envelope::is_preauthorizable(reason),

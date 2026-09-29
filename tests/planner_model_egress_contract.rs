@@ -39,7 +39,8 @@
 
 use glomeris::actions::ActionRegistry;
 use glomeris::evidence::{
-    Evidence, GitState, NativeCleanup, ProbeOutcome, ProbeReason, ProcessRef, Recoverability,
+    DockerActivity, DockerLifecycle, DockerPersistence, DockerReferences, Evidence, GitState,
+    NativeCleanup, OwningTool, ProbeOutcome, ProbeReason, ProcessRef, Recoverability,
     ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
 };
 use glomeris::planner::GraphProjection;
@@ -75,6 +76,18 @@ const MERGE_AXIS: &str = "origin/acme-release-train-q3";
 const PROCESS_COMMAND: &str = "/opt/acme/libexec/acme-internal-builder --watch";
 
 const PROCESS_PID: u32 = 31337;
+
+/// The Docker id of the object the fixture's image is referenced by. A
+/// container name is chosen by a human or a compose file and routinely carries
+/// a product or a customer name, so this one is shaped like the ones that do.
+/// The local graph holds it; the payload may report that *something*
+/// references the image and may not say what (HORO-1544).
+const CONTAINER_MARKER: &str = "acme-billing-prod-replica";
+
+/// The Docker id of the fixture's image. An image reference carries a registry
+/// host and a repository path, which is the same class of identity as a branch
+/// name, and it leaves this Mac for the same reason: it does not.
+const IMAGE_MARKER: &str = "registry.acme.example/acme-billing/api:v9142";
 
 fn at(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
@@ -143,6 +156,7 @@ fn candidate(
         process_cwd_match: ProbeOutcome::Observed(Vec::new()),
         git_state,
         tool_liveness: ProbeOutcome::Observed(false),
+        docker_lifecycle: None,
         collected_at: collected_at(),
         sources: Vec::new(),
     };
@@ -157,8 +171,74 @@ fn candidate(
     (evidence, decision)
 }
 
+/// One Docker object, as a real detector produces it: addressed by its own
+/// id rather than by a path, so it is a global resource by construction
+/// (HORO-1561) and carries lifecycle facts nothing else does.
+///
+/// `lifecycle` is the caller's so both fixtures can share this: one passes an
+/// answered lifecycle, the other an unknown one, which is what pins the
+/// `Reported` keys under `docker_lifecycle` in both directions.
+fn docker_candidate(lifecycle: DockerLifecycle) -> (Evidence, PolicyDecision) {
+    let resource = ResourceId::new(
+        ResourceKind::DockerImage,
+        ResourceLocator::Tool {
+            tool: OwningTool::Docker,
+            id: IMAGE_MARKER.to_string(),
+        },
+    );
+    let evidence = Evidence {
+        resource: resource.clone(),
+        fingerprint: ResourceFingerprint {
+            dev_ino: None,
+            mtime: None,
+            tool_revision: None,
+        },
+        detector: glomeris::detectors::DetectorId("docker.images"),
+        logical_bytes: ProbeOutcome::Observed(1_200_000),
+        physical_bytes: None,
+        reclaimable_bytes: ProbeOutcome::Observed(1_200_000),
+        reclaimable_bytes_is_lower_bound: false,
+        last_modified: ProbeOutcome::Observed(at(86_400 * 12)),
+        last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        regenerability: ResourceKind::DockerImage.regenerability(),
+        recoverability: Recoverability::RegenerableByTool,
+        native_cleanup: NativeCleanup::Unsupported,
+        // No path, so the three path-based probes structurally did not run.
+        open_by_process: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        tool_liveness: ProbeOutcome::Observed(true),
+        docker_lifecycle: Some(lifecycle),
+        collected_at: collected_at(),
+        sources: Vec::new(),
+    };
+    let decision = PolicyDecision {
+        resource,
+        class: PolicyClass::Ask,
+        reasons: vec![ReasonCode::DockerObjectInUse],
+        evidence_collected_at: collected_at(),
+        evaluated_at: collected_at(),
+        policy_version: 1,
+    };
+    (evidence, decision)
+}
+
+/// The image's referrer, as the local graph holds it: a real Docker identity,
+/// so the assertion that only its *count* reaches the payload is an assertion
+/// about withheld identity rather than about a string chosen to be absent.
+fn container_reference() -> ResourceId {
+    ResourceId::new(
+        ResourceKind::DockerContainer,
+        ResourceLocator::Tool {
+            tool: OwningTool::Docker,
+            id: CONTAINER_MARKER.to_string(),
+        },
+    )
+}
+
 /// The three-bucket fixture: one resource inside a repository, one global,
-/// one whose repository could not be determined.
+/// one whose repository could not be determined — plus the Docker object that
+/// is the only source of the `docker_lifecycle` keys.
 fn projection() -> GraphProjection {
     let in_repo_target = temp_cargo_project("worktree");
     let repo_root = in_repo_target
@@ -189,6 +269,14 @@ fn projection() -> GraphProjection {
             ProbeOutcome::Unavailable(ProbeReason::PermissionDenied),
             Vec::new(),
         ),
+        docker_candidate(DockerLifecycle {
+            activity: DockerActivity::Active,
+            persistence: DockerPersistence::ToolManaged,
+            references: ProbeOutcome::Observed(DockerReferences {
+                referenced_by: vec![container_reference()],
+                active_referrers: 1,
+            }),
+        }),
     ];
 
     let mut graph = WorkspaceEvidenceGraph::build(
@@ -279,6 +367,11 @@ fn projection_with_nothing_observed() -> GraphProjection {
             ProbeOutcome::Unavailable(ProbeReason::TimedOut),
             Vec::new(),
         ),
+        // Every axis unknown and the reference query not attempted — what a
+        // Docker object looks like when the daemon stopped answering. The
+        // `Reported` keys under `docker_lifecycle` are `unavailable` here and
+        // observed in the fixture above, so neither direction is unpinned.
+        docker_candidate(DockerLifecycle::unknown(ProbeReason::ToolNotRunning)),
     ];
     for (evidence, _) in &mut candidates {
         evidence.reclaimable_bytes = ProbeOutcome::Unavailable(ProbeReason::PermissionDenied);
@@ -340,10 +433,33 @@ fn resource_view(prefix: &str) -> Vec<String> {
         format!("{prefix}.policy_label"),
         format!("{prefix}.offered_action_ids"),
         format!("{prefix}.offered_action_ids[]"),
+        // Always emitted, `null` on everything Docker does not own. The keys
+        // *inside* it appear only where a Docker resource does — see
+        // `docker_lifecycle_view`.
+        format!("{prefix}.docker_lifecycle"),
     ];
     paths.extend(reported(&format!("{prefix}.reclaimable_bytes")));
     paths.extend(reported(&format!("{prefix}.age_days")));
     paths.extend(reported(&format!("{prefix}.tool_liveness")));
+    paths
+}
+
+/// The keys inside one `DockerLifecycleView`.
+///
+/// Pinned under `global_resources[]` alone, because that is the only bucket a
+/// Docker object can reach: Docker addresses its objects by id rather than by
+/// path, and a resource with a `ResourceLocator::Tool` has no containing
+/// repository by construction (HORO-1561). Should that ever stop being true,
+/// these keys appear under a prefix the pin does not list and
+/// `the_model_payload_key_set_is_pinned` fails on the added paths — which is
+/// the loud failure, not a missed one.
+fn docker_lifecycle_view(prefix: &str) -> Vec<String> {
+    let mut paths = vec![
+        format!("{prefix}.activity"),
+        format!("{prefix}.persistence"),
+    ];
+    paths.extend(reported(&format!("{prefix}.referrer_count")));
+    paths.extend(reported(&format!("{prefix}.active_referrers")));
     paths
 }
 
@@ -411,6 +527,7 @@ fn pinned_paths() -> BTreeSet<String> {
     paths.extend(resource_view("repositories[].worktrees[].resources[]"));
     paths.extend(resource_view("global_resources[]"));
     paths.extend(resource_view("unplaced_resources[].resource"));
+    paths.extend(docker_lifecycle_view("global_resources[].docker_lifecycle"));
 
     paths.extend(reported("workflow_history.mode"));
     paths.extend(reported("workflow_history.confidence"));
@@ -540,6 +657,28 @@ fn the_unanswered_variant_actually_reports_unavailable_values() {
         "timed_out"
     );
 
+    // The Docker object whose daemon stopped answering. `"unknown"` on both
+    // axes, and a referrer count that is unavailable rather than zero — an
+    // observed zero would state that nothing needs this image, which is the
+    // one thing an unanswered reference query has not established.
+    let docker = body["global_resources"]
+        .as_array()
+        .expect("global resources are an array")
+        .iter()
+        .find(|resource| !resource["docker_lifecycle"].is_null())
+        .expect("the Docker object is a global resource");
+    assert_eq!(docker["docker_lifecycle"]["activity"], "unknown");
+    assert_eq!(docker["docker_lifecycle"]["persistence"], "unknown");
+    assert_eq!(
+        docker["docker_lifecycle"]["referrer_count"]["status"],
+        "unavailable"
+    );
+    assert_eq!(
+        docker["docker_lifecycle"]["referrer_count"]["unavailable_reason"],
+        "tool_not_running"
+    );
+    assert!(docker["docker_lifecycle"]["active_referrers"]["value"].is_null());
+
     // And the `value` keys are all present and null, which is exactly what a
     // `skip_serializing_if` would remove.
     assert!(worktree["branch"]["upstream_state"]["value"].is_null());
@@ -566,6 +705,8 @@ fn the_pinned_set_covers_every_view_type() {
         "repositories[].worktrees[].task.observed_age_days.value",
         "repositories[].worktrees[].resources[].offered_action_ids[]",
         "global_resources[].policy_label",
+        "global_resources[].docker_lifecycle.activity",
+        "global_resources[].docker_lifecycle.referrer_count.unavailable_reason",
         "unplaced_resources[].unplaced_reason",
         "workflow_history.confidence.value",
     ] {
@@ -621,6 +762,27 @@ fn no_local_identity_reaches_the_payload() {
         !body.contains(&std::env::temp_dir().to_string_lossy().to_string()),
         "the temp directory reached the payload"
     );
+
+    // HORO-1544. The Docker object's own identity, and the identity of what
+    // references it, are the same class of fact as a branch name: chosen by a
+    // human, and routinely naming a product, a customer or a registry host.
+    // Only the *count* of referrers may leave.
+    assert!(
+        !body.contains(IMAGE_MARKER),
+        "a Docker image reference reached the payload"
+    );
+    assert!(
+        !body.contains(CONTAINER_MARKER),
+        "the name of a referencing container reached the payload"
+    );
+    assert!(
+        !body.contains("acme-billing"),
+        "a Docker identity fragment reached the payload"
+    );
+    assert!(
+        !body.contains("registry.acme.example"),
+        "a registry host reached the payload"
+    );
 }
 
 /// The control for the test above: the payload really is a projection of
@@ -642,7 +804,18 @@ fn the_payload_projects_the_resources_whose_identity_it_withheld() {
     assert!(body.contains("not_merged"));
     assert!(body.contains("present"), "unique work was reported");
 
-    assert_eq!(projection.aliases.len(), 3);
+    // And the Docker facts the identity was withheld in favour of.
+    assert!(body.contains("docker_image"));
+    assert!(
+        body.contains("\"activity\":\"active\""),
+        "the per-object activity was projected"
+    );
+    assert!(
+        body.contains("tool_managed"),
+        "the persistence axis was projected"
+    );
+
+    assert_eq!(projection.aliases.len(), 4);
     let resolved: Vec<String> = projection
         .aliases
         .issued()
@@ -654,15 +827,25 @@ fn the_payload_projects_the_resources_whose_identity_it_withheld() {
                 .to_string()
         })
         .collect();
-    assert_eq!(resolved.len(), 3);
-    for id in &resolved {
-        assert!(
-            id.contains(ACCOUNT_MARKER),
-            "the local side of the alias table must hold the real identity, \
-             or the leak assertions were testing a fixture that never had \
-             any: {id}"
-        );
-    }
+    assert_eq!(resolved.len(), 4);
+
+    // Three path-located resources under a marked path, and the Docker object,
+    // whose real identity is a registry reference rather than a path. Both
+    // halves are asserted because the point is that the alias table holds
+    // whatever the real identity *is* — if it held neither, the leak
+    // assertions above would have been testing a fixture with nothing to leak.
+    let marked = resolved
+        .iter()
+        .filter(|id| id.contains(ACCOUNT_MARKER))
+        .count();
+    assert_eq!(
+        marked, 3,
+        "the local side of the alias table must hold the real paths: {resolved:?}"
+    );
+    assert!(
+        resolved.iter().any(|id| id.contains(IMAGE_MARKER)),
+        "and the real Docker identity: {resolved:?}"
+    );
 }
 
 /// An alias is the only handle a planner response may cite, and one this
@@ -672,7 +855,7 @@ fn the_payload_projects_the_resources_whose_identity_it_withheld() {
 fn an_alias_this_projection_never_issued_resolves_to_nothing() {
     let projection = projection();
     for bogus in [
-        "resource_4",
+        "resource_5",
         "resource_0",
         "resource_1 ",
         "RESOURCE_1",
@@ -687,7 +870,7 @@ fn an_alias_this_projection_never_issued_resolves_to_nothing() {
             "{bogus:?} resolved to a resource"
         );
     }
-    for real in ["resource_1", "resource_2", "resource_3"] {
+    for real in ["resource_1", "resource_2", "resource_3", "resource_4"] {
         assert!(projection.aliases.resolve(real).is_some());
     }
 }

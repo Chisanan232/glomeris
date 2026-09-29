@@ -10,6 +10,7 @@
 
 mod cargo;
 mod docker;
+mod docker_objects;
 mod go;
 mod gradle;
 mod homebrew;
@@ -44,10 +45,22 @@ pub struct DetectorId(pub &'static str);
 /// evidence of "nothing to clean up", it is evidence of "we don't know."
 /// This ticket's code only constructs the variant; enforcing that
 /// distinction end-to-end is the future policy layer's job.
+///
+/// `ToolNotRunning` is HORO-1544's addition, for the client/daemon tools
+/// where "installed" and "answering" are different questions. Docker is the
+/// case that forced it: `docker` on `PATH` with no daemon listening is
+/// neither of the other two — reporting `ToolAbsent` tells a developer their
+/// 21 GB of images are not there, and reporting `Failed` tells them
+/// something broke when nothing did. It is a third fact and it needs a third
+/// word.
 #[derive(Debug, PartialEq)]
 pub enum DetectorStatus {
     Found(Vec<Evidence>),
     ToolAbsent,
+    /// The tool is installed but not answering: a daemon that is not
+    /// running, or a client that cannot reach one. Says nothing about how
+    /// much this detector would have found.
+    ToolNotRunning,
     Failed(String),
 }
 
@@ -413,6 +426,7 @@ pub(crate) fn discovery_evidence(
         process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        docker_lifecycle: None,
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }
@@ -841,6 +855,7 @@ impl DetectorRegistry {
                 Box::new(node::NodeDetector),
                 Box::new(node::NodePackageManagerCacheDetector),
                 Box::new(docker::DockerDetector),
+                Box::new(docker_objects::DockerObjectDetector),
                 Box::new(python::PipCacheDetector),
                 Box::new(python::UvCacheDetector),
                 Box::new(go::GoBuildCacheDetector),
@@ -975,6 +990,7 @@ mod tests {
                 "node_modules",
                 "npm_cache",
                 "docker_build_cache",
+                "docker_objects",
                 "pip_cache",
                 "uv_cache",
                 "go_build_cache",
@@ -1015,21 +1031,23 @@ mod tests {
         use crate::evidence::ResourceKind;
 
         /// Kinds with no detector yet, each with the ticket that owns it.
-        /// `DockerImageCache` is HORO-1544's: images, build cache and volumes
-        /// are distinct lifecycle evidence, and collapsing them into the
-        /// existing build-cache detector merely to satisfy this guard is
-        /// exactly what that ticket forbids.
-        const NOT_YET_DETECTABLE: &[ResourceKind] = &[ResourceKind::DockerImageCache];
+        ///
+        /// Empty as of HORO-1544: `docker_objects` declares the last three —
+        /// `DockerContainer`, `DockerImage` and `DockerVolume` — as the
+        /// distinct lifecycle evidence they are, rather than collapsing them
+        /// into the existing build-cache detector to satisfy this guard, which
+        /// is what that ticket forbids.
+        const NOT_YET_DETECTABLE: &[ResourceKind] = &[];
 
-        // Pinned, so this exemption cannot quietly grow. A kind added here
-        // without its ticket, or one left behind after its detector landed,
-        // both fail on this line.
-        assert_eq!(
-            NOT_YET_DETECTABLE,
-            &[ResourceKind::DockerImageCache],
-            "the not-yet-detectable exemption changed — add the ticket that \
-             owns the new kind to this test's doc comment, or remove a kind \
-             whose detector now exists"
+        // Pinned empty, so the exemption cannot quietly come back. A kind added
+        // to `ResourceKind` without a detector must either get one or be listed
+        // here with the ticket that owns it — and the list is asserted so the
+        // second choice cannot be made silently.
+        assert!(
+            NOT_YET_DETECTABLE.is_empty(),
+            "a kind was exempted from needing a detector — name the ticket that \
+             owns it in this test's doc comment, and delete this assertion's \
+             expectation of emptiness deliberately rather than as a side effect"
         );
 
         let registry = DetectorRegistry::builtin();
@@ -1081,6 +1099,7 @@ mod tests {
             match &self.0 {
                 DetectorStatus::Found(evidence) => DetectorStatus::Found(evidence.clone()),
                 DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
+                DetectorStatus::ToolNotRunning => DetectorStatus::ToolNotRunning,
                 DetectorStatus::Failed(msg) => DetectorStatus::Failed(msg.clone()),
             }
         }

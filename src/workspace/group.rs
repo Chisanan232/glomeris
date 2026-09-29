@@ -416,6 +416,7 @@ mod tests {
             process_cwd_match: ProbeOutcome::Observed(Vec::new()),
             git_state: ProbeOutcome::Observed(Some(worktree.state())),
             tool_liveness: ProbeOutcome::Observed(false),
+            docker_lifecycle: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

@@ -48,6 +48,19 @@ pub enum ReasonCode {
     /// for this specific resource, each time.
     RecoverabilityIrreversible,
     OwningToolLive,
+    /// Docker reported this object as in use: a running container, or an
+    /// object a running container depends on (HORO-1544). Distinct from
+    /// [`Self::OwningToolLive`], which says only that the daemon is up —
+    /// true for every Docker object at once, and therefore silent about
+    /// which of them anything is actually using.
+    DockerObjectInUse,
+    /// Docker did not state whether anything is using this object
+    /// (HORO-1544). An absence of knowledge, kept separate from
+    /// [`Self::DockerObjectInUse`] for the same reason
+    /// [`Self::RegenerabilityUnknown`] is kept separate from
+    /// [`Self::RebuildCostHigh`]: an unanswered question must not read as
+    /// either answer.
+    DockerActivityUnknown,
     // -> AutoSafe
     EvidenceFreshAndComplete,
     RegenerableByTool,
@@ -76,6 +89,8 @@ impl ReasonCode {
             ReasonCode::RegenerabilityUnknown => "regenerability_unknown",
             ReasonCode::RecoverabilityIrreversible => "recoverability_irreversible",
             ReasonCode::OwningToolLive => "owning_tool_live",
+            ReasonCode::DockerObjectInUse => "docker_object_in_use",
+            ReasonCode::DockerActivityUnknown => "docker_activity_unknown",
             ReasonCode::EvidenceFreshAndComplete => "evidence_fresh_and_complete",
             ReasonCode::RegenerableByTool => "regenerable_by_tool",
             ReasonCode::NoActiveUseObserved => "no_active_use_observed",
@@ -103,6 +118,8 @@ impl ReasonCode {
         ReasonCode::RegenerabilityUnknown,
         ReasonCode::RecoverabilityIrreversible,
         ReasonCode::OwningToolLive,
+        ReasonCode::DockerObjectInUse,
+        ReasonCode::DockerActivityUnknown,
         ReasonCode::EvidenceFreshAndComplete,
         ReasonCode::RegenerableByTool,
         ReasonCode::NoActiveUseObserved,
@@ -168,9 +185,11 @@ mod tests {
                 ReasonCode::RegenerabilityUnknown => 14,
                 ReasonCode::RecoverabilityIrreversible => 15,
                 ReasonCode::OwningToolLive => 16,
-                ReasonCode::EvidenceFreshAndComplete => 17,
-                ReasonCode::RegenerableByTool => 18,
-                ReasonCode::NoActiveUseObserved => 19,
+                ReasonCode::DockerObjectInUse => 17,
+                ReasonCode::DockerActivityUnknown => 18,
+                ReasonCode::EvidenceFreshAndComplete => 19,
+                ReasonCode::RegenerableByTool => 20,
+                ReasonCode::NoActiveUseObserved => 21,
             };
             assert_eq!(
                 index,
@@ -181,7 +200,7 @@ mod tests {
         }
         assert_eq!(
             ReasonCode::ALL.len(),
-            20,
+            22,
             "ReasonCode::ALL has gained, lost, or duplicated an entry"
         );
     }

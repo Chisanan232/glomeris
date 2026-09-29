@@ -19,16 +19,22 @@
 //! token is parsed, and any unparseable/missing value becomes
 //! `Unavailable(Failed)`, never a fabricated number.
 //!
-//! Known limitation (unchanged by HORO-992): populating `reclaimable_bytes`
-//! honestly is still not enough to make [`ResourceKind::DockerBuildCache`]
-//! reach [`crate::evidence::Completeness::Complete`]. Its resource uses
-//! [`ResourceLocator::Tool`] (no single canonical filesystem path), so
-//! [`crate::evidence::correlate::DefaultEvidenceCollector`] always reports
-//! `open_by_process`/`process_cwd_match`/`git_state` as
-//! `Unavailable(NotAttempted)` for it — and `required_evidence()` still
-//! requires all three. `AutoSafe` for Docker build cache remains out of
-//! reach until a future ticket gives this kind a real path-based or
-//! tool-native correlation strategy.
+//! Known limitation: [`ResourceKind::DockerBuildCache`] still does not reach
+//! [`crate::evidence::Completeness::Complete`], though HORO-1544 changed the
+//! reason. It used to be structural — `required_evidence()` asked a
+//! [`ResourceLocator::Tool`] resource for the three path probes
+//! (`open_by_process`/`process_cwd_match`/`git_state`), which
+//! [`crate::evidence::correlate::DefaultEvidenceCollector`] cannot run
+//! without a path and reports `Unavailable(NotAttempted)` by construction, so
+//! no Docker resource could ever be complete no matter what any detector
+//! observed. That is fixed: a Docker object is now asked only for facts about
+//! a Docker object.
+//!
+//! What remains is an honest gap in this detector. `docker system df` reports
+//! one aggregate row for the whole build cache and no modification time for
+//! it, so `last_modified` stays `Unavailable(NotAttempted)` and the evidence
+//! is [`crate::evidence::Completeness::Partial`] — `Ask`, for the true reason
+//! that nobody knows how old this is.
 
 use std::process::Command;
 use std::time::SystemTime;
@@ -86,7 +92,18 @@ fn parse_build_cache_reclaimable_bytes(stdout: &str) -> Option<u64> {
 
 /// Parse a docker-style human size string like `"1.2GB"`/`"512MB"`/`"0B"`
 /// into bytes. Best-effort: unrecognized suffixes return `None`.
-fn parse_human_size(s: &str) -> Option<u64> {
+///
+/// Shared with [`super::docker_objects`], which reads the same renderings out
+/// of the same `docker system df` report — one parser, so a suffix Docker
+/// starts printing cannot be understood by one detector and not the other.
+///
+/// Rounded, not truncated (HORO-1544). `2.07GB` is exactly what Docker prints
+/// for a real image on the dev host, and `2.07 * 1e9` is `2069999999.9999998`
+/// in binary floating point — truncating that reports 2069999999 bytes, which
+/// is not a more conservative answer than 2070000000, just a wrong one. The
+/// input carries three significant digits either way; the arithmetic should not
+/// add an error the rendering did not have.
+pub(super) fn parse_human_size(s: &str) -> Option<u64> {
     let s = s.trim();
     let split_at = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
     let (number, suffix) = s.split_at(split_at);
@@ -99,7 +116,38 @@ fn parse_human_size(s: &str) -> Option<u64> {
         "TB" => 1_000_000_000_000.0,
         _ => return None,
     };
-    Some((value * multiplier) as u64)
+    Some((value * multiplier).round() as u64)
+}
+
+/// What a non-zero `docker` exit means, as far as its own stderr says.
+///
+/// Before HORO-1544 every non-zero exit returned `ToolAbsent`, which said
+/// "Docker is not installed on this machine" about a machine holding 11 GB of
+/// images. Two facts were folded into one word, and the reported one was the
+/// wrong one either way: a stopped daemon is not an absent tool, and a real
+/// error is not normal state.
+///
+/// An exit this function cannot attribute becomes [`DetectorStatus::Failed`],
+/// never `ToolNotRunning` and never `ToolAbsent`. "We don't know" is the
+/// answer that keeps the resources visible as unknown rather than reporting
+/// them away.
+///
+/// Shared with [`super::docker_objects`] for the same reason
+/// [`parse_human_size`] is: both detectors invoke the same client, so a daemon
+/// that is down must not be `ToolNotRunning` for one of them and `Failed` for
+/// the other.
+pub(super) fn failure_status(stderr: &str) -> DetectorStatus {
+    if crate::evidence::daemon_unreachable(stderr) {
+        return DetectorStatus::ToolNotRunning;
+    }
+    let detail = stderr.trim();
+    if detail.is_empty() {
+        return DetectorStatus::Failed("docker system df exited non-zero".to_string());
+    }
+    // First line only: `docker` can print a multi-line hint, and a detector
+    // health field is not a log sink.
+    let first_line = detail.lines().next().unwrap_or(detail);
+    DetectorStatus::Failed(format!("docker system df failed: {first_line}"))
 }
 
 impl Detector for DockerDetector {
@@ -124,10 +172,7 @@ impl Detector for DockerDetector {
         };
 
         if !output.status.success() {
-            // Covers "daemon isn't running" (`docker system df` exits
-            // non-zero with a connection-refused message) as well as any
-            // other daemon-unreachable case.
-            return DetectorStatus::ToolAbsent;
+            return failure_status(&String::from_utf8_lossy(&output.stderr));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -174,6 +219,7 @@ impl Detector for DockerDetector {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
             collected_at: SystemTime::now(),
             sources: vec!["docker system df --format '{{json .}}'".to_string()],
         };
@@ -199,11 +245,101 @@ mod tests {
         assert_eq!(DockerDetector.id(), DetectorId("docker_build_cache"));
     }
 
+    /// AC2's central distinction, over the one message shape common to every
+    /// runtime. The full per-runtime wording matrix belongs to the shared
+    /// matcher this delegates to — see `crate::evidence::docker` — and is
+    /// asserted there rather than twice.
+    #[test]
+    fn a_daemon_that_is_not_answering_is_tool_not_running() {
+        assert_eq!(
+            failure_status(
+                "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+                 Is the docker daemon running?\n"
+            ),
+            DetectorStatus::ToolNotRunning
+        );
+    }
+
+    /// The case that matters more than the one above: an exit this code cannot
+    /// attribute must not be guessed at. `ToolNotRunning` would say the
+    /// resources are presumably still there and `ToolAbsent` would say they
+    /// are not — both are claims, and neither was established.
+    #[test]
+    fn an_unattributable_failure_is_failed_not_absent_or_not_running() {
+        let status = failure_status("permission denied while trying to connect\n");
+
+        assert_ne!(status, DetectorStatus::ToolAbsent);
+        assert_ne!(status, DetectorStatus::ToolNotRunning);
+        match status {
+            DetectorStatus::Failed(reason) => {
+                assert!(
+                    reason.contains("permission denied"),
+                    "the reason must carry docker's own words; got: {reason}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// A failure with nothing on stderr is still a failure. The old code's
+    /// `ToolAbsent` was reachable here too, which is how a silent non-zero
+    /// exit came to mean "no Docker on this machine".
+    #[test]
+    fn a_silent_failure_is_still_failed() {
+        match failure_status("   \n") {
+            DetectorStatus::Failed(reason) => assert!(!reason.is_empty()),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// A detector health field is not a log sink: a client that prints a hint
+    /// under its error contributes the error, not the hint.
+    #[test]
+    fn a_multi_line_failure_reports_only_its_first_line() {
+        match failure_status("something broke\nRun 'docker system df --help' for more.\n") {
+            DetectorStatus::Failed(reason) => {
+                assert!(reason.ends_with("something broke"), "got: {reason}");
+                assert!(!reason.contains("--help"), "got: {reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// An empty build cache is a real answer, and a different one from either
+    /// failure above: the row is present, Docker reported `0B`, and the
+    /// detector must report the observed zero rather than an unavailable
+    /// probe. This is AC2's "empty storage" half.
+    #[test]
+    fn a_daemon_reporting_an_empty_build_cache_parses_as_observed_zero() {
+        let stdout = concat!(
+            "{\"Active\":\"0\",\"Reclaimable\":\"0B\",\"Size\":\"0B\",",
+            "\"TotalCount\":\"0\",\"Type\":\"Build Cache\"}\n"
+        );
+
+        assert_eq!(parse_build_cache_bytes(stdout), Some(0));
+        assert_eq!(parse_build_cache_reclaimable_bytes(stdout), Some(0));
+    }
+
     #[test]
     fn parse_human_size_handles_common_suffixes() {
         assert_eq!(parse_human_size("0B"), Some(0));
         assert_eq!(parse_human_size("512MB"), Some(512_000_000));
         assert_eq!(parse_human_size("1.2GB"), Some(1_200_000_000));
+    }
+
+    /// The truncation defect, by the exact values a live daemon prints. Each
+    /// product below is not representable in binary floating point and lands
+    /// just under the whole number; truncating reported one byte less than the
+    /// rendering states. The `2.1GB`/`1.5GB` cases are the anti-vacuity half:
+    /// their products land just *over*, so a fix that subtracted an epsilon
+    /// rather than rounding would fail here.
+    #[test]
+    fn parse_human_size_rounds_rather_than_truncating() {
+        assert_eq!(parse_human_size("2.07GB"), Some(2_070_000_000));
+        assert_eq!(parse_human_size("75.9MB"), Some(75_900_000));
+        assert_eq!(parse_human_size("2.361GB"), Some(2_361_000_000));
+        assert_eq!(parse_human_size("2.1GB"), Some(2_100_000_000));
+        assert_eq!(parse_human_size("1.5GB"), Some(1_500_000_000));
     }
 
     #[test]

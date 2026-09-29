@@ -87,7 +87,8 @@ final class GlomerisVocabularyTests: XCTestCase {
     private static let kindTokens = [
         "xcode_derived_data", "homebrew_cache", "cargo_target_dir", "cargo_registry_cache",
         "node_modules", "node_package_manager_cache", "docker_build_cache",
-        "docker_image_cache", "pip_cache", "uv_cache", "go_build_cache", "go_module_cache",
+        "docker_image", "docker_container", "docker_volume",
+        "pip_cache", "uv_cache", "go_build_cache", "go_module_cache",
         "gradle_cache", "maven_local_repository", "swiftpm_cache", "swiftpm_build_dir",
         "unknown",
     ]
@@ -97,7 +98,7 @@ final class GlomerisVocabularyTests: XCTestCase {
         "ok", "misconfigured", "unreachable", "rejected", "unusable_response",
     ]
 
-    /// `src/policy/class.rs` — `ReasonCode::as_str`, all 20.
+    /// `src/policy/class.rs` — `ReasonCode::as_str`, all 22.
     private static let reasonTokens = [
         "protected_credential_material", "protected_git_internals", "protected_infra_state",
         "protected_persistent_volume", "protected_user_documents", "protected_system_path",
@@ -105,7 +106,8 @@ final class GlomerisVocabularyTests: XCTestCase {
         "evidence_incomplete", "evidence_stale", "evidence_probe_failed",
         "resource_in_active_use", "git_worktree_dirty", "rebuild_cost_high",
         "regenerability_unknown", "recoverability_irreversible",
-        "owning_tool_live", "evidence_fresh_and_complete", "regenerable_by_tool",
+        "owning_tool_live", "docker_object_in_use", "docker_activity_unknown",
+        "evidence_fresh_and_complete", "regenerable_by_tool",
         "no_active_use_observed",
     ]
 

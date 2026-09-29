@@ -49,6 +49,11 @@
       "candidates_found": 0
     },
     {
+      "detector": "docker_objects",
+      "status": "tool_not_running",
+      "candidates_found": 0
+    },
+    {
       "detector": "project_roots",
       "status": "failed",
       "candidates_found": 0,

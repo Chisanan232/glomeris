@@ -95,12 +95,15 @@ impl<T> Reported<T> {
 pub struct ModelGraphView {
     pub machine: MachineView,
     pub repositories: Vec<RepositoryView>,
-    /// Tool-owned caches observed to sit outside any repository.
+    /// Resources with no containing repository — the global caches. Either
+    /// the git probe ran and found none, or the resource is addressed by its
+    /// owning tool rather than by a path, so there is nothing for a
+    /// repository to contain (HORO-1561).
     pub global_resources: Vec<ResourceView>,
-    /// Resources whose containing repository could not be determined. Kept
-    /// as their own list rather than folded into `global_resources`, so the
-    /// model is never told a build directory is a global cache because a
-    /// probe timed out.
+    /// Path-located resources whose containing repository could not be
+    /// determined. Kept as their own list rather than folded into
+    /// `global_resources`, so the model is never told a build directory is a
+    /// global cache because a probe timed out.
     pub unplaced_resources: Vec<UnplacedResourceView>,
     pub workflow_history: WorkflowHistoryView,
 }
@@ -226,6 +229,51 @@ pub struct ResourceView {
     /// select from these and may not invent one; an id outside this list is
     /// dropped by validation rather than resolved.
     pub offered_action_ids: Vec<&'static str>,
+    /// What Docker said about this object, for the resources Docker owns.
+    ///
+    /// `null` on every other resource. That is the one place in this module
+    /// where an absent value is a complete answer rather than an unknown one,
+    /// and it is why this is an `Option` and not a [`Reported`]: a Cargo
+    /// target directory has no Docker activity to be unavailable about.
+    pub docker_lifecycle: Option<DockerLifecycleView>,
+}
+
+/// What Docker can state about one of its own objects.
+///
+/// # Why the three fields and not the object
+///
+/// `tool_liveness` above answers "is the daemon up", which is one answer for
+/// every Docker object on the machine. It cannot distinguish 11 GB of images
+/// no container needs from the named volume a developer's local Postgres
+/// keeps its data in, and those are opposite recommendations. So the per-object
+/// facts are projected — and only as the three axes
+/// [`crate::evidence::DockerLifecycle`] carries, each with its own explicit
+/// `"unknown"`, never collapsed into one state string.
+///
+/// # Counts, never identities
+///
+/// The local graph links an image to the containers that need it by resource
+/// identity. Those identities stay home. A container name is chosen by a human
+/// or a compose file and routinely carries a product or customer name, an image
+/// reference carries a registry host and a repository path, and neither is
+/// needed to rank storage: "two things reference this, one of them is running"
+/// is the whole of what a ranking model can act on. Same reasoning as
+/// [`ActivityView`], reached independently for a different tool.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DockerLifecycleView {
+    /// `"active"`, `"inactive"` or `"unknown"`. `"unknown"` is not a quieter
+    /// `"inactive"`: an object whose activity was never established has not
+    /// been reported idle.
+    pub activity: &'static str,
+    /// `"user_managed"`, `"tool_managed"` or `"unknown"`. Whose data this is,
+    /// as far as Docker stated it — not inferred from a name.
+    pub persistence: &'static str,
+    /// How many other Docker objects Docker reported as referencing this one.
+    /// `unavailable` when the reference query did not run, which is a
+    /// different fact from an observed zero and must not arrive as one.
+    pub referrer_count: Reported<usize>,
+    /// How many of those referrers Docker reported as running.
+    pub active_referrers: Reported<u32>,
 }
 
 /// A resource whose containing repository could not be established.

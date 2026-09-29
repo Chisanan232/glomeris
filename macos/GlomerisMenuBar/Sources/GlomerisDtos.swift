@@ -171,13 +171,15 @@ struct DetectCandidateReportDto: Decodable, Equatable, Identifiable {
 /// Mirrors `reporting::dto::DetectorHealthReport` (HORO-1484) — one
 /// detector's outcome from the discovery pass that produced this report.
 ///
-/// `status` is one of `"found"`, `"tool_absent"`, `"failed"`, produced by
-/// `cli::DetectorOutcome::tag()`. The three are NOT interchangeable and the
-/// app must not collapse them: `tool_absent` means the tool that would
-/// produce candidates is not installed, which is normal state and a real
-/// answer; `failed` means the probe did not answer, so whatever that
-/// detector would have found is unknown. `reason` is present only for
-/// `failed`.
+/// `status` is one of `"found"`, `"tool_absent"`, `"tool_not_running"`,
+/// `"failed"`, produced by `cli::DetectorOutcome::tag()`. The four are NOT
+/// interchangeable and the app must not collapse them: `tool_absent` means
+/// the tool that would produce candidates is not installed, which is normal
+/// state and a real answer; `tool_not_running` means it is installed but was
+/// not answering, so its resources are presumably still there and this pass
+/// could not see them (HORO-1544); `failed` means the probe did not answer,
+/// so whatever that detector would have found is unknown. `reason` is
+/// present only for `failed`.
 struct DetectorHealthReportDto: Decodable, Equatable, Identifiable {
     let detector: String
     let status: String
@@ -533,8 +535,9 @@ enum ProgressEventDto: Decodable, Equatable {
     /// HORO-1484: `outcome` and `reason` were added because
     /// `candidatesFound: 0` is what a detector that found nothing and a
     /// detector that never answered had in common, and it was all this event
-    /// said about either. `outcome` is `"found"`/`"tool_absent"`/`"failed"`;
-    /// `reason` is present only for `"failed"`.
+    /// said about either. `outcome` is
+    /// `"found"`/`"tool_absent"`/`"tool_not_running"`/`"failed"`; `reason` is
+    /// present only for `"failed"`.
     ///
     /// `outcome` is optional for the same forward/backward reason as
     /// `DetectReportDto.detectors`: the resolved CLI may predate the field.
