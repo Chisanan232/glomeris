@@ -198,6 +198,54 @@ impl GraphProjection {
             aliases: issuer.table,
         }
     }
+
+    /// Every evidence reference this projection actually sent.
+    ///
+    /// # Read off the view, never off the issuer
+    ///
+    /// The obvious implementation is to record each alias as [`AliasIssuer`]
+    /// hands it out. This walks the finished [`ModelGraphView`] instead, and the
+    /// difference is the point: a reference is "issued" only if it reached the
+    /// serialized payload. Were a future edit to project a repository without
+    /// its worktrees, or to drop the unplaced list, the issuer's record would
+    /// still claim those aliases were sent — and a model would be marked as
+    /// having cited something it was never shown. Walking the view cannot say
+    /// that.
+    ///
+    /// # What it is for
+    ///
+    /// [`super::validate`] accepts an `evidence_refs` entry only if it is in
+    /// here (HORO-1548). A response citing `workspace_9` in a request that
+    /// carried two worktrees is citing nothing, and a report that rendered the
+    /// citation anyway would be showing a reader a provenance trail that does
+    /// not exist. Distinct from [`AliasTable::resolve`], which answers a
+    /// narrower question — which local resource an alias means — and only for
+    /// resources: a repository, a worktree, the machine and the workflow
+    /// baseline are citable but are not resources, so they have no entry there
+    /// and must have one here.
+    pub fn issued_evidence_refs(&self) -> std::collections::BTreeSet<&str> {
+        let mut refs = std::collections::BTreeSet::new();
+        refs.insert(self.view.machine.evidence_ref);
+        refs.insert(self.view.workflow_history.evidence_ref);
+
+        for repository in &self.view.repositories {
+            refs.insert(repository.evidence_ref.as_str());
+            for worktree in &repository.worktrees {
+                refs.insert(worktree.evidence_ref.as_str());
+                for resource in &worktree.resources {
+                    refs.insert(resource.evidence_ref.as_str());
+                }
+            }
+        }
+        for resource in &self.view.global_resources {
+            refs.insert(resource.evidence_ref.as_str());
+        }
+        for unplaced in &self.view.unplaced_resources {
+            refs.insert(unplaced.resource.evidence_ref.as_str());
+        }
+
+        refs
+    }
 }
 
 /// Which action ids are on offer per resource, keyed by the resource's own
@@ -1270,6 +1318,69 @@ mod tests {
             "the model is told the repository is unknown because a probe \
              timed out, not that there is no repository"
         );
+    }
+
+    /// Every reference in the payload is citable, and nothing else is.
+    ///
+    /// HORO-1548. The two halves matter for different reasons. Completeness:
+    /// a resource in the global or unplaced list is as citable as one inside a
+    /// worktree, and an implementation that walked only `repositories` would
+    /// discard a correct citation from a model — which then reads as the model
+    /// having made the reference up. Closure: `repo_9` and `resource_9` are not
+    /// in a payload with two repositories and five resources, so a response
+    /// naming them has cited nothing and validation must be able to say so.
+    #[test]
+    fn issued_evidence_refs_are_exactly_what_the_payload_carries() {
+        let candidates = vec![
+            candidate("/w/a/target", in_repo("/w/a", "/w/.git")),
+            candidate("/w/b/target", in_repo("/w/b", "/w/.git")),
+            candidate("/other/target", in_repo("/other", "/other/.git")),
+            candidate("/cache/registry", ProbeOutcome::Observed(None)),
+            candidate(
+                "/lost/target",
+                ProbeOutcome::Unavailable(ProbeReason::TimedOut),
+            ),
+        ];
+        let projection = project(&candidates);
+        let refs = projection.issued_evidence_refs();
+
+        for expected in [
+            MACHINE_EVIDENCE_REF,
+            WORKFLOW_HISTORY_EVIDENCE_REF,
+            "repo_1",
+            "repo_2",
+            "workspace_1",
+            "workspace_2",
+            "workspace_3",
+            "resource_1",
+            "resource_2",
+            "resource_3",
+            // The global cache and the unplaced resource. Neither sits under a
+            // repository, and both were sent.
+            "resource_4",
+            "resource_5",
+        ] {
+            assert!(refs.contains(expected), "{expected} is not citable");
+        }
+
+        for never_issued in [
+            "repo_3",
+            "workspace_4",
+            "resource_6",
+            "resource_9",
+            "machine_1",
+            "workflow_history_1",
+            "",
+        ] {
+            assert!(
+                !refs.contains(never_issued),
+                "{never_issued} is citable but was never sent"
+            );
+        }
+
+        // Nothing beyond the machine, the baseline, 2 repositories,
+        // 3 worktrees and 5 resources.
+        assert_eq!(refs.len(), 2 + 2 + 3 + 5);
     }
 
     /// HORO-1561 AC 5. A tool-owned resource is projected as the global cache
