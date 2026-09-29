@@ -152,6 +152,14 @@ pub struct WorktreeView {
 /// contained somewhere, `merge_comparison_known` says whether there was an
 /// axis to compare against at all — which is what distinguishes "not
 /// merged" from "this machine has no `origin/HEAD` so nobody knows".
+///
+/// The integration fields HORO-1545 added keep to the same rule, and it
+/// costs them something: no commit ids, no branch name on either side of
+/// the comparison, no commit messages and no dates. A model is told that
+/// two commits here have equivalents over there and cannot be told which
+/// commits, which branch, or when — because every one of those is a
+/// description of what this machine's owner is working on, and none of them
+/// changes how a directory should be ranked.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BranchView {
     pub dirty: bool,
@@ -169,6 +177,41 @@ pub struct BranchView {
     /// `true` when HEAD is detached. Not an error and not an absence — a
     /// state a worktree is sometimes deliberately left in.
     pub detached_head: Reported<bool>,
+    /// `"equivalent"`, `"not_equivalent"` or `"not_applicable"` — whether
+    /// the work here has landed on the comparison branch in some form other
+    /// than ancestry (HORO-1545). `unavailable` covers both a probe that
+    /// could not answer and an answer of "unknown", which are the same fact
+    /// in this projection and carry the reason either way.
+    ///
+    /// `"not_applicable"` is the one worth reading carefully: it means
+    /// ancestry already contains HEAD, so there was no question to ask —
+    /// not that the answer was no.
+    pub patch_equivalence: Reported<&'static str>,
+    /// `"per_commit_patch_id"` or `"content_identical"`. Sent because the
+    /// two are not equally strong: the first found every commit's patch
+    /// already over there, the second found the *files* identical and says
+    /// nothing about how they got that way.
+    pub equivalence_method: Reported<&'static str>,
+    /// Commits here that the comparison branch does not have and has no
+    /// equivalent of.
+    pub commits_unique_to_head: Reported<u32>,
+    /// Commits here that the comparison branch has an equivalent patch for
+    /// under a different id — what a cherry-pick or rebase leaves behind.
+    pub commits_equivalent_elsewhere: Reported<u32>,
+    /// Commits absent from the comparison branch that the per-commit method
+    /// declined to classify, which in practice means merge commits. Not a
+    /// count of commits known to hold nothing; a count of commits nobody
+    /// asked about. Sent so the three above can be seen not to add up to
+    /// "nothing unique here".
+    pub commits_unclassified: Reported<u32>,
+    /// How many days ago the newest commit here was written, and the same
+    /// for the branch it was compared against. Durations rather than dates,
+    /// and days rather than seconds: "a branch whose tip is older than the
+    /// branch it was measured against" is the shape worth reasoning about,
+    /// and a timestamp would additionally place this machine's activity on a
+    /// calendar.
+    pub head_tip_age_days: Reported<u64>,
+    pub comparison_tip_age_days: Reported<u64>,
 }
 
 /// Whether anything is using this working tree.

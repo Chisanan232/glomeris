@@ -14,8 +14,8 @@ use crate::actions::ActionRegistry;
 use crate::evidence::{DockerLifecycle, Evidence, ProbeOutcome, ResourceId};
 use crate::policy::PolicyDecision;
 use crate::workspace::{
-    ActivityFacts, BranchLifecycle, ExternalFact, ResourceNode, UpstreamState,
-    WorkspaceEvidenceGraph,
+    ActivityFacts, BranchLifecycle, ExternalFact, IntegrationEvidence, PatchEquivalence,
+    ResourceNode, UpstreamState, WorkspaceEvidenceGraph,
 };
 
 /// A projection plus the local table needed to read its answers back.
@@ -148,7 +148,7 @@ impl GraphProjection {
                             WorktreeView {
                                 evidence_ref,
                                 linked: worktree.linked,
-                                branch: branch_view(&worktree.lifecycle),
+                                branch: branch_view(&worktree.lifecycle, now),
                                 activity: activity_view(&worktree.activity),
                                 pull_request: external_view(
                                     &worktree.external.pull_request,
@@ -249,7 +249,101 @@ fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView 
     }
 }
 
-fn branch_view(lifecycle: &BranchLifecycle) -> BranchView {
+/// The integration half of [`BranchView`], assembled apart from the rest
+/// because `branch_view`'s tuple was already at the edge of legibility and
+/// seven more elements would have put the projection's correctness in the
+/// order of a tuple's fields.
+struct IntegrationFields {
+    patch_equivalence: Reported<&'static str>,
+    equivalence_method: Reported<&'static str>,
+    commits_unique_to_head: Reported<u32>,
+    commits_equivalent_elsewhere: Reported<u32>,
+    commits_unclassified: Reported<u32>,
+    head_tip_age_days: Reported<u64>,
+    comparison_tip_age_days: Reported<u64>,
+}
+
+impl IntegrationFields {
+    /// Every field unavailable for one reason — what the branch probe not
+    /// answering leaves behind.
+    fn unavailable(reason: &'static str) -> Self {
+        Self {
+            patch_equivalence: Reported::unavailable(reason),
+            equivalence_method: Reported::unavailable(reason),
+            commits_unique_to_head: Reported::unavailable(reason),
+            commits_equivalent_elsewhere: Reported::unavailable(reason),
+            commits_unclassified: Reported::unavailable(reason),
+            head_tip_age_days: Reported::unavailable(reason),
+            comparison_tip_age_days: Reported::unavailable(reason),
+        }
+    }
+
+    fn of(integration: &IntegrationEvidence, now: SystemTime) -> Self {
+        // `Unknown` collapses into `unavailable` carrying its reason rather
+        // than becoming an observed `"unknown"` string. Two layers of
+        // not-knowing on one field is one layer too many for a reader to
+        // keep straight, and this way the reason survives — which is the
+        // only part of an unknown that is worth anything.
+        let (equivalence, method) = match integration.equivalence {
+            PatchEquivalence::Equivalent(method) => (
+                Reported::observed("equivalent"),
+                Reported::observed(method.tag()),
+            ),
+            PatchEquivalence::NotEquivalent => (
+                Reported::observed("not_equivalent"),
+                // No method, because nothing was established. Not
+                // `failed`: both methods ran and agreed.
+                Reported::unavailable("not_attempted"),
+            ),
+            PatchEquivalence::NotApplicable => (
+                Reported::observed("not_applicable"),
+                Reported::unavailable("not_attempted"),
+            ),
+            PatchEquivalence::Unknown(reason) => (
+                Reported::unavailable(reason.tag()),
+                Reported::unavailable(reason.tag()),
+            ),
+        };
+        let (unique, equivalent, unclassified) = match &integration.divergence {
+            ProbeOutcome::Observed(divergence) => (
+                Reported::observed(divergence.unique_commits),
+                Reported::observed(divergence.equivalent_commits),
+                Reported::observed(divergence.unclassified_commits),
+            ),
+            ProbeOutcome::Unavailable(reason) => (
+                Reported::unavailable(reason.tag()),
+                Reported::unavailable(reason.tag()),
+                Reported::unavailable(reason.tag()),
+            ),
+        };
+        Self {
+            patch_equivalence: equivalence,
+            equivalence_method: method,
+            commits_unique_to_head: unique,
+            commits_equivalent_elsewhere: equivalent,
+            commits_unclassified: unclassified,
+            head_tip_age_days: tip_age_days(&integration.tip_committed_at, now),
+            comparison_tip_age_days: tip_age_days(&integration.comparison_tip_committed_at, now),
+        }
+    }
+}
+
+/// A commit timestamp as an age in whole days, or the reason there is none.
+fn tip_age_days(tip: &ProbeOutcome<SystemTime>, now: SystemTime) -> Reported<u64> {
+    match tip {
+        ProbeOutcome::Observed(at) => match now.duration_since(*at) {
+            Ok(age) => Reported::observed(age.as_secs() / 86_400),
+            // A commit dated after this machine's clock — a clock that moved
+            // or a commit written with a date of its own. No age rather than
+            // a zero, which would read as "written moments ago" and is the
+            // flattering half of a subtraction with no answer.
+            Err(_) => Reported::unavailable("failed"),
+        },
+        ProbeOutcome::Unavailable(reason) => Reported::unavailable(reason.tag()),
+    }
+}
+
+fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
     let (upstream_state, ahead, behind, merged_state, comparison_known, detached) =
         match &lifecycle.branch {
             ProbeOutcome::Observed(state) => {
@@ -297,6 +391,10 @@ fn branch_view(lifecycle: &BranchLifecycle) -> BranchView {
                 Reported::unavailable(reason.tag()),
             ),
         };
+    let integration = match &lifecycle.branch {
+        ProbeOutcome::Observed(state) => IntegrationFields::of(&state.integration, now),
+        ProbeOutcome::Unavailable(reason) => IntegrationFields::unavailable(reason.tag()),
+    };
 
     BranchView {
         dirty: lifecycle.dirty,
@@ -308,6 +406,13 @@ fn branch_view(lifecycle: &BranchLifecycle) -> BranchView {
         merged_state,
         merge_comparison_known: comparison_known,
         detached_head: detached,
+        patch_equivalence: integration.patch_equivalence,
+        equivalence_method: integration.equivalence_method,
+        commits_unique_to_head: integration.commits_unique_to_head,
+        commits_equivalent_elsewhere: integration.commits_equivalent_elsewhere,
+        commits_unclassified: integration.commits_unclassified,
+        head_tip_age_days: integration.head_tip_age_days,
+        comparison_tip_age_days: integration.comparison_tip_age_days,
     }
 }
 
@@ -407,8 +512,9 @@ mod tests {
     };
     use crate::policy::{PolicyClass, ReasonCode};
     use crate::workspace::{
-        ExternalSource, IntegrationEvidence, MachineContext, MergedState, PullRequestState,
-        TaskState, WorkflowHistorySummary, WorkflowMode, WorkspaceSurvey, WorktreeBranchState,
+        Divergence, EquivalenceMethod, ExternalSource, IntegrationEvidence, MachineContext,
+        MergedState, PullRequestState, TaskState, WorkflowHistorySummary, WorkflowMode,
+        WorkspaceSurvey, WorktreeBranchState,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -821,6 +927,169 @@ mod tests {
         assert_eq!(branch.merge_comparison_known.value, Some(true));
         assert_eq!(branch.detached_head.value, Some(false));
         assert_eq!(branch.unique_work, "present");
+    }
+
+    /// The integration evidence projects as counts, a vocabulary token and
+    /// two ages — and the commit ids, branch names and dates it was computed
+    /// from stay here (HORO-1545).
+    #[test]
+    fn integration_evidence_projects_shapes_and_keeps_its_identities() {
+        let candidates = vec![candidate("/w/a/target", in_repo("/w/a", "/w/.git"))];
+        let mut graph = graph_of(&candidates);
+        graph.repositories[0].worktrees[0].lifecycle.branch =
+            ProbeOutcome::Observed(WorktreeBranchState {
+                branch: Some("v0.0.1/ACME-9142/feat/unreleased".to_string()),
+                upstream: UpstreamState::Tracking {
+                    ahead: 3,
+                    behind: 0,
+                },
+                merged: MergedState::NotMerged {
+                    into: "origin/acme-release-train".to_string(),
+                },
+                integration: IntegrationEvidence {
+                    divergence: ProbeOutcome::Observed(Divergence {
+                        unique_commits: 2,
+                        equivalent_commits: 1,
+                        unclassified_commits: 0,
+                    }),
+                    equivalence: PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
+                    tip_committed_at: ProbeOutcome::Observed(at(86_400 * 5)),
+                    comparison_tip_committed_at: ProbeOutcome::Observed(at(86_400 * 2)),
+                },
+            });
+        let projection = GraphProjection::build(
+            &graph,
+            &candidates,
+            &ActionRegistry::builtin(),
+            at(86_400 * 9),
+        );
+        let body = json(&projection);
+
+        assert!(!body.contains("ACME-9142"));
+        assert!(!body.contains("acme-release-train"));
+        assert!(
+            !body.contains("unreleased"),
+            "the branch name is not a shape"
+        );
+
+        let branch = &projection.view.repositories[0].worktrees[0].branch;
+        assert_eq!(branch.patch_equivalence.value, Some("equivalent"));
+        assert_eq!(
+            branch.equivalence_method.value,
+            Some("content_identical"),
+            "the two methods are not equally strong, so which one answered is sent"
+        );
+        assert_eq!(branch.commits_unique_to_head.value, Some(2));
+        assert_eq!(branch.commits_equivalent_elsewhere.value, Some(1));
+        assert_eq!(branch.commits_unclassified.value, Some(0));
+        assert_eq!(branch.head_tip_age_days.value, Some(4));
+        assert_eq!(branch.comparison_tip_age_days.value, Some(7));
+        assert_eq!(
+            branch.unique_work, "present",
+            "equivalence is not an answer to whether this tree holds unique work"
+        );
+    }
+
+    /// An unknown equivalence carries the reason it is unknown rather than
+    /// projecting as an observed `"unknown"` token.
+    ///
+    /// The distinction is the whole campaign: a model shown
+    /// `patch_equivalence: "unknown"` alongside `status: "observed"` has been
+    /// told a probe answered, and `"unknown"` then reads as a weak
+    /// `"not_equivalent"`. Reported as unavailable, the reason is there to be
+    /// read and the absence cannot be mistaken for a finding.
+    #[test]
+    fn an_unknown_equivalence_reports_why_rather_than_a_token() {
+        let candidates = vec![candidate("/w/a/target", in_repo("/w/a", "/w/.git"))];
+        let mut graph = graph_of(&candidates);
+        graph.repositories[0].worktrees[0].lifecycle.branch =
+            ProbeOutcome::Observed(WorktreeBranchState {
+                branch: Some("wip".to_string()),
+                upstream: UpstreamState::Tracking {
+                    ahead: 1,
+                    behind: 0,
+                },
+                merged: MergedState::NotMerged {
+                    into: "origin/main".to_string(),
+                },
+                integration: IntegrationEvidence {
+                    // The shape a branch sitting on an unseen merge commit
+                    // produces: one commit ahead, and the per-commit method
+                    // declined to describe it.
+                    divergence: ProbeOutcome::Observed(Divergence {
+                        unique_commits: 0,
+                        equivalent_commits: 0,
+                        unclassified_commits: 1,
+                    }),
+                    equivalence: PatchEquivalence::Unknown(ProbeReason::NotAttempted),
+                    tip_committed_at: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
+                    comparison_tip_committed_at: ProbeOutcome::Observed(at(0)),
+                },
+            });
+        let projection = GraphProjection::build(
+            &graph,
+            &candidates,
+            &ActionRegistry::builtin(),
+            at(86_400 * 3),
+        );
+        let branch = &projection.view.repositories[0].worktrees[0].branch;
+
+        assert_eq!(branch.patch_equivalence.status, "unavailable");
+        assert_eq!(branch.patch_equivalence.value, None);
+        assert_eq!(
+            branch.patch_equivalence.unavailable_reason,
+            Some("not_attempted")
+        );
+        assert_eq!(branch.equivalence_method.status, "unavailable");
+        assert_eq!(
+            branch.commits_unclassified.value,
+            Some(1),
+            "the count the per-commit method declined to explain is still sent, \
+             so nothing reads as an absence of unique work"
+        );
+        assert_eq!(
+            branch.head_tip_age_days.unavailable_reason,
+            Some("timed_out")
+        );
+        assert_eq!(branch.comparison_tip_age_days.value, Some(3));
+    }
+
+    /// A commit dated after this machine's clock has no age. Zero would read
+    /// as "written moments ago", which is the flattering half of a
+    /// subtraction that has no answer.
+    #[test]
+    fn a_commit_newer_than_the_clock_has_no_age_rather_than_zero() {
+        let candidates = vec![candidate("/w/a/target", in_repo("/w/a", "/w/.git"))];
+        let mut graph = graph_of(&candidates);
+        graph.repositories[0].worktrees[0].lifecycle.branch =
+            ProbeOutcome::Observed(WorktreeBranchState {
+                branch: None,
+                upstream: UpstreamState::Unknown,
+                merged: MergedState::Unknown,
+                integration: IntegrationEvidence {
+                    divergence: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                    equivalence: PatchEquivalence::NotApplicable,
+                    tip_committed_at: ProbeOutcome::Observed(at(86_400 * 30)),
+                    comparison_tip_committed_at: ProbeOutcome::Observed(at(0)),
+                },
+            });
+        let projection =
+            GraphProjection::build(&graph, &candidates, &ActionRegistry::builtin(), at(86_400));
+        let branch = &projection.view.repositories[0].worktrees[0].branch;
+
+        assert_eq!(branch.head_tip_age_days.status, "unavailable");
+        assert_eq!(branch.head_tip_age_days.unavailable_reason, Some("failed"));
+        // Positive control: the same projection, one day of it subtractable.
+        assert_eq!(branch.comparison_tip_age_days.value, Some(1));
+        assert_eq!(
+            branch.patch_equivalence.value,
+            Some("not_applicable"),
+            "ancestry left no question to ask, which is not an answer of no"
+        );
+        assert_eq!(
+            branch.commits_unique_to_head.unavailable_reason,
+            Some("failed")
+        );
     }
 
     /// Process identities stay local; only counts are projected. A pid does
