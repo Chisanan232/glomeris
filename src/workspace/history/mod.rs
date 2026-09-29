@@ -61,6 +61,7 @@
 //! That is a behaviour change this ticket does not ask for.
 
 pub mod alias;
+pub mod classify;
 pub mod observation;
 pub mod store;
 
@@ -68,6 +69,7 @@ pub mod store;
 mod fixtures;
 
 pub use alias::LocalAlias;
+pub use classify::{classify, summarize};
 pub use observation::{
     CensusEntry, GitCliWorktreeCensus, RepositoryObservation, WorkspaceObservation, WorktreeCensus,
 };
