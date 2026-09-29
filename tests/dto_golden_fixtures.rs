@@ -48,6 +48,7 @@ use std::time::{Duration, SystemTime};
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
 use glomeris::autopilot::RefusalReason;
+use glomeris::cli::external_context::build_external_context_preview;
 use glomeris::cli::pressure::{build_pressure_rejection_report, build_pressure_status_report};
 use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
@@ -73,6 +74,9 @@ use glomeris::reporting::dto::{
 };
 use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
+use glomeris::workspace::external::{
+    ConfiguredProviders, ExternalContextConfig, ExternalProviderError, GitHubSettings, JiraSettings,
+};
 use glomeris::workspace::{
     ActivityState, Divergence, EquivalenceMethod, IntegrationEvidence, MergedState,
     PatchEquivalence, UpstreamState, WorkspaceFamily, WorkspaceMember, WorkspaceWorktree,
@@ -1744,4 +1748,99 @@ fn pressure_rejection_report_matches_golden_fixture() {
 
     let report = build_pressure_rejection_report(&rejection);
     assert_matches_fixture(&report, "pressure_rejection_report.json");
+}
+
+/// The state the product ships in (HORO-1550): no external-context file, so
+/// nothing is configured, nothing is asked and nothing travels.
+///
+/// The fixture a privacy pane shows almost every user, and the one where the
+/// wording matters most. `egress_fields` is empty and `never_sent` is not —
+/// "nothing leaves" plus "and here is specifically what does not" — because a
+/// pane that showed only the empty list would be saying nothing at all.
+///
+/// Both providers still appear, with `configured: false`. Omitting them would
+/// leave a reader unable to tell "Jira was not asked" from "Jira was asked and
+/// said nothing", which is the conflation §10 of the campaign exists to prevent
+/// and AC 4 of this ticket asks the GUI to render.
+#[test]
+fn external_context_preview_report_with_nothing_configured_matches_golden_fixture() {
+    let report = build_external_context_preview(
+        &ExternalContextConfig {
+            github: None,
+            jira: None,
+            timeout: None,
+        },
+        &ConfiguredProviders::none(),
+        Some("/Users/dev/Library/Application Support/Glomeris/external-context.conf".to_string()),
+        false,
+        None,
+    );
+    assert_matches_fixture(&report, "external_context_preview_report_disabled.json");
+}
+
+/// Configured and unusable (HORO-1550) — the other half of AC 4, and the half
+/// that is easy to render as the first.
+///
+/// Both providers are named by the file, and neither is `ready`: one because the
+/// credential variable is not set, one because the service refused the
+/// credential that was. So `configured: true` with `ready: false` appears twice
+/// with two different `refusal` sentences, which is exactly the pair a surface
+/// must not collapse into "GitHub: off". A user whose token expired is not a
+/// user who never set one up, and neither of them has been told anything
+/// whatsoever about whether a pull request exists.
+///
+/// `egress_fields` is derived, not written — it comes from
+/// `PullRequestState::ALL` and `TaskState::ALL_TAGS` by way of
+/// `cli::external_context::egress_fields`, so this fixture is built through the
+/// real builder rather than as a literal. A hand-written egress list would be
+/// the one kind of fixture that is worse than none: it would keep passing while
+/// the product started sending a value it does not name.
+///
+/// Note the fields are listed while `ready` is `false` for both. That is
+/// correct and worth not "fixing": the list answers "what may leave if this
+/// works", and a pane that hid it until a credential was valid would only ever
+/// show a user their exposure *after* they had consented to it.
+#[test]
+fn external_context_preview_report_matches_golden_fixture() {
+    // Field assignment rather than a struct literal: `ConfiguredProviders`
+    // keeps its two adapters private, because building one means reading a
+    // credential out of the environment and a test must not be able to fake
+    // having done that. So `ready: true` is deliberately unreachable from here,
+    // and the two states this fixture holds are the two a preview can honestly
+    // show without a live credential.
+    //
+    // Both refusals are values `external::config::build_from_parts` and the
+    // GitHub adapter really produce — the first for a credential variable that
+    // is not set, the second for one the service rejected. Paraphrasing either
+    // would make this fixture assert a sentence no user will ever see.
+    let mut providers = ConfiguredProviders::none();
+    providers.github_refusal = Some(ExternalProviderError::InvalidConfiguration(
+        "GLOMERIS_GITHUB_TOKEN is not set".to_string(),
+    ));
+    providers.jira_refusal = Some(ExternalProviderError::AuthRejected { status: 401 });
+
+    let report = build_external_context_preview(
+        &ExternalContextConfig {
+            github: Some(GitHubSettings {
+                host: "github.com".to_string(),
+                api_base: "https://api.github.com".to_string(),
+                token_env: "GLOMERIS_GITHUB_TOKEN".to_string(),
+            }),
+            jira: Some(JiraSettings {
+                base_url: "https://example.atlassian.net".to_string(),
+                // Present in the configuration and deliberately absent from the
+                // report: an account address identifies a person rather than a
+                // setting anybody debugs. Pinned here so a future field that
+                // started carrying it fails this fixture.
+                email: "dev@example.com".to_string(),
+                token_env: "GLOMERIS_JIRA_TOKEN".to_string(),
+            }),
+            timeout: None,
+        },
+        &providers,
+        Some("/Users/dev/Library/Application Support/Glomeris/external-context.conf".to_string()),
+        true,
+        None,
+    );
+    assert_matches_fixture(&report, "external_context_preview_report.json");
 }

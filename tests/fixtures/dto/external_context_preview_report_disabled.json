@@ -1,0 +1,28 @@
+{
+  "config_exists": false,
+  "config_path": "/Users/dev/Library/Application Support/Glomeris/external-context.conf",
+  "egress_fields": [],
+  "enabled": false,
+  "never_sent": [
+    "the repository name, owner or URL",
+    "the branch name",
+    "the working tree's path, or any path",
+    "the issue key, summary or description",
+    "the pull request's number, title, body or author",
+    "any account name, email address or username",
+    "any credential, or any part of one",
+    "any file name, file content or diff"
+  ],
+  "providers": [
+    {
+      "configured": false,
+      "ready": false,
+      "source": "github_pull_requests"
+    },
+    {
+      "configured": false,
+      "ready": false,
+      "source": "jira_issues"
+    }
+  ]
+}

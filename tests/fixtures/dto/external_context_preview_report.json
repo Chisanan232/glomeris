@@ -1,0 +1,151 @@
+{
+  "config_exists": true,
+  "config_path": "/Users/dev/Library/Application Support/Glomeris/external-context.conf",
+  "egress_fields": [
+    {
+      "field": "pull_request.source",
+      "shape": "token",
+      "source": "github_pull_requests",
+      "vocabulary": [
+        "github_pull_requests"
+      ]
+    },
+    {
+      "field": "pull_request.state.status",
+      "shape": "status",
+      "source": "github_pull_requests",
+      "vocabulary": [
+        "observed",
+        "unavailable"
+      ]
+    },
+    {
+      "field": "pull_request.state.value",
+      "shape": "token",
+      "source": "github_pull_requests",
+      "vocabulary": [
+        "open",
+        "merged",
+        "closed_unmerged",
+        "none_observed"
+      ]
+    },
+    {
+      "field": "pull_request.state.unavailable_reason",
+      "shape": "token",
+      "source": "github_pull_requests",
+      "vocabulary": [
+        "tool_absent",
+        "tool_not_running",
+        "permission_denied",
+        "timed_out",
+        "rate_limited",
+        "failed",
+        "not_attempted"
+      ]
+    },
+    {
+      "field": "pull_request.observed_age_days.status",
+      "shape": "status",
+      "source": "github_pull_requests",
+      "vocabulary": [
+        "observed",
+        "unavailable"
+      ]
+    },
+    {
+      "field": "pull_request.observed_age_days.value",
+      "shape": "days",
+      "source": "github_pull_requests",
+      "vocabulary": []
+    },
+    {
+      "field": "task.source",
+      "shape": "token",
+      "source": "jira_issues",
+      "vocabulary": [
+        "jira_issues"
+      ]
+    },
+    {
+      "field": "task.state.status",
+      "shape": "status",
+      "source": "jira_issues",
+      "vocabulary": [
+        "observed",
+        "unavailable"
+      ]
+    },
+    {
+      "field": "task.state.value",
+      "shape": "token",
+      "source": "jira_issues",
+      "vocabulary": [
+        "to_do",
+        "in_progress",
+        "done",
+        "other",
+        "none_observed"
+      ]
+    },
+    {
+      "field": "task.state.unavailable_reason",
+      "shape": "token",
+      "source": "jira_issues",
+      "vocabulary": [
+        "tool_absent",
+        "tool_not_running",
+        "permission_denied",
+        "timed_out",
+        "rate_limited",
+        "failed",
+        "not_attempted"
+      ]
+    },
+    {
+      "field": "task.observed_age_days.status",
+      "shape": "status",
+      "source": "jira_issues",
+      "vocabulary": [
+        "observed",
+        "unavailable"
+      ]
+    },
+    {
+      "field": "task.observed_age_days.value",
+      "shape": "days",
+      "source": "jira_issues",
+      "vocabulary": []
+    }
+  ],
+  "enabled": true,
+  "never_sent": [
+    "the repository name, owner or URL",
+    "the branch name",
+    "the working tree's path, or any path",
+    "the issue key, summary or description",
+    "the pull request's number, title, body or author",
+    "any account name, email address or username",
+    "any credential, or any part of one",
+    "any file name, file content or diff"
+  ],
+  "providers": [
+    {
+      "configured": true,
+      "credential_env": "GLOMERIS_GITHUB_TOKEN",
+      "endpoint": "https://api.github.com",
+      "ready": false,
+      "refusal": "external context is misconfigured: GLOMERIS_GITHUB_TOKEN is not set",
+      "repository_host": "github.com",
+      "source": "github_pull_requests"
+    },
+    {
+      "configured": true,
+      "credential_env": "GLOMERIS_JIRA_TOKEN",
+      "endpoint": "https://example.atlassian.net",
+      "ready": false,
+      "refusal": "the service answered 401 and refused the credential; check that the token exists and is allowed to read this subject",
+      "source": "jira_issues"
+    }
+  ]
+}
