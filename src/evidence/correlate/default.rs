@@ -3,7 +3,7 @@
 use super::git::{GitCliProbe, GitProbe};
 use super::open_files::{LsofOpenFileProbe, OpenFileProbe};
 use super::process::{LsofProcessCwdProbe, ProcessCwdProbe};
-use super::tool_liveness::{PgrepToolLivenessProbe, ToolLivenessProbe};
+use super::tool_liveness::{SystemToolLivenessProbe, ToolLivenessProbe};
 use super::{CorrelationResult, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{ResourceId, ResourceLocator};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
@@ -48,7 +48,7 @@ impl Default for DefaultEvidenceCollector {
             Box::new(LsofOpenFileProbe),
             Box::new(LsofProcessCwdProbe),
             Box::new(GitCliProbe),
-            Box::new(PgrepToolLivenessProbe),
+            Box::new(SystemToolLivenessProbe),
         )
     }
 }

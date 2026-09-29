@@ -161,7 +161,7 @@ impl ResourceKind {
     /// `Homebrew`, and the `Pip`/`Uv`/`Go`/`Gradle`/`Maven`/`SwiftPm` group
     /// added by HORO-1543 — `tool_liveness`
     /// is structurally always `Unavailable(ToolNotRunning)` — see
-    /// [`crate::evidence::correlate::PgrepToolLivenessProbe`]
+    /// [`crate::evidence::correlate::SystemToolLivenessProbe`]
     /// — so requiring it here would make [`Completeness::Complete`]
     /// permanently unreachable for those kinds.
     pub fn required_evidence(&self) -> &'static [EvidenceField] {

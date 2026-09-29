@@ -25,7 +25,7 @@ pub use default::DefaultEvidenceCollector;
 pub use git::{GitCliProbe, GitProbe};
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
-pub use tool_liveness::{PgrepToolLivenessProbe, ToolLivenessProbe};
+pub use tool_liveness::{SystemToolLivenessProbe, ToolLivenessProbe};
 
 /// Time budget for one [`EvidenceCollector::collect`] call. Applied *per*
 /// underlying subprocess call (e.g. each of the up-to-four lsof/git/pgrep

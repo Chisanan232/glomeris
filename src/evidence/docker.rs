@@ -166,7 +166,16 @@ impl DockerLifecycle {
 /// message differs per runtime — matching on the wording that is common to each
 /// family is what keeps this working on a machine whose Docker is not the one
 /// this was written on.
+///
+/// The wording also depends on the *transport*, which is how the first entry
+/// came to be missing. Docker CLI 29 prints `Cannot connect to the Docker
+/// daemon at tcp://…` for a TCP host but `failed to connect to the docker API
+/// at unix://…` for a socket — and every macOS Docker is a socket, so the
+/// shape this list did not recognize was the only one a Mac would ever
+/// produce. Verified against client 29.4.2 on the dev host by pointing
+/// `DOCKER_HOST` at a nonexistent socket and at a closed TCP port.
 const DAEMON_UNREACHABLE_SIGNATURES: &[&str] = &[
+    "failed to connect to the docker api",
     "cannot connect to the docker daemon",
     "is the docker daemon running",
     "the docker daemon is not running",
@@ -258,9 +267,21 @@ mod tests {
     /// Docker Desktop, Colima (whose socket lives under the user's home, hence
     /// the elided path) and Podman's shim. None of them means the tool is
     /// absent, and none of them is an error to report as such.
+    ///
+    /// The first two were captured from client 29.4.2 on the dev host, with
+    /// `DOCKER_HOST` pointed at a nonexistent socket and at a closed TCP port
+    /// respectively. They are the same client, the same command and the same
+    /// failure, worded differently because the transport differs — and the
+    /// socket one is what every macOS Docker produces.
     #[test]
     fn each_runtimes_daemon_down_message_is_recognized() {
         for stderr in [
+            "failed to connect to the docker API at \
+             unix:///Users/x/.colima/default/docker.sock; check if the path is \
+             correct and if the daemon is running: dial unix \
+             /Users/x/.colima/default/docker.sock: connect: no such file or directory\n",
+            "Cannot connect to the Docker daemon at tcp://127.0.0.1:2376. \
+             Is the docker daemon running?\n",
             "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
              Is the docker daemon running?\n",
             "Cannot connect to the Docker daemon at unix:///Users/x/.colima/default/docker.sock. \
