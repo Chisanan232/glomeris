@@ -379,6 +379,34 @@ fn is_safe_branch_name(value: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskKey(String);
 
+impl RepositoryBranchSubject {
+    /// The same host and branch, naming a repository a *provider* pointed at.
+    ///
+    /// Exists for one case: a branch pushed to a fork has its pull request in
+    /// the upstream repository, and the only place the upstream's name can come
+    /// from is GitHub's own answer. That makes `owner` and `repo` here
+    /// provider-controlled strings on their way into a URL path — which is the
+    /// shape campaign section 16 refuses categorically for a language model, and
+    /// the reasoning does not weaken for a service. So they go through the same
+    /// allowlist a git remote does, and a name that would not survive that check
+    /// yields `None` rather than a request.
+    ///
+    /// The host and the branch are deliberately *not* taken from the provider.
+    /// A provider cannot redirect a lookup to another forge, and cannot change
+    /// which branch is being asked about.
+    pub(super) fn redirected_to(&self, owner: &str, repo: &str) -> Option<Self> {
+        if !is_safe_path_segment(owner) || !is_safe_path_segment(repo) {
+            return None;
+        }
+        Some(Self {
+            host: self.host.clone(),
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+            branch: self.branch.clone(),
+        })
+    }
+}
+
 /// The longest project prefix accepted, and the most digits. Bounds exist so a
 /// pathological branch name cannot produce an unbounded URL; both are far above
 /// any real key.

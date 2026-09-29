@@ -49,11 +49,13 @@
 //! recommendation about somebody's unpushed work.
 
 mod error;
+mod github;
 mod http;
 mod provider;
 mod subject;
 
 pub use error::ExternalProviderError;
+pub use github::{GitHubPullRequests, GITHUB_API_BASE, GITHUB_HOST};
 pub use http::{HeaderPair, HttpJson, ReadOnlyHttp, UreqReadOnlyHttp, MAX_BODY_BYTES};
 pub use provider::{
     ExternalContextResolver, ExternalDetail, PullRequestProvider, ResolvedExternalContext,

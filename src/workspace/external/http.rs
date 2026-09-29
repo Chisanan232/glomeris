@@ -241,6 +241,21 @@ pub(crate) mod fake {
         }
     }
 
+    /// So an adapter can own its transport as a `Box<dyn ReadOnlyHttp>` while a
+    /// test still reads back what was asked for. Without this the choice is
+    /// between an adapter generic over its transport — complexity the product
+    /// does not need — and a test that cannot inspect the requests, which is the
+    /// only way to prove AC 5.
+    impl ReadOnlyHttp for std::rc::Rc<FakeHttp> {
+        fn get_json(
+            &self,
+            url: &str,
+            headers: &[HeaderPair],
+        ) -> Result<HttpJson, ExternalProviderError> {
+            FakeHttp::get_json(self, url, headers)
+        }
+    }
+
     /// An `Ok` answer with no quota header.
     pub(crate) fn json(status: u16, body: &str) -> HttpJson {
         HttpJson {
