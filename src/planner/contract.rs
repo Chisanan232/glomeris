@@ -310,6 +310,67 @@ mod tests {
         check!(ProbeId);
     }
 
+    /// Each `ALL` lists every variant exactly once, in declaration order.
+    ///
+    /// The round-trip test above cannot see this. `from_tag` searches `ALL`, so
+    /// a variant the author forgot to add there is silently unparseable — and
+    /// `tags_round_trip_and_are_distinct` iterates `ALL` too, so it never asks
+    /// about the missing one. Here the `match` is exhaustive, which makes the
+    /// omission a build failure instead. The length assertions catch the
+    /// reverse mistake: a duplicated or stale entry.
+    ///
+    /// Same idiom and same reasoning as
+    /// `evidence::model::tests::all_lists_every_variant_exactly_once_in_declaration_order`.
+    #[test]
+    fn each_all_lists_every_variant_exactly_once() {
+        for (index, value) in Disposition::ALL.iter().enumerate() {
+            let expected = match value {
+                Disposition::RecommendNow => 0,
+                Disposition::AskUser => 1,
+                Disposition::Defer => 2,
+                Disposition::Keep => 3,
+            };
+            assert_eq!(index, expected, "{} is misplaced in ALL", value.tag());
+        }
+        assert_eq!(Disposition::ALL.len(), 4);
+
+        for (index, value) in ClaimConfidence::ALL.iter().enumerate() {
+            let expected = match value {
+                ClaimConfidence::Observed => 0,
+                ClaimConfidence::Inferred => 1,
+                ClaimConfidence::Unknown => 2,
+            };
+            assert_eq!(index, expected, "{} is misplaced in ALL", value.tag());
+        }
+        assert_eq!(ClaimConfidence::ALL.len(), 3);
+
+        for (index, value) in ObservationKind::ALL.iter().enumerate() {
+            let expected = match value {
+                ObservationKind::ConflictingEvidence => 0,
+                ObservationKind::MissingEvidence => 1,
+                ObservationKind::WorkflowShape => 2,
+                ObservationKind::ResourceLifecycle => 3,
+                ObservationKind::RecoveryOutlook => 4,
+            };
+            assert_eq!(index, expected, "{} is misplaced in ALL", value.tag());
+        }
+        assert_eq!(ObservationKind::ALL.len(), 5);
+
+        for (index, value) in ProbeId::ALL.iter().enumerate() {
+            let expected = match value {
+                ProbeId::GitBranchState => 0,
+                ProbeId::GitPatchEquivalence => 1,
+                ProbeId::ProcessActivity => 2,
+                ProbeId::ToolLiveness => 3,
+                ProbeId::GithubPrState => 4,
+                ProbeId::JiraTaskState => 5,
+                ProbeId::WorkspaceHistorySummary => 6,
+            };
+            assert_eq!(index, expected, "{} is misplaced in ALL", value.tag());
+        }
+        assert_eq!(ProbeId::ALL.len(), 7);
+    }
+
     /// Near misses are refused, not resolved.
     ///
     /// Each case is a string a model plausibly produces instead of the legal
