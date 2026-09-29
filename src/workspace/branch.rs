@@ -127,10 +127,20 @@ impl MergedState {
 /// How much work HEAD holds that the comparison branch does not contain,
 /// split by whether an equivalent patch is already over there.
 ///
-/// Both counts are about commits the comparison branch does **not**
-/// contain. A merged branch therefore reports `0` and `0`: nothing is
-/// absent, so nothing is absent-but-equivalent either. That is an observed
-/// zero from ancestry, not a probe that failed.
+/// All three counts are about commits the comparison branch does **not**
+/// contain, and they sum to how many that is. A merged branch therefore
+/// reports zero across the board: nothing is absent, so nothing is
+/// absent-but-equivalent or absent-but-unclassifiable either. That is an
+/// observed zero from ancestry, not a probe that failed.
+///
+/// # Why the third count exists
+///
+/// `git cherry` says nothing at all about merge commits — there is no
+/// single patch for one to have an id. Counting only its two kinds of line
+/// would report "nothing unique, nothing equivalent" for a branch sitting
+/// on a merge the comparison branch has never seen, and a reader would take
+/// that for an absence of unique work. It is the opposite: it is a commit
+/// the per-commit method declined to describe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Divergence {
     /// Commits absent from the comparison branch with no equivalent patch
@@ -140,6 +150,11 @@ pub struct Divergence {
     /// there, under a different commit id — `git cherry`'s `-` lines. This
     /// is what a cherry-pick or a rebase leaves behind.
     pub equivalent_commits: u32,
+    /// Commits absent from the comparison branch that `git cherry` declined
+    /// to classify either way, which in practice means merge commits. Not a
+    /// count of commits known to hold nothing, and not a count of commits
+    /// known to hold something — a count of commits nobody asked about.
+    pub unclassified_commits: u32,
 }
 
 /// Whether the work on this branch has already landed on the comparison
@@ -483,6 +498,7 @@ fn integration_evidence(
             ProbeOutcome::Observed(Divergence {
                 unique_commits: 0,
                 equivalent_commits: 0,
+                unclassified_commits: 0,
             }),
             PatchEquivalence::NotApplicable,
         ),
@@ -544,27 +560,39 @@ fn divergence_and_equivalence(
         return unanswered(ProbeReason::NotAttempted);
     }
 
-    let divergence = match run_git(worktree_root, &["cherry", default_ref, "HEAD"], timeout) {
-        Ok(output) if output.status.success() => parse_cherry(&output.stdout),
-        _ => return unanswered(ProbeReason::Failed),
+    let (unique_commits, equivalent_commits) =
+        match run_git(worktree_root, &["cherry", default_ref, "HEAD"], timeout) {
+            Ok(output) if output.status.success() => parse_cherry(&output.stdout),
+            _ => return unanswered(ProbeReason::Failed),
+        };
+    // Whatever `rev-list` counted and `cherry` then declined to speak
+    // about. Saturating because the two invocations are not one atomic read
+    // of the repository: a ref that moves in between could leave `cherry`
+    // describing more commits than `rev-list` counted, and the honest
+    // reading of that is "none unaccounted for", not a wrapped u32.
+    let divergence = Divergence {
+        unique_commits,
+        equivalent_commits,
+        unclassified_commits: ahead.saturating_sub(unique_commits + equivalent_commits),
     };
 
-    let equivalence = match divergence.unique_commits {
-        // Every absent commit has a patch-id twin over there. The strong
-        // answer, and the only one reached without further work.
-        0 if divergence.equivalent_commits > 0 => {
-            PatchEquivalence::Equivalent(EquivalenceMethod::PerCommitPatchId)
-        }
-        // `rev-list` counted commits ahead and `cherry` accounted for none
-        // of them. That happens for merge commits, which have no single
-        // patch to have an id. Calling this `Equivalent` would be the
-        // reassurance this module most needs not to invent.
-        0 => PatchEquivalence::Unknown(ProbeReason::Failed),
-        _ => match content_equivalence(worktree_root, default_ref, bounds, timeout) {
+    let equivalence = if divergence.unique_commits == 0 && divergence.unclassified_commits == 0 {
+        // Every commit ahead has a patch-id twin over there. The strong
+        // answer, and the only one reached without further work. Reached
+        // only with at least one such commit: `ahead` was non-zero, and
+        // nothing is unique or unclassified, so the remainder are twins.
+        PatchEquivalence::Equivalent(EquivalenceMethod::PerCommitPatchId)
+    } else {
+        // Either some commit has no twin over there, or `cherry` declined
+        // to describe it. Both leave the per-commit method short of an
+        // answer rather than at a negative one, and comparing the trees can
+        // still reach one — which is the case a squash lands in, and also
+        // the case where the same work arrived through a different merge.
+        match content_equivalence(worktree_root, default_ref, bounds, timeout) {
             Some(true) => PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
             Some(false) => PatchEquivalence::NotEquivalent,
             None => PatchEquivalence::Unknown(ProbeReason::Failed),
-        },
+        }
     };
 
     (ProbeOutcome::Observed(divergence), equivalence)
@@ -573,20 +601,21 @@ fn divergence_and_equivalence(
 /// `git cherry <upstream> <head>` prints one line per commit on `head`
 /// that `upstream` does not contain: `+ <sha>` when no equivalent patch
 /// exists upstream, `- <sha>` when one does.
-fn parse_cherry(stdout: &[u8]) -> Divergence {
+///
+/// Returns the two counts rather than a [`Divergence`], because the third
+/// count in one is not a thing this output can be read for — it is what the
+/// output failed to mention, which only the caller's `rev-list` total knows.
+fn parse_cherry(stdout: &[u8]) -> (u32, u32) {
     let text = String::from_utf8_lossy(stdout);
-    let mut divergence = Divergence {
-        unique_commits: 0,
-        equivalent_commits: 0,
-    };
+    let (mut unique, mut equivalent) = (0, 0);
     for line in text.lines() {
         match line.as_bytes().first() {
-            Some(b'+') => divergence.unique_commits += 1,
-            Some(b'-') => divergence.equivalent_commits += 1,
+            Some(b'+') => unique += 1,
+            Some(b'-') => equivalent += 1,
             _ => {}
         }
     }
-    divergence
+    (unique, equivalent)
 }
 
 /// The squash-merge method: does every file this branch touched since the
