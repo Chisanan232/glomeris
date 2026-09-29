@@ -34,7 +34,9 @@ use crate::detectors::{
     DetectorId, DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext,
 };
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
-use crate::evidence::model::{Evidence, NativeCleanup, ResourceFingerprint, ResourceLocator};
+use crate::evidence::model::{
+    ActionId, Evidence, NativeCleanup, ResourceFingerprint, ResourceId, ResourceLocator,
+};
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{
     ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
@@ -865,101 +867,17 @@ pub fn build_llm_plan_report(
 
     let mut items = Vec::with_capacity(result.validated_items.len());
     for validated in result.validated_items {
-        let Some((ev, decision)) = candidates
-            .iter()
-            .find(|(ev, _)| ev.resource == validated.resource)
-        else {
-            // Unreachable in practice: `resource` came from `evidences`,
-            // which is itself derived from `candidates` — but never panic
-            // on a defensive fallback, matching this module's style.
-            continue;
-        };
-
-        let resource_id = ev.resource.to_string();
-        let policy_label = crate::reporting::label_for(decision).as_str();
-        let priority = validated.priority;
-        let model_reason = validated.model_reason;
-        // Built from `ev` and `decision` only — the local evidence and the
-        // real policy verdict. Note what is NOT an input: anything from
-        // `validated`. The model cannot influence `executable`,
-        // `offered_actions` or `refusal_reason` even by naming a different
-        // action than the one policy would resolve.
-        let candidate = DetectCandidateReport::from_evidence_and_decision(
-            ev,
-            decision,
-            resolve_action_for(ev, actions),
+        if let Some(item) = build_llm_plan_item_report(
+            &validated.resource,
+            validated.action_id,
+            validated.priority,
+            validated.model_reason,
+            candidates,
+            actions,
             impact,
-        );
-        let completeness = crate::reporting::dto::completeness_tag(&ev.completeness());
-        let confidence = crate::reporting::dto::confidence_tag(ev.confidence());
-
-        if decision.class == PolicyClass::Protected {
-            items.push(LlmPlanItemReport {
-                resource_id,
-                policy_label,
-                requested_action_id: None,
-                priority,
-                model_reason,
-                explain: None,
-                skip_reason: Some(
-                    "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
-                ),
-                candidate,
-                completeness,
-                confidence,
-            });
-            continue;
+        ) {
+            items.push(item);
         }
-
-        items.push(match actions.get(validated.action_id.0) {
-            // `dry_run_explain` rather than `dry_run` (HORO-1359). The
-            // commonest refusal here is still a model naming a registered
-            // action that does not apply to the resource it named, which is
-            // the plan-error arm; the arm this change adds is the one where
-            // the plan builds and execution would refuse the step anyway. In
-            // that case `candidate.executable` was already `false` with a
-            // truthful `refusal_reason`, while this row's own `explain`
-            // rendered the action as a live proposal — one JSON object
-            // disagreeing with itself.
-            Some(action) => match crate::actionability::dry_run_explain(action, ev) {
-                Ok(explain) => LlmPlanItemReport {
-                    resource_id,
-                    policy_label,
-                    requested_action_id: Some(action.id().0),
-                    priority,
-                    model_reason,
-                    explain: Some(explain),
-                    skip_reason: None,
-                    candidate,
-                    completeness,
-                    confidence,
-                },
-                Err(reason) => LlmPlanItemReport {
-                    resource_id,
-                    policy_label,
-                    requested_action_id: Some(action.id().0),
-                    priority,
-                    model_reason,
-                    explain: None,
-                    skip_reason: Some(reason),
-                    candidate,
-                    completeness,
-                    confidence,
-                },
-            },
-            None => LlmPlanItemReport {
-                resource_id,
-                policy_label,
-                requested_action_id: None,
-                priority,
-                model_reason,
-                explain: None,
-                skip_reason: Some("no registered action for this action id".to_string()),
-                candidate,
-                completeness,
-                confidence,
-            },
-        });
     }
 
     LlmPlanReport {
@@ -975,6 +893,112 @@ pub fn build_llm_plan_report(
         // or a `--json` field.
         provider_error: result.provider_error.map(|e| e.to_string()),
     }
+}
+
+/// One row of a plan report: the local evidence, the real policy verdict, and
+/// the four things the model claimed about that resource.
+///
+/// Extracted from [`build_llm_plan_report`] unchanged (HORO-1548) so the
+/// version 2 report renders a row through exactly this code rather than
+/// through a second copy of it. A second copy is where the `Protected` early
+/// return would eventually be omitted, and that early return — not a test —
+/// is what guarantees no action is ever rendered for a protected resource.
+///
+/// `None` when `resource` is not among `candidates`. Unreachable in practice,
+/// because a validated resource came from the candidate set in the first
+/// place, but never a panic: this module does not panic on a defensive
+/// fallback.
+fn build_llm_plan_item_report(
+    resource: &ResourceId,
+    action_id: ActionId,
+    priority: Option<u32>,
+    model_reason: Option<String>,
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    impact: ImpactContext,
+) -> Option<LlmPlanItemReport> {
+    let (ev, decision) = candidates.iter().find(|(ev, _)| &ev.resource == resource)?;
+
+    let resource_id = ev.resource.to_string();
+    let policy_label = crate::reporting::label_for(decision).as_str();
+    // Built from `ev` and `decision` only — the local evidence and the real
+    // policy verdict. Note what is NOT an input: anything the model said. It
+    // cannot influence `executable`, `offered_actions` or `refusal_reason`
+    // even by naming a different action than the one policy would resolve.
+    let candidate = DetectCandidateReport::from_evidence_and_decision(
+        ev,
+        decision,
+        resolve_action_for(ev, actions),
+        impact,
+    );
+    let completeness = crate::reporting::dto::completeness_tag(&ev.completeness());
+    let confidence = crate::reporting::dto::confidence_tag(ev.confidence());
+
+    if decision.class == PolicyClass::Protected {
+        return Some(LlmPlanItemReport {
+            resource_id,
+            policy_label,
+            requested_action_id: None,
+            priority,
+            model_reason,
+            explain: None,
+            skip_reason: Some(
+                "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
+            ),
+            candidate,
+            completeness,
+            confidence,
+        });
+    }
+
+    Some(match actions.get(action_id.0) {
+        // `dry_run_explain` rather than `dry_run` (HORO-1359). The commonest
+        // refusal here is still a model naming a registered action that does
+        // not apply to the resource it named, which is the plan-error arm; the
+        // arm this change adds is the one where the plan builds and execution
+        // would refuse the step anyway. In that case `candidate.executable`
+        // was already `false` with a truthful `refusal_reason`, while this
+        // row's own `explain` rendered the action as a live proposal — one
+        // JSON object disagreeing with itself.
+        Some(action) => match crate::actionability::dry_run_explain(action, ev) {
+            Ok(explain) => LlmPlanItemReport {
+                resource_id,
+                policy_label,
+                requested_action_id: Some(action.id().0),
+                priority,
+                model_reason,
+                explain: Some(explain),
+                skip_reason: None,
+                candidate,
+                completeness,
+                confidence,
+            },
+            Err(reason) => LlmPlanItemReport {
+                resource_id,
+                policy_label,
+                requested_action_id: Some(action.id().0),
+                priority,
+                model_reason,
+                explain: None,
+                skip_reason: Some(reason),
+                candidate,
+                completeness,
+                confidence,
+            },
+        },
+        None => LlmPlanItemReport {
+            resource_id,
+            policy_label,
+            requested_action_id: None,
+            priority,
+            model_reason,
+            explain: None,
+            skip_reason: Some("no registered action for this action id".to_string()),
+            candidate,
+            completeness,
+            confidence,
+        },
+    })
 }
 
 /// Builds an [`LlmPayloadReport`] — the exact request a live `llm-plan`
