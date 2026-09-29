@@ -51,6 +51,7 @@ use crate::reporting::dto::{
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
 use crate::reporting::ranking;
+use crate::workspace::history::{GitCliWorktreeCensus, WorkspaceObservation};
 use crate::workspace::{group_families, GitCliBranchProbe, WorkspaceFamily, WorkspaceSurvey};
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
@@ -538,15 +539,50 @@ pub fn build_detect_report(
 /// Explanatory only. Nothing in the returned families may make anything
 /// executable — see the header of [`crate::workspace`].
 pub fn group_workspaces_now(candidates: &[(Evidence, PolicyDecision)]) -> Vec<WorkspaceFamily> {
-    let roots: Vec<PathBuf> = candidates
+    let survey = WorkspaceSurvey::survey(
+        repository_roots_of(candidates),
+        &GitCliBranchProbe,
+        CLI_CORRELATION_TIMEOUT,
+    );
+    group_families(candidates, &survey)
+}
+
+/// The repository root of every candidate that was observed to be in one.
+///
+/// A candidate whose git probe did not answer contributes nothing, rather than
+/// its own path: a resource that might not be in a repository must not be
+/// enumerated as though it were the repository.
+fn repository_roots_of(candidates: &[(Evidence, PolicyDecision)]) -> Vec<PathBuf> {
+    candidates
         .iter()
         .filter_map(|(ev, _)| match ev.git_state.observed() {
             Some(Some(git)) => Some(git.repo_root.clone()),
             _ => None,
         })
-        .collect();
-    let survey = WorkspaceSurvey::survey(roots, &GitCliBranchProbe, CLI_CORRELATION_TIMEOUT);
-    group_families(candidates, &survey)
+        .collect()
+}
+
+/// Takes one workflow-baseline observation of an already-discovered pass
+/// (HORO-1547).
+///
+/// Sibling of [`group_workspaces_now`] and deliberately built the same way:
+/// the roots come from the candidates' own already-collected git state, and the
+/// `git` subprocesses are paid for here rather than inside discovery, so a
+/// caller that cannot pay for them does not call this.
+///
+/// The returned observation holds counts and opaque local ids only — see
+/// [`crate::workspace::history`]. Nothing here decides anything; a baseline is
+/// explanatory, and one observation is never a pattern.
+pub fn observe_workspace_now(
+    candidates: &[(Evidence, PolicyDecision)],
+    at_unix_secs: u64,
+) -> WorkspaceObservation {
+    WorkspaceObservation::collect(
+        at_unix_secs,
+        repository_roots_of(candidates),
+        &GitCliWorktreeCensus,
+        CLI_CORRELATION_TIMEOUT,
+    )
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
