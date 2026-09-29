@@ -92,7 +92,11 @@ fn parse_build_cache_reclaimable_bytes(stdout: &str) -> Option<u64> {
 
 /// Parse a docker-style human size string like `"1.2GB"`/`"512MB"`/`"0B"`
 /// into bytes. Best-effort: unrecognized suffixes return `None`.
-fn parse_human_size(s: &str) -> Option<u64> {
+///
+/// Shared with [`super::docker_objects`], which reads the same renderings out
+/// of the same `docker system df` report — one parser, so a suffix Docker
+/// starts printing cannot be understood by one detector and not the other.
+pub(super) fn parse_human_size(s: &str) -> Option<u64> {
     let s = s.trim();
     let split_at = s.find(|c: char| !c.is_ascii_digit() && c != '.')?;
     let (number, suffix) = s.split_at(split_at);
@@ -136,7 +140,12 @@ const NOT_RUNNING_SIGNATURES: &[&str] = &[
 /// never `ToolNotRunning` and never `ToolAbsent`. "We don't know" is the
 /// answer that keeps the resources visible as unknown rather than reporting
 /// them away.
-fn failure_status(stderr: &str) -> DetectorStatus {
+///
+/// Shared with [`super::docker_objects`] for the same reason
+/// [`parse_human_size`] is: both detectors invoke the same client, so a daemon
+/// that is down must not be `ToolNotRunning` for one of them and `Failed` for
+/// the other.
+pub(super) fn failure_status(stderr: &str) -> DetectorStatus {
     let haystack = stderr.to_ascii_lowercase();
     if NOT_RUNNING_SIGNATURES
         .iter()

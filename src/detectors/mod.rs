@@ -10,6 +10,7 @@
 
 mod cargo;
 mod docker;
+mod docker_objects;
 mod go;
 mod gradle;
 mod homebrew;
@@ -854,6 +855,7 @@ impl DetectorRegistry {
                 Box::new(node::NodeDetector),
                 Box::new(node::NodePackageManagerCacheDetector),
                 Box::new(docker::DockerDetector),
+                Box::new(docker_objects::DockerObjectDetector),
                 Box::new(python::PipCacheDetector),
                 Box::new(python::UvCacheDetector),
                 Box::new(go::GoBuildCacheDetector),
@@ -988,6 +990,7 @@ mod tests {
                 "node_modules",
                 "npm_cache",
                 "docker_build_cache",
+                "docker_objects",
                 "pip_cache",
                 "uv_cache",
                 "go_build_cache",
@@ -1028,26 +1031,20 @@ mod tests {
         use crate::evidence::ResourceKind;
 
         /// Kinds with no detector yet, each with the ticket that owns it.
-        /// The three Docker object kinds are HORO-1544's: they are distinct
+        /// The remaining Docker object kinds are HORO-1544's: they are distinct
         /// lifecycle evidence, and collapsing them into the existing
         /// build-cache detector merely to satisfy this guard is exactly what
-        /// that ticket forbids.
-        const NOT_YET_DETECTABLE: &[ResourceKind] = &[
-            ResourceKind::DockerImage,
-            ResourceKind::DockerContainer,
-            ResourceKind::DockerVolume,
-        ];
+        /// that ticket forbids. `DockerContainer` has left this list —
+        /// `docker_objects` declares it.
+        const NOT_YET_DETECTABLE: &[ResourceKind] =
+            &[ResourceKind::DockerImage, ResourceKind::DockerVolume];
 
         // Pinned, so this exemption cannot quietly grow. A kind added here
         // without its ticket, or one left behind after its detector landed,
         // both fail on this line.
         assert_eq!(
             NOT_YET_DETECTABLE,
-            &[
-                ResourceKind::DockerImage,
-                ResourceKind::DockerContainer,
-                ResourceKind::DockerVolume,
-            ],
+            &[ResourceKind::DockerImage, ResourceKind::DockerVolume],
             "the not-yet-detectable exemption changed — add the ticket that \
              owns the new kind to this test's doc comment, or remove a kind \
              whose detector now exists"
