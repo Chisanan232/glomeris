@@ -44,6 +44,7 @@
 //! made of optionals, and "absent" is a meaning of its own on this surface.
 
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
 use glomeris::autopilot::RefusalReason;
@@ -70,8 +71,9 @@ use glomeris::reporting::dto::{
 use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
 use glomeris::workspace::{
-    ActivityState, IntegrationEvidence, MergedState, UpstreamState, WorkspaceFamily,
-    WorkspaceMember, WorkspaceWorktree, WorktreeBranchState,
+    ActivityState, Divergence, EquivalenceMethod, IntegrationEvidence, MergedState,
+    PatchEquivalence, UpstreamState, WorkspaceFamily, WorkspaceMember, WorkspaceWorktree,
+    WorktreeBranchState,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -698,6 +700,10 @@ fn autopilot_envelope_report_matches_golden_fixture() {
 /// all. Two of the three hold work in progress, which is the number that
 /// makes the family total unusable as delete authority — the bulk and the
 /// outstanding work are in the same group.
+fn at(unix_secs: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH + Duration::from_secs(unix_secs)
+}
+
 fn one_repositorys_three_checkouts() -> WorkspaceFamily {
     WorkspaceFamily {
         common_dir: PathBuf::from("/Users/dev/proj/.git"),
@@ -720,7 +726,19 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                     merged: MergedState::Merged {
                         into: "origin/main".to_string(),
                     },
-                    integration: IntegrationEvidence::not_attempted(),
+                    // Ancestry already contains HEAD, so there was no
+                    // equivalence question — `not_applicable`, and three
+                    // observed zeroes rather than three absences.
+                    integration: IntegrationEvidence {
+                        divergence: ProbeOutcome::Observed(Divergence {
+                            unique_commits: 0,
+                            equivalent_commits: 0,
+                            unclassified_commits: 0,
+                        }),
+                        equivalence: PatchEquivalence::NotApplicable,
+                        tip_committed_at: ProbeOutcome::Observed(at(1_725_000_000)),
+                        comparison_tip_committed_at: ProbeOutcome::Observed(at(1_725_000_000)),
+                    },
                 }),
                 members: vec![WorkspaceMember {
                     resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
@@ -749,7 +767,23 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                     merged: MergedState::NotMerged {
                         into: "origin/main".to_string(),
                     },
-                    integration: IntegrationEvidence::not_attempted(),
+                    // The shape HORO-1545 exists for: three commits ancestry
+                    // does not have, whose files are nonetheless identical to
+                    // the default branch's — a squash landed. And the
+                    // worktree is *still* dirty, so
+                    // `holds_work_in_progress` stays true beside it.
+                    integration: IntegrationEvidence {
+                        divergence: ProbeOutcome::Observed(Divergence {
+                            unique_commits: 3,
+                            equivalent_commits: 0,
+                            unclassified_commits: 0,
+                        }),
+                        equivalence: PatchEquivalence::Equivalent(
+                            EquivalenceMethod::ContentIdentical,
+                        ),
+                        tip_committed_at: ProbeOutcome::Observed(at(1_726_500_000)),
+                        comparison_tip_committed_at: ProbeOutcome::Observed(at(1_725_000_000)),
+                    },
                 }),
                 members: vec![
                     WorkspaceMember {

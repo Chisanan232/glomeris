@@ -147,6 +147,12 @@
           "branch": "main",
           "merged": "merged",
           "merged_into": "origin/main",
+          "patch_equivalence": "not_applicable",
+          "commits_unique_to_head": 0,
+          "commits_equivalent_elsewhere": 0,
+          "commits_unclassified": 0,
+          "head_tip_committed_at_unix": 1725000000,
+          "comparison_tip_committed_at_unix": 1725000000,
           "holds_work_in_progress": false,
           "member_resource_ids": [
             "cargo_target_dir:/Users/dev/proj/target"
@@ -164,6 +170,13 @@
           "branch": "feature/recovery-goal",
           "merged": "not_merged",
           "merged_into": "origin/main",
+          "patch_equivalence": "equivalent",
+          "equivalence_method": "content_identical",
+          "commits_unique_to_head": 3,
+          "commits_equivalent_elsewhere": 0,
+          "commits_unclassified": 0,
+          "head_tip_committed_at_unix": 1726500000,
+          "comparison_tip_committed_at_unix": 1725000000,
           "holds_work_in_progress": true,
           "member_resource_ids": [
             "node_modules:/Users/dev/proj-feature/node_modules",
@@ -178,6 +191,11 @@
           "activity": "in_use",
           "upstream": "unknown",
           "merged": "unknown",
+          "patch_equivalence": "unknown",
+          "equivalence_unknown_reason": "not_attempted",
+          "divergence_unavailable_reason": "not_attempted",
+          "head_tip_unavailable_reason": "not_attempted",
+          "comparison_tip_unavailable_reason": "not_attempted",
           "holds_work_in_progress": true,
           "member_resource_ids": [
             "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-h"
