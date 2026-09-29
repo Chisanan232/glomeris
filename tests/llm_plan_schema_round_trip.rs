@@ -113,3 +113,94 @@ fn schema_output_round_trips_through_plan_file() {
          failure), got: {stdout}"
     );
 }
+
+/// The version 2 equivalent (HORO-1548). Same property, and it needs its own
+/// proof because version 2's example is a different document read by a
+/// different parser: a fixture that parses but is then discarded by
+/// validation would still print, and nobody would notice until they used it.
+///
+/// The assertions deliberately avoid the item row. Version 2 resolves
+/// `resource_id` against the request's own alias table, and which resource
+/// lands on `resource_1` depends on what this host happens to have — so on
+/// one machine the example's item is dropped as an unknown resource and on
+/// another as an action that resource was not offered. What is host
+/// independent, and what proves the round trip, is that the profile and the
+/// observation survived: both cite references the projection always issues
+/// (`workflow_history` and `machine`), so they reach the rendered report on
+/// any machine, and they only reach it by going through real validation.
+#[test]
+fn version_two_schema_output_round_trips_through_plan_file() {
+    let home = make_temp_home("round-trip-v2");
+
+    let schema_output = Command::new(glomeris_bin())
+        .arg("llm-plan")
+        .arg("--contract-version")
+        .arg("2")
+        .arg("--schema")
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn glomeris llm-plan --contract-version 2 --schema");
+
+    assert!(
+        schema_output.status.success(),
+        "--contract-version 2 --schema must exit successfully; stderr: {}",
+        String::from_utf8_lossy(&schema_output.stderr)
+    );
+    let emitted = String::from_utf8_lossy(&schema_output.stdout).into_owned();
+    assert!(
+        emitted.contains("\"contract_version\": 2"),
+        "the version 2 example must declare its contract version, got: {emitted}"
+    );
+    assert!(
+        emitted.contains("\"workspace_profile\""),
+        "expected a version 2 shaped document, got: {emitted}"
+    );
+
+    let plan_file = home.join("emitted-schema-v2.json");
+    std::fs::write(&plan_file, &emitted).expect("write emitted schema to plan file");
+
+    let plan_output = Command::new(glomeris_bin())
+        .arg("llm-plan")
+        .arg("--contract-version")
+        .arg("2")
+        .arg("--plan-file")
+        .arg(&plan_file)
+        .env("HOME", &home)
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to spawn glomeris llm-plan --contract-version 2 --plan-file");
+
+    let stdout = String::from_utf8_lossy(&plan_output.stdout);
+    let stderr = String::from_utf8_lossy(&plan_output.stderr);
+
+    assert!(
+        plan_output.status.success(),
+        "--contract-version 2 --plan-file <emitted-schema> must not fail parsing/validation \
+         (exit code {:?}); stdout: {stdout}\nstderr: {stderr}",
+        plan_output.status.code()
+    );
+    assert!(
+        stdout.contains("WORKSPACE PLAN (contract v2)"),
+        "expected the version 2 advisory banner, got: {stdout}"
+    );
+    // Proof that validation ran rather than the document merely parsing: the
+    // profile and the observation are rendered with the model attribution
+    // that only `build_workspace_plan_report` applies.
+    assert!(
+        stdout.contains("model workspace profile: unknown"),
+        "the example's profile must survive validation, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("model observation [missing_evidence]"),
+        "the example's observation must survive validation, got: {stdout}"
+    );
+    // And the banner must not have been reached by skipping the provider
+    // step: a document this build could not read would say so instead.
+    assert!(
+        !stderr.contains("provider error"),
+        "the emitted example must not be reported as a provider error: {stderr}"
+    );
+
+    std::fs::remove_dir_all(&home).ok();
+}
