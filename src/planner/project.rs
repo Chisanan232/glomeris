@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::dto::{
-    ActivityView, BranchView, ExternalFactView, MachineView, ModelGraphView, Reported,
-    RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView, WorktreeView,
-    MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
+    Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
+    WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 use crate::actions::llm::{completeness_tag, regenerability_tag};
 use crate::actions::ActionRegistry;
-use crate::evidence::{Evidence, ProbeOutcome, ResourceId};
+use crate::evidence::{DockerLifecycle, Evidence, ProbeOutcome, ResourceId};
 use crate::policy::PolicyDecision;
 use crate::workspace::{
     ActivityFacts, BranchLifecycle, ExternalFact, ResourceNode, UpstreamState,
@@ -362,6 +362,31 @@ fn resource_view(
             .get(&node.resource.to_string())
             .cloned()
             .unwrap_or_default(),
+        docker_lifecycle: node.docker_lifecycle.as_ref().map(docker_lifecycle_view),
+    }
+}
+
+/// Projects the three axes and the *size* of the reference set, never its
+/// members — see [`DockerLifecycleView`] for why the identities stay local.
+fn docker_lifecycle_view(lifecycle: &DockerLifecycle) -> DockerLifecycleView {
+    let (referrer_count, active_referrers) = match &lifecycle.references {
+        ProbeOutcome::Observed(references) => (
+            Reported::observed(references.referenced_by.len()),
+            Reported::observed(references.active_referrers),
+        ),
+        // Docker was not asked, or did not answer. Zero referrers would be a
+        // positive statement that nothing needs this object, which is the one
+        // thing an unanswered query has not established.
+        ProbeOutcome::Unavailable(reason) => (
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+        ),
+    };
+    DockerLifecycleView {
+        activity: lifecycle.activity.tag(),
+        persistence: lifecycle.persistence.tag(),
+        referrer_count,
+        active_referrers,
     }
 }
 
@@ -1015,6 +1040,106 @@ mod tests {
         assert_eq!(
             payload["global_resources"].as_array().map(Vec::len),
             Some(1)
+        );
+    }
+
+    /// HORO-1544. The three axes reach the model, the referrer *count* reaches
+    /// it, and the referring container's identity does not.
+    ///
+    /// `not_docker` is the half that would otherwise go unnoticed: a Cargo
+    /// target directory must project `null` rather than an all-unknown
+    /// lifecycle, because "nobody established this image's activity" and "this
+    /// is not a Docker object" are different statements and only one of them is
+    /// a gap.
+    #[test]
+    fn docker_lifecycle_projects_its_axes_and_counts_but_no_identity() {
+        let mut docker = tool_candidate(ResourceKind::DockerImage, "sha256:abc");
+        docker.0.docker_lifecycle = Some(DockerLifecycle {
+            activity: crate::evidence::DockerActivity::Active,
+            persistence: crate::evidence::DockerPersistence::UserManaged,
+            references: ProbeOutcome::Observed(crate::evidence::DockerReferences {
+                referenced_by: vec![
+                    ResourceId::new(
+                        ResourceKind::DockerContainer,
+                        ResourceLocator::Tool {
+                            tool: crate::evidence::OwningTool::Docker,
+                            id: "acme-billing-replica".to_string(),
+                        },
+                    ),
+                    ResourceId::new(
+                        ResourceKind::DockerContainer,
+                        ResourceLocator::Tool {
+                            tool: crate::evidence::OwningTool::Docker,
+                            id: "acme-billing-worker".to_string(),
+                        },
+                    ),
+                ],
+                active_referrers: 1,
+            }),
+        });
+        let candidates = vec![
+            docker,
+            candidate("/w/a/target", ProbeOutcome::Observed(None)),
+        ];
+        let projection = project(&candidates);
+        let serialized = json(&projection);
+
+        let lifecycle = projection
+            .view
+            .global_resources
+            .iter()
+            .find_map(|view| view.docker_lifecycle.clone())
+            .expect("the Docker object projects a lifecycle");
+        assert_eq!(lifecycle.activity, "active");
+        assert_eq!(lifecycle.persistence, "user_managed");
+        assert_eq!(lifecycle.referrer_count.value, Some(2));
+        assert_eq!(lifecycle.active_referrers.value, Some(1));
+
+        assert!(
+            !serialized.contains("acme-billing"),
+            "a referring container's identity reached the payload: {serialized}"
+        );
+
+        let not_docker = projection
+            .view
+            .global_resources
+            .iter()
+            .find(|view| view.kind == "cargo_target_dir")
+            .expect("the cargo resource is global");
+        assert!(
+            not_docker.docker_lifecycle.is_none(),
+            "a non-Docker resource has no Docker lifecycle to be unknown about"
+        );
+    }
+
+    /// The anti-vacuity half. An unanswered reference query must not arrive as
+    /// an observed zero — "nothing references this image" is deletion-shaped
+    /// evidence, and it is exactly what nobody established here.
+    #[test]
+    fn an_unanswered_reference_query_is_not_a_referrer_count_of_zero() {
+        let mut docker = tool_candidate(ResourceKind::DockerImage, "sha256:abc");
+        docker.0.docker_lifecycle = Some(DockerLifecycle::unknown(ProbeReason::ToolNotRunning));
+        let projection = project(&[docker]);
+
+        let lifecycle = projection
+            .view
+            .global_resources
+            .iter()
+            .find_map(|view| view.docker_lifecycle.clone())
+            .expect("the Docker object projects a lifecycle");
+
+        assert_eq!(lifecycle.referrer_count.status, "unavailable");
+        assert_eq!(lifecycle.referrer_count.value, None);
+        assert_eq!(
+            lifecycle.referrer_count.unavailable_reason,
+            Some("tool_not_running")
+        );
+        assert_eq!(lifecycle.active_referrers.status, "unavailable");
+        assert_eq!(lifecycle.activity, "unknown");
+        assert_ne!(
+            lifecycle.activity,
+            crate::evidence::DockerActivity::Inactive.tag(),
+            "unknown activity must not be spelled like an observed idle"
         );
     }
 
