@@ -263,24 +263,35 @@ pub struct IntegrationEvidence {
     pub comparison_tip_committed_at: ProbeOutcome<SystemTime>,
 }
 
-/// How many commits may diverge before the patch-equivalence work is
-/// skipped rather than attempted.
+/// What "bounded" means for the two expensive methods (AC 6).
 ///
-/// `git cherry` computes a patch id for every commit on both sides, which
-/// on a branch that forked a year ago is minutes of work for a question
-/// asked while someone waits. AC 6 says bounded, so the bound is a number
-/// here and a refusal in the output: past it,
-/// [`PatchEquivalence::Unknown`] carries [`ProbeReason::NotAttempted`] and
-/// says so, rather than the timeout silently producing `Failed` and
-/// reading like a broken repository.
-const MAX_DIVERGENT_COMMITS: u32 = 200;
+/// Values rather than constants, threaded through, so a test can shrink
+/// them and prove the refusal actually happens. A bound only a
+/// two-hundred-commit fixture could reach is a bound nobody checks, and an
+/// unchecked bound is indistinguishable from a missing one.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    /// How many commits may diverge before the patch-equivalence work is
+    /// skipped rather than attempted.
+    ///
+    /// `git cherry` computes a patch id for every commit on both sides,
+    /// which on a branch that forked a year ago is minutes of work for a
+    /// question asked while someone waits. Past this,
+    /// [`PatchEquivalence::Unknown`] carries [`ProbeReason::NotAttempted`]
+    /// and says so, rather than the timeout silently producing `Failed`
+    /// and reading like a broken repository.
+    max_divergent_commits: u32,
+    /// How many changed paths may be passed to the content comparison,
+    /// whose argv grows with the number of files the branch touched.
+    max_compared_paths: usize,
+}
 
-/// How many changed paths may be passed to the content comparison.
-///
-/// The second method's argv grows with the number of files the branch
-/// touched. Past this, no attempt — the honest answer is that the question
-/// was not asked.
-const MAX_COMPARED_PATHS: usize = 512;
+impl Bounds {
+    const DEFAULT: Self = Self {
+        max_divergent_commits: 200,
+        max_compared_paths: 512,
+    };
+}
 
 impl IntegrationEvidence {
     /// Every field unanswered, because nothing was asked. The state a
@@ -339,7 +350,13 @@ impl BranchProbe for GitCliBranchProbe {
         // this module's header a lie for no gain.
         let axis = default_ref(worktree_root, timeout);
         let merged = containment(worktree_root, axis.as_deref(), timeout);
-        let integration = integration_evidence(worktree_root, axis.as_deref(), &merged, timeout);
+        let integration = integration_evidence(
+            worktree_root,
+            axis.as_deref(),
+            &merged,
+            Bounds::DEFAULT,
+            timeout,
+        );
 
         ProbeOutcome::Observed(WorktreeBranchState {
             branch,
@@ -445,6 +462,7 @@ fn integration_evidence(
     worktree_root: &Path,
     default_ref: Option<&str>,
     merged: &MergedState,
+    bounds: Bounds,
     timeout: Duration,
 ) -> IntegrationEvidence {
     let tip_committed_at = commit_time(worktree_root, "HEAD", timeout);
@@ -476,7 +494,7 @@ fn integration_evidence(
             PatchEquivalence::Unknown(ProbeReason::Failed),
         ),
         MergedState::NotMerged { .. } => {
-            divergence_and_equivalence(worktree_root, default_ref, timeout)
+            divergence_and_equivalence(worktree_root, default_ref, bounds, timeout)
         }
     };
 
@@ -492,6 +510,7 @@ fn integration_evidence(
 fn divergence_and_equivalence(
     worktree_root: &Path,
     default_ref: &str,
+    bounds: Bounds,
     timeout: Duration,
 ) -> (ProbeOutcome<Divergence>, PatchEquivalence) {
     let unanswered = |reason: ProbeReason| {
@@ -521,7 +540,7 @@ fn divergence_and_equivalence(
         // would be reporting a repository that no longer exists.
         return unanswered(ProbeReason::Failed);
     }
-    if ahead > MAX_DIVERGENT_COMMITS {
+    if ahead > bounds.max_divergent_commits {
         return unanswered(ProbeReason::NotAttempted);
     }
 
@@ -541,7 +560,7 @@ fn divergence_and_equivalence(
         // patch to have an id. Calling this `Equivalent` would be the
         // reassurance this module most needs not to invent.
         0 => PatchEquivalence::Unknown(ProbeReason::Failed),
-        _ => match content_equivalence(worktree_root, default_ref, timeout) {
+        _ => match content_equivalence(worktree_root, default_ref, bounds, timeout) {
             Some(true) => PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
             Some(false) => PatchEquivalence::NotEquivalent,
             None => PatchEquivalence::Unknown(ProbeReason::Failed),
@@ -588,7 +607,12 @@ fn parse_cherry(stdout: &[u8]) -> Divergence {
 /// the reverse. Read-only throughout: `git commit-tree`, the usual trick
 /// for this question, writes an object into the repository, which the
 /// ticket forbids.
-fn content_equivalence(worktree_root: &Path, default_ref: &str, timeout: Duration) -> Option<bool> {
+fn content_equivalence(
+    worktree_root: &Path,
+    default_ref: &str,
+    bounds: Bounds,
+    timeout: Duration,
+) -> Option<bool> {
     let base = match run_git(worktree_root, &["merge-base", "HEAD", default_ref], timeout) {
         Ok(output) if output.status.success() => trimmed(&output.stdout),
         _ => return None,
@@ -614,7 +638,7 @@ fn content_equivalence(worktree_root: &Path, default_ref: &str, timeout: Duratio
     // --` with no pathspec compares the two trees entire, which for a
     // branch that changed nothing would be a confident `Some(true)` about
     // a comparison nobody made. There is also nothing to conclude from it.
-    if paths.is_empty() || paths.len() > MAX_COMPARED_PATHS {
+    if paths.is_empty() || paths.len() > bounds.max_compared_paths {
         return None;
     }
 
