@@ -126,6 +126,7 @@ HANDLER_COMMANDS=(
   'run_autopilot_command;;autopilot'
   'run_daemon_command;;daemon'
   'run_actions_command;;actions'
+  'run_workflow_profile_command;;workflow-profile'
   # Subcommand handlers. `autopilot run` accepts project roots where its three
   # siblings reject extra arguments outright, so the group's own handler is not a
   # useful granularity here.
@@ -147,6 +148,12 @@ HANDLER_COMMANDS=(
 #   autopilot run     — the stored grant's own kinds and limits decide what it
 #                       may consider; narrowing that with the roots would change
 #                       a grant the user wrote down.
+#   workflow-profile  — the app never invokes it either (HORO-1547 ships the
+#                       command; HORO-1550 is where a surface for it would go).
+#                       The flag is only read by `workflow-profile record`, whose
+#                       census runs the same discovery pass as `detect`, so when
+#                       a surface does appear the roots are what it should pass —
+#                       `show` reads the stored file and ignores them.
 #
 # `free` was listed here on the same grounds as `clean` until HORO-1506 gave the
 # app a Recovery card that invokes it. It is now scoped, which is the outcome
@@ -155,6 +162,7 @@ HANDLER_COMMANDS=(
 DECLARED_OMISSIONS=(
   'clean'
   'autopilot run'
+  'workflow-profile'
 )
 
 # --- rules -------------------------------------------------------------------
