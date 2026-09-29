@@ -75,6 +75,16 @@ impl Detector for PipCacheDetector {
                 // if nothing answers, this is what gets reported, so the
                 // failure cannot end up presented as "no pip cache".
                 ToolQuery::Failed(msg) => last_failure = Some(msg),
+                // Unlike `Failed`, a timeout stops the loop. The remaining
+                // name resolves through the same shim and version-manager
+                // machinery that just stalled, so trying it would pay a
+                // second PROBE_DEADLINE for an answer from the component that
+                // is already known to be stuck — doubling this detector's
+                // worst case for no independent information (HORO-1559).
+                ToolQuery::TimedOut(msg) => {
+                    last_failure = Some(msg);
+                    break;
+                }
             }
         }
 
@@ -106,7 +116,9 @@ impl Detector for UvCacheDetector {
                 RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
             ),
             ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
-            ToolQuery::Failed(msg) => DetectorStatus::Failed(msg),
+            // Abandoning the probe is not evidence that uv is missing: it was
+            // spawned successfully, it just did not finish (HORO-1559).
+            ToolQuery::Failed(msg) | ToolQuery::TimedOut(msg) => DetectorStatus::Failed(msg),
         }
     }
 }

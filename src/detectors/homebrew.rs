@@ -92,7 +92,9 @@ fn status_for(query: ToolQuery) -> DetectorStatus {
             RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
         ),
         ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
-        ToolQuery::Failed(msg) => DetectorStatus::Failed(msg),
+        // A timeout is reported as a failed probe, never as `ToolAbsent`: we
+        // know `brew` exists, because we spawned it (HORO-1559).
+        ToolQuery::Failed(msg) | ToolQuery::TimedOut(msg) => DetectorStatus::Failed(msg),
     }
 }
 

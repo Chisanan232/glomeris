@@ -83,7 +83,10 @@ fn go_env_cache_root(
             ),
         },
         ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
-        ToolQuery::Failed(msg) => DetectorStatus::Failed(msg),
+        // A `go env` that had to be abandoned tells us nothing about whether
+        // the cache exists, so it must not reach the report as `ToolAbsent`
+        // or as a zero-byte resource (HORO-1559).
+        ToolQuery::Failed(msg) | ToolQuery::TimedOut(msg) => DetectorStatus::Failed(msg),
     }
 }
 

@@ -175,7 +175,9 @@ impl Detector for NodePackageManagerCacheDetector {
                 RootAbsence::ToolAnsweredWithAPathItHasNotWritten,
             ),
             ToolQuery::ToolAbsent => DetectorStatus::ToolAbsent,
-            ToolQuery::Failed(msg) => DetectorStatus::Failed(msg),
+            // The shim that stalled in HORO-1559 was this probe's. A timeout
+            // is a failed probe — not an absent npm, and not an empty cache.
+            ToolQuery::Failed(msg) | ToolQuery::TimedOut(msg) => DetectorStatus::Failed(msg),
         }
     }
 }

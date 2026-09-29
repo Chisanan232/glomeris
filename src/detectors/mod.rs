@@ -20,9 +20,11 @@ mod swiftpm;
 mod xcode;
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, SystemTime};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::evidence::{
     Evidence, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability, Regenerability,
@@ -431,7 +433,37 @@ pub(crate) enum ToolQuery {
     Lines(Vec<String>),
     ToolAbsent,
     Failed(String),
+    /// The tool was spawned and did not finish within [`PROBE_DEADLINE`].
+    ///
+    /// Separate from [`ToolQuery::Failed`] because the two are not the same
+    /// claim: `Failed` means the tool answered and the answer was unusable,
+    /// which is a fact about the tool. This means we stopped waiting, which
+    /// is a fact about *us*. Nothing downstream may read either one as "the
+    /// cache is absent" or as "the tool is not installed" (HORO-1559).
+    TimedOut(String),
 }
+
+/// Wall-clock a single spawned probe may take before it is abandoned
+/// (HORO-1559).
+///
+/// Healthy cache-location queries answer in well under a second — the
+/// observed `npm`, `pip`, `uv`, `go env` and `brew --cache` calls on this
+/// workstation are all a few hundred milliseconds. Three seconds leaves an
+/// order of magnitude of headroom for a loaded machine while keeping a
+/// discovery pass responsive.
+///
+/// The bound exists because an unbounded one was not theoretical: a `proto`
+/// shim fronting `npm`, invoked with a cold store, spent over eleven minutes
+/// provisioning a toolchain and would have blocked `detect` for as long as it
+/// took. A GUI waiting on that has nothing to show and nothing to cancel.
+pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(3);
+
+/// How often [`query_tool_lines_with_deadline`] re-checks a running child.
+///
+/// Small enough that the deadline is honoured closely, large enough that a
+/// probe which answers immediately is not delayed by polling and does not
+/// spin a core while it waits.
+const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Runs `program args...` and returns stdout's non-empty lines.
 ///
@@ -443,26 +475,72 @@ pub(crate) enum ToolQuery {
 /// stdin is `/dev/null`. A discovery probe must never end up waiting on
 /// the user's terminal, so a tool that decides to prompt gets EOF and
 /// exits instead of hanging the scan.
+///
+/// The wait is bounded by [`PROBE_DEADLINE`]. Closing stdin stops a tool
+/// that wants *input*; it does nothing for a tool that is simply slow, and
+/// one of those blocked `detect` indefinitely (HORO-1559).
 pub(crate) fn query_tool_lines(program: &str, args: &[&str]) -> ToolQuery {
-    let output = match Command::new(program)
+    query_tool_lines_with_deadline(program, args, PROBE_DEADLINE)
+}
+
+/// [`query_tool_lines`] with the deadline supplied, so tests can assert the
+/// timeout path without waiting a real [`PROBE_DEADLINE`] for each one.
+pub(crate) fn query_tool_lines_with_deadline(
+    program: &str,
+    args: &[&str],
+    deadline: Duration,
+) -> ToolQuery {
+    let mut child = match Command::new(program)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
-        Ok(o) => o,
+        Ok(child) => child,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ToolQuery::ToolAbsent,
         Err(e) => return ToolQuery::Failed(format!("failed to spawn {program}: {e}")),
     };
 
-    if !output.status.success() {
+    // Drain both pipes on their own threads rather than reading after the
+    // wait. A pipe buffer is finite, so a tool that prints more than it holds
+    // blocks writing until someone reads — and a deadline that expired on a
+    // tool which was only waiting for *us* to read would be a self-inflicted
+    // timeout, reported as if the tool were at fault.
+    let stdout = child.stdout.take().map(drain_on_thread);
+    let stderr = child.stderr.take().map(drain_on_thread);
+
+    let status = match wait_bounded(&mut child, deadline) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            return ToolQuery::TimedOut(format!(
+                "{program} {} did not answer within {deadline:?}",
+                args.join(" ")
+            ));
+        }
+        Err(e) => return ToolQuery::Failed(format!("failed to wait for {program}: {e}")),
+    };
+
+    // Joining only on the success path: after a timeout the reader threads
+    // end when the killed child's pipes close, and nothing needs their bytes.
+    drop(stderr);
+
+    if !status.success() {
         return ToolQuery::Failed(format!(
-            "{program} {} exited with status {}",
-            args.join(" "),
-            output.status
+            "{program} {} exited with status {status}",
+            args.join(" ")
         ));
     }
 
-    let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+    let bytes = match stdout.map(|handle| handle.join()) {
+        Some(Ok(bytes)) => bytes,
+        Some(Err(_)) => {
+            return ToolQuery::Failed(format!("failed to read {program}'s output"));
+        }
+        None => Vec::new(),
+    };
+
+    let lines: Vec<String> = String::from_utf8_lossy(&bytes)
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
@@ -476,6 +554,51 @@ pub(crate) fn query_tool_lines(program: &str, args: &[&str]) -> ToolQuery {
     }
 
     ToolQuery::Lines(lines)
+}
+
+/// Waits for `child` for at most `deadline`, returning `Ok(None)` if it is
+/// still running when that expires.
+///
+/// On expiry the child is killed *and reaped*. Killing without reaping leaves
+/// a zombie for the lifetime of the CLI; abandoning it without killing leaves
+/// it running — the stalled `proto` in HORO-1559 kept consuming CPU until it
+/// was signalled by hand, and it would have outlived the process that spawned
+/// it.
+///
+/// This signals the child only, not its descendants. Containing a whole
+/// process group would mean spawning into one and signalling the group, which
+/// needs a facility beyond `std::process`; the observed case is a direct child
+/// and terminating it did release the probe.
+fn wait_bounded(
+    child: &mut Child,
+    deadline: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let expires_at = Instant::now() + deadline;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= expires_at {
+            child.kill()?;
+            child.wait()?;
+            return Ok(None);
+        }
+        thread::sleep(PROBE_POLL_INTERVAL.min(expires_at - now));
+    }
+}
+
+/// Reads `reader` to end on a new thread, so a child writing more than a pipe
+/// buffer holds is never blocked on us.
+fn drain_on_thread<R: Read + Send + 'static>(mut reader: R) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        // A read error is not this function's to report: the exit status and
+        // the resulting empty output already say the probe produced nothing
+        // usable, and `Failed("printed nothing")` is the honest outcome.
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    })
 }
 
 /// [`query_tool_lines`] for a tool asked for exactly one path.
