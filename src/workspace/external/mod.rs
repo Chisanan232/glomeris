@@ -49,5 +49,7 @@
 //! recommendation about somebody's unpushed work.
 
 mod error;
+mod http;
 
 pub use error::ExternalProviderError;
+pub use http::{HeaderPair, HttpJson, ReadOnlyHttp, UreqReadOnlyHttp, MAX_BODY_BYTES};
