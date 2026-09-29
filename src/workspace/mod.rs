@@ -44,6 +44,7 @@
 //! resource belongs to and nothing about whether the resource may go.
 
 pub mod branch;
+pub mod external;
 mod graph;
 mod group;
 
