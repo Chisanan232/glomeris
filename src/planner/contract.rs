@@ -211,14 +211,12 @@ impl ObservationKind {
 /// strings and a bounded question, both of which are looked up rather than
 /// executed.
 ///
-/// # What this ticket does and does not implement
+/// # What each ticket contributed
 ///
-/// HORO-1548 defines the vocabulary and makes an unknown probe id fail closed
-/// at the parse boundary. Actually *running* a probe, bounding the rounds and
-/// re-planning on the result is HORO-1549. Until then a validated request is
-/// a recorded ask that reaches a report and nothing else — which is why the
-/// vocabulary lands first: a closed set that already refuses unknown ids
-/// cannot be widened accidentally by the ticket that gives it teeth.
+/// HORO-1548 defined the vocabulary and made an unknown probe id fail closed
+/// at the parse boundary. HORO-1549 added [`Self::subject_kinds`] — which
+/// *kinds* of subject each probe can even be asked about — and the registry in
+/// [`super::probe`] that runs one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProbeId {
     /// Re-read one worktree's branch lifecycle: dirty, untracked, upstream,
@@ -270,6 +268,96 @@ impl ProbeId {
     pub fn from_tag(tag: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|p| p.tag() == tag)
     }
+
+    /// The kinds of subject this probe can be asked about.
+    ///
+    /// # Why a set rather than one kind
+    ///
+    /// Because two of these questions are genuinely about more than one shape
+    /// of thing and one of them is about fewer than it looks.
+    /// [`Self::ProcessActivity`] asks whether anything is using a directory,
+    /// and a working tree and a build directory are both directories a process
+    /// can sit in — refusing the second would make the probe unable to answer
+    /// the question it exists for, which is whether *this cache* is in use.
+    /// [`Self::ToolLiveness`] is the reverse: "is Docker up" is a question
+    /// about the tool that owns a resource, so it needs a resource to read an
+    /// owner off and a working tree cannot supply one.
+    ///
+    /// # What is absent from every list, and why that is the point
+    ///
+    /// [`ProbeSubjectKind::Machine`] and [`ProbeSubjectKind::Repository`] are
+    /// citable references — a response may point at either as *evidence* — and
+    /// no probe here accepts one. So `{"probe_id": "git_branch_state",
+    /// "subject_ref": "repo_1"}` names a real probe and a reference this
+    /// request really issued, and is still refused, because a repository is not
+    /// a working tree and the probe would otherwise have to pick one of its
+    /// working trees on the model's behalf. That is the narrow gap HORO-1549
+    /// closes over HORO-1548, which checked only that the reference had been
+    /// issued.
+    pub fn subject_kinds(self) -> &'static [ProbeSubjectKind] {
+        match self {
+            Self::GitBranchState | Self::GitPatchEquivalence => &[ProbeSubjectKind::Worktree],
+            Self::ProcessActivity => &[ProbeSubjectKind::Worktree, ProbeSubjectKind::Resource],
+            Self::ToolLiveness => &[ProbeSubjectKind::Resource],
+            Self::GithubPrState | Self::JiraTaskState => &[ProbeSubjectKind::Worktree],
+            Self::WorkspaceHistorySummary => &[ProbeSubjectKind::WorkflowHistory],
+        }
+    }
+
+    /// Whether this probe may be asked about a subject of that kind.
+    pub fn accepts(self, kind: ProbeSubjectKind) -> bool {
+        self.subject_kinds().contains(&kind)
+    }
+}
+
+/// What kind of thing one issued evidence reference names.
+///
+/// Every reference [`super::project::GraphProjection::issued_evidence_refs`]
+/// hands out is exactly one of these, and a probe request is checked against
+/// the kind rather than against the spelling of the alias. Matching on
+/// `"workspace_"` prefixes instead would make the naming scheme load-bearing:
+/// renaming an alias would silently widen what probes accept, and a
+/// hypothetical future `workspace_history` reference would be read as a
+/// working tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeSubjectKind {
+    /// The machine-level facts. No probe accepts it — see
+    /// [`ProbeId::subject_kinds`].
+    Machine,
+    /// The local workflow baseline.
+    WorkflowHistory,
+    /// One repository: a git directory and every working tree sharing it. No
+    /// probe accepts it.
+    Repository,
+    /// One git working tree.
+    Worktree,
+    /// One storage resource.
+    Resource,
+}
+
+impl ProbeSubjectKind {
+    pub const ALL: [ProbeSubjectKind; 5] = [
+        ProbeSubjectKind::Machine,
+        ProbeSubjectKind::WorkflowHistory,
+        ProbeSubjectKind::Repository,
+        ProbeSubjectKind::Worktree,
+        ProbeSubjectKind::Resource,
+    ];
+
+    /// A stable snake_case token, for reports and for the drop audit.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Machine => "machine",
+            Self::WorkflowHistory => "workflow_history",
+            Self::Repository => "repository",
+            Self::Worktree => "worktree",
+            Self::Resource => "resource",
+        }
+    }
+
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|k| k.tag() == tag)
+    }
 }
 
 #[cfg(test)]
@@ -308,6 +396,7 @@ mod tests {
         check!(ClaimConfidence);
         check!(ObservationKind);
         check!(ProbeId);
+        check!(ProbeSubjectKind);
     }
 
     /// Each `ALL` lists every variant exactly once, in declaration order.
@@ -369,6 +458,98 @@ mod tests {
             assert_eq!(index, expected, "{} is misplaced in ALL", value.tag());
         }
         assert_eq!(ProbeId::ALL.len(), 7);
+
+        for (index, value) in ProbeSubjectKind::ALL.iter().enumerate() {
+            let expected = match value {
+                ProbeSubjectKind::Machine => 0,
+                ProbeSubjectKind::WorkflowHistory => 1,
+                ProbeSubjectKind::Repository => 2,
+                ProbeSubjectKind::Worktree => 3,
+                ProbeSubjectKind::Resource => 4,
+            };
+            assert_eq!(index, expected, "{} is misplaced in ALL", value.tag());
+        }
+        assert_eq!(ProbeSubjectKind::ALL.len(), 5);
+    }
+
+    /// Every probe names at least one kind of subject it can be asked about.
+    ///
+    /// A probe with an empty list would be unaskable — offered to the model by
+    /// [`super::prompt`], which interpolates `ProbeId::ALL`, and refused by
+    /// every subject. Advertised and impossible is worse than absent.
+    #[test]
+    fn every_probe_accepts_at_least_one_kind_of_subject() {
+        for probe in ProbeId::ALL {
+            assert!(
+                !probe.subject_kinds().is_empty(),
+                "{} is offered to the model and can be asked about nothing",
+                probe.tag()
+            );
+        }
+    }
+
+    /// The machine and a repository are citable and are not probeable.
+    ///
+    /// Both are references [`super::project::GraphProjection::issued_evidence_refs`]
+    /// hands out, so HORO-1548's issued-reference check passes for either. This
+    /// is what makes the kind check a real narrowing rather than a second copy
+    /// of the same test: `git_branch_state` about `repo_1` is a legal probe id
+    /// and a legal reference, and must still be refused.
+    #[test]
+    fn no_probe_accepts_the_machine_or_a_repository() {
+        for probe in ProbeId::ALL {
+            for kind in [ProbeSubjectKind::Machine, ProbeSubjectKind::Repository] {
+                assert!(
+                    !probe.accepts(kind),
+                    "{} accepts a {} subject, which no probe can act on",
+                    probe.tag(),
+                    kind.tag()
+                );
+            }
+        }
+    }
+
+    /// The kind each probe actually needs, written out once so a widening is a
+    /// diff on this test rather than a silent change in what a model may ask.
+    #[test]
+    fn each_probe_accepts_exactly_the_kinds_it_can_answer_for() {
+        use ProbeSubjectKind::{Resource, WorkflowHistory, Worktree};
+
+        let expected: [(ProbeId, &[ProbeSubjectKind]); 7] = [
+            (ProbeId::GitBranchState, &[Worktree]),
+            (ProbeId::GitPatchEquivalence, &[Worktree]),
+            // A directory a process can sit in, of which there are two kinds.
+            (ProbeId::ProcessActivity, &[Worktree, Resource]),
+            // A resource, because that is what has an owning tool to ask about.
+            (ProbeId::ToolLiveness, &[Resource]),
+            (ProbeId::GithubPrState, &[Worktree]),
+            (ProbeId::JiraTaskState, &[Worktree]),
+            (ProbeId::WorkspaceHistorySummary, &[WorkflowHistory]),
+        ];
+
+        for (probe, kinds) in expected {
+            assert_eq!(probe.subject_kinds(), kinds, "{}", probe.tag());
+        }
+    }
+
+    /// A subject kind tag is not a probe tag.
+    ///
+    /// They are two vocabularies that both contain `workflow_history`, and the
+    /// probe that reads the baseline is `workspace_history_summary` — close
+    /// enough that a future edit could start comparing one against the other.
+    /// The overlap is checked rather than forbidden: `machine` and
+    /// `workflow_history` really are the reference spellings, and they have to
+    /// stay the reference spellings.
+    #[test]
+    fn a_subject_kind_tag_is_never_read_as_a_probe_id() {
+        for kind in ProbeSubjectKind::ALL {
+            assert_eq!(
+                ProbeId::from_tag(kind.tag()),
+                None,
+                "the subject kind {} resolves as a probe id",
+                kind.tag()
+            );
+        }
     }
 
     /// Near misses are refused, not resolved.
@@ -433,6 +614,7 @@ mod tests {
             .chain(ClaimConfidence::ALL.iter().map(|v| v.tag()))
             .chain(ObservationKind::ALL.iter().map(|v| v.tag()))
             .chain(ProbeId::ALL.iter().map(|v| v.tag()))
+            .chain(ProbeSubjectKind::ALL.iter().map(|v| v.tag()))
             .collect();
 
         for forbidden in [
@@ -470,7 +652,15 @@ mod tests {
         );
         for probe in ProbeId::ALL {
             let tag = probe.tag();
-            for verb in ["write", "delete", "remove", "prune", "clean", "exec", "run"] {
+            for verb in [
+                "write", "delete", "remove", "prune", "clean", "exec", "run",
+                // Campaign section 9: answering a question must never be a
+                // reason to contact a remote or move a ref. `git fetch` is
+                // read-only about the working tree and writes remote-tracking
+                // refs, which is a mutation of repository state and is not this
+                // registry's to make.
+                "fetch", "pull", "merge", "push", "rebase", "checkout",
+            ] {
                 assert!(
                     !tag.contains(verb),
                     "probe {tag:?} names {verb:?} — the registry is read-only questions only"

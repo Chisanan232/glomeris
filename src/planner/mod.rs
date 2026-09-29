@@ -63,7 +63,8 @@ pub mod response;
 pub mod validate;
 
 pub use contract::{
-    ClaimConfidence, Disposition, ObservationKind, ProbeId, PLANNER_CONTRACT_VERSION,
+    ClaimConfidence, Disposition, ObservationKind, ProbeId, ProbeSubjectKind,
+    PLANNER_CONTRACT_VERSION,
 };
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
