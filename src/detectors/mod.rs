@@ -465,6 +465,49 @@ pub(crate) const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 /// spin a core while it waits.
 const PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Detectors in [`DetectorRegistry::builtin`] that spawn a tool to locate a
+/// cache, and so can each spend up to one [`PROBE_DEADLINE`].
+///
+/// Counted per *detector*, not per call site: `go_build_cache` and
+/// `go_module_cache` share one call site and spawn `go env` once each, so
+/// call sites would undercount the pass.
+///
+/// Test-only, like [`WORST_CASE_SPAWN_WAIT`]: nothing in the product reads
+/// either one. They exist so the bound is asserted rather than merely
+/// described in prose, and a value the product consumed would be a second
+/// source of truth for a number already decided by [`PROBE_DEADLINE`].
+#[cfg(test)]
+pub(crate) const SPAWNING_DETECTORS: &[&str] = &[
+    "homebrew_cache",
+    "npm_cache",
+    "pip_cache",
+    "uv_cache",
+    "go_build_cache",
+    "go_module_cache",
+];
+
+/// Worst case wall-clock one discovery pass can spend waiting on spawned
+/// tools, if every one of them stalls.
+///
+/// Detectors run one after another in [`DetectorRegistry::discover_all`], and
+/// each spawning site can burn at most one [`PROBE_DEADLINE`] — including
+/// `pip`'s two-name loop, which stops at the first timeout rather than paying
+/// the deadline again for a second name that routes through the same stalled
+/// shim.
+///
+/// This is a stated serial bound, not a shared pool: a pass-level budget
+/// would have to be threaded through [`DiscoveryContext`] and mutated from
+/// `&self` detectors, and that contract is not worth reshaping for a case
+/// where every tool on the machine stalls at once.
+///
+/// [`SPAWNING_DETECTORS`] is maintained by hand. The guard test
+/// `every_spawning_detector_is_registered_and_accounted_for` keeps it honest
+/// for a new module that starts spawning, which is how a regression would
+/// realistically arrive.
+#[cfg(test)]
+pub(crate) const WORST_CASE_SPAWN_WAIT: Duration =
+    Duration::from_secs(PROBE_DEADLINE.as_secs() * SPAWNING_DETECTORS.len() as u64);
+
 /// Runs `program args...` and returns stdout's non-empty lines.
 ///
 /// An argument array, never a shell string (HORO-1543 AC 7): there is no
@@ -1102,7 +1145,13 @@ mod tests {
     ///   production wiring rather than a stub. The sibling
     ///   `discover_all_returns_one_status_per_detector` test deliberately
     ///   proves its invariant with fake detectors instead, so it does
-    ///   not appear here;
+    ///   not appear here. `probe_deadline_tests::`
+    ///   `every_spawning_detector_is_registered_and_accounted_for`
+    ///   (HORO-1559) is the same reviewed shape: it reads `id()` on each
+    ///   registered detector to check [`SPAWNING_DETECTORS`] still names
+    ///   real ones, and must use the production wiring because a stub
+    ///   registry could not go stale — it never calls `discover()`, so it
+    ///   spawns no tool and produces no evidence to execute;
     /// - `tests/golden_chain_execute.rs` and
     ///   `tests/reclaimable_bytes_reaches_auto_safe.rs`, which do use the
     ///   real registry but scope every subsequent policy/execute step to
@@ -1138,7 +1187,7 @@ mod tests {
         // (path relative to the manifest dir, exact expected occurrence
         // count in that file's test code)
         let allowlist: &[(&str, usize)] = &[
-            ("src/detectors/mod.rs", 2),
+            ("src/detectors/mod.rs", 3),
             ("tests/golden_chain_execute.rs", 1),
             ("tests/reclaimable_bytes_reaches_auto_safe.rs", 1),
             ("tests/cli_project_root_wiring.rs", 2),
@@ -1312,7 +1361,7 @@ mod tests {
     /// directory or file is silently skipped rather than failing the
     /// test — this guard's job is to catch real occurrences of the
     /// needle, not to assert every file in the tree is readable.
-    fn scan_rs_files(dir: &Path, visit: &mut dyn FnMut(&Path, &str)) {
+    pub(super) fn scan_rs_files(dir: &Path, visit: &mut dyn FnMut(&Path, &str)) {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(_) => return,
@@ -1556,6 +1605,359 @@ mod size_estimate_tests {
         assert_eq!(estimate.stop_reason, StopReason::Exhausted);
 
         fs::remove_dir_all(&root).ok();
+    }
+}
+
+/// Tests for the bound on a spawned probe (HORO-1559).
+///
+/// These do spawn processes, unlike the selection-rule tests below, because
+/// the property under test *is* what happens to a real child that will not
+/// finish. `sleep` and `seq` stand in for a stalled and a chatty tool: both
+/// are POSIX utilities, and neither depends on which language toolchains the
+/// machine running the tests happens to have.
+#[cfg(test)]
+mod probe_deadline_tests {
+    use super::*;
+
+    /// Short enough to keep the suite fast, long enough that a loaded machine
+    /// still starts the child before it expires.
+    const TEST_DEADLINE: Duration = Duration::from_millis(250);
+
+    /// The duration argument that identifies the one child
+    /// [`an_abandoned_probe_leaves_no_running_child`] is allowed to see.
+    ///
+    /// Counting children named `sleep` is not good enough. `cargo test` runs
+    /// this binary's tests as threads of a single process, so every `sleep` any
+    /// other test spawns — `evidence::correlate::timeout`'s `sleep 5`, and this
+    /// module's own `sleep 30` — is also a child of `std::process::id()`, and a
+    /// before/after count of them races those tests starting and finishing.
+    /// This value appears at exactly one call site, so a matching child can
+    /// only be the one under test.
+    const STALL_MARKER_SECONDS: &str = "31.4159";
+
+    /// The duration argument of the child
+    /// [`an_abandoned_probe_leaves_no_running_child`] spawns and deliberately
+    /// leaves running, to prove [`own_children_matching`] can see a child at
+    /// all. Distinct from [`STALL_MARKER_SECONDS`] so the two never count each
+    /// other.
+    const CONTROL_MARKER_SECONDS: &str = "27.1828";
+
+    /// The duration argument of the child the reaping test kills without
+    /// waiting for, to prove [`own_zombie_children`] can see an unreaped child.
+    const ZOMBIE_MARKER_SECONDS: &str = "23.6067";
+
+    /// Counts our own children that have exited and not been reaped.
+    ///
+    /// A zombie has no argv left — `ps` renders it as `<defunct>` — so unlike
+    /// [`own_children_matching`] this cannot be narrowed to one test's child.
+    /// [`settles_to_no_zombie_children`] is what makes it usable anyway.
+    fn own_zombie_children() -> usize {
+        let me = std::process::id().to_string();
+        let out = Command::new("ps")
+            .args(["-A", "-o", "ppid=,stat="])
+            .output()
+            .expect("failed to run ps");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.split_whitespace();
+                let ppid = parts.next()?;
+                let stat = parts.next()?;
+                (ppid == me && stat.starts_with('Z')).then_some(())
+            })
+            .count()
+    }
+
+    /// Waits for our zombie-child count to reach zero, returning whether it did.
+    ///
+    /// The settling is the whole point, not slack. Tests run as threads of one
+    /// process, so another test's own kill-then-reap is briefly visible as a
+    /// zombie of ours — but it clears within its own `wait`. A child that
+    /// nothing ever waits on stays a zombie for the life of the process, so
+    /// "clears" and "does not clear" separate exactly the two cases.
+    fn settles_to_no_zombie_children() -> bool {
+        let expires_at = Instant::now() + Duration::from_secs(2);
+        loop {
+            if own_zombie_children() == 0 {
+                return true;
+            }
+            if Instant::now() >= expires_at {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Counts our own still-running child processes whose command line contains
+    /// `marker`.
+    ///
+    /// `ps` is read-only and its own invocation is reaped by `output()` before
+    /// the count is taken. Matched against the full argv rather than `comm`
+    /// because the marker is an argument.
+    ///
+    /// `-A` is load-bearing, not tidiness. Without it `ps` lists only processes
+    /// attached to the current terminal, and a test binary has none — so the
+    /// count was silently always zero, and the assertion it backs held for a
+    /// probe that leaked its child just as happily as for one that killed it.
+    /// The positive control in that test is what keeps this honest.
+    fn own_children_matching(marker: &str) -> usize {
+        let me = std::process::id().to_string();
+        let out = Command::new("ps")
+            .args(["-A", "-o", "ppid=,args="])
+            .output()
+            .expect("failed to run ps");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (ppid, argv) = line.trim_start().split_once(char::is_whitespace)?;
+                (ppid == me && argv.contains(marker)).then_some(())
+            })
+            .count()
+    }
+
+    /// The defect itself: before the deadline existed this call did not
+    /// return, and neither did `glomeris detect`.
+    #[test]
+    fn a_probe_that_never_answers_is_abandoned_at_the_deadline() {
+        let started = Instant::now();
+        let query = query_tool_lines_with_deadline("sleep", &["30"], TEST_DEADLINE);
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(query, ToolQuery::TimedOut(_)),
+            "a tool that never answers must be reported as abandoned, got {query:?}"
+        );
+        assert!(
+            elapsed >= TEST_DEADLINE,
+            "returned in {elapsed:?}, before the {TEST_DEADLINE:?} deadline — \
+             the wait was not actually bounded by the deadline"
+        );
+        assert!(
+            elapsed < TEST_DEADLINE * 8,
+            "took {elapsed:?} for a {TEST_DEADLINE:?} deadline; the 30s child \
+             was waited on rather than abandoned"
+        );
+    }
+
+    /// A timeout must not be readable as any of the three outcomes that would
+    /// let a caller conclude something about the cache. `Lines` says where it
+    /// is, `ToolAbsent` says the ecosystem is not installed, and an empty
+    /// `Lines` cannot occur at all — only `TimedOut` says "we do not know".
+    #[test]
+    fn an_abandoned_probe_is_none_of_the_answering_outcomes() {
+        let query = query_tool_lines_with_deadline("sleep", &["30"], TEST_DEADLINE);
+
+        assert!(!matches!(query, ToolQuery::Lines(_)));
+        assert!(!matches!(query, ToolQuery::ToolAbsent));
+        assert!(!matches!(query, ToolQuery::Failed(_)));
+        assert!(matches!(query, ToolQuery::TimedOut(_)));
+    }
+
+    /// Abandoning the wait must not abandon the process. An unreaped child is
+    /// a zombie for the life of the CLI; an unkilled one keeps running — the
+    /// `proto` in HORO-1559 was still burning CPU minutes later.
+    #[test]
+    fn an_abandoned_probe_leaves_no_running_child() {
+        // A child deliberately left running, so "nothing matched" cannot pass
+        // by the observation being blind. Every observation is taken before
+        // anything is asserted, so a failing assertion cannot leak it.
+        let mut control = Command::new("sleep")
+            .arg(CONTROL_MARKER_SECONDS)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("failed to spawn the control child");
+
+        let control_seen = own_children_matching(CONTROL_MARKER_SECONDS);
+        let before = own_children_matching(STALL_MARKER_SECONDS);
+        let query = query_tool_lines_with_deadline("sleep", &[STALL_MARKER_SECONDS], TEST_DEADLINE);
+        // The kill is synchronous with the reap, so no settling loop is
+        // needed: if the child were still listed here it would still be ours.
+        let after = own_children_matching(STALL_MARKER_SECONDS);
+
+        control.kill().ok();
+        control.wait().ok();
+
+        assert_eq!(
+            control_seen, 1,
+            "a child this test is still holding open was not observed, so the \
+             assertion below would pass for a probe that leaked its child"
+        );
+        assert_eq!(
+            before, 0,
+            "{STALL_MARKER_SECONDS} is supposed to appear at one call site only"
+        );
+        assert!(matches!(query, ToolQuery::TimedOut(_)));
+        assert_eq!(
+            after, 0,
+            "a timed-out probe left its child running or unreaped"
+        );
+    }
+
+    /// The other half of leaving no process behind: killing a child does not
+    /// dispose of it. An unwaited-for child stays a zombie in this process's
+    /// table for as long as the process lives, and `glomeris detect` is invoked
+    /// by a menu-bar app that lives a long time.
+    #[test]
+    fn an_abandoned_probe_leaves_no_unreaped_child() {
+        // Plain `sleep 30`, not [`STALL_MARKER_SECONDS`]: this test counts
+        // zombies rather than matching argv, and taking that marker would cost
+        // `an_abandoned_probe_leaves_no_running_child` the uniqueness its own
+        // assertion depends on.
+        let query = query_tool_lines_with_deadline("sleep", &["30"], TEST_DEADLINE);
+        assert!(matches!(query, ToolQuery::TimedOut(_)));
+
+        // Positive control, run after the probe so its own zombie cannot be
+        // mistaken for the probe's: a child killed and deliberately not reaped
+        // must be observable, or the assertion below would hold for a probe
+        // that never reaped either. Reaped here, before that assertion.
+        let mut leaked = Command::new("sleep")
+            .arg(ZOMBIE_MARKER_SECONDS)
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("failed to spawn the control child");
+        leaked.kill().expect("failed to kill the control child");
+        let mut saw_zombie = false;
+        let expires_at = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < expires_at {
+            if own_zombie_children() >= 1 {
+                saw_zombie = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        leaked.wait().expect("failed to reap the control child");
+
+        assert!(
+            saw_zombie,
+            "a child killed and deliberately left unreaped was not observed, so \
+             the assertion below cannot distinguish a probe that reaps from one \
+             that does not"
+        );
+        assert!(
+            settles_to_no_zombie_children(),
+            "a timed-out probe left an unreaped child"
+        );
+    }
+
+    /// The other half of the bound: a tool that answers must not be slowed or
+    /// truncated by the machinery that bounds one that does not.
+    #[test]
+    fn a_probe_that_answers_promptly_still_answers() {
+        match query_tool_lines_with_deadline("echo", &["/tmp/somewhere"], TEST_DEADLINE) {
+            ToolQuery::Lines(lines) => assert_eq!(lines, vec!["/tmp/somewhere".to_string()]),
+            other => panic!("expected the echoed line, got {other:?}"),
+        }
+    }
+
+    /// A tool printing more than one pipe buffer holds would block writing if
+    /// nothing drained it, and the deadline would then expire on a tool that
+    /// was only waiting for us — a self-inflicted timeout blamed on the tool.
+    /// 200k lines is far more than any pipe buffer.
+    #[test]
+    fn a_chatty_probe_is_not_a_self_inflicted_timeout() {
+        match query_tool_lines_with_deadline("seq", &["200000"], Duration::from_secs(30)) {
+            ToolQuery::Lines(lines) => assert_eq!(lines.len(), 200_000),
+            other => panic!("expected 200000 drained lines, got {other:?}"),
+        }
+    }
+
+    /// A tool that exits non-zero is still a `Failed` probe and not a
+    /// timeout: it answered, and the answer was that it could not help.
+    #[test]
+    fn a_tool_that_exits_non_zero_is_failed_not_timed_out() {
+        match query_tool_lines_with_deadline("false", &[], TEST_DEADLINE) {
+            ToolQuery::Failed(msg) => assert!(msg.contains("exited with status")),
+            other => panic!("expected a failed probe, got {other:?}"),
+        }
+    }
+
+    /// A program that is not installed must still be `ToolAbsent`. The
+    /// deadline changed how the child is waited on, and conflating "no such
+    /// program" with "did not answer in time" would report every missing
+    /// ecosystem as a broken probe.
+    #[test]
+    fn a_program_that_does_not_exist_is_still_tool_absent() {
+        assert_eq!(
+            query_tool_lines_with_deadline("glomeris-no-such-program-exists", &[], TEST_DEADLINE),
+            ToolQuery::ToolAbsent
+        );
+    }
+
+    /// The shipped deadline, not just the injected one, is what `detect` uses.
+    #[test]
+    fn the_shipped_deadline_is_the_one_wired_into_the_probe() {
+        assert_eq!(PROBE_DEADLINE, Duration::from_secs(3));
+        assert!(
+            PROBE_DEADLINE > TEST_DEADLINE,
+            "the tests must exercise a shorter deadline than production, or \
+             they prove nothing about production being bounded"
+        );
+    }
+
+    /// AC 7: the worst case for a whole pass is stated, and it is the serial
+    /// sum it claims to be. Every detector named must actually exist, so the
+    /// count cannot drift by a detector being renamed away.
+    #[test]
+    fn every_spawning_detector_is_registered_and_accounted_for() {
+        let registry = DetectorRegistry::builtin();
+        let registered: Vec<&str> = registry.detectors.iter().map(|d| d.id().0).collect();
+
+        for id in SPAWNING_DETECTORS {
+            assert!(
+                registered.contains(id),
+                "SPAWNING_DETECTORS names {id}, which is not registered — the \
+                 worst-case pass bound is computed from a detector that no \
+                 longer exists"
+            );
+        }
+
+        assert_eq!(
+            WORST_CASE_SPAWN_WAIT,
+            PROBE_DEADLINE * SPAWNING_DETECTORS.len() as u32,
+            "the documented worst case is no longer the serial sum it claims"
+        );
+
+        // The realistic regression is a *new* module that starts spawning
+        // without the bound being revisited, so pin which modules may.
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let spawning_modules: &[&str] = &[
+            "src/detectors/go.rs",
+            "src/detectors/homebrew.rs",
+            "src/detectors/node.rs",
+            "src/detectors/python.rs",
+        ];
+        // Split so this test's own source does not contain the needle.
+        let needle = format!("{}{}", "query_tool_", "single_path(");
+
+        let mut unexpected: Vec<String> = Vec::new();
+        super::tests::scan_rs_files(&manifest_dir.join("src/detectors"), &mut |path, content| {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "src/detectors/mod.rs" || spawning_modules.contains(&rel.as_str()) {
+                return;
+            }
+            let production = match content.split_once("#[cfg(test)]") {
+                Some((before, _)) => before,
+                None => content,
+            };
+            if production
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .any(|line| line.contains(&needle))
+            {
+                unexpected.push(rel);
+            }
+        });
+
+        assert!(
+            unexpected.is_empty(),
+            "{unexpected:?} spawn a tool but are not accounted for in \
+             SPAWNING_DETECTORS, so the worst-case pass wait is understated \
+             (HORO-1559)"
+        );
     }
 }
 
