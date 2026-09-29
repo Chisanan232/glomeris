@@ -129,6 +129,18 @@ const CACHE_KINDS: &[ResourceKind] = &[ResourceKind::NodePackageManagerCache];
 /// See [`NodePackageManagerCacheDetector`] for the siblings it must not.
 const CACACHE_SUBDIR: &str = "_cacache";
 
+/// Asking npm where its cache is, without npm writing a log about it
+/// (HORO-1556).
+///
+/// `npm` writes `<cache>/_logs/<timestamp>-debug-0.log` on every invocation,
+/// including one that only reads a config value. That put a new file inside the
+/// directory this detector measures each time `glomeris detect` ran — growing
+/// the resource being reported on, and writing to the user's disk from a
+/// command whose help says "Read-only — changes nothing." `--logs-max=0` is
+/// npm's own documented control for retaining no log files, and it applies to
+/// the invocation that would create one.
+const NPM_CACHE_QUERY: &[&str] = &["config", "get", "cache", "--logs-max=0"];
+
 /// Narrows the directory `npm config get cache` reports to the cache proper.
 ///
 /// A separate function so the boundary is testable: a test that joined
@@ -148,7 +160,7 @@ impl Detector for NodePackageManagerCacheDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        match query_tool_single_line("npm", &["config", "get", "cache"]) {
+        match query_tool_single_line("npm", NPM_CACHE_QUERY) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
                 ResourceKind::NodePackageManagerCache,
