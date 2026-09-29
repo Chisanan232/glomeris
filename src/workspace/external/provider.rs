@@ -36,7 +36,7 @@ use super::error::ExternalProviderError;
 use super::subject::{
     task_key_from_branch, RepositoryBranchSubject, SubjectResolver, SubjectUnknown, TaskKey,
 };
-use crate::evidence::ProbeReason;
+use crate::evidence::{ProbeOutcome, ProbeReason};
 use crate::workspace::{
     ExternalContext, ExternalFact, ExternalSource, PullRequestState, TaskState,
 };
@@ -212,6 +212,48 @@ impl<'a> ExternalContextResolver<'a> {
         }
     }
 
+    /// Asks about one worktree whose branch fact may itself not have been read.
+    ///
+    /// `ProbeOutcome<Option<&str>>` rather than `Option<&str>` because those are
+    /// three states and not two. A detached HEAD is a worktree deliberately left
+    /// off a branch; an unread branch probe is a question nobody answered.
+    /// Collapsing the second into the first would report "no task key" for a
+    /// worktree whose branch may well name one, and "no subject" for a repository
+    /// that may well have a pull request — the campaign's *unknown is not false*,
+    /// one layer below where it is usually stated.
+    pub fn resolve_branch_outcome(
+        &self,
+        worktree: &Path,
+        branch: ProbeOutcome<Option<&str>>,
+        now: SystemTime,
+    ) -> ResolvedExternalContext {
+        match branch {
+            ProbeOutcome::Observed(branch) => self.resolve(worktree, branch, now),
+            ProbeOutcome::Unavailable(reason) => {
+                if !self.is_enabled() {
+                    return ResolvedExternalContext::unqueried();
+                }
+                // The branch probe's own reason is carried through rather than
+                // replaced: a worktree whose git probe timed out and one whose
+                // git binary is absent are different problems, and this is the
+                // only place that knows which happened.
+                let unknown = SubjectUnknown::GitUnavailable(reason);
+                let (pull_request, pull_request_detail) = unread_branch(
+                    ExternalSource::GitHubPullRequests,
+                    self.pull_requests.is_some(),
+                    &unknown,
+                );
+                let (task, task_detail) =
+                    unread_branch(ExternalSource::JiraIssues, self.tasks.is_some(), &unknown);
+                ResolvedExternalContext {
+                    context: ExternalContext { pull_request, task },
+                    pull_request_detail,
+                    task_detail,
+                }
+            }
+        }
+    }
+
     fn resolve_pull_request(
         &self,
         worktree: &Path,
@@ -283,6 +325,29 @@ impl<'a> ExternalContextResolver<'a> {
                 ExternalDetail::Failed(error),
             ),
         }
+    }
+}
+
+/// One fact for a worktree whose branch could not be read.
+///
+/// A configured provider reports *why* nobody could ask it; an unconfigured one
+/// stays "disabled", because a provider that does not exist was not prevented
+/// from answering by anything.
+fn unread_branch<T>(
+    source: ExternalSource,
+    configured: bool,
+    unknown: &SubjectUnknown,
+) -> (ExternalFact<T>, ExternalDetail) {
+    if configured {
+        (
+            ExternalFact::unavailable(source, unknown.reason()),
+            ExternalDetail::NoSubject(unknown.clone()),
+        )
+    } else {
+        (
+            ExternalFact::not_attempted(source),
+            ExternalDetail::ProviderDisabled,
+        )
     }
 }
 
@@ -798,5 +863,128 @@ pub(crate) mod tests {
         tags.sort_unstable();
         tags.dedup();
         assert_eq!(tags.len(), all.len(), "two details share a tag");
+    }
+
+    /// An unread branch probe is not a detached HEAD and not a missing key. Both
+    /// providers report that nobody could ask, carrying the branch probe's own
+    /// reason, and neither invents an absence.
+    #[test]
+    fn an_unread_branch_probe_is_not_an_absence() {
+        let subjects = StubSubjects::on("github.com", "o", "r", "trunk");
+        let pulls = StubPullRequests::on("github.com", Ok(PullRequestState::Merged));
+        let tasks = StubTasks::answering(Ok(TaskState::Done));
+        let resolver = ExternalContextResolver {
+            subjects: &subjects,
+            pull_requests: Some(&pulls),
+            tasks: Some(&tasks),
+        };
+
+        let resolved = resolver.resolve_branch_outcome(
+            worktree(),
+            ProbeOutcome::Unavailable(ProbeReason::TimedOut),
+            now(),
+        );
+
+        // Neither provider was asked, so neither can have answered.
+        assert!(pulls.asked.borrow().is_empty());
+        assert!(tasks.asked.borrow().is_empty());
+        assert_eq!(resolved.pull_request_detail.tag(), "no_subject");
+        assert_eq!(
+            resolved.pull_request_detail.qualifier(),
+            Some("git_unavailable")
+        );
+        assert_eq!(resolved.task_detail.tag(), "no_subject");
+        assert_eq!(resolved.task_detail.qualifier(), Some("git_unavailable"));
+        assert!(!resolved.pull_request_detail.reached_provider());
+        assert!(!resolved.task_detail.reached_provider());
+        // The branch probe's reason survives: a timed-out git and an absent git
+        // send a user to two different places.
+        assert_eq!(
+            resolved.context.pull_request.outcome,
+            ProbeOutcome::Unavailable(ProbeReason::TimedOut)
+        );
+        assert_eq!(
+            resolved.context.task.outcome,
+            ProbeOutcome::Unavailable(ProbeReason::TimedOut)
+        );
+        // And specifically *not* the tidier reading, which is the one a caller
+        // that collapsed the three states into two would have produced.
+        assert_ne!(resolved.task_detail.tag(), "no_task_key");
+        assert_ne!(
+            resolved.pull_request_detail.qualifier(),
+            Some("detached_head")
+        );
+        // An unavailable fact has no observation, so it has nothing to be fresh.
+        assert!(resolved.context.pull_request.observed_at.is_none());
+        assert!(resolved.context.task.observed_at.is_none());
+    }
+
+    /// The same unread branch with nothing configured stays "disabled": a
+    /// provider that does not exist was not stopped from answering by git.
+    #[test]
+    fn an_unread_branch_with_no_providers_is_still_just_disabled() {
+        let subjects = StubSubjects::on("github.com", "o", "r", "trunk");
+        let resolver = ExternalContextResolver::disabled(&subjects);
+
+        let resolved = resolver.resolve_branch_outcome(
+            worktree(),
+            ProbeOutcome::Unavailable(ProbeReason::ToolAbsent),
+            now(),
+        );
+
+        assert_eq!(resolved, ResolvedExternalContext::unqueried());
+    }
+
+    /// One provider configured and one not, with an unread branch: the
+    /// configured one reports why, and the absent one does not borrow its reason.
+    #[test]
+    fn an_unread_branch_reports_per_provider() {
+        let subjects = StubSubjects::on("github.com", "o", "r", "trunk");
+        let tasks = StubTasks::answering(Ok(TaskState::InProgress));
+        let resolver = ExternalContextResolver {
+            subjects: &subjects,
+            pull_requests: None,
+            tasks: Some(&tasks),
+        };
+
+        let resolved = resolver.resolve_branch_outcome(
+            worktree(),
+            ProbeOutcome::Unavailable(ProbeReason::PermissionDenied),
+            now(),
+        );
+
+        assert_eq!(resolved.pull_request_detail.tag(), "provider_disabled");
+        assert_eq!(
+            resolved.context.pull_request.outcome,
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+        assert_eq!(resolved.task_detail.tag(), "no_subject");
+        assert_eq!(resolved.task_detail.qualifier(), Some("git_unavailable"));
+        assert_eq!(
+            resolved.context.task.outcome,
+            ProbeOutcome::Unavailable(ProbeReason::PermissionDenied)
+        );
+    }
+
+    /// A branch that *was* read routes to the ordinary path unchanged, so the
+    /// new entry point adds a state rather than a second set of rules.
+    #[test]
+    fn a_read_branch_resolves_exactly_as_before() {
+        let subjects = StubSubjects::on("github.com", "o", "r", "HORO-1546/feat/x");
+        let pulls = StubPullRequests::on("github.com", Ok(PullRequestState::Open));
+        let tasks = StubTasks::answering(Ok(TaskState::InProgress));
+        let resolver = ExternalContextResolver {
+            subjects: &subjects,
+            pull_requests: Some(&pulls),
+            tasks: Some(&tasks),
+        };
+
+        for branch in [Some("HORO-1546/feat/x"), None] {
+            assert_eq!(
+                resolver.resolve_branch_outcome(worktree(), ProbeOutcome::Observed(branch), now()),
+                resolver.resolve(worktree(), branch, now()),
+                "{branch:?}"
+            );
+        }
     }
 }
