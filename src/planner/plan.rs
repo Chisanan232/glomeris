@@ -23,7 +23,7 @@
 //! anything executes. That was true of version 1 and nothing here changes it:
 //! the contract got richer, not more powerful.
 
-use super::dto::PlannerRequestView;
+use super::dto::{PlannerRequestView, ProbeResultView};
 use super::project::GraphProjection;
 use super::prompt::system_prompt;
 use super::response::{read_planner_response, PlannerResponse};
@@ -81,7 +81,25 @@ impl WorkspacePlanResult {
 /// diverge: `--print-payload` prints what this returns, and
 /// [`plan_workspace`] sends what this returns.
 pub fn build_workspace_request(projection: &GraphProjection) -> Result<WorkspaceRequest, LlmError> {
-    let request = PlannerRequestView::of(projection.view.clone());
+    build_workspace_request_with(projection, Vec::new())
+}
+
+/// Builds the request for `projection` with `probe_results` appended.
+///
+/// The second and later rounds of a bounded expansion run (HORO-1549). The
+/// projection is the *same* one the first round sent — aliases mean what they
+/// meant, because nothing re-derived them — with the findings since appended
+/// rather than folded in. See [`PlannerRequestView::probe_results`] for why
+/// appending is the load-bearing choice and not merely the simpler one.
+///
+/// Callers wanting a preview still use [`build_workspace_request`]: round one
+/// sends no findings, so `--print-payload` printing the empty case is printing
+/// what would actually be sent first.
+pub fn build_workspace_request_with(
+    projection: &GraphProjection,
+    probe_results: Vec<ProbeResultView>,
+) -> Result<WorkspaceRequest, LlmError> {
+    let request = PlannerRequestView::of(projection.view.clone()).with_probe_results(probe_results);
     let user_prompt = serde_json::to_string(&request).map_err(|e| {
         LlmError::InvalidResponse(format!("failed to serialize the workspace projection: {e}"))
     })?;
@@ -98,7 +116,21 @@ pub fn plan_workspace(
     projection: &GraphProjection,
     actions: &ActionRegistry,
 ) -> WorkspacePlanResult {
-    let request = match build_workspace_request(projection) {
+    plan_workspace_with(provider, projection, actions, Vec::new())
+}
+
+/// Runs one planning round with `probe_results` included in the request.
+///
+/// Identical to [`plan_workspace`] in every other respect — same validation
+/// against the same projection, so a later round cannot widen what the model is
+/// allowed to name just because it asked a question first.
+pub fn plan_workspace_with(
+    provider: &dyn LlmProvider,
+    projection: &GraphProjection,
+    actions: &ActionRegistry,
+    probe_results: Vec<ProbeResultView>,
+) -> WorkspacePlanResult {
+    let request = match build_workspace_request_with(projection, probe_results) {
         Ok(request) => request,
         Err(error) => return WorkspacePlanResult::failed(error),
     };
@@ -136,7 +168,8 @@ mod tests {
         Evidence, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability, ResourceFingerprint,
         ResourceId, ResourceKind, ResourceLocator,
     };
-    use crate::planner::contract::{Disposition, PLANNER_CONTRACT_VERSION};
+    use crate::planner::contract::{Disposition, ProbeId, PLANNER_CONTRACT_VERSION};
+    use crate::planner::dto::{ProbeFindingView, ProbeResultView};
     use crate::policy::{PolicyClass, PolicyDecision, ReasonCode};
     use crate::workspace::{MachineContext, WorkspaceEvidenceGraph, WorkspaceSurvey};
     use std::cell::RefCell;
@@ -283,6 +316,43 @@ mod tests {
         assert_eq!(*user, request.user_prompt);
         // And the request carries the version the response is held to.
         assert!(user.contains(&format!("\"contract_version\":{PLANNER_CONTRACT_VERSION}")));
+    }
+
+    /// A later round sends the same projection with the findings appended. The
+    /// same projection is the point: an alias the model asked about still means
+    /// what it meant, because nothing re-derived the table between rounds.
+    #[test]
+    fn a_later_round_carries_the_findings_and_the_same_aliases() {
+        let projection = projection();
+        let first = build_workspace_request(&projection).expect("the request builds");
+
+        let finding = ProbeResultView {
+            round: 2,
+            probe_id: ProbeId::ProcessActivity.tag(),
+            subject_ref: "resource_1".to_string(),
+            finding: ProbeFindingView::Unavailable {
+                reason: "tool_absent",
+            },
+        };
+        let second =
+            build_workspace_request_with(&projection, vec![finding]).expect("the request builds");
+
+        assert_eq!(
+            second.system_prompt, first.system_prompt,
+            "a later round changed the contract it is answering"
+        );
+        assert!(first.user_prompt.contains("\"probe_results\":[]"));
+        assert!(second
+            .user_prompt
+            .contains("\"probe_id\":\"process_activity\""));
+        assert!(second.user_prompt.contains("\"reason\":\"tool_absent\""));
+        // The graph is unchanged, so every alias the first round issued is
+        // still in the second round's request verbatim.
+        let graph = serde_json::to_string(&projection.view).expect("the graph serializes");
+        assert!(
+            second.user_prompt.contains(&graph),
+            "a later round re-derived the projection"
+        );
     }
 
     #[test]

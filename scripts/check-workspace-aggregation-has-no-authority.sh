@@ -521,6 +521,102 @@ if [[ "${deny_count:-0}" -ne "$expected_deny" ]]; then
   violations=$((violations + 1))
 fi
 
+# ---------------------------------------------------------------------------
+# Check 9: the probe runner cannot build a process, and cannot reach an action.
+# ---------------------------------------------------------------------------
+#
+# HORO-1549. Check 8 keeps a provider's bytes from *deserializing* into a path
+# or a command. This is the other end of the same wire: the module that takes a
+# validated request and actually runs something.
+#
+# `probe.rs` is where a model-chosen probe id and a model-chosen subject alias
+# are turned into work. Two things must be true of it structurally, because
+# neither is something a reviewer reliably notices in a diff:
+#
+#   - It builds no process. Every probe here delegates to the deterministic,
+#     timeout-bounded probes in `crate::evidence::correlate` that a snapshot
+#     already uses — the same probes, so two rounds cannot disagree about what
+#     they measured, and no new place where a subject becomes argv.
+#   - It cannot reach an action, a policy class, the executor or Autopilot. A
+#     probe answers a question; a module that could name an ActionId while
+#     holding a model's request is one refactor away from answering it by doing
+#     something. Campaign section 15: the model "may NOT ... generate
+#     executable shell commands" or "convert ASK/PROTECTED into executable".
+#
+# `expand.rs` is deliberately *not* held to the second rule: it needs the
+# registry to re-validate each round's plan against the same offers the first
+# round made, which is the check that stops a later round widening what the
+# model may name.
+
+PROBE_FILE="src/planner/probe.rs"
+abs_probe="${REPO_ROOT}/${PROBE_FILE}"
+
+if [[ ! -f "$abs_probe" ]]; then
+  echo "FAIL: ${PROBE_FILE} is missing."
+  echo "It is the only module that turns a validated evidence request into work. If it moved, update PROBE_FILE."
+  exit 1
+fi
+
+FORBIDDEN_IN_PROBE=(
+  '\bCommand\b;;names a process builder, so a model-selected subject could become argv here'
+  'std::process;;imports the process module'
+  'crate::actions;;can reach the action registry, so a probe answer could become something that runs'
+  '\bcrate::policy\b;;can reach the policy vocabulary, so a probe answer could assign a class'
+  'crate::executor;;can reach the executor'
+  'crate::autopilot;;can reach Autopilot'
+)
+
+for entry in "${FORBIDDEN_IN_PROBE[@]}"; do
+  pattern="${entry%%;;*}"
+  why="${entry#*;;}"
+
+  compile_error="$(grep -E "$pattern" /dev/null 2>&1 || true)"
+  if [[ -n "$compile_error" ]]; then
+    echo "FAIL: forbidden-pattern regex does not compile: ${pattern}"
+    echo "    grep said: ${compile_error}"
+    exit 1
+  fi
+
+  while IFS= read -r match; do
+    [[ -n "$match" ]] || continue
+    echo "VIOLATION: ${PROBE_FILE}:${match%%:*}: ${why}"
+    echo "    ${match#*:}"
+    violations=$((violations + 1))
+  done < <(grep -nE "$pattern" "$abs_probe" | strip_comments)
+done
+
+# Non-vacuity for the list above, which passes over an empty file.
+for needle in 'pub trait ProbeRunner\b' 'pub struct LocalProbeRunner\b'; do
+  if ! grep -nE "$needle" "$abs_probe" | strip_comments | grep -q .; then
+    echo "VIOLATION: ${PROBE_FILE}: '${needle}' is gone — the checks above would now pass over a stub."
+    violations=$((violations + 1))
+  fi
+done
+
+# And the registry the runner is reached through stays closed by exact match.
+#
+# `ProbeId::from_tag` is the only door: an id a provider wrote becomes a probe
+# here or nowhere. A prefix, trimming or case-insensitive match would let
+# `"tool_liveness; rm -rf /"` resolve to a real probe — which is refused today,
+# and is refused by this one comparison rather than by anything downstream.
+# `tests/planner_evidence_request_injection.rs` proves that by mutation; this
+# pins the comparison so a refactor cannot loosen it quietly.
+CONTRACT_FILE="src/planner/contract.rs"
+abs_contract="${REPO_ROOT}/${CONTRACT_FILE}"
+
+if [[ ! -f "$abs_contract" ]]; then
+  echo "FAIL: ${CONTRACT_FILE} is missing."
+  echo "It holds ProbeId and the closed probe registry. If it moved, update CONTRACT_FILE."
+  exit 1
+fi
+
+if ! grep -nE 'find\(\|p\| p\.tag\(\) == tag\)' "$abs_contract" | strip_comments | grep -q .; then
+  echo "VIOLATION: ${CONTRACT_FILE}: ProbeId::from_tag no longer resolves a provider's id by exact equality over ProbeId::ALL."
+  echo "    A prefix, trimmed or case-folded match would let a shell string ending in a real probe name"
+  echo "    resolve to that probe (campaign section 16, 'unknown probe ids fail closed')."
+  violations=$((violations + 1))
+fi
+
 if [[ "$violations" -gt 0 ]]; then
   echo ""
   echo "FAIL: found ${violations} line(s) breaking HORO-1511's no-authority boundary."
@@ -536,4 +632,5 @@ echo "PASS: crate::workspace and crate::planner are unreachable from ${DECIDING_
 echo "PASS: the developer-projects card has nothing to act with and still reads each member's own verdict."
 echo "PASS: ${DTO_FILE} cannot name a path type or an external-context domain type, so the model-facing types cannot serialize one."
 echo "PASS: ${RESPONSE_FILE} cannot name a path, a resource id, an action id, a policy class or a command, so a provider's bytes cannot deserialize into one."
+echo "PASS: ${PROBE_FILE} builds no process and cannot reach an action, a policy class, the executor or Autopilot, and ProbeId::from_tag stays an exact match."
 exit 0

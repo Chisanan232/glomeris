@@ -736,6 +736,12 @@ fn run_llm_plan_command(args: &[String]) {
     // shape, so defaulting to it would change what an existing invocation
     // sends — which is exactly the silent wire-contract mutation AC1 forbids.
     let mut contract_version: u32 = 1;
+    // HORO-1549: `None` is "the caller did not ask for expansion", which is a
+    // different fact from "the caller asked for one round" — the first plans
+    // exactly as HORO-1548 did and reports no expansion at all, and the second
+    // reports a one-round run that probed nothing. Collapsing them here would
+    // make a report claim a bounded run happened where none was requested.
+    let mut evidence_rounds: Option<u32> = None;
     let mut i = 0;
     while i < remaining.len() {
         match remaining[i].as_str() {
@@ -759,6 +765,34 @@ fn run_llm_plan_command(args: &[String]) {
                         eprintln!(
                             "glomeris llm-plan: unsupported --contract-version '{value}' — this \
                              build implements 1 and 2"
+                        );
+                        std::process::exit(2);
+                    }
+                }
+                i += 2;
+            }
+            "--evidence-rounds" => {
+                let Some(value) = remaining.get(i + 1) else {
+                    eprintln!(
+                        "glomeris llm-plan: --evidence-rounds requires a value (1 to {})",
+                        glomeris::planner::EvidenceBounds::MAX_ROUNDS
+                    );
+                    print_command_usage("llm-plan");
+                    std::process::exit(2);
+                };
+                // A zero is refused rather than floored to one. `for_rounds`
+                // floors it so no *library* caller can ask for a run that
+                // plans nothing, but a user who typed 0 meant something, and
+                // silently doing one round is not it.
+                match value.parse::<u32>() {
+                    Ok(v) if (1..=glomeris::planner::EvidenceBounds::MAX_ROUNDS).contains(&v) => {
+                        evidence_rounds = Some(v)
+                    }
+                    _ => {
+                        eprintln!(
+                            "glomeris llm-plan: unsupported --evidence-rounds '{value}' — this \
+                             build allows 1 to {}",
+                            glomeris::planner::EvidenceBounds::MAX_ROUNDS
                         );
                         std::process::exit(2);
                     }
@@ -801,6 +835,30 @@ fn run_llm_plan_command(args: &[String]) {
         }
     }
 
+    // Refused rather than ignored. Version 1 has no evidence-request field for
+    // a model to answer into, so there is nothing an extra round could acquire
+    // — and a caller who passed the flag and got a single-round version 1
+    // report would have no way to tell it had been dropped.
+    if let Some(rounds) = evidence_rounds {
+        if contract_version != 2 {
+            eprintln!(
+                "glomeris llm-plan: --evidence-rounds {rounds} needs --contract-version 2 — the \
+                 version 1 contract has no evidence requests to answer"
+            );
+            std::process::exit(2);
+        }
+        // The preview is round one's request, which is the truth about what is
+        // sent first and not the truth about what a multi-round run sends.
+        // Refused so the two cannot be mistaken for each other.
+        if print_payload {
+            eprintln!(
+                "glomeris llm-plan: --print-payload shows the first round's request — pass it \
+                 without --evidence-rounds, or run the expansion without it"
+            );
+            std::process::exit(2);
+        }
+    }
+
     if schema {
         // Each contract version documents its own response shape. Printing
         // version 1's example under `--contract-version 2` would hand the user
@@ -817,7 +875,14 @@ fn run_llm_plan_command(args: &[String]) {
     let actions = ActionRegistry::builtin();
 
     if contract_version == 2 {
-        run_llm_plan_v2(&candidates, &actions, plan_file, json, print_payload);
+        run_llm_plan_v2(
+            &candidates,
+            &actions,
+            plan_file,
+            json,
+            print_payload,
+            evidence_rounds,
+        );
         return;
     }
 
@@ -904,8 +969,10 @@ fn run_llm_plan_v2(
     plan_file: Option<std::path::PathBuf>,
     json: bool,
     print_payload: bool,
+    evidence_rounds: Option<u32>,
 ) {
     use glomeris::actions::llm::{provider_from_env, FilePlanProvider};
+    use glomeris::planner::EvidenceBounds;
 
     let now = std::time::SystemTime::now();
     let projection = glomeris::cli::build_workspace_projection_now(
@@ -935,25 +1002,33 @@ fn run_llm_plan_v2(
     }
 
     let impact = impact_context();
+    // One closure so the two provider paths cannot diverge on whether they
+    // expand: the choice is made once, here, from the flag.
+    let plan = |provider: &dyn glomeris::actions::llm::LlmProvider| match evidence_rounds {
+        Some(rounds) => glomeris::cli::build_workspace_plan_report_expanded(
+            &projection,
+            candidates,
+            actions,
+            provider,
+            impact,
+            EvidenceBounds::for_rounds(rounds),
+            now,
+        ),
+        None => glomeris::cli::build_workspace_plan_report(
+            &projection,
+            candidates,
+            actions,
+            provider,
+            impact,
+        ),
+    };
     let report = match plan_file {
         Some(path) => {
             let provider = FilePlanProvider { path };
-            glomeris::cli::build_workspace_plan_report(
-                &projection,
-                candidates,
-                actions,
-                &provider,
-                impact,
-            )
+            plan(&provider)
         }
         None => match provider_from_env() {
-            Ok(provider) => glomeris::cli::build_workspace_plan_report(
-                &projection,
-                candidates,
-                actions,
-                &provider,
-                impact,
-            ),
+            Ok(provider) => plan(&provider),
             Err(glomeris::actions::llm::LlmError::InvalidConfiguration(detail)) => {
                 eprintln!("glomeris llm-plan: {detail}");
                 std::process::exit(2);

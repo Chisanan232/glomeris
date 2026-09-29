@@ -43,7 +43,10 @@ use glomeris::evidence::{
     NativeCleanup, OwningTool, ProbeOutcome, ProbeReason, ProcessRef, Recoverability,
     ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
 };
-use glomeris::planner::{dto::PlannerRequestView, GraphProjection};
+use glomeris::planner::{
+    dto::{ModelGraphView, PlannerRequestView, ProbeFindingView, ProbeResultView, Reported},
+    GraphProjection, ProbeId,
+};
 use glomeris::policy::{PolicyClass, PolicyDecision, ReasonCode};
 use glomeris::workspace::{
     ExternalFact, ExternalSource, IntegrationEvidence, MachineContext, MergedState,
@@ -421,6 +424,67 @@ fn projection_with_nothing_observed() -> GraphProjection {
 /// is still written by hand exactly once, which is the property this pin
 /// exists for: a new DTO field cannot reach a provider until someone adds it
 /// here.
+/// One answered evidence request of every shape the loop can produce
+/// (HORO-1549).
+///
+/// Every payload is taken from `view` itself rather than built beside it. That
+/// is deliberate: a hand-written finding could describe a `BranchView` the
+/// projection no longer produces, and the pin would go on passing while the
+/// real payload drifted. Sourcing them from the snapshot means the fixture
+/// cannot be more correct than the thing it is testing.
+///
+/// `tool_liveness` and `unavailable` have no counterpart in the graph, so they
+/// are the two that are constructed — the first is a bare `Reported<bool>`, the
+/// second carries a closed reason tag.
+fn probe_findings(view: &ModelGraphView) -> Vec<ProbeResultView> {
+    let worktree = &view.repositories[0].worktrees[0];
+    let answered = |probe: ProbeId, finding: ProbeFindingView| ProbeResultView {
+        round: 2,
+        probe_id: probe.tag(),
+        // An alias the projection already issued. A probe about anything else
+        // never runs, so no other subject can reach a finding.
+        subject_ref: worktree.evidence_ref.clone(),
+        finding,
+    };
+
+    vec![
+        answered(
+            ProbeId::GitBranchState,
+            ProbeFindingView::BranchState(Box::new(worktree.branch.clone())),
+        ),
+        answered(
+            ProbeId::GitPatchEquivalence,
+            ProbeFindingView::PatchEquivalence(Box::new(worktree.branch.integration.clone())),
+        ),
+        answered(
+            ProbeId::ProcessActivity,
+            ProbeFindingView::Activity(worktree.activity.clone()),
+        ),
+        answered(
+            ProbeId::ToolLiveness,
+            ProbeFindingView::ToolLiveness(Reported::observed(true)),
+        ),
+        answered(
+            ProbeId::GithubPrState,
+            ProbeFindingView::PullRequest(worktree.pull_request.clone()),
+        ),
+        answered(
+            ProbeId::JiraTaskState,
+            ProbeFindingView::Task(worktree.task.clone()),
+        ),
+        answered(
+            ProbeId::WorkspaceHistorySummary,
+            ProbeFindingView::WorkflowHistory(view.workflow_history.clone()),
+        ),
+        answered(
+            ProbeId::ProcessActivity,
+            ProbeFindingView::Unavailable {
+                reason: "tool_absent",
+            },
+        ),
+    ]
+}
+
 fn reported(prefix: &str) -> Vec<String> {
     vec![
         prefix.to_string(),
@@ -480,10 +544,83 @@ fn docker_lifecycle_view(prefix: &str) -> Vec<String> {
 /// hides: the only paths this adds are the two the envelope itself introduces,
 /// and every graph key keeps being pinned under its new prefix.
 fn pinned_request_paths() -> BTreeSet<String> {
-    let mut paths: BTreeSet<String> = ["contract_version".to_string(), "graph".to_string()]
-        .into_iter()
-        .collect();
+    let mut paths: BTreeSet<String> = [
+        "contract_version".to_string(),
+        "graph".to_string(),
+        // HORO-1549. Always present, always an array, `[]` on the first round.
+        // A key that appeared only when a later round had findings would be a
+        // key this pin could not hold.
+        "probe_results".to_string(),
+    ]
+    .into_iter()
+    .collect();
     paths.extend(pinned_paths().iter().map(|path| format!("graph.{path}")));
+    paths
+}
+
+/// Every key path a populated `probe_results` may serialize (HORO-1549).
+///
+/// Hand-written for the same reason the graph's is: a new variant of
+/// `ProbeFindingView`, or a new field on one, has to be looked at by somebody
+/// and decided to be sendable before this test goes green again.
+///
+/// The payload paths reuse the graph pin under a new prefix rather than being
+/// re-listed. That is the claim worth pinning, not a shortcut: a probe answer
+/// is the same view the snapshot already sends, so an extra round cannot widen
+/// what leaves this machine. If a finding ever carried a shape the graph does
+/// not, this would fail, which is the point.
+fn pinned_probe_result_paths() -> BTreeSet<String> {
+    let entry = "probe_results[]";
+    let mut paths: BTreeSet<String> = [
+        entry.to_string(),
+        format!("{entry}.round"),
+        format!("{entry}.probe_id"),
+        format!("{entry}.subject_ref"),
+        format!("{entry}.finding"),
+        // The only field any variant adds that the graph has no counterpart
+        // for — a closed `ProbeReason` tag, never a message.
+        format!("{entry}.finding.unavailable"),
+        format!("{entry}.finding.unavailable.reason"),
+    ]
+    .into_iter()
+    .collect();
+
+    let graph = pinned_paths();
+    let under = |variant: &str, prefix: &str| -> Vec<String> {
+        let mut out = vec![format!("{entry}.finding.{variant}")];
+        out.extend(graph.iter().filter_map(|path| {
+            path.strip_prefix(&format!("{prefix}."))
+                .map(|rest| format!("{entry}.finding.{variant}.{rest}"))
+        }));
+        out
+    };
+
+    let worktree = "repositories[].worktrees[]";
+    paths.extend(under("branch_state", &format!("{worktree}.branch")));
+    paths.extend(under("activity", &format!("{worktree}.activity")));
+    paths.extend(under("pull_request", &format!("{worktree}.pull_request")));
+    paths.extend(under("task", &format!("{worktree}.task")));
+    paths.extend(under("workflow_history", "workflow_history"));
+    // `patch_equivalence` is the flattened subset of `branch`, so it reuses the
+    // branch pin filtered to the seven integration names rather than a second
+    // hand-written list of them.
+    paths.insert(format!("{entry}.finding.patch_equivalence"));
+    for field in [
+        "patch_equivalence",
+        "equivalence_method",
+        "commits_unique_to_head",
+        "commits_equivalent_elsewhere",
+        "commits_unclassified",
+        "head_tip_age_days",
+        "comparison_tip_age_days",
+    ] {
+        paths.extend(reported(&format!(
+            "{entry}.finding.patch_equivalence.{field}"
+        )));
+    }
+    // `tool_liveness` is a bare `Reported<bool>` — no wrapper object of its own.
+    paths.extend(reported(&format!("{entry}.finding.tool_liveness")));
+
     paths
 }
 
@@ -677,6 +814,152 @@ fn the_model_payload_key_set_is_pinned() {
              the payload's shape carry information of its own: {removed:#?}"
         );
     }
+}
+
+/// AC6 and AC7, for the round that carries evidence. A populated
+/// `probe_results` is pinned key by key, on the same two projections and
+/// against the same helper the first round is pinned against.
+///
+/// The claim being pinned is narrower than "these keys are allowed". It is that
+/// a later round sends *the shapes the first round already sent*: every finding
+/// path here is the graph's own pin re-prefixed, so a probe answer cannot widen
+/// what leaves this machine. If a finding ever grew a field the snapshot has no
+/// counterpart for, `pinned_probe_result_paths` would stop covering it and this
+/// would fail — which is the only reason to build the pin that way rather than
+/// listing the paths again.
+#[test]
+fn the_key_set_a_probe_finding_adds_is_pinned() {
+    let mut pinned = pinned_request_paths();
+    pinned.extend(pinned_probe_result_paths());
+
+    for (label, projection) in [
+        ("everything observed", projection()),
+        ("nothing observed", projection_with_nothing_observed()),
+    ] {
+        let request = PlannerRequestView::of(projection.view.clone())
+            .with_probe_results(probe_findings(&projection.view));
+        let actual = key_paths(&serde_json::to_value(&request).expect("the request serializes"));
+
+        let added: Vec<&String> = actual.difference(&pinned).collect();
+        assert!(
+            added.is_empty(),
+            "[{label}] a probe answer sends keys the pin does not list. A later \
+             round is the one place the payload can grow without anybody \
+             editing the graph DTO, so each of these is a decision to send \
+             something more off this machine: {added:#?}"
+        );
+
+        let removed: Vec<&String> = pinned.difference(&actual).collect();
+        assert!(
+            removed.is_empty(),
+            "[{label}] these keys are pinned but no longer serialized. A \
+             finding that quietly stops carrying a field makes the shape of an \
+             answer carry information of its own: {removed:#?}"
+        );
+
+        // Non-vacuity. Every variant of `ProbeFindingView` is exercised, so
+        // the equality above cannot be satisfied by a fixture that answered
+        // one probe eight times.
+        let variants: BTreeSet<&str> = actual
+            .iter()
+            .filter_map(|path| path.strip_prefix("probe_results[].finding."))
+            .filter(|rest| !rest.contains('.'))
+            .collect();
+        assert_eq!(
+            variants.len(),
+            8,
+            "[{label}] the fixture exercises {} finding shapes, not all eight: \
+             {variants:?}",
+            variants.len()
+        );
+        for required in [
+            "branch_state",
+            "patch_equivalence",
+            "activity",
+            "tool_liveness",
+            "pull_request",
+            "task",
+            "workflow_history",
+            "unavailable",
+        ] {
+            assert!(
+                variants.contains(required),
+                "[{label}] no finding of shape {required} was pinned"
+            );
+        }
+        // And every probe this build implements is represented, so a new
+        // `ProbeId` whose answer has an unpinned shape cannot slip past.
+        let probes: BTreeSet<&str> = request
+            .probe_results
+            .iter()
+            .map(|result| result.probe_id)
+            .collect();
+        for probe in ProbeId::ALL {
+            assert!(
+                probes.contains(probe.tag()),
+                "[{label}] {} answers nothing in this fixture, so whatever \
+                 shape its finding takes is unpinned",
+                probe.tag()
+            );
+        }
+
+        // `ProbeFindingView::tag` names the shape for the *local* report, and
+        // is pinned here against the wire spelling so a report and a payload
+        // cannot end up calling the same finding two different things.
+        for result in &request.probe_results {
+            let value = serde_json::to_value(&result.finding).expect("a finding serializes");
+            let key = value
+                .as_object()
+                .and_then(|object| object.keys().next().cloned())
+                .expect("a finding serializes as one tagged key");
+            assert_eq!(
+                key,
+                result.finding.tag(),
+                "[{label}] a finding is spelled {key} on the wire and {} locally",
+                result.finding.tag()
+            );
+            assert_eq!(
+                result.finding.unavailable_reason().is_some(),
+                key == "unavailable",
+                "[{label}] {key} disagrees with itself about whether it answered"
+            );
+        }
+    }
+}
+
+/// AC9 again, for the round that carries evidence. The markers the first-round
+/// payload withholds stay withheld when a probe re-reads the same worktree —
+/// including the branch name and the merge axis, which a branch-state finding
+/// is precisely a re-read of.
+#[test]
+fn no_local_identity_reaches_a_probe_finding() {
+    let projection = projection();
+    let request = PlannerRequestView::of(projection.view.clone())
+        .with_probe_results(probe_findings(&projection.view));
+    let body = serde_json::to_string(&request).expect("the request serializes");
+
+    for marker in [
+        ACCOUNT_MARKER,
+        BRANCH_NAME,
+        MERGE_AXIS,
+        PROCESS_COMMAND,
+        CONTAINER_MARKER,
+        IMAGE_MARKER,
+    ] {
+        assert!(
+            !body.contains(marker),
+            "a probe finding carried {marker} off this machine"
+        );
+    }
+    assert!(
+        !body.contains('/'),
+        "a path separator reached a round that carried evidence: {body}"
+    );
+    assert!(!body.contains(&PROCESS_PID.to_string()));
+
+    // Not vacuous: the findings really are in the payload that was searched.
+    assert!(body.contains("\"probe_id\":\"git_branch_state\""));
+    assert!(body.contains("\"branch_state\""));
 }
 
 /// The unanswered variant really is unanswered. Without this, the equality

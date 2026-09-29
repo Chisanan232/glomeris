@@ -2,12 +2,15 @@
 //! alias table on this side of the wire.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::contract::ProbeSubjectKind;
 use super::dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
-    Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
-    WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    PatchEquivalenceView, Reported, RepositoryView, ResourceView, UnplacedResourceView,
+    WorkflowHistoryView, WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF,
+    WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 use crate::actions::llm::{completeness_tag, regenerability_tag};
 use crate::actions::ActionRegistry;
@@ -15,17 +18,23 @@ use crate::evidence::{DockerLifecycle, Evidence, ProbeOutcome, ResourceId};
 use crate::policy::PolicyDecision;
 use crate::workspace::{
     ActivityFacts, BranchLifecycle, ExternalFact, IntegrationEvidence, PatchEquivalence,
-    ResourceNode, UpstreamState, WorkspaceEvidenceGraph,
+    ResourceNode, UpstreamState, WorkflowHistorySummary, WorkspaceEvidenceGraph,
 };
 
-/// A projection plus the local table needed to read its answers back.
+/// A projection plus the local tables needed to read its answers back.
 ///
-/// The two halves exist separately on purpose: `view` is serializable and
-/// `aliases` is not, so there is no code path that sends both.
+/// The halves exist separately on purpose: `view` is serializable and the two
+/// tables are not, so there is no code path that sends both.
 #[derive(Debug, Clone)]
 pub struct GraphProjection {
     pub view: ModelGraphView,
     pub aliases: AliasTable,
+    /// What each issued reference names locally (HORO-1549). A superset of
+    /// [`Self::aliases`] in coverage and a different question in kind: that one
+    /// answers "which resource", this one answers "which *thing*, of the five
+    /// kinds there are" — including the machine and a repository, which are
+    /// citable and are not resources.
+    pub subjects: SubjectTable,
 }
 
 /// Maps the opaque wire ids handed out by one projection back to the real
@@ -72,6 +81,104 @@ impl AliasTable {
     }
 }
 
+/// The local thing one issued evidence reference names (HORO-1549).
+///
+/// # Why this is not just [`AliasTable`] with more variants
+///
+/// An alias resolves to a resource so that policy can be re-run against it.
+/// This resolves to whatever a reference names — including two things that are
+/// citable and are not resources at all — so that a probe request can be
+/// *refused for being about the wrong shape of thing* before any probe runs.
+/// [`super::ProbeId::subject_kinds`] states which kinds each probe can answer
+/// for; [`Self::kind`] is the other half of that check.
+///
+/// # Each variant carries what a probe would need and nothing more
+///
+/// A working tree carries its root, because every probe that accepts one
+/// (`git_branch_state`, `git_patch_equivalence`, `process_activity`,
+/// `github_pr_state`, `jira_task_state`) starts from a directory. It
+/// deliberately does not carry the branch name or the branch state already
+/// collected for the projection: this table answers *which thing*, and a probe
+/// exists to collect evidence about it. Caching last round's answer here would
+/// make a re-plan able to return stale facts while claiming to have probed —
+/// and campaign section 16 is explicit that verifying means new evidence.
+///
+/// Not [`serde::Serialize`], and it must stay that way: these are the real
+/// local paths, which is exactly what the opaque aliases exist to keep off the
+/// wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeSubject {
+    /// The machine-level facts. No probe accepts it.
+    Machine,
+    /// The local workflow baseline.
+    WorkflowHistory,
+    /// One repository, identified by the git directory its working trees
+    /// share. No probe accepts it — see [`super::ProbeId::subject_kinds`].
+    Repository { common_dir: PathBuf },
+    /// One git working tree, identified by its root.
+    Worktree { root: PathBuf },
+    /// One storage resource.
+    Resource { resource: ResourceId },
+}
+
+impl ProbeSubject {
+    /// Which of the five kinds this is.
+    pub fn kind(&self) -> ProbeSubjectKind {
+        match self {
+            Self::Machine => ProbeSubjectKind::Machine,
+            Self::WorkflowHistory => ProbeSubjectKind::WorkflowHistory,
+            Self::Repository { .. } => ProbeSubjectKind::Repository,
+            Self::Worktree { .. } => ProbeSubjectKind::Worktree,
+            Self::Resource { .. } => ProbeSubjectKind::Resource,
+        }
+    }
+}
+
+/// What every reference one projection issued names locally.
+///
+/// Request-scoped for the same reason [`AliasTable`] is, and built in the same
+/// single traversal so the two cannot disagree. Keyed by the issued reference
+/// string, which is the only handle a model ever holds.
+#[derive(Debug, Clone, Default)]
+pub struct SubjectTable {
+    subjects: Vec<(String, ProbeSubject)>,
+}
+
+impl SubjectTable {
+    /// What a reference names, or `None` for a reference this projection never
+    /// issued.
+    ///
+    /// `None` is a refusal, not a fallback. A model naming `workspace_9` in a
+    /// two-worktree request has hallucinated or is being replayed against
+    /// another projection, and there is no working tree to substitute.
+    pub fn resolve(&self, reference: &str) -> Option<&ProbeSubject> {
+        self.subjects
+            .iter()
+            .find(|(issued, _)| issued == reference)
+            .map(|(_, subject)| subject)
+    }
+
+    /// The kind of thing a reference names, or `None` if it was never issued.
+    pub fn kind_of(&self, reference: &str) -> Option<ProbeSubjectKind> {
+        self.resolve(reference).map(ProbeSubject::kind)
+    }
+
+    /// Every reference this table holds, in the order they were handed out.
+    pub fn issued(&self) -> impl Iterator<Item = &str> {
+        self.subjects
+            .iter()
+            .map(|(reference, _)| reference.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.subjects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.subjects.is_empty()
+    }
+}
+
 /// Hands out `resource_N` / `workspace_N` / `repo_N` in one traversal, so
 /// two callers cannot disagree about which alias belongs to what.
 struct AliasIssuer {
@@ -79,32 +186,70 @@ struct AliasIssuer {
     next_worktree: usize,
     next_repository: usize,
     table: AliasTable,
+    subjects: SubjectTable,
 }
 
 impl AliasIssuer {
     fn new() -> Self {
+        // The machine and the workflow baseline are not issued during the
+        // traversal — their references are fixed constants and
+        // `machine_view`/`workflow_history_view` always emit them — so they are
+        // seeded here. Omitting them would leave two references the payload
+        // carries with no subject, and a probe asked about either would be
+        // refused as *unknown* rather than as *the wrong kind*, which is a
+        // different and less honest answer.
+        let subjects = SubjectTable {
+            subjects: vec![
+                (MACHINE_EVIDENCE_REF.to_string(), ProbeSubject::Machine),
+                (
+                    WORKFLOW_HISTORY_EVIDENCE_REF.to_string(),
+                    ProbeSubject::WorkflowHistory,
+                ),
+            ],
+        };
         Self {
             next_resource: 0,
             next_worktree: 0,
             next_repository: 0,
             table: AliasTable::default(),
+            subjects,
         }
     }
 
-    fn repository(&mut self) -> String {
+    fn repository(&mut self, common_dir: &Path) -> String {
         self.next_repository += 1;
-        format!("repo_{}", self.next_repository)
+        let alias = format!("repo_{}", self.next_repository);
+        self.subjects.subjects.push((
+            alias.clone(),
+            ProbeSubject::Repository {
+                common_dir: common_dir.to_path_buf(),
+            },
+        ));
+        alias
     }
 
-    fn worktree(&mut self) -> String {
+    fn worktree(&mut self, root: &Path) -> String {
         self.next_worktree += 1;
-        format!("workspace_{}", self.next_worktree)
+        let alias = format!("workspace_{}", self.next_worktree);
+        self.subjects.subjects.push((
+            alias.clone(),
+            ProbeSubject::Worktree {
+                root: root.to_path_buf(),
+            },
+        ));
+        alias
     }
 
     fn resource(&mut self, resource: &ResourceId) -> String {
         self.next_resource += 1;
         let alias = format!("resource_{}", self.next_resource);
         self.table.resources.push((alias.clone(), resource.clone()));
+        self.subjects.subjects.push((
+            alias.clone(),
+            ProbeSubject::Resource {
+                resource: resource.clone(),
+            },
+        ));
         alias
     }
 }
@@ -136,7 +281,7 @@ impl GraphProjection {
             .repositories
             .iter()
             .map(|repo| {
-                let evidence_ref = issuer.repository();
+                let evidence_ref = issuer.repository(&repo.common_dir);
                 RepositoryView {
                     evidence_ref,
                     worktree_count: repo.worktree_count(),
@@ -144,7 +289,7 @@ impl GraphProjection {
                         .worktrees
                         .iter()
                         .map(|worktree| {
-                            let evidence_ref = issuer.worktree();
+                            let evidence_ref = issuer.worktree(&worktree.root);
                             WorktreeView {
                                 evidence_ref,
                                 linked: worktree.linked,
@@ -193,9 +338,10 @@ impl GraphProjection {
                 repositories,
                 global_resources,
                 unplaced_resources,
-                workflow_history: workflow_history_view(graph),
+                workflow_history: workflow_history_view(&graph.history),
             },
             aliases: issuer.table,
+            subjects: issuer.subjects,
         }
     }
 
@@ -279,6 +425,19 @@ impl GraphProjection {
             )
             .find(|resource| resource.evidence_ref == alias)
     }
+
+    /// What kind of thing an issued reference names, or `None` if this
+    /// projection never issued it.
+    ///
+    /// The lookup [`super::validate`] needs to refuse a probe request whose
+    /// subject is the wrong *shape* — `git_branch_state` about `repo_1`, say.
+    /// It reads the kind off [`Self::subjects`] rather than off the spelling of
+    /// the reference, because a check on a `"workspace_"` prefix would make the
+    /// naming scheme load-bearing: renaming an alias would silently widen what
+    /// probes accept.
+    pub fn probe_subject_kind(&self, reference: &str) -> Option<ProbeSubjectKind> {
+        self.subjects.kind_of(reference)
+    }
 }
 
 /// Which action ids are on offer per resource, keyed by the resource's own
@@ -309,8 +468,16 @@ fn machine_view(graph: &WorkspaceEvidenceGraph) -> MachineView {
     }
 }
 
-fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView {
-    match &graph.history {
+/// One workflow baseline as the model sees it.
+///
+/// Takes the outcome rather than the graph so the same projection serves a
+/// freshly run `workspace_history_summary` probe (HORO-1549), which has an
+/// outcome and no graph. Keeping one function means a probe result and a
+/// snapshot cannot describe the same baseline differently.
+pub(super) fn workflow_history_view(
+    history: &ProbeOutcome<WorkflowHistorySummary>,
+) -> WorkflowHistoryView {
+    match history {
         ProbeOutcome::Observed(summary) => WorkflowHistoryView {
             evidence_ref: WORKFLOW_HISTORY_EVIDENCE_REF,
             mode: Reported::observed(summary.mode.tag()),
@@ -332,82 +499,75 @@ fn workflow_history_view(graph: &WorkspaceEvidenceGraph) -> WorkflowHistoryView 
     }
 }
 
-/// The integration half of [`BranchView`], assembled apart from the rest
-/// because `branch_view`'s tuple was already at the edge of legibility and
-/// seven more elements would have put the projection's correctness in the
-/// order of a tuple's fields.
-struct IntegrationFields {
-    patch_equivalence: Reported<&'static str>,
-    equivalence_method: Reported<&'static str>,
-    commits_unique_to_head: Reported<u32>,
-    commits_equivalent_elsewhere: Reported<u32>,
-    commits_unclassified: Reported<u32>,
-    head_tip_age_days: Reported<u64>,
-    comparison_tip_age_days: Reported<u64>,
+/// Every field unavailable for one reason — what the branch probe not
+/// answering leaves behind.
+///
+/// `pub(super)` because a `git_patch_equivalence` evidence request that the
+/// probe could not answer has to produce the same shape, and a second
+/// hand-written set of seven unavailable fields would be a second chance to
+/// get one of them wrong.
+pub(super) fn patch_equivalence_unavailable(reason: &'static str) -> PatchEquivalenceView {
+    PatchEquivalenceView {
+        patch_equivalence: Reported::unavailable(reason),
+        equivalence_method: Reported::unavailable(reason),
+        commits_unique_to_head: Reported::unavailable(reason),
+        commits_equivalent_elsewhere: Reported::unavailable(reason),
+        commits_unclassified: Reported::unavailable(reason),
+        head_tip_age_days: Reported::unavailable(reason),
+        comparison_tip_age_days: Reported::unavailable(reason),
+    }
 }
 
-impl IntegrationFields {
-    /// Every field unavailable for one reason — what the branch probe not
-    /// answering leaves behind.
-    fn unavailable(reason: &'static str) -> Self {
-        Self {
-            patch_equivalence: Reported::unavailable(reason),
-            equivalence_method: Reported::unavailable(reason),
-            commits_unique_to_head: Reported::unavailable(reason),
-            commits_equivalent_elsewhere: Reported::unavailable(reason),
-            commits_unclassified: Reported::unavailable(reason),
-            head_tip_age_days: Reported::unavailable(reason),
-            comparison_tip_age_days: Reported::unavailable(reason),
-        }
-    }
-
-    fn of(integration: &IntegrationEvidence, now: SystemTime) -> Self {
-        // `Unknown` collapses into `unavailable` carrying its reason rather
-        // than becoming an observed `"unknown"` string. Two layers of
-        // not-knowing on one field is one layer too many for a reader to
-        // keep straight, and this way the reason survives — which is the
-        // only part of an unknown that is worth anything.
-        let (equivalence, method) = match integration.equivalence {
-            PatchEquivalence::Equivalent(method) => (
-                Reported::observed("equivalent"),
-                Reported::observed(method.tag()),
-            ),
-            PatchEquivalence::NotEquivalent => (
-                Reported::observed("not_equivalent"),
-                // No method, because nothing was established. Not
-                // `failed`: both methods ran and agreed.
-                Reported::unavailable("not_attempted"),
-            ),
-            PatchEquivalence::NotApplicable => (
-                Reported::observed("not_applicable"),
-                Reported::unavailable("not_attempted"),
-            ),
-            PatchEquivalence::Unknown(reason) => (
-                Reported::unavailable(reason.tag()),
-                Reported::unavailable(reason.tag()),
-            ),
-        };
-        let (unique, equivalent, unclassified) = match &integration.divergence {
-            ProbeOutcome::Observed(divergence) => (
-                Reported::observed(divergence.unique_commits),
-                Reported::observed(divergence.equivalent_commits),
-                Reported::observed(divergence.unclassified_commits),
-            ),
-            ProbeOutcome::Unavailable(reason) => (
-                Reported::unavailable(reason.tag()),
-                Reported::unavailable(reason.tag()),
-                Reported::unavailable(reason.tag()),
-            ),
-        };
-        Self {
-            patch_equivalence: equivalence,
-            equivalence_method: method,
-            commits_unique_to_head: unique,
-            commits_equivalent_elsewhere: equivalent,
-            commits_unclassified: unclassified,
-            head_tip_age_days: tip_age_days(&integration.tip_committed_at, now),
-            comparison_tip_age_days: tip_age_days(&integration.comparison_tip_committed_at, now),
-        }
+/// What a measured [`IntegrationEvidence`] says, as the model sees it.
+pub(super) fn patch_equivalence_view(
+    integration: &IntegrationEvidence,
+    now: SystemTime,
+) -> PatchEquivalenceView {
+    // `Unknown` collapses into `unavailable` carrying its reason rather
+    // than becoming an observed `"unknown"` string. Two layers of
+    // not-knowing on one field is one layer too many for a reader to
+    // keep straight, and this way the reason survives — which is the
+    // only part of an unknown that is worth anything.
+    let (equivalence, method) = match integration.equivalence {
+        PatchEquivalence::Equivalent(method) => (
+            Reported::observed("equivalent"),
+            Reported::observed(method.tag()),
+        ),
+        PatchEquivalence::NotEquivalent => (
+            Reported::observed("not_equivalent"),
+            // No method, because nothing was established. Not
+            // `failed`: both methods ran and agreed.
+            Reported::unavailable("not_attempted"),
+        ),
+        PatchEquivalence::NotApplicable => (
+            Reported::observed("not_applicable"),
+            Reported::unavailable("not_attempted"),
+        ),
+        PatchEquivalence::Unknown(reason) => (
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+        ),
+    };
+    let (unique, equivalent, unclassified) = match &integration.divergence {
+        ProbeOutcome::Observed(divergence) => (
+            Reported::observed(divergence.unique_commits),
+            Reported::observed(divergence.equivalent_commits),
+            Reported::observed(divergence.unclassified_commits),
+        ),
+        ProbeOutcome::Unavailable(reason) => (
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+            Reported::unavailable(reason.tag()),
+        ),
+    };
+    PatchEquivalenceView {
+        patch_equivalence: equivalence,
+        equivalence_method: method,
+        commits_unique_to_head: unique,
+        commits_equivalent_elsewhere: equivalent,
+        commits_unclassified: unclassified,
+        head_tip_age_days: tip_age_days(&integration.tip_committed_at, now),
+        comparison_tip_age_days: tip_age_days(&integration.comparison_tip_committed_at, now),
     }
 }
 
@@ -426,7 +586,7 @@ fn tip_age_days(tip: &ProbeOutcome<SystemTime>, now: SystemTime) -> Reported<u64
     }
 }
 
-fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
+pub(super) fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
     let (upstream_state, ahead, behind, merged_state, comparison_known, detached) =
         match &lifecycle.branch {
             ProbeOutcome::Observed(state) => {
@@ -475,8 +635,8 @@ fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
             ),
         };
     let integration = match &lifecycle.branch {
-        ProbeOutcome::Observed(state) => IntegrationFields::of(&state.integration, now),
-        ProbeOutcome::Unavailable(reason) => IntegrationFields::unavailable(reason.tag()),
+        ProbeOutcome::Observed(state) => patch_equivalence_view(&state.integration, now),
+        ProbeOutcome::Unavailable(reason) => patch_equivalence_unavailable(reason.tag()),
     };
 
     BranchView {
@@ -489,17 +649,11 @@ fn branch_view(lifecycle: &BranchLifecycle, now: SystemTime) -> BranchView {
         merged_state,
         merge_comparison_known: comparison_known,
         detached_head: detached,
-        patch_equivalence: integration.patch_equivalence,
-        equivalence_method: integration.equivalence_method,
-        commits_unique_to_head: integration.commits_unique_to_head,
-        commits_equivalent_elsewhere: integration.commits_equivalent_elsewhere,
-        commits_unclassified: integration.commits_unclassified,
-        head_tip_age_days: integration.head_tip_age_days,
-        comparison_tip_age_days: integration.comparison_tip_age_days,
+        integration,
     }
 }
 
-fn activity_view(activity: &ActivityFacts) -> ActivityView {
+pub(super) fn activity_view(activity: &ActivityFacts) -> ActivityView {
     ActivityView {
         state: activity.state.tag(),
         observed_process_count: activity.observed_processes.len(),
@@ -507,7 +661,11 @@ fn activity_view(activity: &ActivityFacts) -> ActivityView {
     }
 }
 
-fn external_view<T, F>(fact: &ExternalFact<T>, tag: F, now: SystemTime) -> ExternalFactView
+pub(super) fn external_view<T, F>(
+    fact: &ExternalFact<T>,
+    tag: F,
+    now: SystemTime,
+) -> ExternalFactView
 where
     F: Fn(&T) -> &'static str,
 {
@@ -599,6 +757,7 @@ mod tests {
         MergedState, PullRequestState, TaskState, WorkflowHistorySummary, WorkflowMode,
         WorkflowSupport, WorkspaceSurvey, WorktreeBranchState,
     };
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
@@ -865,6 +1024,191 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
+    // Subject table (HORO-1549)
+    // ---------------------------------------------------------------
+
+    /// The cross-check that keeps the two halves from drifting.
+    ///
+    /// [`GraphProjection::issued_evidence_refs`] deliberately walks the
+    /// finished view, because a reference counts as issued only once it reached
+    /// the payload. [`SubjectTable`] cannot be built that way — only the
+    /// traversal sees the local nodes and their paths — so it is built from the
+    /// issuer, and the two sources have to be held equal by a test rather than
+    /// by construction. A reference in the view with no subject would be
+    /// refused as *unknown*; a subject for a reference the view never carried
+    /// would let a probe run against something the model was never shown.
+    #[test]
+    fn every_issued_reference_has_exactly_one_subject_and_vice_versa() {
+        let target = temp_cargo_project("subjects");
+        let target_str = target.to_str().expect("utf-8 temp path").to_string();
+        let repo_root = target
+            .parent()
+            .expect("target has a parent")
+            .to_str()
+            .expect("utf-8")
+            .to_string();
+        let candidates = vec![
+            candidate(
+                &target_str,
+                in_repo(&repo_root, &format!("{repo_root}/.git")),
+            ),
+            candidate("/w/b/target", in_repo("/w/b", "/w/.git")),
+            candidate("/opt/homebrew/cache", ProbeOutcome::Observed(None)),
+        ];
+        let projection = project(&candidates);
+
+        let issued: BTreeSet<&str> = projection.issued_evidence_refs();
+        let subjects: BTreeSet<&str> = projection.subjects.issued().collect();
+        assert_eq!(
+            issued, subjects,
+            "the view and the subject table disagree about what was issued"
+        );
+
+        // Non-vacuity: this fixture really does carry all five kinds, so the
+        // equality above is over a populated set and not over two empties.
+        let kinds: BTreeSet<&str> = issued
+            .iter()
+            .map(|reference| {
+                projection
+                    .probe_subject_kind(reference)
+                    .unwrap_or_else(|| panic!("{reference} has no subject"))
+                    .tag()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([
+                "machine",
+                "workflow_history",
+                "repository",
+                "worktree",
+                "resource",
+            ])
+        );
+    }
+
+    /// A subject resolves to the real local thing — which is why the table may
+    /// never be serialized, and why the check is worth making: if a working
+    /// tree's subject held no path, every kind check would still pass and the
+    /// probe runner would have nothing to run against.
+    #[test]
+    fn a_subject_carries_the_real_local_identity_the_alias_hides() {
+        let candidates = vec![candidate("/w/a/target", in_repo("/w/a", "/w/.git"))];
+        let projection = project(&candidates);
+
+        assert_eq!(
+            projection.subjects.resolve("repo_1"),
+            Some(&ProbeSubject::Repository {
+                common_dir: PathBuf::from("/w/.git")
+            })
+        );
+        assert_eq!(
+            projection.subjects.resolve("workspace_1"),
+            Some(&ProbeSubject::Worktree {
+                root: PathBuf::from("/w/a")
+            })
+        );
+        match projection
+            .subjects
+            .resolve("resource_1")
+            .expect("resource_1 was issued")
+        {
+            ProbeSubject::Resource { resource } => assert_eq!(
+                Some(resource),
+                projection.aliases.resolve("resource_1"),
+                "the two tables name different resources for one alias"
+            ),
+            other => panic!("resource_1 resolved to {other:?}"),
+        }
+        assert_eq!(
+            projection.subjects.resolve(MACHINE_EVIDENCE_REF),
+            Some(&ProbeSubject::Machine)
+        );
+        assert_eq!(
+            projection.subjects.resolve(WORKFLOW_HISTORY_EVIDENCE_REF),
+            Some(&ProbeSubject::WorkflowHistory)
+        );
+    }
+
+    /// A reference this projection never issued has no kind, so a probe about
+    /// it is refused for being unknown rather than resolved to the nearest
+    /// plausible subject.
+    #[test]
+    fn a_reference_this_projection_never_issued_has_no_subject() {
+        let projection = project(&[candidate("/w/a/target", in_repo("/w/a", "/w/.git"))]);
+
+        for bogus in [
+            "workspace_2",
+            "repo_2",
+            "resource_2",
+            "workspace_0",
+            "WORKSPACE_1",
+            "workspace_history",
+            "/w/a",
+            "",
+        ] {
+            assert!(
+                projection.probe_subject_kind(bogus).is_none(),
+                "{bogus:?} resolved to a subject"
+            );
+        }
+        // Discriminating: the three this projection did issue all resolve.
+        for real in ["workspace_1", "repo_1", "resource_1"] {
+            assert!(projection.probe_subject_kind(real).is_some(), "{real}");
+        }
+    }
+
+    /// No reference names two subjects.
+    ///
+    /// Worth its own test because the previous one cannot catch this:
+    /// [`GraphProjection::issued_evidence_refs`] returns a set, so a duplicate
+    /// reference would be deduplicated there and the two sides would still
+    /// compare equal. [`SubjectTable`] is a list and [`SubjectTable::resolve`]
+    /// takes the first match, so a second `workspace_1` would be silently
+    /// unreachable — which is exactly what per-repository alias counters would
+    /// produce. This fixture spans two repositories with two working trees
+    /// each, so a reset counter fails it.
+    #[test]
+    fn no_issued_reference_names_two_subjects() {
+        let candidates = vec![
+            candidate("/a/w1/target", in_repo("/a/w1", "/a/.git")),
+            candidate("/a/w2/target", in_repo("/a/w2", "/a/.git")),
+            candidate("/b/w1/target", in_repo("/b/w1", "/b/.git")),
+            candidate("/b/w2/target", in_repo("/b/w2", "/b/.git")),
+        ];
+        let projection = project(&candidates);
+
+        let issued: Vec<&str> = projection.subjects.issued().collect();
+        let distinct: BTreeSet<&str> = issued.iter().copied().collect();
+        assert_eq!(
+            issued.len(),
+            distinct.len(),
+            "a reference is recorded twice: {issued:?}"
+        );
+
+        // Non-vacuity: the fixture really is two repositories of two working
+        // trees, which is the shape a per-repository counter would collide on.
+        assert_eq!(projection.view.repositories.len(), 2);
+        for repository in &projection.view.repositories {
+            assert_eq!(repository.worktrees.len(), 2);
+        }
+        // 2 repositories + 4 working trees + 4 resources + machine + history.
+        assert_eq!(projection.subjects.len(), 12);
+        assert!(!projection.subjects.is_empty());
+
+        // And every working tree resolves to its own root, so the four
+        // references are four different places rather than one repeated.
+        let roots: BTreeSet<PathBuf> = issued
+            .iter()
+            .filter_map(|reference| match projection.subjects.resolve(reference) {
+                Some(ProbeSubject::Worktree { root }) => Some(root.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(roots.len(), 4, "{roots:?}");
+    }
+
+    // ---------------------------------------------------------------
     // Unknown is not false
     // ---------------------------------------------------------------
 
@@ -1056,17 +1400,23 @@ mod tests {
         );
 
         let branch = &projection.view.repositories[0].worktrees[0].branch;
-        assert_eq!(branch.patch_equivalence.value, Some("equivalent"));
         assert_eq!(
-            branch.equivalence_method.value,
+            branch.integration.patch_equivalence.value,
+            Some("equivalent")
+        );
+        assert_eq!(
+            branch.integration.equivalence_method.value,
             Some("content_identical"),
             "the two methods are not equally strong, so which one answered is sent"
         );
-        assert_eq!(branch.commits_unique_to_head.value, Some(2));
-        assert_eq!(branch.commits_equivalent_elsewhere.value, Some(1));
-        assert_eq!(branch.commits_unclassified.value, Some(0));
-        assert_eq!(branch.head_tip_age_days.value, Some(4));
-        assert_eq!(branch.comparison_tip_age_days.value, Some(7));
+        assert_eq!(branch.integration.commits_unique_to_head.value, Some(2));
+        assert_eq!(
+            branch.integration.commits_equivalent_elsewhere.value,
+            Some(1)
+        );
+        assert_eq!(branch.integration.commits_unclassified.value, Some(0));
+        assert_eq!(branch.integration.head_tip_age_days.value, Some(4));
+        assert_eq!(branch.integration.comparison_tip_age_days.value, Some(7));
         assert_eq!(
             branch.unique_work, "present",
             "equivalence is not an answer to whether this tree holds unique work"
@@ -1117,24 +1467,24 @@ mod tests {
         );
         let branch = &projection.view.repositories[0].worktrees[0].branch;
 
-        assert_eq!(branch.patch_equivalence.status, "unavailable");
-        assert_eq!(branch.patch_equivalence.value, None);
+        assert_eq!(branch.integration.patch_equivalence.status, "unavailable");
+        assert_eq!(branch.integration.patch_equivalence.value, None);
         assert_eq!(
-            branch.patch_equivalence.unavailable_reason,
+            branch.integration.patch_equivalence.unavailable_reason,
             Some("not_attempted")
         );
-        assert_eq!(branch.equivalence_method.status, "unavailable");
+        assert_eq!(branch.integration.equivalence_method.status, "unavailable");
         assert_eq!(
-            branch.commits_unclassified.value,
+            branch.integration.commits_unclassified.value,
             Some(1),
             "the count the per-commit method declined to explain is still sent, \
              so nothing reads as an absence of unique work"
         );
         assert_eq!(
-            branch.head_tip_age_days.unavailable_reason,
+            branch.integration.head_tip_age_days.unavailable_reason,
             Some("timed_out")
         );
-        assert_eq!(branch.comparison_tip_age_days.value, Some(3));
+        assert_eq!(branch.integration.comparison_tip_age_days.value, Some(3));
     }
 
     /// A commit dated after this machine's clock has no age. Zero would read
@@ -1160,17 +1510,20 @@ mod tests {
             GraphProjection::build(&graph, &candidates, &ActionRegistry::builtin(), at(86_400));
         let branch = &projection.view.repositories[0].worktrees[0].branch;
 
-        assert_eq!(branch.head_tip_age_days.status, "unavailable");
-        assert_eq!(branch.head_tip_age_days.unavailable_reason, Some("failed"));
-        // Positive control: the same projection, one day of it subtractable.
-        assert_eq!(branch.comparison_tip_age_days.value, Some(1));
+        assert_eq!(branch.integration.head_tip_age_days.status, "unavailable");
         assert_eq!(
-            branch.patch_equivalence.value,
+            branch.integration.head_tip_age_days.unavailable_reason,
+            Some("failed")
+        );
+        // Positive control: the same projection, one day of it subtractable.
+        assert_eq!(branch.integration.comparison_tip_age_days.value, Some(1));
+        assert_eq!(
+            branch.integration.patch_equivalence.value,
             Some("not_applicable"),
             "ancestry left no question to ask, which is not an answer of no"
         );
         assert_eq!(
-            branch.commits_unique_to_head.unavailable_reason,
+            branch.integration.commits_unique_to_head.unavailable_reason,
             Some("failed")
         );
     }

@@ -31,11 +31,13 @@
 //! permissive than it already was.
 //!
 //! **Fail closed regardless — the whole entry is dropped.** An
-//! `evidence_requests` entry with an unrecognised `probe_id` or a subject
-//! this request never issued. §16 of the campaign brief: unknown probe ids
-//! fail closed. HORO-1549 will run these; a request that reached it holding
-//! a word this build does not implement would be a decision deferred to the
-//! thing executing it.
+//! `evidence_requests` entry with an unrecognised `probe_id`, a subject this
+//! request never issued, or a subject of a kind that probe cannot answer for.
+//! §16 of the campaign brief: unknown probe ids fail closed. These get run
+//! (HORO-1549); a request that reached the runner holding a word this build
+//! does not implement would be a decision deferred to the thing executing it,
+//! and one naming a repository where a working tree belongs would leave the
+//! runner choosing a subject on the model's behalf.
 //!
 //! # What cannot be constructed here at all
 //!
@@ -189,6 +191,14 @@ pub struct PlanValidationCounters {
     pub dropped_unknown_probe: u32,
     /// An evidence request about a subject this request never issued.
     pub dropped_unknown_probe_subject: u32,
+    /// An evidence request whose subject was issued and is the wrong *kind* of
+    /// thing for that probe — `git_branch_state` about a repository, say. A
+    /// separate count from [`Self::dropped_unknown_probe_subject`] because the
+    /// two mean different things about the provider: one cited something it was
+    /// never shown, the other misunderstood what a probe is for.
+    pub dropped_incompatible_probe_subject: u32,
+    /// A second request naming the same probe and the same subject.
+    pub dropped_duplicate_evidence_request: u32,
     /// A `confidence` that was not one of the three words, degraded to
     /// [`ClaimConfidence::Unknown`].
     pub degraded_unknown_confidence: u32,
@@ -401,6 +411,29 @@ fn validate_evidence_requests(
             counters.dropped_unknown_probe_subject += 1;
             continue;
         }
+        // Issued is not enough (HORO-1549). The machine, the workflow baseline
+        // and every repository are issued references, so `git_branch_state`
+        // about `repo_1` cleared the check above while naming something a
+        // branch probe cannot be run against — leaving whoever runs it to pick
+        // one of that repository's working trees on the model's behalf.
+        let subject_kind = projection.probe_subject_kind(&claim.subject_ref);
+        if !subject_kind.is_some_and(|kind| probe_id.accepts(kind)) {
+            counters.dropped_incompatible_probe_subject += 1;
+            continue;
+        }
+        // Deduplicated on the whole question, not on the probe: two probes of
+        // the same kind about two different working trees are two different
+        // questions and both are wanted. `reason` is excluded from the key
+        // deliberately — re-asking the same question with new prose is still
+        // the same probe run, and letting the text distinguish them would make
+        // the round budget spendable by rewording.
+        if requests
+            .iter()
+            .any(|kept| kept.probe_id == probe_id && kept.subject_ref == claim.subject_ref)
+        {
+            counters.dropped_duplicate_evidence_request += 1;
+            continue;
+        }
         if requests.len() >= MAX_EVIDENCE_REQUESTS {
             counters.truncated_evidence_requests += 1;
             continue;
@@ -487,13 +520,14 @@ mod tests {
     use super::*;
     use crate::detectors::DetectorId;
     use crate::evidence::{
-        Evidence, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability, ResourceFingerprint,
-        ResourceKind, ResourceLocator,
+        Evidence, GitState, NativeCleanup, ProbeOutcome, ProbeReason, Recoverability,
+        ResourceFingerprint, ResourceKind, ResourceLocator,
     };
     use crate::planner::response::read_planner_response;
     use crate::planner::PlannerResponse;
     use crate::policy::{PolicyClass, PolicyDecision, ReasonCode};
     use crate::workspace::{MachineContext, WorkspaceEvidenceGraph, WorkspaceSurvey};
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -571,6 +605,52 @@ mod tests {
     /// `cargo.clean.target_dir` genuinely on offer for it.
     fn projection() -> GraphProjection {
         wide_projection(1)
+    }
+
+    /// One projection that also carries a repository and a working tree, so
+    /// `repo_1` and `workspace_1` are genuinely issued references.
+    ///
+    /// [`projection`] cannot serve for the kind checks: its resource sits in no
+    /// repository, so those two references do not exist there and a wrong-kind
+    /// request naming one would be refused as *unknown* — passing the assertion
+    /// for the wrong reason.
+    fn projection_in_a_repository() -> GraphProjection {
+        let target = temp_cargo_project();
+        let root = target
+            .parent()
+            .expect("a target has a project root")
+            .to_path_buf();
+        let mut candidate = candidate(&target);
+        candidate.0.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: root.clone(),
+            common_dir: root.join(".git"),
+            dirty: false,
+            untracked: false,
+            worktree: true,
+        }));
+
+        let candidates = vec![candidate];
+        let graph = WorkspaceEvidenceGraph::build(
+            &candidates,
+            &WorkspaceSurvey::unsurveyed(),
+            MachineContext::unmeasured(),
+            at(86_400 * 7),
+        );
+        let projection = GraphProjection::build(
+            &graph,
+            &candidates,
+            &ActionRegistry::builtin(),
+            at(86_400 * 7),
+        );
+
+        // Only ever the directory `temp_cargo_project` just created.
+        assert!(
+            root.starts_with(std::env::temp_dir()),
+            "refusing to remove {root:?}, which is not under the temporary directory"
+        );
+        let _ = fs::remove_dir_all(&root);
+
+        projection
     }
 
     /// A projection carrying `count` resources, for the bounds that cannot be
@@ -957,6 +1037,158 @@ mod tests {
         assert!(!plan.counters.any());
     }
 
+    /// The gap HORO-1549 closes over HORO-1548.
+    ///
+    /// Every subject below *was* issued by this request, so none of them is
+    /// caught by the unknown-subject check — which the `dropped_unknown_probe_
+    /// subject == 0` assertion holds to. They are refused for being the wrong
+    /// shape of thing: a branch probe cannot be run against a repository
+    /// without picking one of its working trees on the model's behalf, and a
+    /// liveness probe has no owning tool to read off a working tree.
+    #[test]
+    fn a_probe_about_an_issued_subject_of_the_wrong_kind_fails_closed() {
+        let projection = projection_in_a_repository();
+        // Non-vacuity: all five references really are issued here, so each
+        // refusal below is about the kind and not about the reference.
+        for reference in [
+            "machine",
+            "workflow_history",
+            "repo_1",
+            "workspace_1",
+            "resource_1",
+        ] {
+            assert!(
+                projection.probe_subject_kind(reference).is_some(),
+                "{reference} was not issued, so this fixture proves nothing"
+            );
+        }
+
+        for (probe, subject) in [
+            ("git_branch_state", "repo_1"),
+            ("git_branch_state", "machine"),
+            ("git_branch_state", "workflow_history"),
+            ("git_branch_state", "resource_1"),
+            ("git_patch_equivalence", "repo_1"),
+            ("process_activity", "repo_1"),
+            ("process_activity", "machine"),
+            ("tool_liveness", "workspace_1"),
+            ("tool_liveness", "workflow_history"),
+            ("github_pr_state", "resource_1"),
+            ("jira_task_state", "machine"),
+            ("workspace_history_summary", "workspace_1"),
+        ] {
+            let plan = validated(
+                &format!(
+                    r#"{{"contract_version":2,"evidence_requests":
+                        [{{"probe_id":"{probe}","subject_ref":"{subject}"}}]}}"#
+                ),
+                &projection,
+            );
+            assert!(
+                plan.evidence_requests.is_empty(),
+                "{probe} was accepted about {subject}"
+            );
+            assert_eq!(
+                plan.counters.dropped_incompatible_probe_subject, 1,
+                "{probe} about {subject}"
+            );
+            assert_eq!(
+                plan.counters.dropped_unknown_probe_subject, 0,
+                "{subject} was refused as unknown, so the kind check was not what refused it"
+            );
+        }
+    }
+
+    /// The positive control for the test above: every one of the seven probes
+    /// is accepted about a subject of a kind it can answer for. Without this,
+    /// a mapping that accepted nothing at all would pass.
+    #[test]
+    fn every_probe_is_accepted_about_a_subject_of_a_kind_it_accepts() {
+        let projection = projection_in_a_repository();
+        let mut covered: BTreeSet<&str> = BTreeSet::new();
+
+        for (probe, subject) in [
+            ("git_branch_state", "workspace_1"),
+            ("git_patch_equivalence", "workspace_1"),
+            ("process_activity", "workspace_1"),
+            ("process_activity", "resource_1"),
+            ("tool_liveness", "resource_1"),
+            ("github_pr_state", "workspace_1"),
+            ("jira_task_state", "workspace_1"),
+            ("workspace_history_summary", "workflow_history"),
+        ] {
+            let plan = validated(
+                &format!(
+                    r#"{{"contract_version":2,"evidence_requests":
+                        [{{"probe_id":"{probe}","subject_ref":"{subject}"}}]}}"#
+                ),
+                &projection,
+            );
+            assert_eq!(
+                plan.evidence_requests.len(),
+                1,
+                "{probe} was refused about {subject}: {:?}",
+                plan.counters
+            );
+            assert!(!plan.counters.any(), "{probe} about {subject}");
+            covered.insert(probe);
+        }
+
+        // And the list above really does exercise all seven.
+        assert_eq!(
+            covered,
+            ProbeId::ALL
+                .iter()
+                .map(|p| p.tag())
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    /// Asking the same question twice runs it once. The budget in §16 is a
+    /// budget on probes actually run, so a response that repeats itself must
+    /// not be able to spend it twice over.
+    #[test]
+    fn a_repeated_evidence_request_is_asked_once() {
+        let projection = projection_in_a_repository();
+        let plan = validated(
+            r#"{"contract_version":2,"evidence_requests":[
+                 {"probe_id":"git_branch_state","subject_ref":"workspace_1"},
+                 {"probe_id":"git_branch_state","subject_ref":"workspace_1"},
+                 {"probe_id":"git_branch_state","subject_ref":"workspace_1",
+                  "reason":"asking again, differently worded"}]}"#,
+            &projection,
+        );
+
+        assert_eq!(plan.evidence_requests.len(), 1);
+        assert_eq!(plan.counters.dropped_duplicate_evidence_request, 2);
+        // The first one wins, reason and all, rather than the last.
+        assert_eq!(plan.evidence_requests[0].reason, None);
+    }
+
+    /// Deduplication is on the whole question. Two probes of the same kind
+    /// about two different subjects are two different questions, and a key of
+    /// `probe_id` alone would silently answer only the first.
+    #[test]
+    fn the_same_probe_about_two_subjects_is_two_requests() {
+        let projection = projection_in_a_repository();
+        let plan = validated(
+            r#"{"contract_version":2,"evidence_requests":[
+                 {"probe_id":"process_activity","subject_ref":"workspace_1"},
+                 {"probe_id":"process_activity","subject_ref":"resource_1"}]}"#,
+            &projection,
+        );
+
+        assert_eq!(plan.evidence_requests.len(), 2);
+        assert_eq!(
+            plan.evidence_requests
+                .iter()
+                .map(|request| request.subject_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["workspace_1", "resource_1"]
+        );
+        assert!(!plan.counters.any());
+    }
+
     // ---------------------------------------------------------------
     // Model text, and the bounds
     // ---------------------------------------------------------------
@@ -1016,8 +1248,11 @@ mod tests {
         let observations: Vec<String> = (0..MAX_OBSERVATIONS + 3)
             .map(|n| format!(r#"{{"kind":"workflow_shape","detail":"n{n}"}}"#))
             .collect();
-        let requests: Vec<String> = (0..MAX_EVIDENCE_REQUESTS + 2)
-            .map(|_| r#"{"probe_id":"tool_liveness","subject_ref":"resource_1"}"#.to_string())
+        // Each about a different resource. Ten copies of one question are
+        // deduplicated (HORO-1549) and would never reach the count bound, so a
+        // repeated fixture would test the wrong refusal.
+        let requests: Vec<String> = (1..=MAX_EVIDENCE_REQUESTS + 2)
+            .map(|n| format!(r#"{{"probe_id":"tool_liveness","subject_ref":"resource_{n}"}}"#))
             .collect();
         let uncertainties: Vec<String> = (0..MAX_UNCERTAINTIES_PER_ITEM + 4)
             .map(|n| format!(r#""u{n}""#))
@@ -1035,7 +1270,7 @@ mod tests {
                 observations.join(","),
                 requests.join(",")
             ),
-            &projection(),
+            &wide_projection(MAX_EVIDENCE_REQUESTS + 2),
         );
 
         assert_eq!(plan.observations.len(), MAX_OBSERVATIONS);

@@ -1132,6 +1132,16 @@ pub struct WorkspacePlanDroppedReport {
     pub unknown_observation_kind: u32,
     pub unknown_probe: u32,
     pub unknown_probe_subject: u32,
+    /// A probe asked about a subject this request did issue, of a kind that
+    /// probe cannot answer for (HORO-1549). Separate from
+    /// `unknown_probe_subject` because the two say different things about the
+    /// provider: one cited something it was never shown, the other asked a
+    /// working-tree question about a repository.
+    pub incompatible_probe_subject: u32,
+    /// A second request naming the same probe and the same subject. Counted
+    /// rather than silently collapsed, so a round budget spent on repetition is
+    /// visible.
+    pub duplicate_evidence_request: u32,
     pub uncited_evidence_ref: u32,
     /// A claim whose confidence word this build does not accept is not
     /// discarded — it is kept and reported as `"unknown"`, which is counted
@@ -1171,11 +1181,66 @@ pub struct WorkspacePlanReport {
     pub observations: Vec<WorkspaceObservationReport>,
     pub evidence_requests: Vec<WorkspaceEvidenceRequestReport>,
     pub dropped: WorkspacePlanDroppedReport,
+    /// `Some(..)` when a bounded evidence-expansion run produced this plan, and
+    /// `None` when a single round did (HORO-1549).
+    ///
+    /// The distinction is the point, and it is the same one
+    /// [`WorkspaceEvidenceRequestReport`] rests on: "no expansion was run" and
+    /// "an expansion ran and probed nothing" are different facts about the same
+    /// empty finding list, and a reader who cannot tell them apart cannot tell
+    /// whether the model's requests were answered or merely recorded.
+    pub expansion: Option<WorkspaceExpansionReport>,
     /// `Some(..)` when the round produced nothing usable — unreachable
     /// provider, unreadable answer, or an answer in another contract version.
     /// The rest of the report is empty in that case, and the caller falls back
     /// to rule-only ranking exactly as it does when no provider is configured.
     pub provider_error: Option<String>,
+}
+
+/// What one bounded evidence-expansion run cost and why it stopped
+/// (HORO-1549).
+///
+/// The ceilings are reported beside what was spent, because "3 rounds ran" only
+/// means something next to how many were allowed. A run that stopped at its
+/// round limit produced a plan formed without evidence somebody asked for, and
+/// that is a materially weaker plan than one that converged — see
+/// [`Self::converged`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceExpansionReport {
+    pub rounds_run: u32,
+    pub rounds_allowed: u32,
+    pub probes_run: usize,
+    pub probes_allowed: u32,
+    /// A `crate::planner::StopReason` tag.
+    pub stopped_because: &'static str,
+    /// Whether the run ended because nothing further was asked.
+    ///
+    /// Derived from `stopped_because`, and carried anyway: it is the one bit a
+    /// caller almost always wants, and computing it at each call site is how a
+    /// ceiling eventually gets read as convergence.
+    pub converged: bool,
+    pub findings: Vec<WorkspaceProbeFindingReport>,
+}
+
+/// One probe a round actually ran, and what shape its answer took
+/// (HORO-1549).
+///
+/// The answer *itself* is not here. It went to the model, and the local report
+/// already shows the same facts from the evidence they were read out of — a
+/// second rendering of a branch state would be a second place for it to be
+/// wrong. What a reader needs from this is which question was asked, about
+/// what, and whether it was answered at all.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkspaceProbeFindingReport {
+    pub round: u32,
+    pub probe_id: &'static str,
+    /// The opaque request-scoped alias, never a local path.
+    pub subject_ref: String,
+    /// A `crate::planner::ProbeFindingView` tag.
+    pub finding: &'static str,
+    /// `Some(..)` only when `finding` is `"unavailable"`. A probe that could
+    /// not answer is reported as such and never as an answer of `false`.
+    pub unavailable_reason: Option<&'static str>,
 }
 
 /// One wire-id -> real-resource mapping of a `glomeris llm-plan

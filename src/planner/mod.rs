@@ -54,25 +54,35 @@
 //! working unchanged. It was never versioned on the wire, so a response that
 //! declares no version is read as v1 rather than guessed at.
 
+pub mod bounds;
 pub mod contract;
 pub mod dto;
+pub mod expand;
 pub mod plan;
+pub mod probe;
 pub mod project;
 pub mod prompt;
 pub mod response;
 pub mod validate;
 
+pub use bounds::{ElapsedClock, EvidenceBounds, MonotonicClock};
 pub use contract::{
-    ClaimConfidence, Disposition, ObservationKind, ProbeId, PLANNER_CONTRACT_VERSION,
+    ClaimConfidence, Disposition, ObservationKind, ProbeId, ProbeSubjectKind,
+    PLANNER_CONTRACT_VERSION,
 };
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
-    PlannerRequestView, Reported, RepositoryView, ResourceView, UnplacedResourceView,
-    WorkflowHistoryView, WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF,
-    WORKFLOW_HISTORY_EVIDENCE_REF,
+    PatchEquivalenceView, PlannerRequestView, ProbeFindingView, ProbeResultView, Reported,
+    RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView, WorkflowSupportView,
+    WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
-pub use plan::{build_workspace_request, plan_workspace, WorkspacePlanResult, WorkspaceRequest};
-pub use project::{AliasTable, GraphProjection};
+pub use expand::{expand_and_plan, ExpansionRun, StopReason};
+pub use plan::{
+    build_workspace_request, build_workspace_request_with, plan_workspace, plan_workspace_with,
+    WorkspacePlanResult, WorkspaceRequest,
+};
+pub use probe::{LocalProbeRunner, ProbeRunner};
+pub use project::{AliasTable, GraphProjection, ProbeSubject, SubjectTable};
 pub use prompt::system_prompt;
 pub use response::{
     read_planner_response, EvidenceRequestClaim, ObservationClaim, PlanItemClaim, PlannerResponse,

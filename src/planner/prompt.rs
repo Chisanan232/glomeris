@@ -111,6 +111,11 @@ pub fn system_prompt() -> String {
          \"detail\": string}}], \
          \"evidence_requests\": [{{\"probe_id\": one of [{probes}], \"subject_ref\": \
          reference, \"reason\": string}}]}}\n\n\
+         Each probe accepts only certain kinds of reference, and a request naming any other \
+         kind is discarded even though the probe and the reference are both real: \
+         {probe_subjects}. No probe accepts a machine or a repository reference: a repository \
+         is not a working tree, and picking one of its working trees on your behalf is not \
+         something this can do. Ask about the working tree you mean.\n\n\
          Every reference must be one you were given in this request. Every action id must \
          be one listed in that resource's own offered_action_ids; an action offered for a \
          different resource does not count. An unrecognised field anywhere makes the whole \
@@ -123,7 +128,34 @@ pub fn system_prompt() -> String {
         dispositions = tag_list(&Disposition::ALL.map(Disposition::tag)),
         kinds = tag_list(&ObservationKind::ALL.map(ObservationKind::tag)),
         probes = tag_list(&ProbeId::ALL.map(ProbeId::tag)),
+        probe_subjects = probe_subjects(),
     )
+}
+
+/// `"git_branch_state" takes a worktree reference; ...` — one clause per probe,
+/// read off [`ProbeId::subject_kinds`].
+///
+/// Generated for the reason the word lists are: this pairing is the one part of
+/// the probe contract HORO-1548 left the model to guess at, and a hand-written
+/// sentence describing it would be a second copy of a table
+/// [`super::validate`] enforces. A model that guesses wrong spends a whole
+/// round on a request that is dropped, which is a silent cost — the request was
+/// well-formed, the probe was real, the reference was one we issued, and
+/// nothing happened.
+fn probe_subjects() -> String {
+    ProbeId::ALL
+        .iter()
+        .map(|probe| {
+            let kinds = probe
+                .subject_kinds()
+                .iter()
+                .map(|kind| kind.tag())
+                .collect::<Vec<_>>()
+                .join(" or a ");
+            format!("\"{}\" takes a {kinds} reference", probe.tag())
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// `"a", "b", "c"` — quoted, because every one of these is a JSON string
@@ -138,6 +170,7 @@ fn tag_list(tags: &[&'static str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::planner::contract::ProbeSubjectKind;
 
     /// The reason the prompt is assembled: every word the parser accepts is
     /// offered to the model, and adding a variant to either side cannot
@@ -175,6 +208,63 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// HORO-1549. Every probe is offered with every subject kind it accepts,
+    /// so the pairing the parser enforces is the pairing the model is told.
+    #[test]
+    fn every_probe_is_offered_with_the_subject_kinds_it_accepts() {
+        let prompt = system_prompt();
+
+        for probe in ProbeId::ALL {
+            let kinds = probe.subject_kinds();
+            assert!(
+                !kinds.is_empty(),
+                "{} accepts no subject at all, so it can never be asked",
+                probe.tag()
+            );
+            for kind in kinds {
+                assert!(
+                    prompt.contains(&format!("a {} reference", kind.tag()))
+                        || prompt.contains(&format!("a {} or a ", kind.tag())),
+                    "{} accepts a {} subject and the prompt never says so",
+                    probe.tag(),
+                    kind.tag()
+                );
+            }
+            assert!(
+                prompt.contains(&format!("\"{}\" takes a ", probe.tag())),
+                "{} is listed as a probe but its subject kind is left to a guess",
+                probe.tag()
+            );
+        }
+    }
+
+    /// The non-vacuous half. The two citable kinds no probe accepts are named
+    /// as refused rather than simply left out — a model that reads an omission
+    /// as permission is the reason `repo_1` was accepted by HORO-1548's check
+    /// and is not by this one.
+    ///
+    /// Without this, the test above would pass against a prompt that offered
+    /// every probe with every kind.
+    #[test]
+    fn the_two_kinds_no_probe_accepts_are_refused_in_words() {
+        let prompt = system_prompt();
+
+        for kind in [ProbeSubjectKind::Machine, ProbeSubjectKind::Repository] {
+            assert!(
+                ProbeId::ALL.iter().all(|probe| !probe.accepts(kind)),
+                "{} is now accepted by some probe, so this test is out of date",
+                kind.tag()
+            );
+            assert!(
+                !prompt.contains(&format!("takes a {} reference", kind.tag())),
+                "the prompt offers a probe a {} subject, which is always dropped",
+                kind.tag()
+            );
+        }
+        assert!(prompt.contains("No probe accepts a machine or a repository reference"));
+        assert!(prompt.contains("a repository is not a working tree"));
     }
 
     /// §13. Each of the six is a conflation a plausible model makes, so each
