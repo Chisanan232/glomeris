@@ -605,29 +605,61 @@ final class OverviewStateTests: XCTestCase {
         """
     }
 
+    /// What the fixture binary prints on stdout for `llm-plan`.
+    ///
+    /// HORO-1550 made this the contract-version-2 envelope, because the card now
+    /// asks for version 2 and `AiPlanInterpretation` checks the version on the
+    /// way back in. A version 1 body here would be read as `.malformedOutput`,
+    /// and these tests would then be asserting navigation behaviour against an
+    /// error state rather than against a plan.
     private static func planReportJSON(resourceId: String) -> String {
         """
         {
+          "contract_version": 2,
+          "contract_declared": true,
+          "profile": null,
           "items": [
             {
-              "resource_id": "\(resourceId)",
-              "policy_label": "AUTO_SAFE",
-              "requested_action_id": "node.clean.node_modules",
-              "priority": 1,
-              "model_reason": "regenerable dependencies",
-              "explain": null,
-              "skip_reason": null,
-              "candidate": \(candidateJSON(resourceId: resourceId)),
-              "completeness": "complete",
-              "confidence": "high"
+              "item": {
+                "resource_id": "\(resourceId)",
+                "policy_label": "AUTO_SAFE",
+                "requested_action_id": "node.clean.node_modules",
+                "priority": 1,
+                "model_reason": "regenerable dependencies",
+                "explain": null,
+                "skip_reason": null,
+                "candidate": \(candidateJSON(resourceId: resourceId)),
+                "completeness": "complete",
+                "confidence": "high"
+              },
+              "disposition": "recommend_now",
+              "model_confidence": "observed",
+              "uncertainties": [],
+              "evidence_refs": ["resource_1"]
             }
           ],
-          "dropped_unknown_resource": 0,
-          "dropped_unknown_action": 0,
+          "observations": [],
+          "evidence_requests": [],
+          "dropped": \(noDroppedJSON),
+          "expansion": null,
           "provider_error": null
         }
         """
     }
+
+    /// Every `dropped` counter at zero, spelled out rather than abbreviated:
+    /// version 2 always emits the block, and these tests are about navigation
+    /// rather than about what a provider got wrong.
+    private static let noDroppedJSON = """
+    {"unknown_resource":0,"unoffered_action":0,"unknown_disposition":0,
+     "duplicate_item":0,"unknown_observation_kind":0,"unknown_probe":0,
+     "unknown_probe_subject":0,"incompatible_probe_subject":0,
+     "duplicate_evidence_request":0,"uncited_evidence_ref":0,
+     "degraded_unknown_confidence":0,"degraded_unknown_workflow_mode":0,
+     "truncated_items":0,"truncated_observations":0,
+     "truncated_evidence_requests":0,"truncated_uncertainties":0,
+     "truncated_evidence_refs":0}
+    """
 
     private func candidate(
         resourceId: String = "/tmp/example/target",
@@ -648,31 +680,67 @@ final class OverviewStateTests: XCTestCase {
         )
     }
 
-    private func planReport(resourceIds: [String]) -> LlmPlanReportDto {
-        LlmPlanReportDto(
+    private func planReport(resourceIds: [String]) -> WorkspacePlanReportDto {
+        WorkspacePlanReportDto(
+            contractVersion: 2,
+            contractDeclared: true,
+            profile: nil,
             items: resourceIds.enumerated().map { index, resourceId in
-                LlmPlanItemReportDto(
-                    resourceId: resourceId,
-                    policyLabel: "AUTO_SAFE",
-                    requestedActionId: "node.clean.node_modules",
-                    priority: UInt32(index + 1),
-                    modelReason: "regenerable dependencies",
-                    explain: nil,
-                    skipReason: nil,
-                    candidate: candidate(resourceId: resourceId),
-                    completeness: "complete",
-                    confidence: "high"
+                WorkspacePlanItemReportDto(
+                    item: LlmPlanItemReportDto(
+                        resourceId: resourceId,
+                        policyLabel: "AUTO_SAFE",
+                        requestedActionId: "node.clean.node_modules",
+                        priority: UInt32(index + 1),
+                        modelReason: "regenerable dependencies",
+                        explain: nil,
+                        skipReason: nil,
+                        candidate: candidate(resourceId: resourceId),
+                        completeness: "complete",
+                        confidence: "high"
+                    ),
+                    disposition: "recommend_now",
+                    modelConfidence: "observed",
+                    uncertainties: [],
+                    evidenceRefs: ["resource_\(index + 1)"]
                 )
             },
-            droppedUnknownResource: 0,
-            droppedUnknownAction: 0,
+            observations: [],
+            evidenceRequests: [],
+            dropped: Self.noDropped,
+            expansion: nil,
             providerError: nil
         )
     }
 
+    /// The typed counterpart of `noDroppedJSON`, for the reports these tests
+    /// build in memory rather than through the fixture binary.
+    private static let noDropped = WorkspacePlanDroppedReportDto(
+        unknownResource: 0,
+        unofferedAction: 0,
+        unknownDisposition: 0,
+        duplicateItem: 0,
+        unknownObservationKind: 0,
+        unknownProbe: 0,
+        unknownProbeSubject: 0,
+        incompatibleProbeSubject: 0,
+        duplicateEvidenceRequest: 0,
+        uncitedEvidenceRef: 0,
+        degradedUnknownConfidence: 0,
+        degradedUnknownWorkflowMode: 0,
+        truncatedItems: 0,
+        truncatedObservations: 0,
+        truncatedEvidenceRequests: 0,
+        truncatedUncertainties: 0,
+        truncatedEvidenceRefs: 0
+    )
+
+    /// The machine's rows out of the version 2 wrapper. These tests are about
+    /// which resources survive navigation, which is a property of the local
+    /// findings — the model's reading rides along untouched.
     private func planItems(_ outcome: AiPlanOutcome?) -> [LlmPlanItemReportDto] {
         guard case .plan(let report) = outcome else { return [] }
-        return report.items
+        return report.items.map(\.item)
     }
 
     private func occurrences(of needle: String, in haystack: String) -> Int {

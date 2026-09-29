@@ -1,0 +1,148 @@
+{
+  "contract_version": 2,
+  "contract_declared": true,
+  "profile": {
+    "mode": "mixed",
+    "confidence": "inferred",
+    "evidence_refs": ["workflow_history"],
+    "summary": "Some repositories are used one branch at a time and one keeps several working trees."
+  },
+  "items": [
+    {
+      "item": {
+        "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+        "policy_label": "AUTO_SAFE",
+        "requested_action_id": "cargo.clean.target_dir",
+        "priority": 1,
+        "model_reason": "Large, but a build may be running and the probe did not say.",
+        "explain": "remove the Cargo target directory for this project",
+        "skip_reason": null,
+        "candidate": {
+          "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+          "kind": "cargo_target_dir",
+          "reclaimable_bytes": 2147483648,
+          "reclaimable_human": "2.0 GB",
+          "reclaimable_bytes_is_lower_bound": false,
+          "impact_tier": "notable",
+          "policy_label": "AUTO_SAFE",
+          "reasons": ["no_active_use_observed"],
+          "executable": true,
+          "offered_actions": [
+            {
+              "action_id": "cargo.clean.target_dir",
+              "requires_confirmation": false
+            }
+          ],
+          "refusal_reason": null
+        },
+        "completeness": "complete",
+        "confidence": "high"
+      },
+      "disposition": "defer",
+      "model_confidence": "inferred",
+      "uncertainties": ["whether a cargo build is running right now"],
+      "evidence_refs": ["resource_1"]
+    },
+    {
+      "item": {
+        "resource_id": "node_modules:/Users/dev/proj/node_modules",
+        "policy_label": "ASK",
+        "requested_action_id": "node.remove.node_modules",
+        "priority": 2,
+        "model_reason": "Regenerable from the lockfile.",
+        "explain": "remove node_modules for this project",
+        "skip_reason": null,
+        "candidate": {
+          "resource_id": "node_modules:/Users/dev/proj/node_modules",
+          "kind": "node_modules",
+          "reclaimable_bytes": 536870912,
+          "reclaimable_human": "512.0 MB",
+          "reclaimable_bytes_is_lower_bound": false,
+          "impact_tier": "normal",
+          "policy_label": "ASK",
+          "reasons": ["regenerable_by_tool"],
+          "executable": true,
+          "offered_actions": [
+            {
+              "action_id": "node.remove.node_modules",
+              "requires_confirmation": true
+            }
+          ],
+          "refusal_reason": null
+        },
+        "completeness": "partial",
+        "confidence": "medium"
+      },
+      "disposition": "recommend_now",
+      "model_confidence": "unknown",
+      "uncertainties": [
+        "whether the lockfile still resolves",
+        "no pull request state was available"
+      ],
+      "evidence_refs": ["resource_2", "workflow_history"]
+    }
+  ],
+  "observations": [
+    {
+      "kind": "conflicting_evidence",
+      "evidence_refs": ["workspace_1"],
+      "detail": "A working tree reports no upstream and also reports commits that are merged."
+    },
+    {
+      "kind": "missing_evidence",
+      "evidence_refs": ["machine"],
+      "detail": null
+    }
+  ],
+  "evidence_requests": [
+    {
+      "probe_id": "github_pr_state",
+      "subject_ref": "workspace_1",
+      "reason": "is anything open against this branch"
+    }
+  ],
+  "dropped": {
+    "unknown_resource": 1,
+    "unoffered_action": 1,
+    "unknown_disposition": 0,
+    "duplicate_item": 0,
+    "unknown_observation_kind": 0,
+    "unknown_probe": 1,
+    "unknown_probe_subject": 0,
+    "incompatible_probe_subject": 0,
+    "duplicate_evidence_request": 0,
+    "uncited_evidence_ref": 0,
+    "degraded_unknown_confidence": 1,
+    "degraded_unknown_workflow_mode": 0,
+    "truncated_items": 0,
+    "truncated_observations": 0,
+    "truncated_evidence_requests": 0,
+    "truncated_uncertainties": 2,
+    "truncated_evidence_refs": 0
+  },
+  "expansion": {
+    "rounds_run": 3,
+    "rounds_allowed": 3,
+    "probes_run": 2,
+    "probes_allowed": 12,
+    "stopped_because": "round_limit",
+    "converged": false,
+    "findings": [
+      {
+        "round": 2,
+        "probe_id": "git_branch_state",
+        "subject_ref": "workspace_1",
+        "finding": "branch_state",
+        "unavailable_reason": null
+      },
+      {
+        "round": 3,
+        "probe_id": "github_pr_state",
+        "subject_ref": "workspace_1",
+        "finding": "unavailable",
+        "unavailable_reason": "not_attempted"
+      }
+    ]
+  },
+  "provider_error": null
+}

@@ -1723,3 +1723,439 @@ struct PressureRejectionReportDto: Decodable, Equatable {
         case message
     }
 }
+
+// MARK: - Workspace intelligence (HORO-1550)
+
+/// Mirrors `reporting::dto::WorkspacePlanItemReport` — one row of the
+/// contract-version-2 plan.
+///
+/// The shape worth preserving here is the nesting. `item` is the same
+/// `LlmPlanItemReportDto` the version-1 plan carries, holding this machine's
+/// own finding and its policy verdict; the four properties beside it are what
+/// the model said about that finding. They are siblings rather than one flat
+/// row because §17 of the campaign requires a surface to be unable to present
+/// a local fact and a model inference as one thing, and a view that reads
+/// `dto.item.policyLabel` from one value and `dto.disposition` from another
+/// cannot merge them by accident.
+///
+/// `modelConfidence` is not called `confidence` for the same reason:
+/// `item.confidence` is already the *evidence* confidence Rust computed, and
+/// two properties of that name on one row is a misattribution waiting to
+/// happen.
+struct WorkspacePlanItemReportDto: Decodable, Equatable, Identifiable {
+    let item: LlmPlanItemReportDto
+    /// `"recommend_now"`, `"ask_user"`, `"defer"` or `"keep"` — the model's
+    /// recommendation, which is never authority. A `"recommend_now"` on a row
+    /// whose `item.candidate.executable` is `false`, or whose action is absent
+    /// from `item.candidate.offeredActions`, still may not be acted on: that
+    /// list remains the only enablement path, exactly as on a candidates-list
+    /// row.
+    let disposition: String
+    /// `"observed"`, `"inferred"` or `"unknown"` — how the model rated its own
+    /// claim. A plain `String` for the usual forward-compatibility reason: a
+    /// resolved CLI newer than this app may name a value this build has no word
+    /// for, and refusing to decode the whole plan over it would be worse than
+    /// rendering it as unrecognised.
+    let modelConfidence: String
+    /// What the model said it could not settle. Shown rather than dropped —
+    /// a recommendation whose caveats were edited out reads more certain than
+    /// the model was.
+    let uncertainties: [String]
+    /// Opaque request-scoped aliases (`resource_1`, `workspace_1`, …) the model
+    /// cited. Never a path, a repository name or an issue key — the aliases are
+    /// all it was given.
+    let evidenceRefs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case item
+        case disposition
+        case modelConfidence = "model_confidence"
+        case uncertainties
+        case evidenceRefs = "evidence_refs"
+    }
+
+    var id: String { item.resourceId }
+}
+
+/// Mirrors `reporting::dto::WorkspaceProfileReport` — the model's reading of
+/// the workspace's shape, which is not the same thing as
+/// `WorkflowProfileReportDto`'s locally measured baseline and must not be
+/// rendered as though it were.
+struct WorkspaceProfileReportDto: Decodable, Equatable {
+    /// A `workspace::WorkflowMode` tag.
+    let mode: String
+    /// `"observed"`, `"inferred"` or `"unknown"`.
+    let confidence: String
+    let evidenceRefs: [String]
+    let summary: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case confidence
+        case evidenceRefs = "evidence_refs"
+        case summary
+    }
+}
+
+/// Mirrors `reporting::dto::WorkspaceObservationReport` — something the model
+/// noticed about the evidence as a whole rather than about one resource.
+///
+/// `kind` matters more than `detail` here: `"conflicting_evidence"` and
+/// `"missing_evidence"` are the two AC 1 asks a user to be able to see, and
+/// `detail` is `nil` whenever the model offered a kind without wording.
+struct WorkspaceObservationReportDto: Decodable, Equatable {
+    let kind: String
+    let evidenceRefs: [String]
+    let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case evidenceRefs = "evidence_refs"
+        case detail
+    }
+}
+
+/// Mirrors `reporting::dto::WorkspaceEvidenceRequestReport` — a read-only probe
+/// the model asked for and did not get to run itself.
+///
+/// `probeId` is a tag from a compiled registry and `subjectRef` is an alias
+/// that already existed in the request. Neither is a command, a path or a URL,
+/// and this app builds nothing from either: it renders them so a user can see
+/// what the model wanted to know.
+struct WorkspaceEvidenceRequestReportDto: Decodable, Equatable {
+    let probeId: String
+    let subjectRef: String
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case probeId = "probe_id"
+        case subjectRef = "subject_ref"
+        case reason
+    }
+}
+
+/// Mirrors `reporting::dto::WorkspacePlanDroppedReport` — every way a provider
+/// response was refused, counted.
+///
+/// Surfaced rather than swallowed, for the reason `LlmPlanReportDto`'s two
+/// counts are: a two-row plan built from a response whose other five rows were
+/// rejected is not a two-row plan, and the rejections are the evidence that the
+/// validation in Rust is the thing deciding what may be shown.
+struct WorkspacePlanDroppedReportDto: Decodable, Equatable {
+    let unknownResource: UInt32
+    let unofferedAction: UInt32
+    let unknownDisposition: UInt32
+    let duplicateItem: UInt32
+    let unknownObservationKind: UInt32
+    let unknownProbe: UInt32
+    let unknownProbeSubject: UInt32
+    let incompatibleProbeSubject: UInt32
+    let duplicateEvidenceRequest: UInt32
+    let uncitedEvidenceRef: UInt32
+    let degradedUnknownConfidence: UInt32
+    let degradedUnknownWorkflowMode: UInt32
+    let truncatedItems: UInt32
+    let truncatedObservations: UInt32
+    let truncatedEvidenceRequests: UInt32
+    let truncatedUncertainties: UInt32
+    let truncatedEvidenceRefs: UInt32
+
+    /// `true` when the provider said anything Rust refused. The card shows the
+    /// breakdown only then, because seventeen zeroes is noise.
+    var anyDropped: Bool {
+        unknownResource > 0 || unofferedAction > 0 || unknownDisposition > 0
+            || duplicateItem > 0 || unknownObservationKind > 0 || unknownProbe > 0
+            || unknownProbeSubject > 0 || incompatibleProbeSubject > 0
+            || duplicateEvidenceRequest > 0 || uncitedEvidenceRef > 0
+            || degradedUnknownConfidence > 0 || degradedUnknownWorkflowMode > 0
+            || truncatedItems > 0 || truncatedObservations > 0
+            || truncatedEvidenceRequests > 0 || truncatedUncertainties > 0
+            || truncatedEvidenceRefs > 0
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case unknownResource = "unknown_resource"
+        case unofferedAction = "unoffered_action"
+        case unknownDisposition = "unknown_disposition"
+        case duplicateItem = "duplicate_item"
+        case unknownObservationKind = "unknown_observation_kind"
+        case unknownProbe = "unknown_probe"
+        case unknownProbeSubject = "unknown_probe_subject"
+        case incompatibleProbeSubject = "incompatible_probe_subject"
+        case duplicateEvidenceRequest = "duplicate_evidence_request"
+        case uncitedEvidenceRef = "uncited_evidence_ref"
+        case degradedUnknownConfidence = "degraded_unknown_confidence"
+        case degradedUnknownWorkflowMode = "degraded_unknown_workflow_mode"
+        case truncatedItems = "truncated_items"
+        case truncatedObservations = "truncated_observations"
+        case truncatedEvidenceRequests = "truncated_evidence_requests"
+        case truncatedUncertainties = "truncated_uncertainties"
+        case truncatedEvidenceRefs = "truncated_evidence_refs"
+    }
+}
+
+/// Mirrors `reporting::dto::WorkspaceProbeFindingReport` — one probe that ran,
+/// and what came back.
+///
+/// `unavailableReason` is why this type exists as more than a tag pair: a probe
+/// that ran and found nothing and a probe that could not run are two different
+/// facts, and `finding: "unavailable"` with a `tool_absent` reason must never be
+/// rendered as the quiet former.
+struct WorkspaceProbeFindingReportDto: Decodable, Equatable {
+    let round: UInt32
+    let probeId: String
+    let subjectRef: String
+    /// A `planner::contract::ProbeFindingView` tag, or `"unavailable"`.
+    let finding: String
+    /// An `evidence::ProbeReason` tag, set only for `"unavailable"`.
+    let unavailableReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case round
+        case probeId = "probe_id"
+        case subjectRef = "subject_ref"
+        case finding
+        case unavailableReason = "unavailable_reason"
+    }
+}
+
+/// Mirrors `reporting::dto::WorkspaceExpansionReport` — what the bounded
+/// evidence loop actually did.
+///
+/// `converged` is the honest end state and `stoppedBecause` is why. A plan that
+/// stopped at `"round_limit"` has open questions the model asked and nobody
+/// answered, which a surface claiming completeness would hide.
+struct WorkspaceExpansionReportDto: Decodable, Equatable {
+    let roundsRun: UInt32
+    let roundsAllowed: UInt32
+    let probesRun: Int
+    let probesAllowed: Int
+    /// A `planner::expansion::StopReason` tag.
+    let stoppedBecause: String
+    /// `true` only for `"nothing_more_asked"` — the model ran out of questions
+    /// rather than out of budget.
+    let converged: Bool
+    let findings: [WorkspaceProbeFindingReportDto]
+
+    enum CodingKeys: String, CodingKey {
+        case roundsRun = "rounds_run"
+        case roundsAllowed = "rounds_allowed"
+        case probesRun = "probes_run"
+        case probesAllowed = "probes_allowed"
+        case stoppedBecause = "stopped_because"
+        case converged
+        case findings
+    }
+}
+
+/// Mirrors `reporting::dto::WorkspacePlanReport` — what
+/// `llm-plan --contract-version 2 --json` prints.
+///
+/// `contractDeclared` is separate from `contractVersion` because a provider
+/// that answered without naming the contract it was answering is a different
+/// situation from one that named it: the response was still validated against
+/// version 2, and the difference is worth showing rather than assuming.
+///
+/// Every key in this family is always present on the wire — the Rust side
+/// carries no `skip_serializing_if` here — so an absent one is a mismatch this
+/// app should fail on rather than quietly read as `nil`. The optionals below are
+/// optional because Rust sends `null`, not because the key may be missing.
+struct WorkspacePlanReportDto: Decodable, Equatable {
+    let contractVersion: UInt32
+    let contractDeclared: Bool
+    let profile: WorkspaceProfileReportDto?
+    let items: [WorkspacePlanItemReportDto]
+    let observations: [WorkspaceObservationReportDto]
+    let evidenceRequests: [WorkspaceEvidenceRequestReportDto]
+    let dropped: WorkspacePlanDroppedReportDto
+    /// `nil` when the plan ran in a single round with no expansion, which is
+    /// the default. Not the same as an expansion that ran and found nothing.
+    let expansion: WorkspaceExpansionReportDto?
+    /// Non-`nil` when the provider call itself failed. The CLI still prints the
+    /// whole report and exits 1, so the card reads it through `runRaw` for the
+    /// same reason `LlmPlanReportDto` does.
+    let providerError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case contractVersion = "contract_version"
+        case contractDeclared = "contract_declared"
+        case profile
+        case items
+        case observations
+        case evidenceRequests = "evidence_requests"
+        case dropped
+        case expansion
+        case providerError = "provider_error"
+    }
+
+    /// Whether the reply carried anything at all besides suggestions.
+    ///
+    /// The version 1 contract had only items, so "no items" and "no answer"
+    /// were one fact and the card said "No suggestions". Here they are two: a
+    /// reply can propose nothing and still report a conflict, name a workflow
+    /// shape, or ask for a branch probe — and each of those is the kind of thing
+    /// HORO-1550 exists to put on screen. `dropped` is deliberately NOT counted,
+    /// because a reply whose every suggestion was discarded proposed nothing
+    /// usable and saying otherwise would dress validation failures up as
+    /// findings.
+    var saidSomethingBesidesItems: Bool {
+        profile != nil
+            || !observations.isEmpty
+            || !evidenceRequests.isEmpty
+            || expansion != nil
+    }
+}
+
+/// Mirrors `reporting::dto::ExternalEgressFieldReport` — one field that may
+/// reach a model, and every value it may carry.
+struct ExternalEgressFieldReportDto: Decodable, Equatable, Identifiable {
+    let source: String
+    let field: String
+    /// `"token"`, `"days"` or `"status"`.
+    let shape: String
+    /// Empty for `"days"`, whose range is the numbers rather than a set.
+    let vocabulary: [String]
+
+    var id: String { field }
+}
+
+/// Mirrors `reporting::dto::ExternalProviderPreviewReport` — one provider's
+/// local setup state.
+///
+/// `configured`, `ready` and `refusal` are three properties rather than one
+/// status because §10 of the campaign forbids folding them: a provider nobody
+/// set up and a provider whose credential a service rejected must not present
+/// as the same thing, and neither implies that no pull request or task exists.
+struct ExternalProviderPreviewReportDto: Decodable, Equatable, Identifiable {
+    let source: String
+    /// Whether the configuration file names this provider at all.
+    let configured: Bool
+    /// Configured *and* its credential variable set — the only state in which
+    /// anything is ever asked of it.
+    let ready: Bool
+    /// The name of the variable a credential is read from. Never its value.
+    let credentialEnv: String?
+    let endpoint: String?
+    /// The git remote host whose working trees are in scope for this provider,
+    /// or `nil` for one keyed by an explicit issue key instead.
+    let repositoryHost: String?
+    /// Why a configured provider is not ready, worded by Rust.
+    let refusal: String?
+
+    var id: String { source }
+
+    enum CodingKeys: String, CodingKey {
+        case source
+        case configured
+        case ready
+        case credentialEnv = "credential_env"
+        case endpoint
+        case repositoryHost = "repository_host"
+        case refusal
+    }
+}
+
+/// Mirrors `reporting::dto::ExternalContextPreviewReport` — what
+/// `external-context --json` prints.
+///
+/// Nothing in it was fetched. `neverSent` is the explicit negative and the
+/// reason this is worth a screen at all: a list of what travels does not answer
+/// "did you send my branch name", and only naming the absence does.
+struct ExternalContextPreviewReportDto: Decodable, Equatable {
+    /// `true` when at least one provider is configured. `false` is the state the
+    /// product ships in, and then `egressFields` is empty because nothing is
+    /// asked or sent.
+    let enabled: Bool
+    let configPath: String?
+    /// Whether a file exists there — distinct from `enabled`, because a file
+    /// that parses to nothing configured is not the same as no file.
+    let configExists: Bool
+    let configError: String?
+    /// Every provider this product can have, configured or not, so the screen
+    /// can say "not configured" rather than omit it.
+    let providers: [ExternalProviderPreviewReportDto]
+    let egressFields: [ExternalEgressFieldReportDto]
+    let neverSent: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case configPath = "config_path"
+        case configExists = "config_exists"
+        case configError = "config_error"
+        case providers
+        case egressFields = "egress_fields"
+        case neverSent = "never_sent"
+    }
+}
+
+/// Mirrors `reporting::dto::WorkflowSupportReport` — the counts a
+/// `WorkflowProfileReportDto`'s mode was read off.
+struct WorkflowSupportReportDto: Decodable, Equatable {
+    let spanningDays: UInt32
+    let repositoriesObserved: UInt32
+    let parallelObservations: UInt32
+    let serialObservations: UInt32
+    let mixedObservations: UInt32
+    let singleCheckoutBranchChanges: UInt32
+    let mostWorktreesSeenAtOnce: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case spanningDays = "spanning_days"
+        case repositoriesObserved = "repositories_observed"
+        case parallelObservations = "parallel_observations"
+        case serialObservations = "serial_observations"
+        case mixedObservations = "mixed_observations"
+        case singleCheckoutBranchChanges = "single_checkout_branch_changes"
+        case mostWorktreesSeenAtOnce = "most_worktrees_seen_at_once"
+    }
+}
+
+/// Mirrors `reporting::dto::WorkflowProfileReport` — what
+/// `workflow-profile --json` prints: this machine's own measured baseline.
+///
+/// This is the historical half of AC 2, and the distinction the screen has to
+/// keep is between it and current evidence. `mode: "unknown"` with
+/// `confidence: "insufficient"` and `observationsStillNeeded: 1` is a
+/// measurement that was taken and has an answer pending — a surface that
+/// rendered it as "workflow: unknown" would be reporting it as though nothing
+/// had been looked at.
+///
+/// `state` is a word rather than a bool for the same reason: `never_collected`,
+/// `unreadable` and `collected` have three different next steps, and a
+/// `hasHistory: Bool` would send somebody to re-run a recorder that is running
+/// fine.
+struct WorkflowProfileReportDto: Decodable, Equatable {
+    /// `"never_collected"`, `"unreadable"` or `"collected"`.
+    let state: String
+    /// An `evidence::ProbeReason` tag, set only for `"unreadable"`.
+    let unreadableReason: String?
+    let storedAt: String?
+    /// A `workspace::WorkflowMode` tag.
+    let mode: String
+    /// `"observed"` or `"insufficient"`.
+    let confidence: String
+    let observationCount: UInt32
+    /// `0` once the minimum is met — present rather than omitted, because "you
+    /// need none more" is what somebody who just met it is looking for.
+    let observationsStillNeeded: UInt32
+    let minimumIntervalSecs: UInt64
+    let retentionDays: UInt64
+    let support: WorkflowSupportReportDto
+    /// What this baseline may and may not do, worded by Rust. Rendered verbatim:
+    /// the app does not get to paraphrase a limit on its own authority.
+    let authority: String
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case unreadableReason = "unreadable_reason"
+        case storedAt = "stored_at"
+        case mode
+        case confidence
+        case observationCount = "observation_count"
+        case observationsStillNeeded = "observations_still_needed"
+        case minimumIntervalSecs = "minimum_interval_secs"
+        case retentionDays = "retention_days"
+        case support
+        case authority
+    }
+}

@@ -284,6 +284,15 @@ struct GlomerisPopoverView: View {
                 // what a user acts on and this is an explanation of it — and it
                 // draws nothing at all when no candidate lives in a checkout.
                 WorkspaceFamiliesSectionView(scan: scan)
+                // HORO-1550, and the position is campaign §17's four tiers read
+                // top to bottom: the two cards above are local fact measured
+                // today, this one is recorded habit and remote setup, the card
+                // below is a model's reading, and the safety class on every row
+                // is the verdict. A reader meets what is true now before what
+                // was true before, and both before an inference drawn from
+                // either. Above the AI card for the same reason the AI card is
+                // below the candidates list — context precedes advice.
+                WorkspaceIntelligenceSectionView(client: client)
                 AiPlanSectionView(
                     plan: plan,
                     client: client,

@@ -42,17 +42,30 @@
 //! process that raises the pressure notification the daemon can only record.
 //! Three status fixtures rather than one: the shape a client acts on is mostly
 //! made of optionals, and "absent" is a meaning of its own on this surface.
+//!
+//! HORO-1550 added three more families, because the GUI has to explain
+//! workspace intelligence rather than just list candidates:
+//! `WorkspacePlanReport` (the contract-version-2 plan, whose model inference
+//! sits *beside* a nested v1 row instead of flattened into it — the separation
+//! the explanation surface depends on), `ExternalContextPreviewReport` (which
+//! must keep "not configured" and "configured but refused" distinguishable all
+//! the way to the screen), and `WorkflowProfileReport` (where a measurement
+//! that has been taken but not yet answered must not render as one that was
+//! never taken). Each of the latter two got a second fixture for its
+//! nothing-observed state for that reason.
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
 use glomeris::autopilot::RefusalReason;
+use glomeris::cli::external_context::build_external_context_preview;
 use glomeris::cli::pressure::{build_pressure_rejection_report, build_pressure_status_report};
 use glomeris::cli::recovery::{
     build_goal_rejection_report, build_recovery_preview_report, build_recovery_run_report,
 };
 use glomeris::cli::settings::{build_settings_rejection_report, build_settings_report};
+use glomeris::cli::workflow_profile::build_workflow_profile_report;
 use glomeris::evidence::{ProbeOutcome, ProbeReason};
 use glomeris::executor::goal::RecoveryGoal;
 use glomeris::executor::recovery_loop::{
@@ -66,10 +79,19 @@ use glomeris::reporting::dto::{
     AutopilotCeilingsReport, AutopilotEnvelopeReport, DaemonStatusReport, DetectCandidateReport,
     DetectReport, DetectorHealthReport, ExecuteReport, HistoryEventReport, HistoryReport,
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    OfferedAction, StatusReport, WorkspaceFamilyReport,
+    OfferedAction, StatusReport, WorkspaceEvidenceRequestReport, WorkspaceExpansionReport,
+    WorkspaceFamilyReport, WorkspaceObservationReport, WorkspacePlanDroppedReport,
+    WorkspacePlanItemReport, WorkspacePlanReport, WorkspaceProbeFindingReport,
+    WorkspaceProfileReport,
 };
 use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
+use glomeris::workspace::external::{
+    ConfiguredProviders, ExternalContextConfig, ExternalProviderError, GitHubSettings, JiraSettings,
+};
+use glomeris::workspace::history::{
+    LocalAlias, RepositoryObservation, StoreState, WorkspaceObservation,
+};
 use glomeris::workspace::{
     ActivityState, Divergence, EquivalenceMethod, IntegrationEvidence, MergedState,
     PatchEquivalence, UpstreamState, WorkspaceFamily, WorkspaceMember, WorkspaceWorktree,
@@ -423,6 +445,205 @@ fn llm_plan_report_matches_golden_fixture() {
         provider_error: None,
     };
     assert_matches_fixture(&report, "llm_plan_report.json");
+}
+
+/// HORO-1550. The version 2 plan, whose rows the Workspace Intelligence surface
+/// has to render without ever merging the model's request into this machine's
+/// verdict.
+///
+/// The two rows are paired the awkward way round on purpose, and it is a
+/// different awkwardness from the version 1 fixture's:
+///
+/// 1. a row this machine classified `AUTO_SAFE` and the model asked to
+///    `defer` — so a surface cannot read `disposition` as a stronger form of
+///    `policy_label`, because here it is a weaker one;
+/// 2. a row this machine classified `ASK`, whose only offered action
+///    `requires_confirmation`, and which the model asked to `recommend_now`
+///    with `model_confidence: "unknown"` — so a surface cannot read
+///    `recommend_now` as authority to offer one click, and cannot read the
+///    model's own admission of ignorance as an absence of doubt.
+///
+/// There is deliberately **no `PROTECTED` row**, which is the version 1
+/// fixture's item 3. A version 2 response naming an action for a protected
+/// resource is dropped before a row is built — `cli::tests::
+/// build_workspace_plan_report_never_renders_a_row_for_a_protected_resource` —
+/// so a fixture carrying one would be a shape its producer cannot produce. What
+/// happened to it is `dropped.unoffered_action: 1` instead, and that is the
+/// point of the counters: the protected resource's absence from `items` is only
+/// readable there.
+///
+/// `evidence_refs` hold wire aliases (`resource_1`) while every `resource_id`
+/// holds the real local id. Both are true at once and the asymmetry is load
+/// bearing: the model cited the only names it was given, and the row names the
+/// resource on this disk. A Swift mirror that tried to join the two directly
+/// would find nothing.
+///
+/// `expansion` is present, reports a run that stopped at its round ceiling, and
+/// includes one `unavailable` finding — the three facts a surface must not round
+/// off. `converged: false` beside `rounds_run == rounds_allowed` is the shape of
+/// a plan formed without evidence somebody asked for, and the `unavailable`
+/// finding carries a `reason` rather than an answer of `false`.
+#[test]
+fn workspace_plan_report_matches_golden_fixture() {
+    let report = WorkspacePlanReport {
+        contract_version: 2,
+        contract_declared: true,
+        profile: Some(WorkspaceProfileReport {
+            mode: "mixed",
+            confidence: "inferred",
+            evidence_refs: vec!["workflow_history".to_string()],
+            summary: Some(
+                "Some repositories are used one branch at a time and one keeps several \
+                 working trees."
+                    .to_string(),
+            ),
+        }),
+        items: vec![
+            WorkspacePlanItemReport {
+                item: LlmPlanItemReport {
+                    resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                    policy_label: "AUTO_SAFE",
+                    requested_action_id: Some("cargo.clean.target_dir"),
+                    priority: Some(1),
+                    model_reason: Some(
+                        "Large, but a build may be running and the probe did not say.".to_string(),
+                    ),
+                    explain: Some("remove the Cargo target directory for this project".to_string()),
+                    skip_reason: None,
+                    candidate: DetectCandidateReport {
+                        resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                        kind: "cargo_target_dir",
+                        reclaimable_bytes: Some(2_147_483_648),
+                        reclaimable_human: Some("2.0 GB".to_string()),
+                        reclaimable_bytes_is_lower_bound: false,
+                        impact_tier: "notable",
+                        policy_label: "AUTO_SAFE",
+                        reasons: vec!["no_active_use_observed"],
+                        executable: true,
+                        offered_actions: vec![OfferedAction {
+                            action_id: "cargo.clean.target_dir".to_string(),
+                            requires_confirmation: false,
+                        }],
+                        refusal_reason: None,
+                    },
+                    completeness: "complete",
+                    confidence: "high",
+                },
+                // Weaker than the policy verdict, not stronger.
+                disposition: "defer",
+                model_confidence: "inferred",
+                uncertainties: vec!["whether a cargo build is running right now".to_string()],
+                evidence_refs: vec!["resource_1".to_string()],
+            },
+            WorkspacePlanItemReport {
+                item: LlmPlanItemReport {
+                    resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                    policy_label: "ASK",
+                    requested_action_id: Some("node.remove.node_modules"),
+                    priority: Some(2),
+                    model_reason: Some("Regenerable from the lockfile.".to_string()),
+                    explain: Some("remove node_modules for this project".to_string()),
+                    skip_reason: None,
+                    candidate: DetectCandidateReport {
+                        resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                        kind: "node_modules",
+                        reclaimable_bytes: Some(536_870_912),
+                        reclaimable_human: Some("512.0 MB".to_string()),
+                        reclaimable_bytes_is_lower_bound: false,
+                        impact_tier: "normal",
+                        policy_label: "ASK",
+                        reasons: vec!["regenerable_by_tool"],
+                        executable: true,
+                        offered_actions: vec![OfferedAction {
+                            action_id: "node.remove.node_modules".to_string(),
+                            requires_confirmation: true,
+                        }],
+                        refusal_reason: None,
+                    },
+                    completeness: "partial",
+                    confidence: "medium",
+                },
+                // The sharp one: the model wants this done now and says it does
+                // not know how well-founded that is.
+                disposition: "recommend_now",
+                model_confidence: "unknown",
+                // Non-empty here and single-element above, because an empty
+                // list is the one value a surface must not render as
+                // reassurance — see `WorkspacePlanItemReport::uncertainties`.
+                uncertainties: vec![
+                    "whether the lockfile still resolves".to_string(),
+                    "no pull request state was available".to_string(),
+                ],
+                evidence_refs: vec!["resource_2".to_string(), "workflow_history".to_string()],
+            },
+        ],
+        observations: vec![
+            WorkspaceObservationReport {
+                kind: "conflicting_evidence",
+                evidence_refs: vec!["workspace_1".to_string()],
+                detail: Some(
+                    "A working tree reports no upstream and also reports commits that are \
+                     merged."
+                        .to_string(),
+                ),
+            },
+            // `detail: null` on purpose: the model named a kind and said
+            // nothing more, and a surface has to show the kind rather than
+            // drop a wordless observation.
+            WorkspaceObservationReport {
+                kind: "missing_evidence",
+                evidence_refs: vec!["machine".to_string()],
+                detail: None,
+            },
+        ],
+        evidence_requests: vec![WorkspaceEvidenceRequestReport {
+            probe_id: "github_pr_state",
+            subject_ref: "workspace_1".to_string(),
+            reason: Some("is anything open against this branch".to_string()),
+        }],
+        dropped: WorkspacePlanDroppedReport {
+            // The protected resource the model asked to delete.
+            unoffered_action: 1,
+            // A resource id that was never issued, and a probe this build does
+            // not implement: the two halves of "the model asked for things that
+            // do not exist", which a surface reporting only `items.len()` hides.
+            unknown_resource: 1,
+            unknown_probe: 1,
+            degraded_unknown_confidence: 1,
+            truncated_uncertainties: 2,
+            ..WorkspacePlanDroppedReport::default()
+        },
+        expansion: Some(WorkspaceExpansionReport {
+            rounds_run: 3,
+            rounds_allowed: 3,
+            probes_run: 2,
+            probes_allowed: 12,
+            stopped_because: "round_limit",
+            // A ceiling, and never to be rendered as agreement.
+            converged: false,
+            findings: vec![
+                WorkspaceProbeFindingReport {
+                    round: 2,
+                    probe_id: "git_branch_state",
+                    subject_ref: "workspace_1".to_string(),
+                    finding: "branch_state",
+                    unavailable_reason: None,
+                },
+                WorkspaceProbeFindingReport {
+                    round: 3,
+                    probe_id: "github_pr_state",
+                    subject_ref: "workspace_1".to_string(),
+                    finding: "unavailable",
+                    // Not an answer of "no pull request": the provider was
+                    // never configured, which is a different fact and the one
+                    // §10 forbids collapsing.
+                    unavailable_reason: Some("not_attempted"),
+                },
+            ],
+        }),
+        provider_error: None,
+    };
+    assert_matches_fixture(&report, "workspace_plan_report.json");
 }
 
 #[test]
@@ -1542,4 +1763,158 @@ fn pressure_rejection_report_matches_golden_fixture() {
 
     let report = build_pressure_rejection_report(&rejection);
     assert_matches_fixture(&report, "pressure_rejection_report.json");
+}
+
+/// The state the product ships in (HORO-1550): no external-context file, so
+/// nothing is configured, nothing is asked and nothing travels.
+///
+/// The fixture a privacy pane shows almost every user, and the one where the
+/// wording matters most. `egress_fields` is empty and `never_sent` is not —
+/// "nothing leaves" plus "and here is specifically what does not" — because a
+/// pane that showed only the empty list would be saying nothing at all.
+///
+/// Both providers still appear, with `configured: false`. Omitting them would
+/// leave a reader unable to tell "Jira was not asked" from "Jira was asked and
+/// said nothing", which is the conflation §10 of the campaign exists to prevent
+/// and AC 4 of this ticket asks the GUI to render.
+#[test]
+fn external_context_preview_report_with_nothing_configured_matches_golden_fixture() {
+    let report = build_external_context_preview(
+        &ExternalContextConfig {
+            github: None,
+            jira: None,
+            timeout: None,
+        },
+        &ConfiguredProviders::none(),
+        Some("/Users/dev/Library/Application Support/Glomeris/external-context.conf".to_string()),
+        false,
+        None,
+    );
+    assert_matches_fixture(&report, "external_context_preview_report_disabled.json");
+}
+
+/// Configured and unusable (HORO-1550) — the other half of AC 4, and the half
+/// that is easy to render as the first.
+///
+/// Both providers are named by the file, and neither is `ready`: one because the
+/// credential variable is not set, one because the service refused the
+/// credential that was. So `configured: true` with `ready: false` appears twice
+/// with two different `refusal` sentences, which is exactly the pair a surface
+/// must not collapse into "GitHub: off". A user whose token expired is not a
+/// user who never set one up, and neither of them has been told anything
+/// whatsoever about whether a pull request exists.
+///
+/// `egress_fields` is derived, not written — it comes from
+/// `PullRequestState::ALL` and `TaskState::ALL_TAGS` by way of
+/// `cli::external_context::egress_fields`, so this fixture is built through the
+/// real builder rather than as a literal. A hand-written egress list would be
+/// the one kind of fixture that is worse than none: it would keep passing while
+/// the product started sending a value it does not name.
+///
+/// Note the fields are listed while `ready` is `false` for both. That is
+/// correct and worth not "fixing": the list answers "what may leave if this
+/// works", and a pane that hid it until a credential was valid would only ever
+/// show a user their exposure *after* they had consented to it.
+#[test]
+fn external_context_preview_report_matches_golden_fixture() {
+    // Field assignment rather than a struct literal: `ConfiguredProviders`
+    // keeps its two adapters private, because building one means reading a
+    // credential out of the environment and a test must not be able to fake
+    // having done that. So `ready: true` is deliberately unreachable from here,
+    // and the two states this fixture holds are the two a preview can honestly
+    // show without a live credential.
+    //
+    // Both refusals are values `external::config::build_from_parts` and the
+    // GitHub adapter really produce — the first for a credential variable that
+    // is not set, the second for one the service rejected. Paraphrasing either
+    // would make this fixture assert a sentence no user will ever see.
+    let mut providers = ConfiguredProviders::none();
+    providers.github_refusal = Some(ExternalProviderError::InvalidConfiguration(
+        "GLOMERIS_GITHUB_TOKEN is not set".to_string(),
+    ));
+    providers.jira_refusal = Some(ExternalProviderError::AuthRejected { status: 401 });
+
+    let report = build_external_context_preview(
+        &ExternalContextConfig {
+            github: Some(GitHubSettings {
+                host: "github.com".to_string(),
+                api_base: "https://api.github.com".to_string(),
+                token_env: "GLOMERIS_GITHUB_TOKEN".to_string(),
+            }),
+            jira: Some(JiraSettings {
+                base_url: "https://example.atlassian.net".to_string(),
+                // Present in the configuration and deliberately absent from the
+                // report: an account address identifies a person rather than a
+                // setting anybody debugs. Pinned here so a future field that
+                // started carrying it fails this fixture.
+                email: "dev@example.com".to_string(),
+                token_env: "GLOMERIS_JIRA_TOKEN".to_string(),
+            }),
+            timeout: None,
+        },
+        &providers,
+        Some("/Users/dev/Library/Application Support/Glomeris/external-context.conf".to_string()),
+        true,
+        None,
+    );
+    assert_matches_fixture(&report, "external_context_preview_report.json");
+}
+
+/// A collected baseline that is not yet allowed to claim a habit (HORO-1550).
+///
+/// Two observations, and `MIN_OBSERVATIONS_FOR_A_PATTERN` is three — so
+/// `state: "collected"`, `confidence: "insufficient"`, `mode: "unknown"` and
+/// `observations_still_needed: 1` all at once. That combination is the whole
+/// reason AC 2 of this ticket asks for current evidence and historical habit to
+/// be *semantically* distinct and not merely two rows: a surface that rendered
+/// this as "workflow: unknown" would be reporting a measurement that was taken
+/// and has an answer pending, as though nothing had been looked at.
+///
+/// Built through the real builder rather than as a literal, because
+/// `authority` is a constant sentence the CLI prints and the counts are read off
+/// the observations by `workspace::history::classify`. A literal would let this
+/// fixture assert a classification the classifier does not make — and `mode`
+/// being `"unknown"` for two *parallel* observations is exactly the sort of
+/// non-obvious outcome a hand-written fixture gets wrong in the reassuring
+/// direction.
+#[test]
+fn workflow_profile_report_matches_golden_fixture() {
+    let day = 86_400;
+    let now = 1_700_000_000;
+    let observations = (0..2)
+        .map(|i| WorkspaceObservation {
+            at_unix_secs: now - (5 * day) + (i * 2 * day),
+            repositories: vec![RepositoryObservation {
+                repository: LocalAlias::of_name("repo-0"),
+                worktree_count: 4,
+                linked_worktree_count: 3,
+                detached_worktree_count: 0,
+                single_checkout_branch: None,
+            }],
+        })
+        .collect();
+
+    let report = build_workflow_profile_report(
+        &StoreState::Collected(observations),
+        Some("/Users/dev/Library/Application Support/Glomeris/workflow-history.json".to_string()),
+        now,
+    );
+    assert_matches_fixture(&report, "workflow_profile_report.json");
+}
+
+/// No baseline at all (HORO-1550), which is not the same as an unreadable one.
+///
+/// `state: "never_collected"` with `unreadable_reason` omitted. The sibling
+/// state — `"unreadable"` with a `ProbeReason` tag — has a different next step
+/// (look at the file's permissions, not run the recorder), and a surface that
+/// folded the two into "no history" would send somebody to re-run a recorder
+/// that is running fine.
+///
+/// `stored_at` is `None` here, standing for a machine where `$HOME` could not be
+/// resolved, so the key is absent rather than null. Same rule the recovery
+/// settings report follows.
+#[test]
+fn workflow_profile_report_never_collected_matches_golden_fixture() {
+    let report = build_workflow_profile_report(&StoreState::NeverCollected, None, 1_700_000_000);
+    assert_matches_fixture(&report, "workflow_profile_report_never_collected.json");
 }

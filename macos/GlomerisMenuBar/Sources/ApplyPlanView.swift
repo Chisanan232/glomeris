@@ -393,7 +393,7 @@ struct ApplyPlanView: View {
     // MARK: - Wording
     //
     // `static` and pure so every sentence below is assertable without building
-    // a view — the same reason `AiPlanSectionView.droppedText` is.
+    // a view — the same reason `AiPlanSectionView.discardedTexts` is.
 
     static func summaryText(_ preview: PlanApplicationPreview, includingConfirmable: Bool) -> String {
         var parts: [String] = []

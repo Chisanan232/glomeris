@@ -1289,4 +1289,320 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(term.title, "Nothing was owed")
         XCTAssertEqual(term.tone, .neutral)
     }
+
+    // MARK: - WorkspacePlanReport (HORO-1550)
+
+    func testDecodesWorkspacePlanReport() throws {
+        let dto = try decodeFixture(
+            "workspace_plan_report.json",
+            as: WorkspacePlanReportDto.self
+        )
+
+        XCTAssertEqual(dto.contractVersion, 2)
+        XCTAssertTrue(dto.contractDeclared)
+        XCTAssertNil(dto.providerError)
+        XCTAssertEqual(dto.items.count, 2)
+
+        let profile = try XCTUnwrap(dto.profile)
+        XCTAssertEqual(profile.mode, "mixed")
+        XCTAssertEqual(profile.confidence, "inferred")
+        XCTAssertEqual(profile.evidenceRefs, ["workflow_history"])
+        XCTAssertEqual(
+            profile.summary,
+            "Some repositories are used one branch at a time and one keeps several working trees."
+        )
+
+        let first = dto.items[0]
+        XCTAssertEqual(first.item.resourceId, "cargo_target_dir:/Users/dev/proj/target")
+        XCTAssertEqual(first.disposition, "defer")
+        XCTAssertEqual(first.modelConfidence, "inferred")
+        XCTAssertEqual(first.uncertainties, ["whether a cargo build is running right now"])
+        XCTAssertEqual(first.evidenceRefs, ["resource_1"])
+        // `Identifiable` reads through the nested row, so a plan row and a
+        // candidates-list row for the same resource have the same identity.
+        XCTAssertEqual(first.id, first.item.resourceId)
+
+        let second = dto.items[1]
+        XCTAssertEqual(second.disposition, "recommend_now")
+        XCTAssertEqual(second.modelConfidence, "unknown")
+        XCTAssertEqual(second.uncertainties.count, 2)
+        XCTAssertEqual(second.evidenceRefs, ["resource_2", "workflow_history"])
+
+        XCTAssertEqual(dto.observations.count, 2)
+        XCTAssertEqual(dto.observations[0].kind, "conflicting_evidence")
+        XCTAssertEqual(dto.observations[0].evidenceRefs, ["workspace_1"])
+        XCTAssertEqual(
+            dto.observations[0].detail,
+            "A working tree reports no upstream and also reports commits that are merged."
+        )
+        // A kind the model offered without wording. Absent detail is not an
+        // absent observation.
+        XCTAssertEqual(dto.observations[1].kind, "missing_evidence")
+        XCTAssertNil(dto.observations[1].detail)
+
+        XCTAssertEqual(dto.evidenceRequests.count, 1)
+        XCTAssertEqual(dto.evidenceRequests[0].probeId, "github_pr_state")
+        XCTAssertEqual(dto.evidenceRequests[0].subjectRef, "workspace_1")
+        XCTAssertEqual(dto.evidenceRequests[0].reason, "is anything open against this branch")
+    }
+
+    /// The point of the version-2 row shape: the model's reading and this
+    /// machine's verdict are two different values, so no view can read one and
+    /// display the other.
+    ///
+    /// Both pairings in the fixture are deliberately the awkward way round — a
+    /// machine `AUTO_SAFE` the model wants deferred, and a machine `ASK` the
+    /// model wants done now. A surface that merged the two tiers would render
+    /// the second as an actionable recommendation, when the only enablement
+    /// authority on that row still says confirmation is required.
+    func testModelInferenceNeverOverwritesThePolicyVerdict() throws {
+        let dto = try decodeFixture(
+            "workspace_plan_report.json",
+            as: WorkspacePlanReportDto.self
+        )
+
+        let deferredAutoSafe = dto.items[0]
+        XCTAssertEqual(deferredAutoSafe.item.policyLabel, "AUTO_SAFE")
+        XCTAssertEqual(deferredAutoSafe.disposition, "defer")
+
+        let recommendedAsk = dto.items[1]
+        XCTAssertEqual(recommendedAsk.item.policyLabel, "ASK")
+        XCTAssertEqual(recommendedAsk.disposition, "recommend_now")
+        // `offeredActions` remains the only enablement path, exactly as on a
+        // candidates-list row: `recommend_now` does not clear a confirmation.
+        XCTAssertTrue(recommendedAsk.item.candidate.executable)
+        XCTAssertEqual(recommendedAsk.item.candidate.offeredActions.count, 1)
+        XCTAssertTrue(recommendedAsk.item.candidate.offeredActions[0].requiresConfirmation)
+    }
+
+    /// A plan whose response was partly refused is not a two-row plan, and a
+    /// probe that could not run is not a probe that found nothing.
+    func testWorkspacePlanSurfacesWhatWasRefusedAndWhatCouldNotBeAnswered() throws {
+        let dto = try decodeFixture(
+            "workspace_plan_report.json",
+            as: WorkspacePlanReportDto.self
+        )
+
+        XCTAssertTrue(dto.dropped.anyDropped)
+        XCTAssertEqual(dto.dropped.unknownResource, 1)
+        XCTAssertEqual(dto.dropped.unofferedAction, 1)
+        XCTAssertEqual(dto.dropped.unknownProbe, 1)
+        XCTAssertEqual(dto.dropped.degradedUnknownConfidence, 1)
+        XCTAssertEqual(dto.dropped.truncatedUncertainties, 2)
+        XCTAssertEqual(dto.dropped.duplicateItem, 0)
+
+        let expansion = try XCTUnwrap(dto.expansion)
+        XCTAssertEqual(expansion.roundsRun, 3)
+        XCTAssertEqual(expansion.roundsAllowed, 3)
+        XCTAssertEqual(expansion.probesRun, 2)
+        XCTAssertEqual(expansion.probesAllowed, 12)
+        XCTAssertEqual(expansion.stoppedBecause, "round_limit")
+        // Out of budget, not out of questions — the model still had one open.
+        XCTAssertFalse(expansion.converged)
+
+        XCTAssertEqual(expansion.findings.count, 2)
+        XCTAssertEqual(expansion.findings[0].finding, "branch_state")
+        XCTAssertNil(expansion.findings[0].unavailableReason)
+        XCTAssertEqual(expansion.findings[1].finding, "unavailable")
+        XCTAssertEqual(expansion.findings[1].unavailableReason, "not_attempted")
+    }
+
+    // MARK: - ExternalContextPreviewReport (HORO-1550)
+
+    /// The state the product ships in: nothing configured, so nothing may leave.
+    func testDecodesExternalContextPreviewWithNothingConfigured() throws {
+        let dto = try decodeFixture(
+            "external_context_preview_report_disabled.json",
+            as: ExternalContextPreviewReportDto.self
+        )
+
+        XCTAssertFalse(dto.enabled)
+        XCTAssertFalse(dto.configExists)
+        XCTAssertNotNil(dto.configPath)
+        XCTAssertNil(dto.configError)
+        XCTAssertTrue(dto.egressFields.isEmpty)
+
+        // The negative list is present even here — this is the screen that
+        // answers "did you send my branch name", and it has to answer it in the
+        // state where the answer is trivially no.
+        XCTAssertFalse(dto.neverSent.isEmpty)
+
+        // Both providers are listed rather than omitted, so the screen can say
+        // "Jira: not configured" instead of leaving a reader to wonder.
+        XCTAssertEqual(dto.providers.count, 2)
+        for provider in dto.providers {
+            XCTAssertFalse(provider.configured)
+            XCTAssertFalse(provider.ready)
+            XCTAssertNil(provider.refusal)
+        }
+    }
+
+    /// AC 4's distinction, decoded: a provider nobody set up and a provider
+    /// whose credential was refused must not arrive as the same value, and
+    /// neither says anything about whether a pull request or task exists.
+    func testConfiguredButUnusableIsDistinctFromNotConfigured() throws {
+        let configured = try decodeFixture(
+            "external_context_preview_report.json",
+            as: ExternalContextPreviewReportDto.self
+        )
+        let nothing = try decodeFixture(
+            "external_context_preview_report_disabled.json",
+            as: ExternalContextPreviewReportDto.self
+        )
+
+        XCTAssertTrue(configured.enabled)
+        XCTAssertTrue(configured.configExists)
+
+        let github = try XCTUnwrap(
+            configured.providers.first { $0.source == "github_pull_requests" }
+        )
+        let jira = try XCTUnwrap(configured.providers.first { $0.source == "jira_issues" })
+
+        // Configured, and separately not ready, and separately why.
+        for provider in [github, jira] {
+            XCTAssertTrue(provider.configured)
+            XCTAssertFalse(provider.ready)
+            XCTAssertNotNil(provider.refusal)
+        }
+
+        // Two different refusals: a credential variable that is not set, and one
+        // the service rejected. Different next steps, so different sentences.
+        XCTAssertEqual(
+            github.refusal,
+            "external context is misconfigured: GLOMERIS_GITHUB_TOKEN is not set"
+        )
+        XCTAssertEqual(
+            jira.refusal,
+            "the service answered 401 and refused the credential; "
+                + "check that the token exists and is allowed to read this subject"
+        )
+
+        // The variable is named so a missing credential is fixable; the value
+        // never appears, here or anywhere.
+        XCTAssertEqual(github.credentialEnv, "GLOMERIS_GITHUB_TOKEN")
+        XCTAssertEqual(jira.credentialEnv, "GLOMERIS_JIRA_TOKEN")
+
+        // Which forge is in scope — the most privacy-relevant line on the
+        // screen. `nil` for the provider keyed by an explicit issue key, which
+        // has no host to scope by.
+        XCTAssertEqual(github.repositoryHost, "github.com")
+        XCTAssertNil(jira.repositoryHost)
+
+        // The whole report differs from the nothing-configured one, which is the
+        // property a folded single status would destroy.
+        XCTAssertNotEqual(configured.providers, nothing.providers)
+    }
+
+    /// The egress list must describe what may leave completely enough to be
+    /// checkable — every field with the whole value set it may carry.
+    func testEveryEgressFieldNamesItsSourceShapeAndCompleteVocabulary() throws {
+        let dto = try decodeFixture(
+            "external_context_preview_report.json",
+            as: ExternalContextPreviewReportDto.self
+        )
+
+        XCTAssertFalse(dto.egressFields.isEmpty)
+        for field in dto.egressFields {
+            XCTAssertFalse(field.field.isEmpty)
+            XCTAssertFalse(field.source.isEmpty)
+            XCTAssertTrue(["token", "days", "status"].contains(field.shape), field.shape)
+            // A closed vocabulary must be listed; a numeric one has no set to
+            // list and says so through its shape rather than by looking empty
+            // for an unexplained reason.
+            if field.shape == "days" {
+                XCTAssertTrue(field.vocabulary.isEmpty)
+            } else {
+                XCTAssertFalse(field.vocabulary.isEmpty, field.field)
+            }
+        }
+
+        // A field's own path is what travels, and no path, name or key does.
+        let names = dto.egressFields.map(\.field)
+        XCTAssertTrue(names.contains("pull_request.state.value"))
+        XCTAssertTrue(names.contains("task.state.value"))
+        for name in names {
+            XCTAssertFalse(name.contains("/"), name)
+        }
+
+        // An unavailable remote fact carries the reason it was unavailable,
+        // which is the vocabulary that keeps "no result" and "nobody asked"
+        // apart on the wire as well as on the screen.
+        let unavailable = try XCTUnwrap(
+            dto.egressFields.first { $0.field == "pull_request.state.unavailable_reason" }
+        )
+        XCTAssertTrue(unavailable.vocabulary.contains("not_attempted"))
+        XCTAssertTrue(unavailable.vocabulary.contains("tool_absent"))
+    }
+
+    // MARK: - WorkflowProfileReport (HORO-1550)
+
+    /// A baseline that has been collected and is not yet allowed to claim a
+    /// habit. Three things at once — collected, insufficient, one more needed —
+    /// and a screen that showed only `mode` would report a measurement with a
+    /// pending answer as though nothing had been looked at.
+    func testDecodesWorkflowProfileReportThatCannotYetClaimAHabit() throws {
+        let dto = try decodeFixture(
+            "workflow_profile_report.json",
+            as: WorkflowProfileReportDto.self
+        )
+
+        XCTAssertEqual(dto.state, "collected")
+        XCTAssertEqual(dto.confidence, "insufficient")
+        XCTAssertEqual(dto.mode, "unknown")
+        XCTAssertEqual(dto.observationCount, 2)
+        XCTAssertEqual(dto.observationsStillNeeded, 1)
+        XCTAssertNil(dto.unreadableReason)
+        XCTAssertNotNil(dto.storedAt)
+        XCTAssertEqual(dto.minimumIntervalSecs, 3600)
+        XCTAssertEqual(dto.retentionDays, 90)
+
+        // The counts the mode was read off, so an "unknown" can be argued with.
+        XCTAssertEqual(dto.support.spanningDays, 2)
+        XCTAssertEqual(dto.support.repositoriesObserved, 1)
+        XCTAssertEqual(dto.support.parallelObservations, 2)
+        XCTAssertEqual(dto.support.serialObservations, 0)
+        XCTAssertEqual(dto.support.mostWorktreesSeenAtOnce, 4)
+
+        // Rust words the limit and the app renders it verbatim.
+        XCTAssertTrue(dto.authority.contains("never permission"))
+    }
+
+    /// No baseline at all, which is not an unreadable one — different next step,
+    /// so a different state rather than a shared "no history".
+    func testDecodesWorkflowProfileReportWithNoBaselineAtAll() throws {
+        let dto = try decodeFixture(
+            "workflow_profile_report_never_collected.json",
+            as: WorkflowProfileReportDto.self
+        )
+
+        XCTAssertEqual(dto.state, "never_collected")
+        XCTAssertNil(dto.unreadableReason)
+        XCTAssertNil(dto.storedAt)
+        XCTAssertEqual(dto.observationCount, 0)
+        XCTAssertEqual(dto.observationsStillNeeded, 3)
+        XCTAssertEqual(dto.mode, "unknown")
+        XCTAssertEqual(dto.confidence, "insufficient")
+        XCTAssertEqual(dto.support.spanningDays, 0)
+        XCTAssertEqual(dto.support.mostWorktreesSeenAtOnce, 0)
+    }
+
+    /// `mode: "unknown"` arrives from two unrelated situations — a store with
+    /// too few observations and no store at all — so the mode alone cannot be
+    /// what a screen renders. `state` and `observationCount` are what separate
+    /// them.
+    func testWorkflowModeAloneDoesNotDistinguishTooLittleHistoryFromNone() throws {
+        let collected = try decodeFixture(
+            "workflow_profile_report.json",
+            as: WorkflowProfileReportDto.self
+        )
+        let never = try decodeFixture(
+            "workflow_profile_report_never_collected.json",
+            as: WorkflowProfileReportDto.self
+        )
+
+        XCTAssertEqual(collected.mode, never.mode)
+        XCTAssertEqual(collected.confidence, never.confidence)
+        XCTAssertNotEqual(collected.state, never.state)
+        XCTAssertNotEqual(collected.observationCount, never.observationCount)
+    }
 }

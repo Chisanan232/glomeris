@@ -21,7 +21,8 @@ Swift source (`macos/GlomerisMenuBar/Sources/GlomerisMenuBarApp.swift`):
 In practice this means every screen below is a formatting step over one of
 `glomeris`'s own `--json` reports (`status`, `daemon status`, `detect`,
 `explain`, `history`, `actions history`, `execute`, `autopilot
-show|enable|revoke`), spawned as a subprocess. The app never re-derives "is
+show|enable|revoke`, `workflow-profile show`, `external-context`), spawned as a
+subprocess. The app never re-derives "is
 this safe to clean" from
 `policy_label` or `reasons` — it reads the already-computed `executable`,
 `offered_actions`, and `refusal_reason` fields the CLI provides for exactly
@@ -170,6 +171,102 @@ stay selectable so they can be quoted in a bug report.
   CLI printed — one specific message per outcome, not a generic
   success/failure toast.
 
+### Workspace intelligence
+
+The one card in the panel that cannot do anything. It answers a question none of
+the cards above it can — what else is known about this machine, beyond what
+today's scan measured — and it has no Clean, no Refresh, no Ask and no setting;
+its only controls open a disclosure. It sits directly above the AI Plan card
+because recorded habit and remote setup are the ground an inference is drawn
+from, so they are worth reading before the inference.
+
+Two halves, from two commands, kept apart because they are two different kinds
+of knowledge:
+
+- **Previously recorded habit** — `glomeris workflow-profile show --json`. The
+  stored local baseline: the workflow shape it has settled on, how many looks it
+  is built from, what those looks counted, and how long observations are kept.
+- **Optional remote context** — `glomeris external-context --json`. Which
+  GitHub and Jira lookups are set up on this machine, which fields could reach a
+  model if they are, and the list of things that never will.
+
+Both are read once, when the card appears. Neither writes anything, neither
+takes `--project-root`, neither costs money, and neither asks a remote service
+anything — `external-context` answers from your configuration file and from the
+vocabularies the code itself serializes, rather than by making the requests it
+describes.
+
+**History never outranks today**, and the card says so above whatever it found:
+*"This is a record of earlier looks at this machine, not a reading of what is
+happening now. Where it disagrees with what was measured today, today's
+measurement is the one that counts."* A working tree that is dirty and in use
+stays protected whatever shape the baseline recorded — and this card could not
+change that in either direction if it wanted to, because it has no control to
+change anything with.
+
+Four claims the habit half can make, and they are four different things:
+
+| State | What it says |
+|---|---|
+| Nothing recorded yet | No observation has been taken. **Not** a finding about how this machine is used. |
+| Recorded, and short of its minimum | Observations exist but too few to name a shape. It says how many more it wants, and that a pattern it has not named is not a finding that this machine has none. |
+| Recorded | Names the shape in the CLI's own vocabulary, and quotes verbatim the CLI's own statement of what a baseline may and may not do. The counts it was read from — how many looks, over how many days, how many repositories, and how many working trees were seen at once — sit behind a **What that was read from** disclosure, with the retention window and when the baseline was last written. |
+| Unreadable | The stored baseline could not be read, and it names the reason. Nothing about how this machine is used can be read off that, in either direction. |
+
+A state this app does not recognise — a newer CLI paired with an older app — is
+named rather than guessed at, and states nothing about the machine either way.
+
+None of the shapes is the good one, and nothing here ranks whoever uses the
+machine. The card describes a *workspace* — "one checkout, moved between
+branches", "several working trees at once" — and has no vocabulary for advanced,
+beginner, heavy or casual; `scripts/check-workflow-history-labels-no-one.sh` is
+what keeps it that way. The [CLI Reference](cli_reference.md)'s
+`glomeris workflow-profile` section lists the shapes themselves and says why
+they are unordered.
+
+The remote half's rule is the mirror image: **silence is not an answer.** Off,
+not set up and unreachable all mean the same thing — Glomeris learned nothing —
+and the card says in those words that none of them means no pull request and no
+task exist. So each provider reads as one of three states rather than as a
+checkbox:
+
+| The card says | What it means |
+|---|---|
+| Not set up on this machine | No configuration for it. Nothing was asked and nothing was sent. |
+| Set up, and its credential variable is present | It would be asked, about working trees whose remote is on the host named beside it. |
+| Set up, but not usable | Configured and refused, with the CLI's own refusal quoted verbatim — a missing variable, or a service that answered 401 — rather than paraphrased into "unavailable". |
+
+A provider names the environment variable its credential is read from, never its
+value, and — for GitHub — the one repository host in scope. With nothing
+configured the card says that Glomeris asked GitHub and Jira nothing and sent
+them nothing, which is a fact about the shipped product rather than a
+hypothetical.
+
+Under the providers, two disclosures. The first is labelled with the count *and*
+the bound — "N fields may reach a model, and nothing else" — and lists every one
+of those fields with the vocabulary its value is drawn from, or says why it has
+none. The second is **Never sent, to a provider or to a model**, and lists each
+entry rather than counting them: a list of what is withheld is worth nothing if
+it is itself abridged. If the configuration file cannot be parsed, the card says
+the setup is therefore unknown rather than empty.
+
+Four outcomes per read, and the fourth is the one a thin client usually gets
+wrong: a `glomeris` old enough not to have the subcommand exits 2 with `unknown
+command`, and the card reports that as a missing command — *"That is a missing
+command, not a machine with no recorded habit"* — rather than as an empty answer.
+Exit 0 with output the app cannot decode is a version skew, and anything else
+carries the CLI's own words. Each half has its own slot, so neither read can
+erase the other's result, and both load-bearing sentences above are drawn
+outside the branch that can fail, so a failed read never takes them off screen
+with it.
+
+Each half is introduced by a heading VoiceOver announces as one, so the two can
+be jumped between rather than walked through. The two sentences that make up a
+recorded reading are read as a single phrase rather than as two fragments, and
+each provider is one element carrying its name, its state, its refusal and the
+host or variable beside it — so the state and the reason it is in that state
+cannot be separated by navigation.
+
 ### AI Plan
 
 The one card that talks to the internet, and only ever when you press its
@@ -178,14 +275,26 @@ nothing retries — asking a provider costs money, so asking has to be something
 you did. Until you press it the card says exactly that: *"Nothing has been sent
 anywhere."*
 
-Pressing **Ask AI for a plan** runs `glomeris llm-plan --json
---progress-json` with your project roots, streams the same per-detector
+Pressing **Ask AI for a plan** runs `glomeris llm-plan --contract-version 2
+--json --progress-json` with your project roots, streams the same per-detector
 progress the Reclaimable space card shows, and offers a **Stop** button that
 terminates the CLI child rather than just abandoning the result. Above the
 button, permanently: *"The model recommends. Glomeris decides what may run."*
 and a note that asking costs money and that *"Settings shows exactly what would
 be sent, without sending it"* — the privacy preview described under
 [Preferences — AI Provider](#preferences--ai-provider) below.
+
+**The card asks for contract version 2, and only version 2.** Version 1 gives a
+row one sentence from the model, which is enough to rank and not enough to
+explain — and explaining is what this panel is for. Version 2 is where the
+model's reading lives: what it recommends doing, whether it says that rests on
+evidence it was given or on an inference, what it could not settle, which
+evidence it claims to have read, plus its account of the workspace as a whole.
+See [Planner contract version 2](byok.md#planner-contract-version-2-horo-1548)
+for the wire format. A `glomeris` that predates it rejects the flag while parsing
+arguments — before any provider is contacted and before anything is billed — and
+that is its own message rather than a silent downgrade to version 1, which would
+drop every explanation below with no visible reason.
 
 Each suggestion is one row, and every row is split down the middle by who said
 what:
@@ -197,12 +306,33 @@ what:
   them, in plain words, is what Glomeris is willing to do: *"Glomeris is
   willing to run this"*, *"Glomeris will ask you to confirm this before
   anything runs"*, or the refusal, verbatim.
-- **The model's half** — its rationale — is an attributed, italic quotation
-  under a *"The model says"* label. It is deliberately **not** a badge. A
-  badge in this app means a verdict was reached; putting a model's sentence in
-  one would dress an opinion as a finding. A screen reader hears the machine's
-  verdict first, then *"The model's reason, which is advice and not a
-  verdict: …"*.
+- **The model's half** — everything it said about this row — is one attributed
+  block under a *"The model says"* label, set apart by a leading rule and
+  rendered in italic secondary text: what it recommends (reclaim now, decide
+  about it, leave it, keep it), whether it says that rests on evidence it was
+  given or is inferred or is unknown, its sentence if it gave one, each thing it
+  says it could not settle, and the aliases it cites. Not one of those is a
+  badge. A badge in this app means a verdict was reached, and its
+  recommendation is the field most likely to be mistaken for the policy verdict
+  beside it, so it renders in the same italic text as the quote rather than as a
+  chip. A screen reader hears the machine's verdict first, then *"The model's
+  reading, which is advice and not a verdict: …"* — attribution carried in the
+  words, because position is exactly what a listener who tabs into the middle of
+  the list does not have.
+
+  The uncertainties are written out rather than counted, which is why the block
+  can be tall. An uncertainty a user cannot read is an uncertainty that was not
+  disclosed, and the rule this whole contract exists for is that missing evidence
+  must never become negative evidence. The aliases are safe to show for the same
+  reason they were safe to send: `resource_1` names nothing outside the one
+  request it came from.
+
+  Its recommendation gains no authority anywhere. It cannot make a row
+  executable, and the only behaviour it changes at all moves in the direction of
+  doing less: the bulk-apply control below the list is handed the *reclaim now*
+  items only, so it never sweeps up something the model itself declined to
+  recommend. Anything held back is still reachable one row at a time through the
+  detail view, which is where a single deliberate decision belongs.
 
 The rows appear in the order the provider returned them, and the card says so
 (*"The model's order. Glomeris's own ranking is the list above."*). No rank
@@ -212,14 +342,57 @@ two competing numberings would read as though one of them were authoritative. No
 ranking is the Reclaimable space card, which is why the AI Plan card sits
 below it.
 
+Below the rows, in the same attributed grammar, is **the model's reading of this
+workspace** — its account of the whole machine rather than of one resource. It is
+below them on purpose: a per-row reading is what you came for, and putting this
+first would frame every row beneath it as following from it. Four things can
+appear in it:
+
+- **The shape it thinks it is looking at**, with its confidence attached rather
+  than stated flat: *"It reads this machine as several working trees in parallel
+  — inferred rather than observed."* Same vocabulary as the Workspace
+  intelligence card above, and the same rule: it describes a workspace, never a
+  person.
+- **What it noticed** — evidence that disagrees with itself, evidence it says it
+  did not get, and remarks on how a resource is being used or how much there is
+  to reclaim. Conflicting evidence is the single most useful thing a reply can
+  contain, so each kind is spelled out in words rather than shown as a contract
+  token.
+- **The read-only checks it asked Glomeris to run**, phrased as a request that
+  was *made*, with no claim about whether it was granted — "it asked" must never
+  read as "it found out".
+- **What those checks came back with**, when the bounded loop ran: how many of
+  how many checks over how many of how many rounds, why it stopped, and each
+  answer. A check that could not be answered says so and names the reason — the
+  tool is not installed, Glomeris was not allowed to look, it took too long —
+  and adds, in those words, that *that is not an answer either way*. Every one of
+  those reasons means "no information", and none of them means "no".
+
+Nothing in that block can be pressed. See
+[Asking for more evidence](byok.md#asking-for-more-evidence---evidence-rounds-horo-1549)
+for what the loop is allowed to run and what bounds it.
+
 **A recommendation cannot make anything runnable.** A model that confidently
 describes your SSH private key as a stale build directory gets its sentence
 quoted, next to a `PROTECTED` badge and a refusal, with no action offered — the
 row is built from the same `executable`/`offered_actions`/`refusal_reason`
 fields the candidates list reads, which the CLI computed before the provider
-was contacted. Suggestions naming a resource Glomeris never found, or an action
-it does not have, are dropped by the CLI and the count of them is printed under
-the list rather than quietly swallowed.
+was contacted.
+
+What the model said that never reached the screen is stated under the list rather
+than quietly swallowed — and sorted into the three things that can actually have
+happened to it, because they are three different reasons to trust a provider
+differently:
+
+| The card says | What happened |
+|---|---|
+| "…were **discarded** before reaching this card" | Validation refused the entry outright: a resource Glomeris never found, an action it does not offer for it, a recommendation that is not in the contract, a resource the reply had already covered, a check Glomeris does not run, a check asked about something Glomeris never mentioned or about the wrong kind of subject, the same question twice, or evidence cited that was never sent to it. |
+| "…were **read as unknown** rather than taken at face value" | The entry was kept, with one claim downgraded instead of believed — an unrecognised confidence or workflow shape. Reporting this as discarded would be a lie in the direction of making the model look worse; reporting it as nothing at all, a lie in the other direction. |
+| "…were **cut short** by Glomeris's own limit on how much a reply may say" | Glomeris stopped reading. That is Glomeris's doing, not the provider's, and blaming it on the provider would be the least honest reading of the three. |
+
+Each sentence names its own total and the breakdown behind it, summed from the
+same counters the breakdown is built from — so a count and its reasons cannot
+disagree.
 
 Tapping a row opens the same candidate detail sheet as the candidates list,
 which issues its own `explain` call and owns the only Clean button in the app.
@@ -227,11 +400,21 @@ A plan item carries no fingerprint token, so there is no shortcut past that —
 cleaning something a model suggested goes through exactly the path, and the
 same confirmation, as cleaning something you found yourself.
 
-Six situations, six distinct messages: never asked; asking; no provider
-configured; the provider answered with nothing; the provider call failed
-(quoted); and output this app could not read, which means the app and the
-`glomeris` on `PATH` are different versions. The first three are not failures
-and are not coloured like failures. The *no provider configured* message says
+Seven situations, seven distinct messages: never asked; asking; no provider
+configured; the provider answered with nothing at all; the provider call failed
+(quoted); output this app could not read, which means the app and the `glomeris`
+on `PATH` are different versions; and an installed `glomeris` that cannot produce
+the version 2 format, which says in so many words that nothing was sent and
+nothing was charged, because the remedy there is a CLI update rather than a
+setting. The first three are not failures and are not coloured like failures.
+
+*"Answered with nothing"* is reserved for a reply that carried nothing at all. A
+reply that proposes no cleanup but reports two conflicts and asks for a branch
+check **is** an answer, and covering it with "had nothing to propose" would hide
+the most useful thing the model said — so the workspace reading block speaks for
+it instead.
+
+The *no provider configured* message says
 why a shell user can still land there — a Finder-launched menu-bar app inherits
 no shell environment, so `GLOMERIS_LLM_*` variables exported in a terminal are
 invisible to it — and is the one state with a **Set up an AI provider…** button
@@ -322,19 +505,31 @@ the model, and what came back. See
 for the outcome table. A failure is carried verbatim; nothing is paraphrased
 into something more reassuring than what happened.
 
-**What Gets Sent** — one `glomeris llm-plan --print-payload --json`, with the
-same project roots a real plan would use, so it previews *your* payload rather
-than a generic example. It splits the result into **Leaves this Mac** (the two
-prompts, with a character count) and **Stays on this Mac** (the wire-alias
-table, which is where the absolute paths are). The second group is blue, not
-green: green in this app means `AUTO_SAFE` or *succeeded*, and data being
-withheld is a deliberate hold, not a success.
+**What Gets Sent** — one `glomeris llm-plan --contract-version 2
+--print-payload --json`, with the same project roots a real plan would use, so it
+previews *your* payload rather than a generic example. It splits the result into
+**Leaves this Mac** (the two prompts, with a character count) and **Stays on this
+Mac** (the wire-alias table, which is where the absolute paths are). The second
+group is blue, not green: green in this app means `AUTO_SAFE` or *succeeded*, and
+data being withheld is a deliberate hold, not a success.
+
+The contract version is pinned here for the same reason it is pinned on the AI
+Plan card, and both read it from the same constant. The two versions build their
+request from different sources — version 1 from the candidate list, version 2
+from the workspace projection — with a different system prompt and a different
+user prompt, so a preview that printed the version 1 request would be showing you
+a payload this app no longer sends. That is the one failure a screen whose whole
+purpose is verifying egress cannot afford.
 
 Opening that preview sends nothing and cannot — `--print-payload` returns before
-a provider is constructed — and the preview is the one command on this screen
-that runs *without* the credential in its environment. Neither button does
-anything until pressed: there is no timer, nothing runs when the window opens,
-and nothing retries.
+a provider is constructed, on the version 2 path as on the version 1 one — and
+the preview is the one command on this screen that runs *without* the credential
+in its environment. A `glomeris` too old to understand the version it asks for
+rejects the flag while parsing arguments, and the card says there is nothing to
+preview and that nothing was sent anywhere, rather than dumping the CLI's usage
+text: "could not preview" must never be readable as "it went out unpreviewed".
+Neither button does anything until pressed: there is no timer, nothing runs when
+the window opens, and nothing retries.
 
 ## Preferences — Autopilot
 
@@ -502,9 +697,11 @@ anywhere the app looks.
 | Disk space | `glomeris status --json` |
 | Background monitor | `glomeris daemon status --json` |
 | Reclaimable space + Refresh | `glomeris detect --json --progress-json` |
-| AI Plan — Ask AI for a plan | `glomeris llm-plan --json --progress-json` |
+| Workspace intelligence — Previously recorded habit | `glomeris workflow-profile show --json` |
+| Workspace intelligence — Optional remote context | `glomeris external-context --json` (asks no remote service) |
+| AI Plan — Ask AI for a plan | `glomeris llm-plan --contract-version 2 --json --progress-json` |
 | Settings → AI Provider — Test connection | `glomeris llm-check --json` |
-| Settings → AI Provider — Show what would be sent | `glomeris llm-plan --print-payload --json` (no provider contacted) |
+| Settings → AI Provider — Show what would be sent | `glomeris llm-plan --contract-version 2 --print-payload --json` (no provider contacted) |
 | Settings → Autopilot — on appear, Refresh | `glomeris autopilot show --json` |
 | Settings → Autopilot — Enable / Save changes | `glomeris autopilot enable --kinds <tag,...> --max-actions <N> --max-bytes <N> --max-duration <secs> --min-pressure <state\|none> [--preauthorize-ask <kind>:<reason>]... --json` |
 | Settings → Autopilot — Revoke now | `glomeris autopilot revoke --json` |
