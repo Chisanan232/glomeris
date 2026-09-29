@@ -7,32 +7,33 @@ decides; the executor verifies.
 usage: glomeris <command> [options]
 
 INSPECT — look at this machine. Nothing is changed.
-  status        Current disk-pressure state and the thresholds behind it.
-  scan          Largest directories under one path, by size.
-  detect        Find reclaimable candidates and how each is classified.
-  explain       Why one resource is classified the way it is.
+  status            Current disk-pressure state and the thresholds behind it.
+  scan              Largest directories under one path, by size.
+  detect            Find reclaimable candidates and how each is classified.
+  explain           Why one resource is classified the way it is.
 
 PLAN — decide what to do. Nothing is executed.
-  clean         Render what would be cleaned. Executes nothing.
-  llm-plan      Ask a configured LLM for a suggestion. Advisory only.
-  llm-check     Test the configured LLM endpoint, credential and model.
+  clean             Render what would be cleaned. Executes nothing.
+  llm-plan          Ask a configured LLM for a suggestion. Advisory only.
+  llm-check         Test the configured LLM endpoint, credential and model.
 
 ACT — change this machine. Policy decides every deletion.
-  execute       Run one action against one resource, under policy.
-  free          Reclaim space until a recovery goal is reached.
-  emergency     Degraded-path recovery with no network and no LLM.
-  autopilot     Read, grant or revoke a bounded standing authorization.
+  execute           Run one action against one resource, under policy.
+  free              Reclaim space until a recovery goal is reached.
+  emergency         Degraded-path recovery with no network and no LLM.
+  autopilot         Read, grant or revoke a bounded standing authorization.
 
 OBSERVE — what happened before. Nothing is changed.
-  history       Recorded disk-pressure transitions.
-  actions       Registered actions, or the real-execution audit log.
+  history           Recorded disk-pressure transitions.
+  actions           Registered actions, or the real-execution audit log.
 
 SERVICE — the background disk-pressure monitor.
-  daemon        Install, remove, inspect or run the background monitor.
-  pressure      Read the pressure episode, or answer its notification.
+  daemon            Install, remove, inspect or run the background monitor.
+  pressure          Read the pressure episode, or answer its notification.
 
 CONFIGURE — your preferences. Nothing on this machine is deleted.
-  settings      Read or change the alert threshold and the recovery goal.
+  settings          Read or change the alert threshold and the recovery goal.
+  external-context  What optional remote context may reach the model.
 
 Start here
   glomeris status

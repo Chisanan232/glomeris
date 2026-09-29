@@ -1,0 +1,54 @@
+glomeris external-context — What optional remote context may reach the model.
+
+usage: glomeris external-context [--json]
+
+Read-only — changes nothing.
+
+Glomeris can optionally read a pull request's state from GitHub and a work
+item's state from Jira, as supporting context for ranking a stale-looking
+working tree. Both are off until you configure them, and this command tells
+you what is configured and exactly which summarized fields could leave this
+machine as a result.
+
+It asks nothing. Answering "what may leave" by leaving is the one shape this
+command must not have: you would be making the requests you are trying to
+understand, against a service that logs them, before deciding whether you want
+that. Everything printed comes from your configuration and from the value
+vocabularies the code itself serializes.
+
+The field list is the complete set. A remote state reaches a model as a
+bounded token — `merged`, `in_progress`, `none_observed` — with how many
+days ago it was read, and with the KIND of failure when a provider could not
+answer, because "the provider is rate-limited" and "there is no pull request"
+must never arrive as the same value. Nothing else goes: not the repository,
+the branch, the issue key, the pull request's number or title, your account,
+or any path. The command prints that negative explicitly, because a list of
+what travels does not answer "did you send my branch name".
+
+None of this is permission. A merged pull request and a closed ticket are
+context for ranking; they cannot make a working tree deletable, and a dirty or
+actively-used one stays protected by its own evidence whatever a remote
+service says about it.
+
+Options
+  --json
+      Print the same report as JSON: each provider's configured and usable
+      state, the environment variable its credential is read from, the
+      endpoint, the one repository host in scope, every field that may be
+      sent with its complete value vocabulary, and the explicit list of
+      what is never sent. This is what the menu-bar app's privacy preview
+      reads. No credential value and no account address appears in it.
+
+Examples
+  glomeris external-context
+      Is anything configured, and what would leave if it were?
+  glomeris external-context --json
+      The same answer, for a script or the menu-bar app.
+
+Exit codes
+  0   the report was printed. Also when the configuration file is invalid:
+      the refusal is part of the report, and every provider is off.
+  2   usage error — this command takes no arguments besides `--json`.
+  Run `glomeris help exit-codes` for the codes shared by every command.
+
+See also: llm-plan, settings, explain
