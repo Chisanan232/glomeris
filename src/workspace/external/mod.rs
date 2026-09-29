@@ -48,6 +48,7 @@
 //! becomes a guessed lifecycle, and a guessed lifecycle becomes a guessed
 //! recommendation about somebody's unpushed work.
 
+mod config;
 mod error;
 mod github;
 mod http;
@@ -55,6 +56,11 @@ mod jira;
 mod provider;
 mod subject;
 
+pub use config::{
+    build_from_env, build_from_parts, default_config_path, load_config, load_config_at,
+    ConfigError, ConfiguredProviders, ExternalContextConfig, GitHubSettings, JiraSettings,
+    DEFAULT_TIMEOUT, FORMAT_VERSION,
+};
 pub use error::ExternalProviderError;
 pub use github::{GitHubPullRequests, GITHUB_API_BASE, GITHUB_HOST};
 pub use http::{HeaderPair, HttpJson, ReadOnlyHttp, UreqReadOnlyHttp, MAX_BODY_BYTES};
