@@ -1809,11 +1809,14 @@ fn workspace_plan_lines(report: &WorkspacePlanReport) -> Vec<String> {
             }
         ));
         for finding in &expansion.findings {
-            // The reason is appended rather than replacing the shape, so a
-            // reader sees both that the probe did not answer and why.
+            // Answered or not, and why not. The *shape* of an answer is not
+            // rendered because the probe id already implies it — "probe
+            // tool_liveness -> tool_liveness" tells a reader nothing, while
+            // whether it answered at all is the distinction the whole loop
+            // rests on. The JSON report carries the shape.
             let answer = match finding.unavailable_reason {
                 Some(reason) => format!("unavailable ({reason})"),
-                None => finding.finding.to_string(),
+                None => "answered".to_string(),
             };
             lines.push(format!(
                 "  round {} probe {} of {} -> {answer}",
@@ -3647,7 +3650,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("round 2 probe tool_liveness of resource_1 -> "),
+            text.contains("round 2 probe tool_liveness of resource_1 -> answered"),
             "{text}"
         );
         assert!(
