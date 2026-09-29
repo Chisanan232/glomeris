@@ -57,6 +57,7 @@
 pub mod contract;
 pub mod dto;
 pub mod project;
+pub mod prompt;
 pub mod response;
 pub mod validate;
 
@@ -70,6 +71,7 @@ pub use dto::{
     WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 pub use project::{AliasTable, GraphProjection};
+pub use prompt::system_prompt;
 pub use response::{
     read_planner_response, EvidenceRequestClaim, ObservationClaim, PlanItemClaim, PlannerResponse,
     PlannerResponseClaim, ResponseError, WorkspaceProfileClaim,
