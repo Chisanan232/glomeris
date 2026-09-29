@@ -406,6 +406,9 @@ pub enum ExternalSource {
 }
 
 impl ExternalSource {
+    /// Every source, so a surface enumerating providers cannot list a subset.
+    pub const ALL: [Self; 2] = [Self::GitHubPullRequests, Self::JiraIssues];
+
     pub fn tag(self) -> &'static str {
         match self {
             Self::GitHubPullRequests => "github_pull_requests",
@@ -430,6 +433,19 @@ pub enum PullRequestState {
 }
 
 impl PullRequestState {
+    /// Every state a provider can report.
+    ///
+    /// Exists so the egress preview can print the *complete* set of values
+    /// this field may carry off the machine rather than a hand-written list
+    /// beside it. A preview that under-states its own vocabulary is worse
+    /// than no preview: it is a privacy claim nothing checks.
+    pub const ALL: [Self; 4] = [
+        Self::Open,
+        Self::Merged,
+        Self::ClosedUnmerged,
+        Self::NoneObserved,
+    ];
+
     pub fn tag(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -455,6 +471,17 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    /// Every tag [`Self::tag`] can produce, for the same reason as
+    /// [`PullRequestState::ALL`].
+    ///
+    /// Tags rather than values, because [`Self::Other`] carries a `String` and
+    /// cannot sit in a `const` — and because the tracker's own status name in
+    /// that variant is exactly what does *not* travel. `other` is the whole of
+    /// what a model is told about a bespoke workflow state, and this list is
+    /// where that is visible.
+    pub const ALL_TAGS: [&'static str; 5] =
+        ["to_do", "in_progress", "done", "other", "none_observed"];
+
     pub fn tag(&self) -> &'static str {
         match self {
             Self::ToDo => "to_do",
@@ -769,6 +796,68 @@ impl WorkspaceEvidenceGraph {
     pub fn resource_count(&self) -> usize {
         self.resources().count()
     }
+
+    /// Fills in each working tree's [`ExternalContext`] from whichever providers
+    /// are configured, and reports what happened for each attempt.
+    ///
+    /// Separate from [`Self::build`] on purpose. `build` is pure — no I/O, no
+    /// clock, no network — and every caller relies on being able to assemble a
+    /// picture of the machine offline. This is the one method here that can reach
+    /// a service, so it is the one method a reader has to look at to know whether
+    /// a command talks to anything, and it does nothing at all when no provider
+    /// exists: not a request, not a `git` process, not a traversal.
+    ///
+    /// What it changes is one field per working tree. It does not touch
+    /// [`BranchLifecycle`], [`ActivityFacts`], any [`ResourceNode`]'s policy
+    /// decision, or anything a [`crate::actions::Action`] can read — a merged
+    /// pull request is context for a person and for a model, never authority.
+    pub fn attach_external_context(
+        &mut self,
+        resolver: &super::external::ExternalContextResolver<'_>,
+        now: SystemTime,
+    ) -> Vec<ExternalContextAttempt> {
+        if !resolver.is_enabled() {
+            return Vec::new();
+        }
+
+        let mut attempts = Vec::new();
+        for repository in &mut self.repositories {
+            for worktree in &mut repository.worktrees {
+                // The branch name comes from the local probe that already ran,
+                // never from a second reading and never from the directory name.
+                // Its three states are carried across intact; see
+                // `resolve_branch_outcome`.
+                let branch = match &worktree.lifecycle.branch {
+                    ProbeOutcome::Observed(state) => {
+                        ProbeOutcome::Observed(state.branch.as_deref())
+                    }
+                    ProbeOutcome::Unavailable(reason) => ProbeOutcome::Unavailable(*reason),
+                };
+                let resolved = resolver.resolve_branch_outcome(&worktree.root, branch, now);
+                attempts.push(ExternalContextAttempt {
+                    worktree: worktree.root.clone(),
+                    pull_request_detail: resolved.pull_request_detail,
+                    task_detail: resolved.task_detail,
+                });
+                worktree.external = resolved.context;
+            }
+        }
+        attempts
+    }
+}
+
+/// What one working tree's external lookup did, for a local report.
+///
+/// The [`super::external::ExternalDetail`]s stay here rather than on
+/// [`WorktreeNode`] because they are diagnostics for whoever is setting the
+/// feature up — "the token was refused", "this remote is on another host" — and
+/// the graph is what a model projection is built from. A field on the node would
+/// be a field somebody could serialise by accident.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalContextAttempt {
+    pub worktree: PathBuf,
+    pub pull_request_detail: super::external::ExternalDetail,
+    pub task_detail: super::external::ExternalDetail,
 }
 
 /// Mutable state while one working tree's resources are collected.
@@ -1903,6 +1992,64 @@ mod tests {
                     "workflow mode {tag:?} grades the developer"
                 );
             }
+        }
+    }
+
+    /// Every declared vocabulary is complete and collision-free.
+    ///
+    /// Written as a match over each variant rather than as a length check,
+    /// because a length check passes when somebody adds a variant and a
+    /// placeholder tag together. The `match` here fails to compile when a
+    /// variant is added, which is the point: the compiler asks the question
+    /// before a preview surface silently under-reports what may leave.
+    #[test]
+    fn the_external_vocabularies_are_complete() {
+        for source in ExternalSource::ALL {
+            let expected = match source {
+                ExternalSource::GitHubPullRequests => "github_pull_requests",
+                ExternalSource::JiraIssues => "jira_issues",
+            };
+            assert_eq!(source.tag(), expected);
+        }
+
+        let pull_request_tags: Vec<&str> = PullRequestState::ALL.iter().map(|s| s.tag()).collect();
+        for state in PullRequestState::ALL {
+            let expected = match state {
+                PullRequestState::Open => "open",
+                PullRequestState::Merged => "merged",
+                PullRequestState::ClosedUnmerged => "closed_unmerged",
+                PullRequestState::NoneObserved => "none_observed",
+            };
+            assert_eq!(state.tag(), expected);
+        }
+
+        // `Other` stands in for every bespoke tracker status there is, so the
+        // representative carries a name that must not appear in the tag.
+        let task_states = [
+            TaskState::ToDo,
+            TaskState::InProgress,
+            TaskState::Done,
+            TaskState::Other("DEV VERIFY".into()),
+            TaskState::NoneObserved,
+        ];
+        for state in &task_states {
+            assert!(
+                TaskState::ALL_TAGS.contains(&state.tag()),
+                "{state:?} tags as {:?}, which is outside the declared vocabulary",
+                state.tag()
+            );
+        }
+        assert_eq!(task_states.len(), TaskState::ALL_TAGS.len());
+
+        for tags in [
+            &pull_request_tags[..],
+            &TaskState::ALL_TAGS[..],
+            &ExternalSource::ALL.map(ExternalSource::tag)[..],
+        ] {
+            let mut unique: Vec<&str> = tags.to_vec();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(unique.len(), tags.len(), "two values share a tag: {tags:?}");
         }
     }
 }

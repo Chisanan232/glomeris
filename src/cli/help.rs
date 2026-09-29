@@ -1384,6 +1384,65 @@ pub const COMMANDS: &[CommandSpec] = &[
         ],
         see_also: &["free", "status", "autopilot"],
     },
+    CommandSpec {
+        name: "external-context",
+        group: Group::Configure,
+        safety: Safety::ReadOnly,
+        summary: "What optional remote context may reach the model.",
+        usage: &["external-context", "[--json]"],
+        details: "Glomeris can optionally read a pull request's state from GitHub and a work \
+                  item's state from Jira, as supporting context for ranking a stale-looking \
+                  working tree. Both are off until you configure them, and this command tells \
+                  you what is configured and exactly which summarized fields could leave this \
+                  machine as a result.                   \n\nIt asks nothing. Answering \"what may leave\" by leaving is the one \
+                  shape this command must not have: you would be making the requests you are \
+                  trying to understand, against a service that logs them, before deciding \
+                  whether you want that. Everything printed comes from your configuration and \
+                  from the value vocabularies the code itself serializes.                   \n\nThe field list is the complete set. A remote state reaches a model as a \
+                  bounded token — `merged`, `in_progress`, `none_observed` — with how many days \
+                  ago it was read, and with the KIND of failure when a provider could not \
+                  answer, because \"the provider is rate-limited\" and \"there is no pull \
+                  request\" must never arrive as the same value. Nothing else goes: not the \
+                  repository, the branch, the issue key, the pull request's number or title, \
+                  your account, or any path. The command prints that negative explicitly, \
+                  because a list of what travels does not answer \"did you send my branch \
+                  name\".                   \n\nNone of this is permission. A merged pull request and a closed ticket \
+                  are context for ranking; they cannot make a working tree deletable, and a \
+                  dirty or actively-used one stays protected by its own evidence whatever a \
+                  remote service says about it.",
+        subcommands: &[],
+        options: &[OptionSpec {
+            syntax: "--json",
+            description: "Print the same report as JSON: each provider's configured and usable \
+                          state, the environment variable its credential is read from, the \
+                          endpoint, the one repository host in scope, every field that may be \
+                          sent with its complete value vocabulary, and the explicit list of \
+                          what is never sent. This is what the menu-bar app's privacy preview \
+                          reads. No credential value and no account address appears in it.",
+        }],
+        examples: &[
+            ExampleSpec {
+                command: "glomeris external-context",
+                purpose: "Is anything configured, and what would leave if it were?",
+            },
+            ExampleSpec {
+                command: "glomeris external-context --json",
+                purpose: "The same answer, for a script or the menu-bar app.",
+            },
+        ],
+        exit_codes: &[
+            ExitCodeSpec {
+                code: 0,
+                meaning: "the report was printed. Also when the configuration file is invalid: \
+                          the refusal is part of the report, and every provider is off.",
+            },
+            ExitCodeSpec {
+                code: 2,
+                meaning: "usage error — this command takes no arguments besides `--json`.",
+            },
+        ],
+        see_also: &["llm-plan", "settings", "explain"],
+    },
 ];
 
 /// Looks up a subcommand by its literal name.
@@ -1391,10 +1450,37 @@ pub fn find_command(name: &str) -> Option<&'static CommandSpec> {
     COMMANDS.iter().find(|c| c.name == name)
 }
 
-/// Column at which the summary starts in the grouped command list. Wide
-/// enough for the longest name (`llm-check`) plus breathing room, and chosen
-/// so that name + summary stays inside 80 columns.
-const SUMMARY_COLUMN: usize = 14;
+/// Column at which the second field starts in every name-keyed table: the
+/// grouped command list, and the exit-code topic's list of commands.
+///
+/// Derived from the table rather than written down, because a literal was
+/// wrong the moment a name outgrew it and nothing said so — the exit-code
+/// topic silently rendered `external-context0, 2` with no space at all, which
+/// no width assertion catches because the line got *shorter*. A name that does
+/// not fit is now impossible rather than merely tested for.
+///
+/// Two columns of gap, which is the narrowest that still reads as a gap. What
+/// remains measurable is the total: `no_help_output_exceeds_eighty_columns`
+/// bounds name + summary, and at the current longest name that leaves three
+/// columns spare, so the next name added has to be measured rather than
+/// assumed to fit.
+const fn widest_command_name() -> usize {
+    let mut widest = 0;
+    let mut i = 0;
+    while i < COMMANDS.len() {
+        // `max` is not const. Every name is ASCII — pinned by
+        // `a_command_name_is_ascii_so_its_byte_length_is_its_width` — so
+        // `len()` is the column count and not merely the byte count.
+        let len = COMMANDS[i].name.len();
+        if len > widest {
+            widest = len;
+        }
+        i += 1;
+    }
+    widest
+}
+
+const SUMMARY_COLUMN: usize = widest_command_name() + 2;
 
 /// The one-line usage shown on a bad command, and at the top of full help.
 ///
@@ -1684,7 +1770,12 @@ pub fn render_exit_codes() -> String {
             .map(|spec| spec.code.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        out.push_str(&format!("  {:<12}{:<22}", command.name, codes));
+        out.push_str(&format!(
+            "  {:<width$}{:<22}",
+            command.name,
+            codes,
+            width = SUMMARY_COLUMN
+        ));
         out.push_str(&format!("`glomeris {} --help`\n", command.name));
     }
 
@@ -2131,6 +2222,59 @@ mod tests {
     /// about the syntax, so it must be emitted whole rather than truncated or
     /// hyphenated. Documented by test because the alternative — silently
     /// splitting a long resource id — would be worse than a long line.
+    /// [`widest_command_name`] counts bytes, because `char_indices` is not
+    /// available in a `const fn`. That is the column count only while every
+    /// name is ASCII, so say so here rather than leaving it as a comment.
+    #[test]
+    fn a_command_name_is_ascii_so_its_byte_length_is_its_width() {
+        for command in COMMANDS {
+            assert!(
+                command.name.is_ascii(),
+                "`{}` is not ASCII, so SUMMARY_COLUMN's byte-length arithmetic no longer \
+                 describes the column it pads to",
+                command.name
+            );
+        }
+    }
+
+    /// The regression that produced [`widest_command_name`]: the exit-code
+    /// topic padded to a literal 12, so `external-context` ran straight into
+    /// its codes as `external-context0, 2`.
+    ///
+    /// No width assertion catches that, because a collision makes the line
+    /// *shorter*. Both name-keyed tables are checked, and by looking for the
+    /// separator rather than by recomputing the padding — recomputing it would
+    /// pass for exactly the arithmetic that was wrong.
+    #[test]
+    fn a_name_keyed_row_never_runs_into_its_next_column() {
+        let surfaces = [
+            ("top-level", render_top_level_help("0.2.0")),
+            ("exit-codes", render_exit_codes()),
+        ];
+
+        for (label, text) in surfaces {
+            for command in COMMANDS {
+                let prefix = format!("  {}", command.name);
+                let Some(line) = text
+                    .lines()
+                    .find(|line| line.starts_with(&prefix) && *line != prefix)
+                else {
+                    // Not every command has a row on every surface: the
+                    // exit-code topic lists only those with command-specific
+                    // codes. A missing row is that table's business, and the
+                    // tables that must be complete are asserted elsewhere.
+                    continue;
+                };
+                let rest = &line[prefix.len()..];
+                assert!(
+                    rest.starts_with("  "),
+                    "{label} runs `{}` into its next column with no gap: {line}",
+                    command.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn wrap_never_splits_a_single_long_word() {
         let long = "cargo_target_dir:/Users/someone/projects/deeply/nested/target";

@@ -62,6 +62,7 @@ fn main() {
         Some("free") => run_free_command(&args[1..]),
         Some("autopilot") => run_autopilot_command(&args[1..]),
         Some("settings") => run_settings_command(&args[1..]),
+        Some("external-context") => run_external_context_command(&args[1..]),
         Some("pressure") => run_pressure_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
@@ -2353,6 +2354,64 @@ fn pressure_answer_list() -> String {
 /// permits. The two numbers this command stores decide when the product
 /// speaks up and where recovery stops; every gate that stands between a
 /// candidate and its deletion is somewhere else entirely.
+/// `glomeris external-context [--json]`.
+///
+/// Reads the external-context configuration and reports it alongside the
+/// complete set of summarized remote fields a configured provider could
+/// contribute to a model request. It performs no request of its own; see the
+/// command's own help for why answering "what may leave" by leaving would be
+/// the wrong shape.
+///
+/// A configuration this command cannot parse is reported *inside* the report and
+/// still exits 0, unlike `settings show`, which exits 1. The difference is what
+/// the two commands answer. `settings show` is asked "what are my preferences",
+/// and an unreadable file means it has no answer. This command is asked "what
+/// could leave this machine", and an unreadable file has a complete and
+/// reassuring answer — nothing is configured, so nothing leaves — which a
+/// non-zero exit and a bare stderr line would throw away.
+fn run_external_context_command(args: &[String]) {
+    let (json, rest) = take_json_flag(args);
+    if let Some(unexpected) = rest.first() {
+        eprintln!("glomeris external-context: takes no arguments (got '{unexpected}')");
+        print_command_usage("external-context");
+        std::process::exit(2);
+    }
+
+    let path = glomeris::workspace::external::default_config_path().ok();
+    let exists = path.as_ref().map(|p| p.exists()).unwrap_or(false);
+    let (config, error) = match glomeris::workspace::external::load_config() {
+        Ok(config) => (config, None),
+        // The all-off default rather than the partially-applied file, matching
+        // what the resolver itself would do with a refused configuration: a
+        // provider from a stanza that failed validation is never built, so
+        // reporting it as configured would describe a lookup that cannot happen.
+        Err(e) => (
+            glomeris::workspace::external::ExternalContextConfig::default(),
+            Some(e.to_string()),
+        ),
+    };
+    // Built from the real environment, because "is my token set" is most of why
+    // somebody runs this. `build_from_env` is the only site that reads a
+    // credential and it never returns one.
+    let providers = glomeris::workspace::external::build_from_env(&config);
+
+    let report = glomeris::cli::external_context::build_external_context_preview(
+        &config,
+        &providers,
+        path.map(|p| p.display().to_string()),
+        exists,
+        error,
+    );
+
+    if json {
+        print_json_or_exit(&report);
+    } else {
+        for line in glomeris::cli::external_context::describe_external_context_preview(&report) {
+            println!("{line}");
+        }
+    }
+}
+
 fn run_settings_command(args: &[String]) {
     let sub = args.first().map(String::as_str).unwrap_or("show");
     let rest: &[String] = if args.is_empty() { &[] } else { &args[1..] };

@@ -455,6 +455,18 @@ fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
             "pressure show".to_string(),
             argv(&["pressure", "show", "--json"]),
         ),
+        // Worth its own scrutiny for a third reason: `external-context` reports
+        // on providers that reach the network, and the honest-looking way to
+        // report whether one works is to try it. Running it inside a disposable
+        // HOME with nothing on PATH proves it writes nothing; that it also
+        // *asks* nothing is proven by
+        // `scripts/check-external-context-is-read-only.sh` and by the command
+        // taking no transport at all.
+        ("external-context".to_string(), argv(&["external-context"])),
+        (
+            "external-context".to_string(),
+            argv(&["external-context", "--json"]),
+        ),
     ]
 }
 

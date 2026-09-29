@@ -1263,6 +1263,91 @@ A refused *stored* file is `1`, not `2`: it is not this command line's mistake,
 and a script must be able to tell "you typed 120" from "the file on disk
 disagrees with itself".
 
+## `glomeris external-context [--json]`
+
+What optional remote context may reach the model, and what never will. Read-only
+and off by default: with nothing configured it prints that nothing leaves this
+machine, which is a fact about the shipped product rather than a hypothetical.
+
+Glomeris can optionally read **a pull request's state** from GitHub and **a work
+item's state** from Jira, as supporting evidence for ranking a working tree that
+looks stale. Neither is deletion authority — see the list at the end of this
+section — and neither is on until you write the configuration file.
+
+**This command asks nothing.** Answering "what may leave" by leaving is the one
+shape it must not have: you would be making the very requests you are trying to
+understand, against a service that logs them, before deciding whether you want
+that. Everything it prints comes from your configuration file and from the value
+vocabularies the code itself serializes.
+
+Three kinds of line, and the difference between them is the point:
+
+| Section | What it describes |
+|---|---|
+| Providers | Your local setup. Whether each provider is configured, whether it is *usable*, the environment variable its credential is read from, the endpoint, and for GitHub the one repository host in scope. |
+| Fields that may be sent | What could actually leave, one line per serialized key, each with its complete set of possible values. |
+| Never sent | The explicit negative. |
+
+What this page adds:
+
+- **"Not configured" and "configured but not usable" are different rows.** A
+  provider whose credential environment variable is unset is reported as
+  configured with a refusal naming the variable, not as absent. The same
+  distinction runs all the way through the feature: a provider that could not
+  answer never reports an absence, and `no pull request was found` is a
+  different value from `GitHub could not be reached`.
+- **The field list is the complete set, and it is derived rather than written.**
+  Each state vocabulary comes from the enum the projection serializes, so a
+  variant added later cannot widen what really travels while this page keeps
+  understating it. A remote state reaches a model as a bounded token —
+  `merged`, `in_progress`, `none_observed` — with how many days ago it was read,
+  and with the *kind* of failure when a provider could not answer.
+- **Nothing identifying goes.** Not the repository, the branch, the issue key,
+  the pull request's number, title, body or author, your account, or any path.
+  The command prints that negative explicitly, because a list of what travels
+  does not answer "did you send my branch name".
+- **Your Jira account address is not echoed**, even though the configuration
+  file holds it. It identifies a person rather than a setting anybody debugs,
+  and this report gets pasted into bug reports. The site is shown, because you
+  need to see which one is asked.
+- **No credential value appears anywhere**, in prose or in JSON. The variable is
+  named; the value is never read by this command at all.
+- **Jira has no host scope and does not claim one.** Correlation there requires
+  an explicit, deterministic issue key in the branch name — `HORO-1234`, not a
+  fuzzy match from `fix-storage-stuff` — so there is no remote to compare
+  against. GitHub's `repository_host` is the most privacy-relevant line in the
+  report: a working tree whose remote is anywhere else is never named to that
+  provider at all.
+- **None of it is permission.** A merged pull request and a closed ticket are
+  context for *ranking*. They cannot make a working tree deletable: a dirty
+  tree, an untracked file, a local commit made after the merge, or a process
+  holding the directory open each keep it protected or uncertain whatever a
+  remote service says. That is enforced in the policy engine, which never sees
+  external context, and pinned by
+  `tests/external_context_grants_no_authority.rs`.
+- **Read-only by construction, not by convention.** The providers can name
+  exactly one transport, whose whole vocabulary is a single GET;
+  `scripts/check-external-context-is-read-only.sh` proves the module names no
+  mutating verb, no second transport, and nothing that prints or writes.
+- `--json` prints the same report — each provider's configured and usable state,
+  its credential variable, endpoint and host scope, every field that may be sent
+  with its vocabulary, and the `never_sent` list. This is what the menu-bar
+  app's privacy preview reads.
+- The file is
+  `~/Library/Application Support/Glomeris/external-context.conf`, beside
+  `settings.conf` and in the same versioned format.
+
+Exit codes: `0` the report was printed; `2` usage error — this command takes no
+arguments besides `--json`.
+
+An unparseable configuration file is `0`, not `1`, which is the opposite of
+`settings show`. The two commands answer different questions. `settings show` is
+asked "what are my preferences", and an unreadable file means it has no answer.
+This one is asked "what could leave this machine", and an unreadable file has a
+complete and reassuring answer — nothing is configured, so nothing leaves — that
+a non-zero exit and a bare stderr line would throw away. The refusal is reported
+as the first line of the report instead.
+
 ## `glomeris pressure <show|notified|respond> [<answer>] [--json]`
 
 The seam between the background monitor and the menu-bar app. You are unlikely

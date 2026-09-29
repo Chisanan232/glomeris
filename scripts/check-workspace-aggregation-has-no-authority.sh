@@ -26,6 +26,14 @@
 # check 6 holds its egress half to a stricter rule than any other module here:
 # it may not name a path type at all.
 #
+# HORO-1546 extends check 6's forbidden list rather than adding an eighth
+# check. The optional GitHub and Jira providers live under `src/workspace`, so
+# checks 1-3 already hold them; what is new is that their domain types carry
+# identity — a repository subject, a branch, an issue key — and the model-facing
+# DTO must keep projecting those to bounded tokens instead of being able to name
+# them. AC 2, the other half of that ticket, is a separate script:
+# `scripts/check-external-context-is-read-only.sh`.
+#
 # Seven checks, each one a separate way the boundary could be crossed. The
 # first three are about the aggregation module, the next two about the macOS
 # surface that renders it — because a group with no authority shown by a card
@@ -330,6 +338,22 @@ FORBIDDEN_IN_DTO=(
   'std::path;;imports the path module'
   '\bResourceId\b;;names the real resource identity, which embeds a path — the opaque alias exists so this type never has to'
   '\bEvidence\b;;names the local evidence type, whose fields are the thing being withheld'
+  # HORO-1546 adds the external-context domain to the same list, for the same
+  # reason and one step further. Campaign section 5 says adding a local domain
+  # field must not automatically expand provider egress — and the way that
+  # happens is not a deliberate decision, it is a `#[derive(Serialize)]` on a
+  # domain type that somebody later adds a field to. `ExternalContext` holds
+  # the repository subject, the branch it was correlated on and the issue key
+  # that was looked up: every one of them a description of what this machine's
+  # owner is working on. The projection in `src/planner/project.rs` reads those
+  # and emits three bounded tokens. A DTO that could *name* the domain type
+  # could hold one, and then the projection would no longer be the only path.
+  '\bExternalContext\b;;names the local external-context type, which carries the repository subject, the branch and the issue key'
+  '\bExternalFact\b;;names the local fact type, which carries the correlated identity alongside the state'
+  '\bPullRequestState\b;;names the domain enum rather than projecting it to a token, so a variant that later gained a payload would serialize it'
+  '\bTaskState\b;;names the domain enum rather than projecting it to a token, and its Other variant carries the tracker'"'"'s own status name'
+  '\bTaskKey\b;;names the issue key type, which is the one identifier a Jira correlation must not send'
+  '\bRepositoryBranchSubject\b;;names the correlation subject, which is host, owner, repository and branch together'
 )
 
 for entry in "${FORBIDDEN_IN_DTO[@]}"; do
@@ -356,7 +380,7 @@ done
 # eating code. Require the module to still hold the view type whose key set
 # `tests/planner_model_egress_contract.rs` pins, and the `Reported` wrapper
 # that keeps an unavailable probe from looking like a zero.
-for needle in 'pub struct ModelGraphView' 'pub struct Reported'; do
+for needle in 'pub struct ModelGraphView' 'pub struct Reported' 'pub struct ExternalFactView'; do
   if ! grep -nF "$needle" "$abs_dto" | strip_comments | grep -q .; then
     echo "VIOLATION: ${DTO_FILE}: '${needle}' is gone — the checks above would now pass over a stub."
     violations=$((violations + 1))
@@ -376,5 +400,5 @@ fi
 
 echo "PASS: crate::workspace and crate::planner are unreachable from ${DECIDING_PATHS[*]}, and crate::workspace carries no permission-shaped field."
 echo "PASS: the developer-projects card has nothing to act with and still reads each member's own verdict."
-echo "PASS: ${DTO_FILE} cannot name a path type, so the model-facing types cannot serialize one."
+echo "PASS: ${DTO_FILE} cannot name a path type or an external-context domain type, so the model-facing types cannot serialize one."
 exit 0

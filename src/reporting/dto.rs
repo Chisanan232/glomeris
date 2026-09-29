@@ -1970,6 +1970,131 @@ pub fn stop_reason_tag(reason: &crate::executor::recovery_loop::StopReason) -> &
     }
 }
 
+/// `glomeris external-context` report (HORO-1546 AC 7): what is configured,
+/// and the complete set of remote fields that may reach a model.
+///
+/// # Why a preview and not a live query
+///
+/// Nothing in this report is fetched. Answering "what may leave" by leaving is
+/// the one shape this command must not have: a person checking their privacy
+/// exposure would be making the requests they are trying to understand, against
+/// a service that logs them, before deciding whether they want that. So the
+/// command reads configuration and enumerates the egress surface from the
+/// vocabularies the projection itself uses, and sends nothing.
+///
+/// # The three kinds of field here
+///
+/// `providers` is *local* setup — which service is configured, whether a
+/// credential was found, why not. `egress_fields` is the part that leaves.
+/// `never_sent` is the explicit negative: things a reader would reasonably
+/// assume are sent and which are not. The third exists because a list of what
+/// travels does not answer "did you send my branch name"; only naming the
+/// absence does.
+///
+/// `Serialize` only, never `Deserialize` — see [`LlmPlanItemReport`]'s doc
+/// comment.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExternalContextPreviewReport {
+    /// `true` when at least one provider is configured. `false` is the state
+    /// the product ships in, and in that state `egress_fields` is empty because
+    /// nothing at all is asked or sent.
+    pub enabled: bool,
+    /// Absolute path of the configuration file, or `null` when `$HOME` could
+    /// not be resolved. Local, and never part of any provider request — the
+    /// same rule as [`RecoverySettingsReport::stored_at`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_path: Option<String>,
+    /// Whether a file exists there. Distinct from `enabled`: a file that parses
+    /// to nothing configured is a different situation from no file at all, and
+    /// somebody who just wrote one needs to know which they have.
+    pub config_exists: bool,
+    /// A parse refusal, verbatim from [`crate::workspace::external::ConfigError`].
+    /// When this is set nothing is configured, because a half-written stanza is
+    /// refused rather than half-applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
+    /// Every provider this product can have, configured or not — so the report
+    /// says "Jira: not configured" rather than omitting Jira and leaving a
+    /// reader to wonder whether it was asked.
+    pub providers: Vec<ExternalProviderPreviewReport>,
+    /// Every field that may travel, with the complete set of values each may
+    /// carry. Empty when nothing is configured.
+    pub egress_fields: Vec<ExternalEgressFieldReport>,
+    /// Things that are deliberately not sent, named so their absence is
+    /// checkable rather than assumed.
+    pub never_sent: Vec<&'static str>,
+}
+
+/// One provider's local configuration state.
+///
+/// # What is deliberately not in here
+///
+/// The credential, obviously — but also the configured Jira account address.
+/// `credential_env` names the *variable* the credential is read from, which is
+/// what a person fixes a missing one by setting, and the account address is an
+/// identifier for a person rather than a setting anybody debugs. Somebody who
+/// needs to confirm which account is configured has the file, whose path is in
+/// [`ExternalContextPreviewReport::config_path`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExternalProviderPreviewReport {
+    /// A [`crate::workspace::ExternalSource`] tag.
+    pub source: &'static str,
+    /// Whether the configuration file names this provider at all.
+    pub configured: bool,
+    /// Whether it is configured *and* its credential variable is set, which is
+    /// the only state in which anything is ever asked of it.
+    pub ready: bool,
+    /// The name of the environment variable the credential is read from. Never
+    /// its value, and present even when unset — a user with a missing
+    /// credential needs to be told which variable to set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_env: Option<String>,
+    /// The host or site this provider would talk to, so a reader can see that
+    /// their corporate repositories are not being sent to github.com. No path,
+    /// no query string, no credential — see
+    /// [`LlmCheckReport::endpoint_path`]'s reasoning, applied in reverse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// The git remote host whose working trees this provider is asked about,
+    /// for a provider that is keyed by repository identity.
+    ///
+    /// Arguably the most privacy-relevant line in this whole report: a working
+    /// tree whose remote is anywhere else is never named to this provider at
+    /// all, so somebody with corporate repositories on one forge and personal
+    /// ones on another can see which of the two is in scope. `null` for a
+    /// provider keyed by an explicit issue key instead, which has no host to
+    /// scope by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository_host: Option<String>,
+    /// Why a configured provider is not ready, verbatim from
+    /// [`crate::workspace::external::ExternalProviderError`]. Distinct from
+    /// `configured: false`: §10 of the campaign is that "not set up" and
+    /// "set up and unusable" must never be one value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+}
+
+/// One field that may reach a model, and everything it may say.
+///
+/// `vocabulary` is the complete value set, read from the domain enum's own
+/// `ALL` rather than written out here, so the preview cannot under-state what
+/// travels. A field whose values are numbers has an empty vocabulary and says
+/// so in `shape`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ExternalEgressFieldReport {
+    /// Which provider's fact this belongs to — a
+    /// [`crate::workspace::ExternalSource`] tag.
+    pub source: &'static str,
+    /// The key as it appears in the serialized request, e.g. `"pull_request.state"`.
+    pub field: &'static str,
+    /// `"token"` for a value from a closed vocabulary, `"days"` for a whole
+    /// number of days, `"status"` for the observed/unavailable discriminator.
+    pub shape: &'static str,
+    /// Every value this field may carry, for a `"token"` or `"status"` shape.
+    /// Empty for `"days"`, whose range is the numbers.
+    pub vocabulary: Vec<&'static str>,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

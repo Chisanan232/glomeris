@@ -266,6 +266,21 @@ jobs:
       - name: Check workspace aggregation has no authority
         run: bash scripts/check-workspace-aggregation-has-no-authority.sh
 
+  external-context-is-read-only:
+    # HORO-1546: the optional GitHub and Jira providers read a pull request's
+    # state and a work item's state as supporting evidence. Campaign sections 10
+    # and 11 put no mutation of either service inside this feature, and because
+    # this is the one module that holds a credential and talks to the network,
+    # it is also the one where a stray print writes a token into a CI log. The
+    # boundary is structural: no mutating verb anywhere in the module, one
+    # transport chokepoint, one trait method, and production code that neither
+    # prints nor writes. See the header of src/workspace/external/mod.rs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check external context is read-only
+        run: bash scripts/check-external-context-is-read-only.sh
+
   recovery-progress-is-not-persisted:
     # HORO-1512 (verification items 11 and 12): nothing about a recovery run is
     # written down, which is what lets RecoveryRestartGateTests prove a relaunched
