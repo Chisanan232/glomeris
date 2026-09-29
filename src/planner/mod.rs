@@ -43,9 +43,24 @@
 //! action registry, hands out aliases, and keeps the alias table on the
 //! non-serializable side.
 
+//! # The planner contract is versioned (HORO-1548)
+//!
+//! [`contract`] holds the closed vocabularies a planner response may use and
+//! the version number that says which set applies. It is deliberately the
+//! smallest module here and depends on nothing: the words a model is allowed
+//! to say should be readable in one sitting, without reading the parser.
+//!
+//! Version 1 — the flat ranking contract in [`crate::actions::llm`] — keeps
+//! working unchanged. It was never versioned on the wire, so a response that
+//! declares no version is read as v1 rather than guessed at.
+
+pub mod contract;
 pub mod dto;
 pub mod project;
 
+pub use contract::{
+    ClaimConfidence, Disposition, ObservationKind, ProbeId, PLANNER_CONTRACT_VERSION,
+};
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
     Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
