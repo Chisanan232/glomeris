@@ -10,8 +10,9 @@
 //! Unlike the pip/uv/Go detectors, this one infers its path instead of
 //! asking the tool: Gradle has no cheap "print your cache directory"
 //! command (`gradle --version` starts a JVM and does not print it anyway).
-//! So the location comes from `GRADLE_USER_HOME` when set and `~/.gradle`
-//! otherwise — the same two rules Gradle itself applies — and a missing
+//! So the location comes from `GRADLE_USER_HOME` when the caller observed it
+//! set, and `~/.gradle` otherwise — the same two rules Gradle itself applies
+//! ([`DiscoveryContext::tool_home`] supplies the override) — and a missing
 //! directory is [`RootAbsence::NothingObservedAboutTheTool`], because
 //! nothing here ever observed whether Gradle is installed.
 //!
@@ -27,6 +28,7 @@ use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
     cache_root_status, Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence,
+    ToolHomeVar,
 };
 
 pub struct GradleCacheDetector;
@@ -40,9 +42,10 @@ const CACHES_SUBDIR: &str = "caches";
 /// Resolves the Gradle cache root from `GRADLE_USER_HOME` and `$HOME`,
 /// applying Gradle's own two rules.
 ///
-/// Pure so it is testable: `std::env::set_var` is unsound in Rust's
-/// threaded test harness, so the environment is read once at the call site
-/// and passed in.
+/// Pure so it is testable: the `GRADLE_USER_HOME` override arrives through
+/// [`DiscoveryContext::tool_home`] rather than from the process environment,
+/// so a fixture context can exercise both rules (see [`super::ToolHomeVar`]
+/// for why a detector must not read the environment itself).
 ///
 /// An empty or whitespace-only `GRADLE_USER_HOME` falls back to `~/.gradle`
 /// rather than resolving to `/caches` or to a relative path — an exported
@@ -66,8 +69,7 @@ impl Detector for GradleCacheDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
-        let gradle_user_home = std::env::var("GRADLE_USER_HOME").ok();
-        let caches = gradle_caches_dir(gradle_user_home.as_deref(), &ctx.home_dir);
+        let caches = gradle_caches_dir(ctx.tool_home(ToolHomeVar::GradleUserHome), &ctx.home_dir);
 
         cache_root_status(
             self.id(),
@@ -158,18 +160,10 @@ mod tests {
         )
         .unwrap();
 
-        let caches = gradle_caches_dir(None, &home);
-        let status = cache_root_status(
-            GradleCacheDetector.id(),
-            ResourceKind::GradleCache,
-            &caches,
-            Regenerability::RegenerableByRebuild,
-            Recoverability::RegenerableByRebuild,
-            "test fixture",
-            RootAbsence::NothingObservedAboutTheTool,
-        );
-
-        match status {
+        // The real `discover`, through a hermetic `DiscoveryContext`: with no
+        // `GradleUserHome` tool home set it resolves from `home_dir`, so this
+        // cannot reach the host's own `~/.gradle` (HORO-1543).
+        match GradleCacheDetector.discover(&DiscoveryContext::new(&home)) {
             DetectorStatus::Found(evidence) => {
                 assert_eq!(evidence.len(), 1);
                 let ev = &evidence[0];
@@ -197,17 +191,53 @@ mod tests {
     #[test]
     fn a_missing_cache_directory_is_tool_absent_not_zero_bytes() {
         let home = crate::detectors::test_support::make_temp_dir("gradle-home-empty");
-        let status = cache_root_status(
-            GradleCacheDetector.id(),
-            ResourceKind::GradleCache,
-            &gradle_caches_dir(None, &home),
-            Regenerability::RegenerableByRebuild,
-            Recoverability::RegenerableByRebuild,
-            "test fixture",
-            RootAbsence::NothingObservedAboutTheTool,
+        assert_eq!(
+            GradleCacheDetector.discover(&DiscoveryContext::new(&home)),
+            DetectorStatus::ToolAbsent
         );
-        assert_eq!(status, DetectorStatus::ToolAbsent);
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The `GradleUserHome` override has to reach `discover`, not merely
+    /// `gradle_caches_dir`: the pure tests above would still pass if
+    /// `discover` ignored `ctx.tool_home`. The decoy under `home_dir` holds a
+    /// different byte count, so reading the wrong root reports 1_000 and fails.
+    #[test]
+    fn the_gradle_user_home_override_reaches_the_detector() {
+        let relocated = crate::detectors::test_support::make_temp_dir("gradle-relocated");
+        std::fs::create_dir_all(relocated.join("caches/modules-2")).unwrap();
+        std::fs::write(
+            relocated.join("caches/modules-2/some.jar"),
+            vec![0u8; 8_192],
+        )
+        .unwrap();
+
+        let decoy_home = crate::detectors::test_support::make_temp_dir("gradle-decoy-home");
+        std::fs::create_dir_all(decoy_home.join(".gradle/caches")).unwrap();
+        std::fs::write(
+            decoy_home.join(".gradle/caches/decoy.jar"),
+            vec![0u8; 1_000],
+        )
+        .unwrap();
+
+        let ctx = DiscoveryContext::new(&decoy_home)
+            .with_tool_home(ToolHomeVar::GradleUserHome, relocated.to_str().unwrap());
+
+        match GradleCacheDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                assert_eq!(
+                    evidence[0].logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(8_192),
+                    "the relocated cache is the one GRADLE_USER_HOME names; \
+                     1000 would mean the override never reached `discover`"
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&relocated).ok();
+        std::fs::remove_dir_all(&decoy_home).ok();
     }
 }
