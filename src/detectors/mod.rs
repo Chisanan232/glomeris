@@ -49,6 +49,36 @@ pub enum DetectorStatus {
     Failed(String),
 }
 
+/// An environment variable that relocates one tool's home directory, and so
+/// decides where that tool's cache actually lives.
+///
+/// Carried on [`DiscoveryContext`] rather than read with `std::env::var`
+/// inside a `discover()` call. An env-var back-channel makes a detector
+/// answer from the *host* machine even when its caller supplied a fixture
+/// `home_dir` — the same hazard [`DetectorRegistry::from_detectors`]'s doc
+/// comment describes for detectors that shell out to host tools, and one
+/// that really did reach a developer's live `~/.cargo/registry` from a test
+/// whose `$HOME` was an empty temporary directory (HORO-1543). Cargo sets
+/// `CARGO_HOME` in every process it spawns, so `cargo test` guarantees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolHomeVar {
+    CargoHome,
+    GradleUserHome,
+}
+
+impl ToolHomeVar {
+    /// Declaration order is the iteration order of
+    /// [`DiscoveryContext::from_process_env`].
+    pub const ALL: [ToolHomeVar; 2] = [ToolHomeVar::CargoHome, ToolHomeVar::GradleUserHome];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ToolHomeVar::CargoHome => "CARGO_HOME",
+            ToolHomeVar::GradleUserHome => "GRADLE_USER_HOME",
+        }
+    }
+}
+
 /// Shared context passed to every detector's `discover` call.
 pub struct DiscoveryContext {
     pub home_dir: PathBuf,
@@ -57,19 +87,62 @@ pub struct DiscoveryContext {
     /// detectors that need this do nothing when it's empty rather than
     /// guessing at project locations.
     pub known_project_roots: Vec<PathBuf>,
+    /// Tool-home overrides, as captured at the process boundary. Empty
+    /// unless a caller supplied them, which is what makes
+    /// [`DiscoveryContext::new`] hermetic — see [`ToolHomeVar`].
+    tool_homes: Vec<(ToolHomeVar, String)>,
 }
 
 impl DiscoveryContext {
+    /// A context that knows nothing about the process environment: every
+    /// [`ToolHomeVar`] reads as unset, so a detector resolves its tool home
+    /// from `home_dir` alone.
+    ///
+    /// This is the hermetic constructor, and the default on purpose. A
+    /// production caller wants [`DiscoveryContext::from_process_env`]; a test
+    /// that reached for that one by accident would silently measure the
+    /// developer's real caches.
     pub fn new(home_dir: impl Into<PathBuf>) -> Self {
         Self {
             home_dir: home_dir.into(),
             known_project_roots: Vec::new(),
+            tool_homes: Vec::new(),
         }
+    }
+
+    /// `new`, plus every [`ToolHomeVar`] this process actually has set. The
+    /// constructor production code uses.
+    pub fn from_process_env(home_dir: impl Into<PathBuf>) -> Self {
+        let mut ctx = Self::new(home_dir);
+        for var in ToolHomeVar::ALL {
+            if let Ok(value) = std::env::var(var.name()) {
+                ctx.tool_homes.push((var, value));
+            }
+        }
+        ctx
     }
 
     pub fn with_known_project_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.known_project_roots = roots;
         self
+    }
+
+    /// Sets one tool home explicitly, for tests that need to exercise the
+    /// override branch without touching the process environment
+    /// (`std::env::set_var` is unsound in Rust's threaded test harness).
+    pub fn with_tool_home(mut self, var: ToolHomeVar, value: impl Into<String>) -> Self {
+        self.tool_homes.retain(|(existing, _)| *existing != var);
+        self.tool_homes.push((var, value.into()));
+        self
+    }
+
+    /// The override for `var`, or `None` when it is unset. `None` means
+    /// "nothing said otherwise", never "the tool is absent".
+    pub fn tool_home(&self, var: ToolHomeVar) -> Option<&str> {
+        self.tool_homes
+            .iter()
+            .find(|(existing, _)| *existing == var)
+            .map(|(_, value)| value.as_str())
     }
 }
 
