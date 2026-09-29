@@ -47,6 +47,7 @@ pub mod branch;
 pub mod external;
 mod graph;
 mod group;
+pub mod history;
 
 pub use branch::{
     BranchProbe, Divergence, EquivalenceMethod, GitCliBranchProbe, IntegrationEvidence,
