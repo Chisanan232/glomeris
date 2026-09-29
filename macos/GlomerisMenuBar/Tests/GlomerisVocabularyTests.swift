@@ -159,7 +159,21 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// `src/workspace/branch.rs` — `MergedState::tag`, all three. HORO-1511.
     private static let worktreeMergedTokens = ["merged", "not_merged", "unknown"]
 
-    /// The three developer-workspace axes, which share a token (`unknown`)
+    /// `src/workspace/branch.rs` — `PatchEquivalence::tag`, all four. HORO-1545.
+    private static let worktreeEquivalenceTokens = [
+        "equivalent", "not_equivalent", "not_applicable", "unknown",
+    ]
+
+    /// `src/workspace/branch.rs` — `EquivalenceMethod::tag`, both. HORO-1545.
+    ///
+    /// The one worktree vocabulary with no `unknown` token, which is why it is
+    /// not in `worktreeAxes` below: there is no method when there is no
+    /// equivalence, and the field is absent rather than tagged in that case.
+    private static let worktreeEquivalenceMethodTokens = [
+        "per_commit_patch_id", "content_identical",
+    ]
+
+    /// The four developer-workspace axes that share a token (`unknown`)
     /// and must not share a reading of it.
     private static var worktreeAxes:
         [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)]
@@ -168,6 +182,23 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("worktreeActivity", worktreeActivityTokens, GlomerisVocabulary.worktreeActivity),
             ("worktreeUpstream", worktreeUpstreamTokens, GlomerisVocabulary.worktreeUpstream),
             ("worktreeMerged", worktreeMergedTokens, GlomerisVocabulary.worktreeMerged),
+            (
+                "worktreeEquivalence", worktreeEquivalenceTokens,
+                GlomerisVocabulary.worktreeEquivalence
+            ),
+        ]
+    }
+
+    /// Every developer-workspace axis, including the one with no `unknown`.
+    /// What "is prose rather than a chip" is asserted over.
+    private static var worktreeProseAxes:
+        [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)]
+    {
+        worktreeAxes + [
+            (
+                "worktreeEquivalenceMethod", worktreeEquivalenceMethodTokens,
+                GlomerisVocabulary.worktreeEquivalenceMethod
+            ),
         ]
     }
 
@@ -191,7 +222,7 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("episodeResponse", episodeResponseTokens, GlomerisVocabulary.episodeResponse),
             ("episodeRejection", episodeRejectionTokens, GlomerisVocabulary.episodeRejection),
             ("autopilotRefusal", autopilotRefusalTokens, GlomerisVocabulary.autopilotRefusal),
-        ] + worktreeAxes
+        ] + worktreeProseAxes
     }
 
     /// The axes rendered as chips. `kind`, `reason` and the three
@@ -202,6 +233,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     private static var badgeAxes: [(name: String, tokens: [String], lookup: (String) -> GlomerisTerm)] {
         let prose: Set<String> = [
             "kind", "reason", "worktreeActivity", "worktreeUpstream", "worktreeMerged",
+            "worktreeEquivalence", "worktreeEquivalenceMethod",
         ]
         return allAxes.filter { !prose.contains($0.name) }
     }
@@ -380,6 +412,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             GlomerisVocabulary.worktreeActivityAxis,
             GlomerisVocabulary.worktreeUpstreamAxis,
             GlomerisVocabulary.worktreeMergedAxis,
+            GlomerisVocabulary.worktreeEquivalenceAxis,
+            GlomerisVocabulary.worktreeEquivalenceMethodAxis,
         ]
         XCTAssertEqual(
             Set(axisNames).count,
@@ -409,6 +443,8 @@ final class GlomerisVocabularyTests: XCTestCase {
             "worktreeActivity": GlomerisVocabulary.worktreeActivityAxis,
             "worktreeUpstream": GlomerisVocabulary.worktreeUpstreamAxis,
             "worktreeMerged": GlomerisVocabulary.worktreeMergedAxis,
+            "worktreeEquivalence": GlomerisVocabulary.worktreeEquivalenceAxis,
+            "worktreeEquivalenceMethod": GlomerisVocabulary.worktreeEquivalenceMethodAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -1250,8 +1286,8 @@ final class GlomerisVocabularyTests: XCTestCase {
 
     // MARK: - Developer-workspace state (HORO-1511)
 
-    /// The three worktree vocabularies carry no symbol, which is what keeps
-    /// them off the coloured axes.
+    /// The worktree vocabularies carry no symbol, which is what keeps them off
+    /// the coloured axes.
     ///
     /// The one this protects is `merged`. `src/workspace/mod.rs` keeps the
     /// merge facts out of `Evidence` precisely because "already merged" reads as
@@ -1260,7 +1296,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// form a user scans rather than reads. The assertion is `.neutral` AND no
     /// symbol, because either alone would let it become a badge again.
     func testTheWorktreeAxesAreProseSoNoBranchStateCanRenderAsClearance() {
-        for axis in Self.worktreeAxes {
+        for axis in Self.worktreeProseAxes {
             for token in axis.tokens {
                 let term = axis.lookup(token)
                 XCTAssertNil(
@@ -1275,24 +1311,25 @@ final class GlomerisVocabularyTests: XCTestCase {
         }
     }
 
-    /// `unknown` appears in all three vocabularies and means a different thing
-    /// in each — a failed activity probe, an unmade remote comparison, an
-    /// unrecorded default branch. A listener hearing only the title would get
-    /// the same three words three times, so each one names its own subject.
+    /// `unknown` appears in four vocabularies and means a different thing in
+    /// each — a failed activity probe, an unmade remote comparison, an
+    /// unrecorded default branch, an equivalence comparison that could not be
+    /// carried out. A listener hearing only the title would get the same words
+    /// four times, so each one names its own subject.
     func testTheSharedUnknownTokenReadsDifferentlyInEachWorktreeAxis() {
         let titles = Self.worktreeAxes.map { $0.lookup("unknown").title }
         XCTAssertEqual(
             Set(titles).count, titles.count,
-            "the three unknowns are indistinguishable: \(titles)"
+            "the unknowns are indistinguishable: \(titles)"
         )
         let explanations = Self.worktreeAxes.map { $0.lookup("unknown").explanation }
         XCTAssertEqual(
             Set(explanations).count, explanations.count,
-            "the three unknowns explain themselves identically: \(explanations)"
+            "the unknowns explain themselves identically: \(explanations)"
         )
     }
 
-    /// Rust counts every one of these three non-answers as *possible*
+    /// Rust counts every one of these non-answers as *possible*
     /// outstanding work rather than as an absence of it
     /// (`ActivityState::may_be_in_use`, `UpstreamState::may_hold_unpushed_work`,
     /// `MergedState::Unknown`'s "deliberately not a guess"). Wording that
@@ -1320,6 +1357,67 @@ final class GlomerisVocabularyTests: XCTestCase {
                 .explanation.lowercased().contains("does not guess"),
             "an unrecorded default branch must say Glomeris declined to guess at one"
         )
+        XCTAssertTrue(
+            GlomerisVocabulary.worktreeEquivalence("unknown")
+                .explanation.lowercased().contains("neither be shown nor ruled out"),
+            "an unmade equivalence comparison must not read as \"nothing landed elsewhere\""
+        )
+    }
+
+    /// HORO-1545. `equivalent` is the most persuasive-sounding token this app
+    /// renders, and the two things it must not be worded as are "safe" and
+    /// "everything here is accounted for".
+    ///
+    /// It means the commits that were compared have equivalents on the other
+    /// branch. It says nothing about the file a developer has open, the
+    /// untracked scratch directory beside it, or a commit written since — all of
+    /// which Rust still counts as work in progress, and none of which this
+    /// sentence is entitled to override.
+    func testEquivalentWorkIsNotWordedAsClearanceToDelete() {
+        let term = GlomerisVocabulary.worktreeEquivalence("equivalent")
+        for permission in ["safe", "can be deleted", "no longer needed", "finished", "done"] {
+            XCTAssertFalse(
+                (term.title + " " + term.explanation).lowercased().contains(permission),
+                "equivalent reads as permission: \(term.title) — \(term.explanation)"
+            )
+        }
+        XCTAssertTrue(
+            term.explanation.lowercased().contains("nothing is said about anything changed"),
+            "equivalent must limit itself to the commits compared: \(term.explanation)"
+        )
+    }
+
+    /// `not_applicable` means there was no question to ask, because the branch
+    /// is merged outright. Read as a "no" it would turn the most integrated
+    /// worktree on the machine into the least, and nothing downstream would
+    /// notice: the merge state sits in a different field.
+    func testNotApplicableIsNotWordedAsNotIntegrated() {
+        let term = GlomerisVocabulary.worktreeEquivalence("not_applicable")
+        XCTAssertNotEqual(
+            term.title, GlomerisVocabulary.worktreeEquivalence("not_equivalent").title,
+            "an absent question and a negative answer must not read the same"
+        )
+        XCTAssertTrue(
+            term.explanation.lowercased().contains("already merged"),
+            "not_applicable must say why there was nothing to ask: \(term.explanation)"
+        )
+    }
+
+    /// The two methods are not equally strong, and the weaker one must say so.
+    /// A surface showing only "the same work already landed" would present a
+    /// file comparison as a commit-by-commit match.
+    func testTheWeakerEquivalenceMethodAdmitsWhatItDidNotEstablish() {
+        let content = GlomerisVocabulary.worktreeEquivalenceMethod("content_identical")
+        XCTAssertTrue(
+            content.explanation.lowercased().contains("not established"),
+            "content_identical must admit how the files got that way is unknown: "
+                + content.explanation
+        )
+        XCTAssertNotEqual(
+            content.explanation,
+            GlomerisVocabulary.worktreeEquivalenceMethod("per_commit_patch_id").explanation,
+            "the two methods explain themselves identically"
+        )
     }
 
     /// `untracked` is the token most easily misread, and the misreading is the
@@ -1346,7 +1444,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// these three share and a copied `case` label would route a live token to
     /// the wrong axis's wording without failing the guard script.
     func testAnUnknownWorktreeTokenFallsBackWithinItsOwnAxis() {
-        for axis in Self.worktreeAxes {
+        for axis in Self.worktreeProseAxes {
             let term = axis.lookup("a_state_from_a_newer_cli")
             XCTAssertEqual(term.token, "a_state_from_a_newer_cli")
             XCTAssertEqual(
