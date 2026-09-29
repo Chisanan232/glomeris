@@ -23,9 +23,10 @@ ACT — change this machine. Policy decides every deletion.
   emergency         Degraded-path recovery with no network and no LLM.
   autopilot         Read, grant or revoke a bounded standing authorization.
 
-OBSERVE — what happened before. Nothing is changed.
+OBSERVE — what happened before. Nothing on this machine is deleted.
   history           Recorded disk-pressure transitions.
   actions           Registered actions, or the real-execution audit log.
+  workflow-profile  How this machine has been used, over more than one look.
 
 SERVICE — the background disk-pressure monitor.
   daemon            Install, remove, inspect or run the background monitor.

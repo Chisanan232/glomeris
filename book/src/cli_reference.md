@@ -1445,6 +1445,82 @@ failure**. The usual cause is that the disk recovered while the notification was
 on screen, and the app polls this command every thirty seconds — a client that
 treated it as an error would retry at poll speed forever.
 
+## `glomeris workflow-profile [show|record] [--json] [--project-root <path>]`
+
+How this machine has been used, over more than one look. `show` reports the
+stored baseline and is the default; `record` takes one observation and adds it.
+
+A single look cannot honestly say how you usually work. Six working trees of one
+repository today might be this week's shape or this afternoon's, and a product
+that called it a habit on one sighting would be inventing the most persuasive
+thing it knows about you. So the baseline is built from observations taken over
+time, and until enough of them exist it says so.
+
+| Shape | What it means |
+|---|---|
+| `serial_single_checkout` | One checkout at a time, staying on one branch. |
+| `serial_multi_branch` | One checkout at a time, moving between branches. |
+| `parallel_multi_worktree` | Several working trees of a repository at once. |
+| `mixed` | Some repositories with several working trees, some with one. |
+| `unknown` | Not enough observations to say. |
+
+**None of these is the good one.** There is no ordering between them and no
+scale, and the vocabulary deliberately contains no word for the person operating
+the machine — not `advanced`, not `beginner`, not any synonym.
+`scripts/check-workflow-history-labels-no-one.sh` holds that mechanically across
+the whole feature, because the temptation is real: `parallel_multi_worktree` is
+the shape of somebody juggling six checkouts, and calling that "advanced" would
+make `serial_single_checkout` a judgement.
+
+What this page adds:
+
+- **Three observations before any shape is claimed.** Below that the shape is
+  `unknown` and the confidence is `insufficient` — and the counts behind that
+  verdict are still printed, because two observations three minutes apart and
+  two three weeks apart are both insufficient and only the counts say which this
+  is.
+- **The counts are the supporting evidence, not decoration.** How many days the
+  observations span, how many repositories were seen, how many looks found one
+  working tree per repository, how many found several, how many found both, how
+  many times a lone checkout had moved branch since the last look, and the most
+  working trees ever seen at once.
+- **"Never collected", "could not be read" and "collected" are three states,
+  not two.** A baseline whose file could not be read is reported as a read
+  failure, never as a baseline holding nothing: the two have different next
+  steps, and a failed probe that arrived as an empty answer would be the whole
+  defect this feature exists to avoid.
+- **What is stored is counts and opaque local ids.** No path, no branch name, no
+  repository name, no file contents. Two repositories are never named, only
+  counted — which is also why the report can be pasted into a bug thread.
+  `tests/workflow_history_holds_no_identity.rs` asserts it against the bytes on
+  disk rather than against the type.
+- **Bounded on both axes.** At most 64 observations, kept at most 90 days,
+  oldest dropped first. Age before count, so a burst of recent observations
+  cannot push out the records that give the baseline its span.
+- **`record` declines when the last observation is too recent** — at most one an
+  hour — and when the clock has moved backwards. Both are the bounds working:
+  spacing is what stops a loop from manufacturing a pattern, so "too soon" is
+  the answer rather than a failure to get one, and both exit `0`.
+- **`show` writes nothing.** A `show` that recorded an observation "so there is
+  something to show" would make the observation count a measure of how often
+  somebody looked; `tests/subcommand_safety_is_honest.rs` runs it against a
+  disposable `$HOME` and requires the tree to be byte-identical afterwards.
+- **`record` looks at the same project roots `detect` does**, and accepts the
+  same repeated `--project-root <path>` to narrow them. Counting only the
+  current directory would make the baseline a record of where the command was
+  typed.
+- **None of it is permission.** The shape here can order and explain what
+  `detect` found. A working tree that is dirty, in use, or holds commits that
+  exist nowhere else stays protected by its own evidence, whatever the baseline
+  says about how you usually work — enforced by the policy engine never seeing
+  it, and pinned by `tests/workflow_history_has_no_authority.rs`.
+- The file is `~/Library/Application Support/Glomeris/workflow-history.json`,
+  beside `settings.conf`.
+
+Exit codes: `0` the report was printed, including when `record` declined; `1`
+the history file could not be located or written; `2` usage error — an unknown
+verb, or an argument besides `--json` and `--project-root`.
+
 ## Exit codes
 
 Also available as `glomeris help exit-codes`, which is the copy to trust — it

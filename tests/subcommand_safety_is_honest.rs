@@ -467,6 +467,28 @@ fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
             "external-context".to_string(),
             argv(&["external-context", "--json"]),
         ),
+        // Worth its own scrutiny for a fourth reason: `workflow-profile show`
+        // reads a baseline file that usually does not exist yet, standing next
+        // to the recorder that would create one. A `show` that took an
+        // observation "so there is something to show" would be the same defect
+        // as HORO-1507's self-creating settings file, and worse: it would mean
+        // every read of the baseline added to it, so the observation count
+        // would measure how often somebody looked (HORO-1547).
+        (
+            "workflow-profile show".to_string(),
+            argv(&["workflow-profile", "show"]),
+        ),
+        (
+            "workflow-profile show".to_string(),
+            argv(&["workflow-profile", "show", "--json"]),
+        ),
+        // The bare command, because `show` is its default: if the default verb
+        // were ever changed to `record`, typing the command name would start
+        // writing and nothing else here would notice.
+        (
+            "workflow-profile show".to_string(),
+            argv(&["workflow-profile"]),
+        ),
     ]
 }
 
