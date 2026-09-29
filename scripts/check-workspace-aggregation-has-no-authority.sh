@@ -34,6 +34,23 @@
 # them. AC 2, the other half of that ticket, is a separate script:
 # `scripts/check-external-context-is-read-only.sh`.
 #
+# HORO-1547 narrows check 3 in one place and exempts one file in another, both
+# because `src/workspace` gained a second `classify`.
+# `crate::workspace::history::classify` reads stored observations into a
+# workflow mode — the thing this guard exists to keep *away* from authority
+# rather than an exercise of it — so the pattern is now the qualified
+# `policy::classify`, with its braced and glob import forms beside it, instead
+# of the bare word. The bare word was an adequate proxy only while one function
+# in the crate owned the verb, and a proxy that has started matching the module
+# it protects would be read as noise and then deleted.
+#
+# The exempt file is `src/workspace/history/fixtures.rs`, a whole file gated by
+# `#[cfg(test)] mod fixtures;` in its sibling module root: it builds throwaway
+# git repositories under `$TMPDIR` and removes them again, which is the
+# `std::fs::remove` pattern in code that never ships. The in-file `#[cfg(test)]`
+# cut below cannot see a marker that lives in another file, so the loop asks the
+# module root whether the file it is about to scan is test-only.
+#
 # Seven checks, each one a separate way the boundary could be crossed. The
 # first three are about the aggregation module, the next two about the macOS
 # surface that renders it — because a group with no authority shown by a card
@@ -126,6 +143,22 @@ strip_comments() {
   grep -vE '^[0-9]+:[[:space:]]*(//|\*|/\*)' || true
 }
 
+# True when `$1` is a whole file that only exists under `cfg(test)`, which its
+# own `mod` declaration in the sibling module root is the evidence for.
+#
+# Deliberately narrow, and it fails towards scanning: a module root that is
+# missing, unreadable, or declares the file without the attribute leaves the
+# file checked. So the way to be skipped is to be declared test-only, which is
+# also the way to not ship.
+test_only_module_file() {
+  local dir base
+  dir="$(dirname "$1")"
+  base="$(basename "$1" .rs)"
+  [[ -f "${dir}/mod.rs" ]] || return 1
+  grep -B1 -E "\bmod ${base};" "${dir}/mod.rs" 2>/dev/null |
+    grep -qE '^#\[cfg\(test\)\]'
+}
+
 violations=0
 
 # ---------------------------------------------------------------------------
@@ -206,7 +239,9 @@ FORBIDDEN_IN_WORKSPACE=(
   '\bcrate::executor\b;;imports the layer that mutates the filesystem'
   '\bcrate::autopilot\b;;imports the layer that runs unattended'
   '\bcrate::actions\b;;imports the layer that defines mutations'
-  '\bclassify\b;;calls the policy classifier, so it would be deciding'
+  '\bpolicy::classify\b;;calls the policy classifier, so it would be deciding'
+  '\bpolicy::\{[^}]*\bclassify\b;;imports the policy classifier, so it would be deciding'
+  '\bpolicy::\*;;glob-imports the deciding layer, so any of it could be called unqualified'
   '\bstd::fs::remove;;removes files'
   '\bPolicyClass\b;;reads the policy class, whose separation from this module is the point'
 )
@@ -227,6 +262,9 @@ for entry in "${FORBIDDEN_IN_WORKSPACE[@]}"; do
 
   while IFS= read -r -d '' file; do
     rel_file="${file#"${REPO_ROOT}"/}"
+    # A file whose own module declaration gates it on `cfg(test)` ships
+    # nothing, and the in-file cut below cannot see a marker in another file.
+    test_only_module_file "$file" && continue
     # `#[cfg(test)]` code is excluded from this check by taking only the
     # lines before the test module: the group tests legitimately construct
     # `PolicyClass::Protected` candidates to prove that a stale-looking

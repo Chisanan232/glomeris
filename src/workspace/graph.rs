@@ -608,6 +608,59 @@ pub struct WorkflowHistorySummary {
     pub confidence: HistoryConfidence,
     /// How many distinct observations this summary rests on.
     pub observation_count: u32,
+    /// The counts the mode was read off, so a reader can check the reading.
+    pub support: WorkflowSupport,
+}
+
+/// The aggregate counts a [`WorkflowHistorySummary`] was derived from.
+///
+/// HORO-1547's fourth acceptance criterion asks for supporting evidence beside
+/// the classification, and this is it: a mode alone is an assertion, whereas a
+/// mode plus "eleven observations over nine days, never more than one working
+/// tree, two branch changes" is a claim somebody can disagree with. It is also
+/// what makes [`HistoryConfidence::Insufficient`] legible — the counts are
+/// reported even when no mode may be claimed from them.
+///
+/// Every field is a count. There is deliberately no path, no branch name and no
+/// repository name here, because this struct is the one part of the history that
+/// the model-facing projection is allowed to summarise, and a field that does
+/// not exist cannot be forwarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowSupport {
+    /// Days between the oldest and newest observation that counted.
+    pub spanning_days: u32,
+    /// Distinct repositories seen across those observations.
+    pub repositories_observed: u32,
+    /// Observations in which every repository seen had more than one working
+    /// tree.
+    pub parallel_observations: u32,
+    /// Observations in which every repository seen had exactly one.
+    pub serial_observations: u32,
+    /// Observations that saw some of each at the same moment.
+    pub mixed_observations: u32,
+    /// Times a repository's single checkout was seen on a different branch
+    /// than the previous time it was seen as a single checkout.
+    pub single_checkout_branch_changes: u32,
+    /// The largest number of working trees any one repository was seen with.
+    pub most_worktrees_seen_at_once: u32,
+}
+
+impl WorkflowSupport {
+    /// The support behind a summary that rests on nothing.
+    ///
+    /// Named rather than `Default`, because zero here means "no observation
+    /// supports this", which is a statement and not an uninitialised value.
+    pub fn nothing_observed() -> Self {
+        Self {
+            spanning_days: 0,
+            repositories_observed: 0,
+            parallel_observations: 0,
+            serial_observations: 0,
+            mixed_observations: 0,
+            single_checkout_branch_changes: 0,
+            most_worktrees_seen_at_once: 0,
+        }
+    }
 }
 
 /// Below this many observations no pattern may be claimed, whatever the
@@ -627,18 +680,28 @@ impl WorkflowHistorySummary {
     /// [`WorkflowMode::Unknown`] with [`HistoryConfidence::Insufficient`]
     /// no matter what `observed_mode` says. The caller's mode is not
     /// wrong, it is unsupported, and this is the difference.
-    pub fn from_observations(observed_mode: WorkflowMode, observation_count: u32) -> Self {
+    ///
+    /// `support` is carried through both branches unchanged. Withholding the
+    /// counts when the mode is unsupported would make `insufficient` an opaque
+    /// refusal, and the counts are exactly what explains it.
+    pub fn from_observations(
+        observed_mode: WorkflowMode,
+        observation_count: u32,
+        support: WorkflowSupport,
+    ) -> Self {
         if observation_count < MIN_OBSERVATIONS_FOR_A_PATTERN {
             return Self {
                 mode: WorkflowMode::Unknown,
                 confidence: HistoryConfidence::Insufficient,
                 observation_count,
+                support,
             };
         }
         Self {
             mode: observed_mode,
             confidence: HistoryConfidence::Observed,
             observation_count,
+            support,
         }
     }
 }
@@ -780,6 +843,31 @@ impl WorkspaceEvidenceGraph {
             history: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             built_at,
         }
+    }
+
+    /// Attaches the local workflow baseline (HORO-1547).
+    ///
+    /// Separate from [`Self::build`] so that stays pure: the baseline lives in a
+    /// file, and a `build` that read one could not be called from a test without
+    /// a `$HOME`. The caller passes the state it already read and the clock it
+    /// already has.
+    ///
+    /// # All three store states go through here
+    ///
+    /// Never collected, could not be read, and collected-but-thin all arrive as
+    /// [`ProbeOutcome::Unavailable`] or an `Observed` summary whose mode is
+    /// `Unknown` — never as a default shape. That is
+    /// [`super::history::classify`]'s job and it is asserted there; this method
+    /// exists so nothing downstream has to re-derive it, because the one
+    /// dangerous implementation is the convenient one: `unwrap_or(Serial…)`.
+    ///
+    /// The result carries no authority. `history` hangs off the machine node and
+    /// is unreachable from a [`WorktreeNode`], holds only counts and a mode so
+    /// it cannot be matched against a resource, and is never read by
+    /// `policy::classify` — see `tests/workflow_history_has_no_authority.rs`.
+    pub fn with_history(mut self, state: &super::history::StoreState, now_unix_secs: u64) -> Self {
+        self.history = super::history::classify(state, now_unix_secs);
+        self
     }
 
     /// Every resource in the graph, in bucket order. Used by the tests that
@@ -1433,6 +1521,7 @@ mod tests {
         graph.history = ProbeOutcome::Observed(WorkflowHistorySummary::from_observations(
             WorkflowMode::ParallelMultiWorktree,
             40,
+            WorkflowSupport::nothing_observed(),
         ));
 
         let worktree = &graph.repositories[0].worktrees[0];
@@ -1816,14 +1905,21 @@ mod tests {
         ];
         for mode in modes {
             for count in 0..MIN_OBSERVATIONS_FOR_A_PATTERN {
-                let summary = WorkflowHistorySummary::from_observations(mode, count);
+                let summary = WorkflowHistorySummary::from_observations(
+                    mode,
+                    count,
+                    WorkflowSupport::nothing_observed(),
+                );
                 assert_eq!(summary.mode, WorkflowMode::Unknown, "{mode:?} at {count}");
                 assert_eq!(summary.confidence, HistoryConfidence::Insufficient);
                 assert_eq!(summary.observation_count, count);
             }
             // Positive control at the threshold.
-            let summary =
-                WorkflowHistorySummary::from_observations(mode, MIN_OBSERVATIONS_FOR_A_PATTERN);
+            let summary = WorkflowHistorySummary::from_observations(
+                mode,
+                MIN_OBSERVATIONS_FOR_A_PATTERN,
+                WorkflowSupport::nothing_observed(),
+            );
             assert_eq!(summary.mode, mode);
             assert_eq!(summary.confidence, HistoryConfidence::Observed);
         }

@@ -152,7 +152,7 @@ impl Group {
             Group::Inspect => "look at this machine. Nothing is changed.",
             Group::Plan => "decide what to do. Nothing is executed.",
             Group::Act => "change this machine. Policy decides every deletion.",
-            Group::Observe => "what happened before. Nothing is changed.",
+            Group::Observe => "what happened before. Nothing on this machine is deleted.",
             Group::Service => "the background disk-pressure monitor.",
             Group::Configure => "your preferences. Nothing on this machine is deleted.",
         }
@@ -1116,6 +1116,93 @@ pub const COMMANDS: &[CommandSpec] = &[
         ],
         exit_codes: &[],
         see_also: &["execute", "history"],
+    },
+    CommandSpec {
+        name: "workflow-profile",
+        group: Group::Observe,
+        safety: Safety::WritesOwnState,
+        summary: "How this machine has been used, over several looks.",
+        usage: &[
+            "workflow-profile [show] [--json]",
+            "workflow-profile record [--project-root <path>]... [--json]",
+        ],
+        details: "A single look at this machine cannot honestly say how you usually work. \
+                  Running six working trees of one repository today might be this week's \
+                  shape or this afternoon's. So `record` takes one bounded observation — how \
+                  many working trees each repository has, and whether a lone checkout has \
+                  moved branch since the last look — and `show` reports what several \
+                  observations together support.\n\nNothing is claimed from one observation. Until at least three exist the \
+                  shape is `unknown` and the confidence is `insufficient`, and the counts \
+                  behind that verdict are printed so you can see whether it is thin or merely \
+                  young. A baseline that could not be read says so, which is a different \
+                  thing from one that holds nothing.                   \n\nWhat is stored is counts and opaque local ids. No path, no branch name, \
+                  no repository name and no file contents — which is also why two \
+                  repositories are never named, only counted. It stays on this machine unless \
+                  you ask for a model plan, and then only the counts travel.                   \n\nNone of it is permission. The shape here can order and explain what \
+                  `detect` found; a working tree that is dirty, in use, or holds commits that \
+                  exist nowhere else stays protected by its own evidence, whatever the \
+                  baseline says about how you usually work.",
+        subcommands: &[
+            SubcommandSpec {
+                name: "show",
+                args: "[--json]",
+                safety: Safety::ReadOnly,
+                description: "Report the current baseline: its shape, the confidence, and the \
+                              counts behind both. The default when no verb is given.",
+            },
+            SubcommandSpec {
+                name: "record",
+                args: "[--project-root <path>]... [--json]",
+                safety: Safety::WritesOwnState,
+                description: "Take one observation and add it to the baseline. Writes only \
+                              Glomeris's own history file. Declines when the last observation \
+                              is too recent, so repeated runs cannot manufacture a pattern.",
+            },
+        ],
+        options: &[
+            OptionSpec {
+                syntax: "--project-root <path>",
+                description: "Where `record` looks for repositories. Repeatable, and read by \
+                              `record` only — `show` reports the stored file and has nothing \
+                              to discover. Without it the census covers the same roots \
+                              `detect` would, so an observation taken from one directory is \
+                              not a record of where the command was typed.",
+            },
+            OptionSpec {
+                syntax: "--json",
+                description: "Print the report as JSON on stdout: the store's state, the shape, \
+                              the confidence, the seven counts behind them, the recording \
+                              bounds, and the note that none of it is permission.",
+            },
+        ],
+        examples: &[
+            ExampleSpec {
+                command: "glomeris workflow-profile",
+                purpose: "What layout does Glomeris think this machine has, and why?",
+            },
+            ExampleSpec {
+                command: "glomeris workflow-profile record",
+                purpose: "Add today's look, so the baseline eventually rests on more than one.",
+            },
+        ],
+        exit_codes: &[
+            ExitCodeSpec {
+                code: 0,
+                meaning: "the report was printed. Also when `record` declined because the last \
+                          observation is too recent or the clock moved backwards: the spacing \
+                          rule working is not a failure, and the refusal is part of the \
+                          report.",
+            },
+            ExitCodeSpec {
+                code: 1,
+                meaning: "`record` could not write the history file.",
+            },
+            ExitCodeSpec {
+                code: 2,
+                meaning: "usage error — an unknown verb, or an argument besides `--json`.",
+            },
+        ],
+        see_also: &["detect", "external-context", "llm-plan"],
     },
     // ----------------------------------------------------------------- Service
     CommandSpec {

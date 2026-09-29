@@ -14,6 +14,7 @@ Commands that give these codes more specific meanings:
   llm-check         0, 1, 2               `glomeris llm-check --help`
   execute           0, 1, 2, 3, 4, 5, 75  `glomeris execute --help`
   autopilot         0, 1, 2, 3, 75        `glomeris autopilot --help`
+  workflow-profile  0, 1, 2               `glomeris workflow-profile --help`
   pressure          0, 1, 2, 3            `glomeris pressure --help`
   settings          0, 1, 2               `glomeris settings --help`
   external-context  0, 2                  `glomeris external-context --help`

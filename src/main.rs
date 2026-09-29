@@ -64,6 +64,7 @@ fn main() {
         Some("settings") => run_settings_command(&args[1..]),
         Some("external-context") => run_external_context_command(&args[1..]),
         Some("pressure") => run_pressure_command(&args[1..]),
+        Some("workflow-profile") => run_workflow_profile_command(&args[1..]),
         Some(other) => {
             eprintln!("glomeris: unknown command '{other}'");
             eprintln!("{}", help::render_unknown_command_hint());
@@ -2408,6 +2409,121 @@ fn run_external_context_command(args: &[String]) {
     } else {
         for line in glomeris::cli::external_context::describe_external_context_preview(&report) {
             println!("{line}");
+        }
+    }
+}
+
+/// Wall-clock seconds since the epoch, for the workflow baseline's stamps.
+///
+/// A clock set before 1970 reads as 0 rather than panicking. The store already
+/// has to cope with a clock that moved backwards — it declines the observation —
+/// so one more absurd reading it will decline is better than a crash.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// `glomeris workflow-profile [show|record] [--json] [--project-root <path>]`
+/// (HORO-1547).
+///
+/// `show` reports the stored baseline; `record` takes one observation and adds
+/// it. `show` is the default, so the bare command cannot write anything —
+/// writing this machine's own state is something you type a verb for.
+///
+/// # Why a refusal to record still exits 0
+///
+/// The store admits at most one observation an hour, and declines one stamped
+/// before the newest it already holds. Both are the bounds working: the spacing
+/// exists precisely so that running this in a loop cannot manufacture a pattern,
+/// so being told "too soon" is the answer, not a failure to get one. Exit 1 is
+/// reserved for a write that could not happen — a full disk, a permission — the
+/// cases where somebody's next action is to fix something.
+fn run_workflow_profile_command(args: &[String]) {
+    let sub = match args.first().map(String::as_str) {
+        Some("show") => "show",
+        Some("record") => "record",
+        // No verb at all is `show`. An unrecognized *flag* is handled below by
+        // the flag parsing, so only a stray positional lands here.
+        None => "show",
+        Some(flag) if flag.starts_with('-') => "show",
+        Some(other) => {
+            eprintln!("glomeris workflow-profile: unknown subcommand '{other}'");
+            print_command_usage("workflow-profile");
+            std::process::exit(2);
+        }
+    };
+    let rest: &[String] = match args.first().map(String::as_str) {
+        Some("show") | Some("record") => &args[1..],
+        _ => args,
+    };
+
+    let (project_roots, remaining) = match glomeris::cli::extract_project_roots(rest) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("glomeris workflow-profile: {e}");
+            print_command_usage("workflow-profile");
+            std::process::exit(2);
+        }
+    };
+    let (json, leftover) = take_json_flag(&remaining);
+    if let Some(unexpected) = leftover.first() {
+        eprintln!("glomeris workflow-profile: unrecognized argument '{unexpected}'");
+        print_command_usage("workflow-profile");
+        std::process::exit(2);
+    }
+
+    let path = match glomeris::workspace::history::default_history_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("glomeris workflow-profile: cannot locate the history file: {e}");
+            std::process::exit(1);
+        }
+    };
+    let stored_at = Some(path.display().to_string());
+    let now = unix_now();
+
+    if sub == "show" {
+        let state = glomeris::workspace::history::read(&path);
+        let report =
+            glomeris::cli::workflow_profile::build_workflow_profile_report(&state, stored_at, now);
+        if json {
+            print_json_or_exit(&report);
+        } else {
+            for line in glomeris::cli::workflow_profile::describe_workflow_profile(&report) {
+                println!("{line}");
+            }
+        }
+        return;
+    }
+
+    // The same discovery pass `detect` runs, and for the same reason: the
+    // repositories worth counting are the ones this machine's resources were
+    // observed to belong to. Counting only the current directory would make the
+    // baseline a record of where the command was typed.
+    let candidates = discover_and_classify_now(project_roots);
+    let observation = glomeris::cli::observe_workspace_now(&candidates, now);
+    match glomeris::workspace::history::record(&path, observation.clone()) {
+        Ok((admission, stored)) => {
+            let report = glomeris::cli::workflow_profile::build_workflow_record_report(
+                admission,
+                &observation,
+                &stored,
+                stored_at,
+                now,
+            );
+            if json {
+                print_json_or_exit(&report);
+            } else {
+                for line in glomeris::cli::workflow_profile::describe_workflow_record(&report) {
+                    println!("{line}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("glomeris workflow-profile record: {e}");
+            std::process::exit(1);
         }
     }
 }

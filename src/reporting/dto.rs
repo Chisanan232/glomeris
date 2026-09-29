@@ -2095,6 +2095,105 @@ pub struct ExternalEgressFieldReport {
     pub vocabulary: Vec<&'static str>,
 }
 
+/// `glomeris workflow-profile` report (HORO-1547): the local workflow baseline
+/// and what it rests on.
+///
+/// # Why the state is a word and not a bool
+///
+/// `never_collected`, `unreadable` and `collected` are three situations with
+/// three different next steps — run the recorder, look at the file's
+/// permissions, and nothing respectively. A `has_history: bool` would fold the
+/// first two together, and a reader who saw `false` would go looking for the
+/// recorder they had already run.
+///
+/// # Why the counts are here and unconditional
+///
+/// A `mode` alone cannot be argued with. HORO-1547's fourth acceptance
+/// criterion asks for the evidence beside the classification, and its second
+/// forbids claiming a habit from too little — so `confidence` is often
+/// `"insufficient"`, and when it is, the counts are the only thing that says
+/// whether that means "two runs a minute apart" or "two runs a month apart".
+///
+/// # What is deliberately absent
+///
+/// No path except `stored_at`, and no repository or branch name anywhere. The
+/// file this reports on holds none, by construction — see
+/// [`crate::workspace::history::alias`] — so the report has none to print.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkflowProfileReport {
+    /// `"never_collected"`, `"unreadable"` or `"collected"`.
+    pub state: &'static str,
+    /// Why the store could not be read, as a
+    /// [`crate::evidence::ProbeReason`] tag. Only set for `"unreadable"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unreadable_reason: Option<&'static str>,
+    /// Where the baseline lives, or `null` when `$HOME` could not be resolved.
+    /// Local, and never part of any provider request — same rule as
+    /// [`ExternalContextPreviewReport::config_path`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_at: Option<String>,
+    /// A [`crate::workspace::WorkflowMode`] tag. `"unknown"` whenever the
+    /// observations do not support a shape, which includes every failure path.
+    pub mode: &'static str,
+    /// `"observed"` or `"insufficient"`.
+    pub confidence: &'static str,
+    /// How many observations inside the retention window this rests on.
+    pub observation_count: u32,
+    /// How many more would be needed before any shape may be claimed. `0` once
+    /// the minimum is met — not omitted, because "you need none more" is the
+    /// answer somebody who just met it is looking for.
+    pub observations_still_needed: u32,
+    /// The shortest gap between two admitted observations, in seconds. Printed
+    /// because it is the reason a run can be refused, and a refusal without it
+    /// looks like a failure.
+    pub minimum_interval_secs: u64,
+    /// How long a record stays relevant, in days.
+    pub retention_days: u64,
+    /// The counts the mode was read off.
+    pub support: WorkflowSupportReport,
+    /// What this baseline may and may not do, stated in the report rather than
+    /// only in the help, because the report is what gets pasted into a bug
+    /// thread.
+    pub authority: &'static str,
+}
+
+/// The aggregate counts behind a [`WorkflowProfileReport`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct WorkflowSupportReport {
+    pub spanning_days: u32,
+    pub repositories_observed: u32,
+    pub parallel_observations: u32,
+    pub serial_observations: u32,
+    pub mixed_observations: u32,
+    pub single_checkout_branch_changes: u32,
+    pub most_worktrees_seen_at_once: u32,
+}
+
+/// What `glomeris workflow-profile record` did.
+///
+/// A refusal is a normal outcome and not an error: the spacing rule exists so
+/// that repeated runs cannot manufacture a pattern, so being told "too soon"
+/// is the rule working. `seconds_until_eligible` is what makes it actionable.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkflowRecordReport {
+    /// `"admitted"`, `"too_soon"` or `"clock_went_backwards"`.
+    pub admission: &'static str,
+    /// How long until another observation would be admitted. Only set for
+    /// `"too_soon"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_until_eligible: Option<u64>,
+    /// How many repositories this look found. `0` is an observed zero — the
+    /// recorder ran and no root held a repository — and the observation is
+    /// still recorded, because "nothing here today" is a fact about the shape
+    /// of the machine.
+    pub repositories_seen: u32,
+    /// How many observations the file holds afterwards, after compaction.
+    pub observations_stored: u32,
+    /// The profile as it reads after this run, so one command answers both
+    /// "was it recorded" and "what does it say now".
+    pub profile: WorkflowProfileReport,
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
