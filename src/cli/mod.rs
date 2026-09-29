@@ -23,6 +23,7 @@ pub mod help;
 pub mod pressure;
 pub mod recovery;
 pub mod settings;
+pub mod workflow_profile;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
