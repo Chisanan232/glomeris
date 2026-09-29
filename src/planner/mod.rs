@@ -57,6 +57,7 @@
 pub mod bounds;
 pub mod contract;
 pub mod dto;
+pub mod expand;
 pub mod plan;
 pub mod probe;
 pub mod project;
@@ -75,6 +76,7 @@ pub use dto::{
     RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView, WorkflowSupportView,
     WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
+pub use expand::{expand_and_plan, ExpansionRun, StopReason};
 pub use plan::{
     build_workspace_request, build_workspace_request_with, plan_workspace, plan_workspace_with,
     WorkspacePlanResult, WorkspaceRequest,
