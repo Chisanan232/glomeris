@@ -1462,7 +1462,7 @@ time, and until enough of them exist it says so.
 | `serial_multi_branch` | One checkout at a time, moving between branches. |
 | `parallel_multi_worktree` | Several working trees of a repository at once. |
 | `mixed` | Some repositories with several working trees, some with one. |
-| `unknown` | Not enough observations to say. |
+| `unknown` | No layout claimed — either too few observations to say, or looks that found no repository to say anything about. |
 
 **None of these is the good one.** There is no ordering between them and no
 scale, and the vocabulary deliberately contains no word for the person operating

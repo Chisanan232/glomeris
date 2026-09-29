@@ -141,13 +141,22 @@ fn support_report(support: &WorkflowSupport) -> WorkflowSupportReport {
 ///
 /// Descriptions of a layout. None of them is the good one, and there is
 /// deliberately no ordering between them — see the module header.
+///
+/// `unknown` is described without a cause on purpose. It has two, they have
+/// different remedies, and a clause here can only name one of them: this
+/// function is given a word, not the counts behind it. It used to say "not
+/// enough observations to say", which beside `Confidence: observed (5
+/// observations)` reads as a contradiction — five looks that each found no
+/// repository are enough looks and still no shape. Both causes are stated as
+/// their own lines in [`describe_workflow_profile`], where the counts are in
+/// hand.
 pub fn describe_mode(mode: &str) -> &'static str {
     match mode {
         "serial_single_checkout" => "one checkout at a time, staying on one branch",
         "serial_multi_branch" => "one checkout at a time, moving between branches",
         "parallel_multi_worktree" => "several working trees of a repository at once",
         "mixed" => "some repositories with several working trees, some with one",
-        _ => "not enough observations to say",
+        _ => "no layout claimed from what has been seen so far",
     }
 }
 
@@ -199,6 +208,23 @@ pub fn describe_workflow_profile(report: &WorkflowProfileReport) -> Vec<String> 
                         "s"
                     }
                 ));
+            }
+            // The other reason a shape is `unknown`, and the one a count of
+            // observations hides: looks were taken and none of them found a
+            // repository. More looks in the same place will not produce a shape
+            // either, so leaving this to be inferred from `repositories: 0`
+            // further down sends a reader off to record again for nothing.
+            //
+            // `repositories_observed == 0` with at least one observation is
+            // exactly that case: a look that sees a repository contributes to
+            // the serial, parallel or mixed count, so a mode stays `unknown`
+            // only while every look saw none.
+            if report.observation_count > 0 && report.support.repositories_observed == 0 {
+                lines.push(
+                    "  No observation found a repository, so there is no layout to describe. \
+                     Recording from a directory that holds one is what would change this."
+                        .to_string(),
+                );
             }
         }
     }
@@ -360,6 +386,70 @@ mod tests {
         assert_eq!(
             report.support.parallel_observations, 1,
             "the counts must survive an insufficient verdict, or the verdict is unexplained"
+        );
+    }
+
+    /// A look that found no repository at all.
+    fn nothing_seen(days_ago: u64) -> WorkspaceObservation {
+        WorkspaceObservation {
+            at_unix_secs: NOW - days_ago * DAY,
+            repositories: Vec::new(),
+        }
+    }
+
+    /// Five looks that each found no repository are enough looks, so the shape
+    /// line must not blame the number of them.
+    ///
+    /// Found by running the command: the live output read `Shape: unknown — not
+    /// enough observations to say` directly above `Confidence: observed (5
+    /// observations)`. One line said there were too few and the next said there
+    /// were enough, because both causes of `unknown` had collapsed into the only
+    /// clause a mode word can carry.
+    #[test]
+    fn enough_looks_that_saw_nothing_are_not_described_as_too_few_looks() {
+        let report = build_workflow_profile_report(
+            &StoreState::Collected((0..5).map(nothing_seen).collect()),
+            None,
+            NOW,
+        );
+        // The pairing that made the contradiction visible, pinned so this test
+        // fails if either half of it stops holding.
+        assert_eq!(report.mode, "unknown");
+        assert_eq!(report.confidence, "observed");
+        assert_eq!(report.observation_count, 5);
+        assert_eq!(report.observations_still_needed, 0);
+        assert_eq!(report.support.repositories_observed, 0);
+
+        let text = describe_workflow_profile(&report).join("\n");
+        assert!(
+            !text.contains("not enough observations") && !text.contains("more observation"),
+            "five observations were described as too few: {text}"
+        );
+        assert!(
+            text.contains("No observation found a repository"),
+            "the shape is unknown and nothing says why: {text}"
+        );
+    }
+
+    /// One look that found no repository has both causes at once, and says both.
+    ///
+    /// The two lines are not alternatives and must not be made exclusive: a
+    /// second and third look would clear the count, and would still produce no
+    /// shape while they keep finding nothing.
+    #[test]
+    fn a_thin_baseline_that_saw_nothing_gives_both_reasons() {
+        let report =
+            build_workflow_profile_report(&StoreState::Collected(vec![nothing_seen(0)]), None, NOW);
+        assert_eq!(report.confidence, "insufficient");
+        let text = describe_workflow_profile(&report).join("\n");
+        assert!(
+            text.contains("2 more observations needed"),
+            "a single look was not described as a thin baseline: {text}"
+        );
+        assert!(
+            text.contains("No observation found a repository"),
+            "a look that saw nothing was described only as a thin baseline, so \
+             recording twice more reads as the remedy: {text}"
         );
     }
 
