@@ -1398,7 +1398,7 @@ enum GlomerisVocabulary {
 
     // MARK: - Developer-workspace state (HORO-1511)
 
-    /// The three worktree vocabularies below describe where a developer's work
+    /// The five worktree vocabularies below describe where a developer's work
     /// stands, not what Glomeris may do about it — and they are deliberately
     /// `prose`, with no symbol and no tone of their own, for that reason.
     ///
@@ -1410,14 +1410,21 @@ enum GlomerisVocabulary {
     /// that: the safety and actionability axes stay the only coloured things on
     /// the surface, exactly as they are in the candidates list.
     ///
-    /// All three fallbacks read as "not known" rather than as the reassuring
-    /// end of their scale, which matters more here than in most tables. Each of
-    /// these vocabularies has a real `unknown` token standing for "a probe
-    /// could not answer", and Rust counts every one of them as *possible*
-    /// outstanding work rather than as an absence of it
-    /// (`ActivityState::may_be_in_use`, `UpstreamState::may_hold_unpushed_work`,
-    /// `MergedState::Unknown`'s "deliberately not a guess"). Wording that drifts
-    /// towards "idle" or "merged" would undo that on the way to the screen.
+    /// Every fallback reads as "not known" rather than as the reassuring end of
+    /// its scale, which matters more here than in most tables. Each of these
+    /// vocabularies has a real `unknown` token standing for "a probe could not
+    /// answer", and Rust counts every one of them as *possible* outstanding work
+    /// rather than as an absence of it (`ActivityState::may_be_in_use`,
+    /// `UpstreamState::may_hold_unpushed_work`, `MergedState::Unknown`'s
+    /// "deliberately not a guess"). Wording that drifts towards "idle" or
+    /// "merged" would undo that on the way to the screen.
+    ///
+    /// The two HORO-1545 vocabularies are the strongest-sounding of the five and
+    /// the ones most in need of that restraint. "The same work is already on the
+    /// other branch" is very nearly a case for deleting a directory, and it is
+    /// not one: it describes the commits that were compared and says nothing
+    /// about the file a developer has open right now. Both vocabularies keep to
+    /// what was compared, and neither says "safe", "finished" or "done".
 
     static let worktreeActivityAxis = "Worktree activity"
 
@@ -1518,6 +1525,80 @@ enum GlomerisVocabulary {
             return unrecognised(
                 token, worktreeMergedAxis, "Unrecognised merge state",
                 "The CLI reported a branch merge state this app has no wording for."
+            )
+        }
+    }
+
+    static let worktreeEquivalenceAxis = "Integration state"
+
+    /// `PatchEquivalence` as the CLI tags it (`src/workspace/branch.rs` —
+    /// `PatchEquivalence::tag`, diffed by this project's vocabulary guard).
+    ///
+    /// The answer to "has this work landed over there by some route other than
+    /// a merge" — a squash, a rebase, a cherry-pick. Four tokens rather than a
+    /// boolean, and `not_applicable` is the one worth reading twice: it means
+    /// there was no question to ask because the branch is merged outright, and
+    /// it is emphatically not a quiet way of saying no.
+    static func worktreeEquivalence(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "equivalent":
+            return prose(
+                token, worktreeEquivalenceAxis, "Same work already landed",
+                "The commits here also exist on the branch they were compared against, under "
+                    + "different commit ids. Nothing is said about anything changed since."
+            )
+        case "not_equivalent":
+            return prose(
+                token, worktreeEquivalenceAxis, "Work not found elsewhere",
+                "The commits here were compared against that branch and no equivalent of them "
+                    + "was found on it."
+            )
+        case "not_applicable":
+            return prose(
+                token, worktreeEquivalenceAxis, "Nothing to compare",
+                "This branch is already merged outright, so there was no separate question to "
+                    + "ask."
+            )
+        case "unknown":
+            return prose(
+                token, worktreeEquivalenceAxis, "Integration not known",
+                "The comparison could not be made or was not attempted, so work landing "
+                    + "elsewhere can neither be shown nor ruled out."
+            )
+        default:
+            return unrecognised(
+                token, worktreeEquivalenceAxis, "Unrecognised integration state",
+                "The CLI reported a branch integration state this app has no wording for."
+            )
+        }
+    }
+
+    static let worktreeEquivalenceMethodAxis = "How that was established"
+
+    /// `EquivalenceMethod` as the CLI tags it (`src/workspace/branch.rs` —
+    /// `EquivalenceMethod::tag`, diffed by this project's vocabulary guard).
+    ///
+    /// Shown because the two are not equally strong, and a surface that showed
+    /// only "same work already landed" would present the weaker one as the
+    /// stronger. Per-commit means every commit was matched individually.
+    /// Content means the files came out the same and nobody established how.
+    static func worktreeEquivalenceMethod(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "per_commit_patch_id":
+            return prose(
+                token, worktreeEquivalenceMethodAxis, "Matched commit by commit",
+                "Each commit here was matched to an equivalent one on the other branch."
+            )
+        case "content_identical":
+            return prose(
+                token, worktreeEquivalenceMethodAxis, "Matched by file contents",
+                "The files these commits touch are identical on both branches. How they got "
+                    + "there was not established."
+            )
+        default:
+            return unrecognised(
+                token, worktreeEquivalenceMethodAxis, "Unrecognised match method",
+                "The CLI reported a way of matching work this app has no wording for."
             )
         }
     }
