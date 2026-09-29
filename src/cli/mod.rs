@@ -39,6 +39,7 @@ use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{
     ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
 };
+use crate::planner::GraphProjection;
 use crate::policy::approval::authorize;
 use crate::policy::{classify, PolicyClass, PolicyConfig, PolicyDecision, UserConsent};
 use crate::reporting::dto::{
@@ -51,8 +52,11 @@ use crate::reporting::dto::{
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
 use crate::reporting::ranking;
-use crate::workspace::history::{GitCliWorktreeCensus, WorkspaceObservation};
-use crate::workspace::{group_families, GitCliBranchProbe, WorkspaceFamily, WorkspaceSurvey};
+use crate::workspace::history::{GitCliWorktreeCensus, StoreState, WorkspaceObservation};
+use crate::workspace::{
+    group_families, GitCliBranchProbe, MachineContext, WorkspaceEvidenceGraph, WorkspaceFamily,
+    WorkspaceSurvey,
+};
 
 /// Correlation-refresh timeout for one candidate at the CLI layer. Mirrors
 /// `executor::recovery_loop::CANDIDATE_CORRELATION_TIMEOUT`'s reasoning
@@ -583,6 +587,60 @@ pub fn observe_workspace_now(
         &GitCliWorktreeCensus,
         CLI_CORRELATION_TIMEOUT,
     )
+}
+
+/// Assembles the workspace evidence graph for an already-discovered pass
+/// (HORO-1548).
+///
+/// The third sibling of [`group_workspaces_now`] and [`observe_workspace_now`],
+/// built the same way and for the same reason: the survey costs one `git`
+/// subprocess per worktree root, so it is paid for here rather than inside
+/// discovery.
+///
+/// `machine` and `history` are parameters rather than read here. Reading free
+/// space is a platform call and reading the baseline is a file open, and a
+/// caller that did neither must be able to say so — [`MachineContext::unmeasured`]
+/// and [`StoreState::NeverCollected`] are both honest values, where a default
+/// assembled inside this function would claim measurements nobody took.
+///
+/// What this deliberately does **not** do is call
+/// [`WorkspaceEvidenceGraph::attach_external_context`]. That is the one method
+/// on the graph that can reach a network, and keeping it out of here means a
+/// reader can tell from the call site whether a command talks to anything.
+pub fn build_workspace_graph_now(
+    candidates: &[(Evidence, PolicyDecision)],
+    machine: MachineContext,
+    history: &StoreState,
+    now: SystemTime,
+    now_unix_secs: u64,
+) -> WorkspaceEvidenceGraph {
+    let survey = WorkspaceSurvey::survey(
+        repository_roots_of(candidates),
+        &GitCliBranchProbe,
+        CLI_CORRELATION_TIMEOUT,
+    );
+    WorkspaceEvidenceGraph::build(candidates, &survey, machine, now)
+        .with_history(history, now_unix_secs)
+}
+
+/// The privacy-safe projection of that graph — what a version 2 planning round
+/// sends, and the only thing it sends (HORO-1548).
+///
+/// Thin on purpose. It exists so a caller needs no `use` of
+/// [`crate::workspace`] or [`crate::planner::GraphProjection`]'s inputs to
+/// obtain a projection, and so there is exactly one composition of
+/// [`build_workspace_graph_now`] with [`GraphProjection::build`] rather than
+/// one per command.
+pub fn build_workspace_projection_now(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    machine: MachineContext,
+    history: &StoreState,
+    now: SystemTime,
+    now_unix_secs: u64,
+) -> GraphProjection {
+    let graph = build_workspace_graph_now(candidates, machine, history, now, now_unix_secs);
+    GraphProjection::build(&graph, candidates, actions, now)
 }
 
 /// Builds an [`ExplainReport`] for one already-classified candidate.
@@ -2122,6 +2180,42 @@ mod tests {
         let actions = ActionRegistry::builtin();
         let report = build_detect_report(&candidates, &[], &actions, ImpactContext::default(), &[]);
         assert_eq!(report.candidates.len(), 2);
+    }
+
+    /// HORO-1548. The projection a version 2 planning round sends covers every
+    /// candidate, and the two things the caller did not measure arrive as
+    /// unmeasured rather than as zeros — a machine reported with `free_bytes: 0`
+    /// and a workflow mode of `serial_single_checkout` would be two fabricated
+    /// findings, and both are the convenient default.
+    #[test]
+    fn build_workspace_projection_now_covers_every_candidate_without_inventing_context() {
+        let ev1 = evidence("/tmp/a/target", ResourceKind::CargoTargetDir, Some(100));
+        let ev2 = evidence("/tmp/b/node_modules", ResourceKind::NodeModules, Some(9999));
+        let cfg = PolicyConfig::default();
+        let now = SystemTime::UNIX_EPOCH;
+        let candidates = vec![
+            (ev1.clone(), classify(&ev1, &cfg, now)),
+            (ev2.clone(), classify(&ev2, &cfg, now)),
+        ];
+
+        let projection = build_workspace_projection_now(
+            &candidates,
+            &ActionRegistry::builtin(),
+            MachineContext::unmeasured(),
+            &StoreState::NeverCollected,
+            now,
+            0,
+        );
+
+        assert_eq!(projection.aliases.len(), 2);
+        for alias in ["resource_1", "resource_2"] {
+            assert!(
+                projection.resource_view(alias).is_some(),
+                "{alias} was issued but projects nothing"
+            );
+        }
+        assert_eq!(projection.view.machine.free_bytes.value, None);
+        assert_eq!(projection.view.workflow_history.mode.value, None);
     }
 
     /// HORO-1049: `format_size_field` — the shared text-rendering helper
