@@ -595,6 +595,7 @@ final class WorkspaceFamilyRowViewModelTests: XCTestCase {
         behind: UInt32? = 0,
         merged: String = "merged",
         mergedInto: String? = "origin/main",
+        patchEquivalence: String = "unknown",
         holdsWorkInProgress: Bool = false,
         memberResourceIds: [String] = []
     ) -> [String: Any] {
@@ -606,9 +607,18 @@ final class WorkspaceFamilyRowViewModelTests: XCTestCase {
             "activity": activity,
             "upstream": upstream,
             "merged": merged,
+            "patch_equivalence": patchEquivalence,
             "holds_work_in_progress": holdsWorkInProgress,
             "member_resource_ids": memberResourceIds,
         ]
+        // `"unknown"` is the default because it is the one integration state
+        // that is coherent beside any `merged` value a test picks — a bounded
+        // probe that never ran says nothing either way. It carries its reason,
+        // because an integration state without one is the absence this
+        // campaign spends its effort refusing (HORO-1545).
+        if patchEquivalence == "unknown" {
+            json["equivalence_unknown_reason"] = "not_attempted"
+        }
         if let ahead { json["ahead"] = ahead }
         if let behind { json["behind"] = behind }
         if let branch { json["branch"] = branch }
