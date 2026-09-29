@@ -73,7 +73,7 @@ pub use dto::{
     WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 pub use plan::{build_workspace_request, plan_workspace, WorkspacePlanResult, WorkspaceRequest};
-pub use project::{AliasTable, GraphProjection};
+pub use project::{AliasTable, GraphProjection, ProbeSubject, SubjectTable};
 pub use prompt::system_prompt;
 pub use response::{
     read_planner_response, EvidenceRequestClaim, ObservationClaim, PlanItemClaim, PlannerResponse,
