@@ -1016,18 +1016,26 @@ mod tests {
         use crate::evidence::ResourceKind;
 
         /// Kinds with no detector yet, each with the ticket that owns it.
-        /// `DockerImageCache` is HORO-1544's: images, build cache and volumes
-        /// are distinct lifecycle evidence, and collapsing them into the
-        /// existing build-cache detector merely to satisfy this guard is
-        /// exactly what that ticket forbids.
-        const NOT_YET_DETECTABLE: &[ResourceKind] = &[ResourceKind::DockerImageCache];
+        /// The three Docker object kinds are HORO-1544's: they are distinct
+        /// lifecycle evidence, and collapsing them into the existing
+        /// build-cache detector merely to satisfy this guard is exactly what
+        /// that ticket forbids.
+        const NOT_YET_DETECTABLE: &[ResourceKind] = &[
+            ResourceKind::DockerImage,
+            ResourceKind::DockerContainer,
+            ResourceKind::DockerVolume,
+        ];
 
         // Pinned, so this exemption cannot quietly grow. A kind added here
         // without its ticket, or one left behind after its detector landed,
         // both fail on this line.
         assert_eq!(
             NOT_YET_DETECTABLE,
-            &[ResourceKind::DockerImageCache],
+            &[
+                ResourceKind::DockerImage,
+                ResourceKind::DockerContainer,
+                ResourceKind::DockerVolume,
+            ],
             "the not-yet-detectable exemption changed — add the ticket that \
              owns the new kind to this test's doc comment, or remove a kind \
              whose detector now exists"

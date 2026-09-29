@@ -29,7 +29,31 @@ pub enum ResourceKind {
     NodeModules,
     NodePackageManagerCache,
     DockerBuildCache,
-    DockerImageCache,
+    /// One image held by the Docker daemon (HORO-1544).
+    ///
+    /// Replaces the former `DockerImageCache`, which collapsed images,
+    /// containers and volumes into one kind and therefore had to be refused
+    /// wholesale — see [`crate::evidence::docker`] for why one kind could
+    /// not be made safe. An image is usually a registry copy and sometimes
+    /// was built here and exists nowhere else, and nothing observable
+    /// distinguishes the two, so this kind carries
+    /// [`Regenerability::Unknown`] and policy sends it to `ASK`.
+    DockerImage,
+    /// One container, running or stopped (HORO-1544).
+    ///
+    /// A container's writable layer is created by running it and is not
+    /// reproduced by recreating the container, so this kind is
+    /// [`Regenerability::NotRegenerable`]: a stopped container is inactive,
+    /// which is a different claim from disposable.
+    DockerContainer,
+    /// One Docker volume, named or anonymous (HORO-1544).
+    ///
+    /// The kind that inherits the unconditional `PROTECTED` refusal the
+    /// former `DockerImageCache` carried — a volume is where a developer's
+    /// local database keeps its data, and it is the one Docker object whose
+    /// contents no tool can regenerate. See
+    /// [`crate::policy::protected::protected_reason`].
+    DockerVolume,
     /// `pip`'s HTTP/wheel download cache, as reported by `pip cache dir`.
     PipCache,
     /// `uv`'s cache, as reported by `uv cache dir`.
@@ -76,7 +100,10 @@ impl ResourceKind {
             ResourceKind::HomebrewCache => OwningTool::Homebrew,
             ResourceKind::CargoTargetDir | ResourceKind::CargoRegistryCache => OwningTool::Cargo,
             ResourceKind::NodeModules | ResourceKind::NodePackageManagerCache => OwningTool::Npm,
-            ResourceKind::DockerBuildCache | ResourceKind::DockerImageCache => OwningTool::Docker,
+            ResourceKind::DockerBuildCache
+            | ResourceKind::DockerImage
+            | ResourceKind::DockerContainer
+            | ResourceKind::DockerVolume => OwningTool::Docker,
             ResourceKind::PipCache => OwningTool::Pip,
             ResourceKind::UvCache => OwningTool::Uv,
             ResourceKind::GoBuildCache | ResourceKind::GoModuleCache => OwningTool::Go,
@@ -100,7 +127,14 @@ impl ResourceKind {
             ResourceKind::NodeModules => Regenerability::RegenerableByRebuild,
             ResourceKind::NodePackageManagerCache => Regenerability::RegenerableByTool,
             ResourceKind::DockerBuildCache => Regenerability::RegenerableByTool,
-            ResourceKind::DockerImageCache => Regenerability::RegenerableByTool,
+            // Not RegenerableByTool: an image built here may exist in no
+            // registry, and nothing observable says which it is. The same
+            // argument as `MavenLocalRepository` above.
+            ResourceKind::DockerImage => Regenerability::Unknown,
+            // A container's writable layer comes from having run it, not
+            // from recreating it.
+            ResourceKind::DockerContainer => Regenerability::NotRegenerable,
+            ResourceKind::DockerVolume => Regenerability::NotRegenerable,
             ResourceKind::PipCache => Regenerability::RegenerableByTool,
             ResourceKind::UvCache => Regenerability::RegenerableByTool,
             ResourceKind::GoBuildCache => Regenerability::RegenerableByRebuild,
@@ -148,10 +182,30 @@ impl ResourceKind {
             EvidenceField::GitState,
             EvidenceField::ToolLiveness,
         ];
+        /// The three path probes are *inapplicable* to a Docker object, not
+        /// merely unobserved: a [`ResourceLocator::Tool`] resource has no
+        /// path for `lsof` or `git` to be pointed at, so
+        /// [`crate::evidence::correlate::DefaultEvidenceCollector`] reports
+        /// them `Unavailable(NotAttempted)` by construction.
+        ///
+        /// Requiring them anyway is what made every Docker resource
+        /// permanently [`Completeness::Failed`] before HORO-1544 — which
+        /// sounds conservative and is the opposite: `classify` returns at
+        /// the completeness gate, so the active-use step that reads a
+        /// running container's lifecycle was never reached. A kind whose
+        /// evidence can never be complete cannot be reasoned about at all.
+        const DOCKER_OBJECT: &[EvidenceField] = &[
+            EvidenceField::LogicalBytes,
+            EvidenceField::ReclaimableBytes,
+            EvidenceField::LastModified,
+            EvidenceField::ToolLiveness,
+        ];
         match self {
-            ResourceKind::XcodeDerivedData
-            | ResourceKind::DockerBuildCache
-            | ResourceKind::DockerImageCache => WITH_TOOL_LIVENESS,
+            ResourceKind::XcodeDerivedData => WITH_TOOL_LIVENESS,
+            ResourceKind::DockerBuildCache
+            | ResourceKind::DockerImage
+            | ResourceKind::DockerContainer
+            | ResourceKind::DockerVolume => DOCKER_OBJECT,
             ResourceKind::HomebrewCache
             | ResourceKind::CargoTargetDir
             | ResourceKind::CargoRegistryCache
@@ -183,7 +237,9 @@ impl ResourceKind {
             ResourceKind::NodeModules => "node_modules",
             ResourceKind::NodePackageManagerCache => "node_package_manager_cache",
             ResourceKind::DockerBuildCache => "docker_build_cache",
-            ResourceKind::DockerImageCache => "docker_image_cache",
+            ResourceKind::DockerImage => "docker_image",
+            ResourceKind::DockerContainer => "docker_container",
+            ResourceKind::DockerVolume => "docker_volume",
             ResourceKind::PipCache => "pip_cache",
             ResourceKind::UvCache => "uv_cache",
             ResourceKind::GoBuildCache => "go_build_cache",
@@ -209,7 +265,9 @@ impl ResourceKind {
         ResourceKind::NodeModules,
         ResourceKind::NodePackageManagerCache,
         ResourceKind::DockerBuildCache,
-        ResourceKind::DockerImageCache,
+        ResourceKind::DockerImage,
+        ResourceKind::DockerContainer,
+        ResourceKind::DockerVolume,
         ResourceKind::PipCache,
         ResourceKind::UvCache,
         ResourceKind::GoBuildCache,
@@ -877,16 +935,18 @@ mod tests {
                 ResourceKind::NodeModules => 4,
                 ResourceKind::NodePackageManagerCache => 5,
                 ResourceKind::DockerBuildCache => 6,
-                ResourceKind::DockerImageCache => 7,
-                ResourceKind::PipCache => 8,
-                ResourceKind::UvCache => 9,
-                ResourceKind::GoBuildCache => 10,
-                ResourceKind::GoModuleCache => 11,
-                ResourceKind::GradleCache => 12,
-                ResourceKind::MavenLocalRepository => 13,
-                ResourceKind::SwiftPackageManagerCache => 14,
-                ResourceKind::SwiftPackageManagerBuildDir => 15,
-                ResourceKind::Unknown => 16,
+                ResourceKind::DockerImage => 7,
+                ResourceKind::DockerContainer => 8,
+                ResourceKind::DockerVolume => 9,
+                ResourceKind::PipCache => 10,
+                ResourceKind::UvCache => 11,
+                ResourceKind::GoBuildCache => 12,
+                ResourceKind::GoModuleCache => 13,
+                ResourceKind::GradleCache => 14,
+                ResourceKind::MavenLocalRepository => 15,
+                ResourceKind::SwiftPackageManagerCache => 16,
+                ResourceKind::SwiftPackageManagerBuildDir => 17,
+                ResourceKind::Unknown => 18,
             };
             assert_eq!(
                 index,
@@ -897,7 +957,7 @@ mod tests {
         }
         assert_eq!(
             ResourceKind::ALL.len(),
-            17,
+            19,
             "ResourceKind::ALL has gained, lost, or duplicated an entry"
         );
     }

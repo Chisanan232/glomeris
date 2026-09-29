@@ -614,7 +614,7 @@ fn autopilot_envelope_report_matches_golden_fixture() {
             "node_modules",
             "node_package_manager_cache",
             "docker_build_cache",
-            "docker_image_cache",
+            "docker_image",
             "pip_cache",
             "uv_cache",
             "go_build_cache",

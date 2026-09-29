@@ -726,9 +726,19 @@ enum GlomerisVocabulary {
         case "docker_build_cache":
             return prose(token, kindAxis, "Docker build cache",
                          "Intermediate build layers Docker keeps to speed up rebuilds.")
-        case "docker_image_cache":
-            return prose(token, kindAxis, "Docker images",
-                         "Pulled and built images held by the Docker daemon.")
+        case "docker_image":
+            return prose(token, kindAxis, "Docker image",
+                         "An image held by the Docker daemon. Usually pulled from a "
+                             + "registry, sometimes built here and held nowhere else. "
+                             + "Glomeris cannot tell which, so it always asks.")
+        case "docker_container":
+            return prose(token, kindAxis, "Docker container",
+                         "A container and its writable layer. Running it produced that "
+                             + "layer; recreating the container does not bring it back.")
+        case "docker_volume":
+            return prose(token, kindAxis, "Docker volume",
+                         "Storage a container writes into — often a local database. "
+                             + "Glomeris never proposes removing one.")
         case "pip_cache":
             return prose(token, kindAxis, "pip cache",
                          "Wheels and downloads pip can fetch again.")

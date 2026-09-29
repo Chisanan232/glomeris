@@ -18,14 +18,20 @@ use super::class::ReasonCode;
 /// evidence-freshness logic, from `classify` — a Protected classification
 /// never depends on evidence freshness/completeness at all.
 pub(super) fn protected_reason(resource: &ResourceId) -> Option<ReasonCode> {
-    // Docker persistent-volume conservatism: detectors do not yet
-    // distinguish a persistent Docker volume from disposable image cache.
-    // Since that ambiguity cannot be resolved from the evidence available
-    // today, every `DockerImageCache` resource is treated as a possible
-    // persistent volume and classified Protected unconditionally. Revisit
-    // once a detector can positively identify build/image cache vs. a
-    // named volume.
-    if resource.kind == ResourceKind::DockerImageCache {
+    // Docker volumes are refused unconditionally, and HORO-1544 narrowed
+    // this from the whole Docker category to the one kind that warrants it.
+    // The previous rule read "every `DockerImageCache` resource is treated
+    // as a possible persistent volume", because a detector could not tell
+    // an image from a volume. It can now: images, containers and volumes
+    // are separate kinds, so the refusal applies to volumes only.
+    //
+    // The refusal itself is NOT narrowed. It deliberately covers anonymous
+    // volumes too, not just named ones. A `docker compose` service whose
+    // volume declaration lost its name still has the developer's database
+    // in it, Docker's own `--volumes` prune flag exists precisely because
+    // Docker does not consider them disposable either, and no evidence
+    // available here distinguishes "anonymous" from "unimportant".
+    if resource.kind == ResourceKind::DockerVolume {
         return Some(ReasonCode::ProtectedPersistentVolume);
     }
 
@@ -129,18 +135,57 @@ mod tests {
         ResourceId::new(kind, ResourceLocator::Path(PathBuf::from(path)))
     }
 
-    #[test]
-    fn docker_image_cache_is_always_protected_persistent_volume() {
-        let resource = ResourceId::new(
-            ResourceKind::DockerImageCache,
+    fn docker_resource(kind: ResourceKind, id: &str) -> ResourceId {
+        ResourceId::new(
+            kind,
             ResourceLocator::Tool {
                 tool: OwningTool::Docker,
-                id: "sha256:abc".to_string(),
+                id: id.to_string(),
             },
+        )
+    }
+
+    /// A named volume holds the only copy of whatever a developer's local
+    /// service wrote into it, so it is refused before any evidence is
+    /// consulted.
+    #[test]
+    fn a_named_docker_volume_is_always_protected_persistent_volume() {
+        let resource = docker_resource(ResourceKind::DockerVolume, "pgdata");
+        assert_eq!(
+            protected_reason(&resource),
+            Some(ReasonCode::ProtectedPersistentVolume)
+        );
+    }
+
+    /// An anonymous volume is refused on exactly the same terms. Docker
+    /// minting the name does not make the contents Docker's, and the only
+    /// thing "anonymous" reliably says is that nobody wrote a name down.
+    #[test]
+    fn an_anonymous_docker_volume_is_also_protected_persistent_volume() {
+        let resource = docker_resource(
+            ResourceKind::DockerVolume,
+            "9f2c1b0a7e5d4c3b2a1908f7e6d5c4b3a29180f7e6d5c4b3a29180f7e6d5c4b3",
         );
         assert_eq!(
             protected_reason(&resource),
             Some(ReasonCode::ProtectedPersistentVolume)
+        );
+    }
+
+    /// The narrowing must be real in both directions: an image and a
+    /// container are no longer swept up by the volume refusal, because they
+    /// are now separately classified on their own evidence. If either of
+    /// these started returning `Some(..)` again the split would have bought
+    /// nothing.
+    #[test]
+    fn docker_images_and_containers_are_not_refused_as_volumes() {
+        assert_eq!(
+            protected_reason(&docker_resource(ResourceKind::DockerImage, "sha256:abc")),
+            None
+        );
+        assert_eq!(
+            protected_reason(&docker_resource(ResourceKind::DockerContainer, "abc123")),
+            None
         );
     }
 
