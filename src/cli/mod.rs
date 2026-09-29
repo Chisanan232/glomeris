@@ -49,7 +49,9 @@ use crate::reporting::dto::{
     CleanDryRunItem, CleanDryRunReport, DaemonStatusReport, DetectCandidateReport, DetectReport,
     DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport, HistoryReport,
     LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    ProgressEvent, StatusReport, WorkspaceFamilyReport,
+    ProgressEvent, StatusReport, WorkspaceEvidenceRequestReport, WorkspaceFamilyReport,
+    WorkspaceObservationReport, WorkspacePlanDroppedReport, WorkspacePlanItemReport,
+    WorkspacePlanReport, WorkspaceProfileReport,
 };
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
@@ -998,6 +1000,156 @@ fn build_llm_plan_item_report(
             completeness,
             confidence,
         },
+    })
+}
+
+/// Builds a [`WorkspacePlanReport`] — one version 2 planning round against
+/// `provider`, rendered (HORO-1548).
+///
+/// **ADVISORY ONLY — never executes anything and never authorizes
+/// anything**, exactly as [`build_llm_plan_report`] is. The version 2
+/// contract carries more: a workspace profile, per-item dispositions and
+/// confidences, observations, and requests for further read-only evidence.
+/// None of that is authority. Every row's local finding and policy verdict
+/// come from [`build_llm_plan_item_report`] — the same function version 1
+/// uses, including its [`PolicyClass::Protected`] early return — and the four
+/// model-attributed fields are added beside that finding rather than into it.
+///
+/// `projection` is a parameter rather than built here for two reasons. It is
+/// what `--print-payload` prints, so a preview and a real call must be able to
+/// use one value and cannot then disagree. And building it requires a
+/// [`MachineContext`] and a [`StoreState`] that only the caller knows how to
+/// obtain honestly — see [`build_workspace_projection_now`], and note that
+/// neither [`MachineContext::unmeasured`] nor [`StoreState::NeverCollected`]
+/// is a value this function could invent on a caller's behalf without
+/// claiming measurements nobody took.
+pub fn build_workspace_plan_report(
+    projection: &GraphProjection,
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    provider: &dyn LlmProvider,
+    impact: ImpactContext,
+) -> WorkspacePlanReport {
+    let result = crate::planner::plan_workspace(provider, projection, actions);
+    let plan = result.plan;
+
+    let mut items = Vec::with_capacity(plan.items.len());
+    for validated in plan.items {
+        // A validated item that resolves to no candidate is dropped rather
+        // than reported with an invented row. Unreachable in practice — the
+        // resource came out of the alias table, which was built from these
+        // same candidates — and not worth a panic if the two ever diverge.
+        if let Some(item) = build_llm_plan_item_report(
+            &validated.resource,
+            validated.action_id,
+            validated.priority,
+            validated.model_reason,
+            candidates,
+            actions,
+            impact,
+        ) {
+            items.push(WorkspacePlanItemReport {
+                item,
+                disposition: validated.disposition.tag(),
+                model_confidence: validated.confidence.tag(),
+                uncertainties: validated.uncertainties,
+                evidence_refs: validated.evidence_refs,
+            });
+        }
+    }
+
+    let counters = plan.counters;
+    WorkspacePlanReport {
+        contract_version: crate::planner::PLANNER_CONTRACT_VERSION,
+        contract_declared: result.contract_declared,
+        profile: plan.profile.map(|profile| WorkspaceProfileReport {
+            mode: profile.mode.tag(),
+            confidence: profile.confidence.tag(),
+            evidence_refs: profile.evidence_refs,
+            summary: profile.summary,
+        }),
+        items,
+        observations: plan
+            .observations
+            .into_iter()
+            .map(|observation| WorkspaceObservationReport {
+                kind: observation.kind.tag(),
+                evidence_refs: observation.evidence_refs,
+                detail: observation.detail,
+            })
+            .collect(),
+        evidence_requests: plan
+            .evidence_requests
+            .into_iter()
+            .map(|request| WorkspaceEvidenceRequestReport {
+                probe_id: request.probe_id.tag(),
+                subject_ref: request.subject_ref,
+                reason: request.reason,
+            })
+            .collect(),
+        dropped: WorkspacePlanDroppedReport {
+            unknown_resource: counters.dropped_unknown_resource,
+            unoffered_action: counters.dropped_unoffered_action,
+            unknown_disposition: counters.dropped_unknown_disposition,
+            duplicate_item: counters.dropped_duplicate_item,
+            unknown_observation_kind: counters.dropped_unknown_observation_kind,
+            unknown_probe: counters.dropped_unknown_probe,
+            unknown_probe_subject: counters.dropped_unknown_probe_subject,
+            uncited_evidence_ref: counters.dropped_uncited_evidence_ref,
+            degraded_unknown_confidence: counters.degraded_unknown_confidence,
+            degraded_unknown_workflow_mode: counters.degraded_unknown_workflow_mode,
+            truncated_items: counters.truncated_items,
+            truncated_observations: counters.truncated_observations,
+            truncated_evidence_requests: counters.truncated_evidence_requests,
+            truncated_uncertainties: counters.truncated_uncertainties,
+            truncated_evidence_refs: counters.truncated_evidence_refs,
+        },
+        // `Display`, not `Debug` — see [`build_llm_plan_report`] for why.
+        provider_error: result.provider_error.map(|e| e.to_string()),
+    }
+}
+
+/// Builds an [`LlmPayloadReport`] for the version 2 contract — the exact
+/// request a live `llm-plan --contract-version 2` run would send for
+/// `projection`, without sending it and without needing a provider or a
+/// credential (HORO-1548).
+///
+/// Calls [`crate::planner::build_workspace_request`], the same function
+/// [`crate::planner::plan_workspace`] calls, for the reason
+/// [`build_llm_payload_report`] gives: a preview that could drift from the
+/// real request would be worse than no preview, since verifying what leaves
+/// this machine is its entire purpose.
+///
+/// Reuses [`LlmPayloadReport`] rather than introducing a second payload type.
+/// Its three fields are exactly what there is to show — the two outbound
+/// strings and the local alias table that stays behind — and that split is
+/// the same in both contract versions.
+pub fn build_workspace_payload_report(
+    projection: &GraphProjection,
+) -> Result<LlmPayloadReport, crate::actions::llm::LlmError> {
+    let request = crate::planner::build_workspace_request(projection)?;
+
+    let mut resource_aliases: Vec<LlmPayloadResourceAlias> = projection
+        .aliases
+        .issued()
+        .filter_map(|wire_resource_id| {
+            let resource = projection.aliases.resolve(wire_resource_id)?;
+            Some(LlmPayloadResourceAlias {
+                wire_resource_id: wire_resource_id.to_string(),
+                local_resource_id: resource.to_string(),
+            })
+        })
+        .collect();
+    // Sorted so two runs over the same machine print the same table. The
+    // alias table's own iteration order is not part of its contract, and an
+    // operator diffing a payload preview against yesterday's should see the
+    // request change, not the ordering.
+    resource_aliases.sort_by(|a, b| a.wire_resource_id.cmp(&b.wire_resource_id));
+
+    Ok(LlmPayloadReport {
+        system_prompt: request.system_prompt,
+        user_prompt: request.user_prompt,
+        resource_aliases,
     })
 }
 
@@ -2961,6 +3113,224 @@ mod tests {
         assert!(report.items.is_empty());
         assert_eq!(report.dropped_unknown_resource, 1);
         assert_eq!(report.dropped_unknown_action, 1);
+    }
+
+    /// A real cargo project on disk, so `cargo.clean.target_dir` is genuinely
+    /// on offer for it — `eligible_action_ids` runs the action's own
+    /// `plan_refusal`, so a made-up path offers nothing and a version 2 item
+    /// naming one is refused before it can be rendered.
+    fn v2_auto_safe_candidate(label: &str) -> (PathBuf, Vec<(Evidence, PolicyDecision)>) {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-v2-plan-{label}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target_dir = dir.join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+
+        let mut ev = evidence(
+            target_dir.to_str().unwrap(),
+            ResourceKind::CargoTargetDir,
+            Some(4096),
+        );
+        ev.open_by_process = ProbeOutcome::Observed(Vec::new());
+        ev.process_cwd_match = ProbeOutcome::Observed(Vec::new());
+        ev.git_state = ProbeOutcome::Observed(None);
+        ev.tool_liveness = ProbeOutcome::Observed(false);
+
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+        (dir, vec![(ev, decision)])
+    }
+
+    fn v2_projection(candidates: &[(Evidence, PolicyDecision)]) -> GraphProjection {
+        build_workspace_projection_now(
+            candidates,
+            &ActionRegistry::builtin(),
+            MachineContext::unmeasured(),
+            &StoreState::NeverCollected,
+            SystemTime::UNIX_EPOCH,
+            0,
+        )
+    }
+
+    /// HORO-1548. A version 2 row carries the local finding and the policy
+    /// verdict in the same nested shape version 1 reports, and the four
+    /// model-attributed fields beside it rather than among them.
+    #[test]
+    fn build_workspace_plan_report_separates_the_model_claim_from_the_local_finding() {
+        let (dir, candidates) = v2_auto_safe_candidate("rendered");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "workspace_profile":{"mode":"unknown","confidence":"unknown",
+                                     "evidence_refs":["workflow_history"],
+                                     "summary":"no history collected"},
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"ask_user","confidence":"inferred",
+                          "priority":3,"evidence_refs":["resource_1"],
+                          "uncertainties":["no process probe was attempted"],
+                          "reason":"large and untouched"}],
+                "observations":[{"kind":"missing_evidence","evidence_refs":["machine"],
+                                 "detail":"free space was not measured"}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert_eq!(report.provider_error, None);
+        assert_eq!(report.contract_version, 2);
+        assert!(report.contract_declared);
+        assert_eq!(report.items.len(), 1);
+
+        let row = &report.items[0];
+        // AI INFERENCE.
+        assert_eq!(row.disposition, "ask_user");
+        assert_eq!(row.model_confidence, "inferred");
+        assert_eq!(row.uncertainties, vec!["no process probe was attempted"]);
+        assert_eq!(row.evidence_refs, vec!["resource_1"]);
+        // LOCAL FACT and POLICY VERDICT, in the nested version 1 row.
+        assert_eq!(row.item.policy_label, "AUTO_SAFE");
+        assert_eq!(row.item.requested_action_id, Some("cargo.clean.target_dir"));
+        assert!(row.item.explain.is_some());
+        assert!(row.item.skip_reason.is_none());
+
+        let profile = report.profile.as_ref().expect("a profile was claimed");
+        assert_eq!(profile.mode, "unknown");
+        assert_eq!(report.observations.len(), 1);
+        assert_eq!(report.observations[0].kind, "missing_evidence");
+        assert_eq!(report.dropped, WorkspacePlanDroppedReport::default());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SAFETY-CRITICAL, and stricter in version 2 than in version 1. A
+    /// `PROTECTED` resource is offered no action at all, so a model naming one
+    /// for a real registered action does not produce a row with an empty
+    /// action — it produces no row, and a counter saying an unoffered action
+    /// was asked for.
+    #[test]
+    fn build_workspace_plan_report_never_renders_a_row_for_a_protected_resource() {
+        let mut ev = evidence(
+            "/Users/x/.ssh/id_ed25519",
+            ResourceKind::CargoTargetDir,
+            Some(1024),
+        );
+        ev.resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/Users/x/.ssh/id_ed25519")),
+        );
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        assert_eq!(decision.class, PolicyClass::Protected);
+        let candidates = vec![(ev, decision)];
+        let projection = v2_projection(&candidates);
+
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"contract_version":2,
+                "items":[{"resource_id":"resource_1",
+                          "action_id":"cargo.clean.target_dir",
+                          "disposition":"recommend_now","confidence":"observed",
+                          "reason":"looks stale"}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert!(
+            report.items.is_empty(),
+            "a protected resource reached a version 2 plan row"
+        );
+        assert_eq!(report.dropped.unoffered_action, 1);
+        assert_eq!(report.provider_error, None);
+    }
+
+    /// A version 1 response to a version 2 request is reported as the mismatch
+    /// it is rather than promoted — promoting it would mean inventing the
+    /// disposition and the confidence, which are the two fields that decide
+    /// whether a human is asked before anything happens.
+    #[test]
+    fn build_workspace_plan_report_does_not_promote_a_version_one_response() {
+        let (dir, candidates) = v2_auto_safe_candidate("v1reply");
+        let projection = v2_projection(&candidates);
+        let provider = FakeLlmPlanProvider {
+            response: Ok(r#"{"items":[{"resource_id":"resource_1",
+                "action_id":"cargo.clean.target_dir","priority":1}]}"#
+                .to_string()),
+        };
+
+        let report = build_workspace_plan_report(
+            &projection,
+            &candidates,
+            &ActionRegistry::builtin(),
+            &provider,
+            ImpactContext::default(),
+        );
+
+        assert!(report.items.is_empty());
+        assert!(report.profile.is_none());
+        let error = report.provider_error.expect("the mismatch is reported");
+        assert!(error.contains("version 1"), "got: {error}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// HORO-1548/§5. The two strings that leave carry no absolute path; the
+    /// alias table, which stays local, is where the operator reads what the
+    /// opaque ids stand for.
+    #[test]
+    fn build_workspace_payload_report_keeps_local_paths_out_of_the_outbound_bytes() {
+        let (dir, candidates) = v2_auto_safe_candidate("payload");
+        let projection = v2_projection(&candidates);
+
+        let report = build_workspace_payload_report(&projection).expect("the request builds");
+
+        let local = dir.to_str().expect("a utf-8 temp path");
+        for (field, bytes) in [
+            ("system_prompt", &report.system_prompt),
+            ("user_prompt", &report.user_prompt),
+        ] {
+            assert!(
+                !bytes.contains(local),
+                "{field} carries the local project path"
+            );
+            assert!(
+                !bytes.contains("/Users/") && !bytes.contains("/private/"),
+                "{field} carries an absolute path shape"
+            );
+        }
+        assert!(report.user_prompt.contains("resource_1"));
+
+        assert_eq!(report.resource_aliases.len(), 1);
+        let alias = &report.resource_aliases[0];
+        assert_eq!(alias.wire_resource_id, "resource_1");
+        assert!(
+            alias.local_resource_id.contains(local),
+            "the local alias table must name the real resource"
+        );
+
+        // And the preview is the request: same bytes, both times.
+        let again = build_workspace_payload_report(&projection).expect("the request builds");
+        assert_eq!(report.system_prompt, again.system_prompt);
+        assert_eq!(report.user_prompt, again.user_prompt);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
