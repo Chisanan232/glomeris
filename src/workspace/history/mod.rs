@@ -61,8 +61,12 @@
 //! That is a behaviour change this ticket does not ask for.
 
 pub mod alias;
+pub mod observation;
 
 #[cfg(test)]
 mod fixtures;
 
 pub use alias::LocalAlias;
+pub use observation::{
+    CensusEntry, GitCliWorktreeCensus, RepositoryObservation, WorkspaceObservation, WorktreeCensus,
+};
