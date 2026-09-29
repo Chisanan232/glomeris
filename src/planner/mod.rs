@@ -64,8 +64,9 @@ pub use contract::{
 };
 pub use dto::{
     ActivityView, BranchView, DockerLifecycleView, ExternalFactView, MachineView, ModelGraphView,
-    Reported, RepositoryView, ResourceView, UnplacedResourceView, WorkflowHistoryView,
-    WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
+    PlannerRequestView, Reported, RepositoryView, ResourceView, UnplacedResourceView,
+    WorkflowHistoryView, WorkflowSupportView, WorktreeView, MACHINE_EVIDENCE_REF,
+    WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 pub use project::{AliasTable, GraphProjection};
 pub use response::{
