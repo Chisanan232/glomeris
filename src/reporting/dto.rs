@@ -1132,6 +1132,16 @@ pub struct WorkspacePlanDroppedReport {
     pub unknown_observation_kind: u32,
     pub unknown_probe: u32,
     pub unknown_probe_subject: u32,
+    /// A probe asked about a subject this request did issue, of a kind that
+    /// probe cannot answer for (HORO-1549). Separate from
+    /// `unknown_probe_subject` because the two say different things about the
+    /// provider: one cited something it was never shown, the other asked a
+    /// working-tree question about a repository.
+    pub incompatible_probe_subject: u32,
+    /// A second request naming the same probe and the same subject. Counted
+    /// rather than silently collapsed, so a round budget spent on repetition is
+    /// visible.
+    pub duplicate_evidence_request: u32,
     pub uncited_evidence_ref: u32,
     /// A claim whose confidence word this build does not accept is not
     /// discarded — it is kept and reported as `"unknown"`, which is counted

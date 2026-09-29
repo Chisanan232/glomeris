@@ -1095,6 +1095,8 @@ pub fn build_workspace_plan_report(
             unknown_observation_kind: counters.dropped_unknown_observation_kind,
             unknown_probe: counters.dropped_unknown_probe,
             unknown_probe_subject: counters.dropped_unknown_probe_subject,
+            incompatible_probe_subject: counters.dropped_incompatible_probe_subject,
+            duplicate_evidence_request: counters.dropped_duplicate_evidence_request,
             uncited_evidence_ref: counters.dropped_uncited_evidence_ref,
             degraded_unknown_confidence: counters.degraded_unknown_confidence,
             degraded_unknown_workflow_mode: counters.degraded_unknown_workflow_mode,
@@ -1775,7 +1777,7 @@ fn push_citations(lines: &mut Vec<String>, refs: &[String]) {
 /// something must never be silent about it, which is why this is not gated
 /// behind a verbosity flag.
 fn rendered_dropped(dropped: &WorkspacePlanDroppedReport) -> Option<String> {
-    let counts: [(&str, u32); 15] = [
+    let counts: [(&str, u32); 17] = [
         ("unknown resource", dropped.unknown_resource),
         ("unoffered action", dropped.unoffered_action),
         ("unknown disposition", dropped.unknown_disposition),
@@ -1783,6 +1785,14 @@ fn rendered_dropped(dropped: &WorkspacePlanDroppedReport) -> Option<String> {
         ("unknown observation kind", dropped.unknown_observation_kind),
         ("unknown probe", dropped.unknown_probe),
         ("unknown probe subject", dropped.unknown_probe_subject),
+        (
+            "probe subject of the wrong kind",
+            dropped.incompatible_probe_subject,
+        ),
+        (
+            "repeated evidence request",
+            dropped.duplicate_evidence_request,
+        ),
         ("uncited evidence ref", dropped.uncited_evidence_ref),
         (
             "confidence degraded to unknown",
