@@ -1062,4 +1062,519 @@ mod tests {
             other => panic!("expected an answer for this checkout, got {other:?}"),
         }
     }
+    // ---------------------------------------------------------------
+    // HORO-1545. The integration fixtures AC 8 lists, each built with
+    // real `git` in a throwaway repository — a fake would only restate
+    // whatever this module already believes about how git answers, and
+    // the `git cherry` behaviour that shaped this design was not what
+    // the design originally assumed.
+    // ---------------------------------------------------------------
+
+    /// Git needs an identity and must not try to sign. Passed per
+    /// invocation rather than written into a config file, so nothing here
+    /// depends on — or touches — the machine's own git identity.
+    const AUTHOR: [&str; 6] = [
+        "-c",
+        "user.name=glomeris test",
+        "-c",
+        "user.email=test@invalid",
+        "-c",
+        "commit.gpgsign=false",
+    ];
+
+    fn commit(root: &Path, file: &str, contents: &str, message: &str) {
+        std::fs::write(root.join(file), contents).expect("write file");
+        run(root, &["add", file]);
+        let mut args: Vec<&str> = AUTHOR.to_vec();
+        args.extend(["commit", "-m", message]);
+        run(root, &args);
+    }
+
+    fn git_out(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed in {root:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// Record `branch` as the repository's default, the way a clone would:
+    /// a remote-tracking ref at that branch's current commit, and
+    /// `origin/HEAD` pointing at it. No network, no fetch.
+    fn record_default(root: &Path, branch: &str) {
+        let target = format!("refs/remotes/origin/{branch}");
+        run(root, &["update-ref", &target, branch]);
+        run(root, &["symbolic-ref", "refs/remotes/origin/HEAD", &target]);
+    }
+
+    /// The integration half of the probe's answer, from the real probe.
+    fn integration_of(root: &Path) -> IntegrationEvidence {
+        match GitCliBranchProbe.state_of(root, Duration::from_secs(30)) {
+            ProbeOutcome::Observed(state) => state.integration,
+            other => panic!("expected an answer for {root:?}, got {other:?}"),
+        }
+    }
+
+    /// Work that landed as a merge commit is contained by ancestry, so
+    /// there is nothing for equivalence to be a question about — and
+    /// `NotApplicable` is how that is said. Not `NotEquivalent`, which
+    /// would claim the work is absent from a branch that has it, and not
+    /// `Unknown`, which would claim a probe failed when none was needed.
+    ///
+    /// The two counts are an observed zero here rather than an
+    /// unavailable: ancestry establishes that nothing is absent.
+    #[test]
+    fn work_that_landed_as_a_merge_commit_needs_no_equivalence_question() {
+        let root = scratch_repo("merge-commit");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        commit(&root, "feature.txt", "f", "feature work");
+        run(&root, &["checkout", "-q", "trunk"]);
+        let mut merge: Vec<&str> = AUTHOR.to_vec();
+        merge.extend(["merge", "--no-ff", "-m", "merge feature", "feature"]);
+        run(&root, &merge);
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "feature"]);
+
+        let integration = integration_of(&root);
+
+        assert_eq!(integration.equivalence, PatchEquivalence::NotApplicable);
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 0,
+                equivalent_commits: 0,
+                unclassified_commits: 0,
+            })
+        );
+        assert!(integration.tip_committed_at.is_observed());
+        assert!(integration.comparison_tip_committed_at.is_observed());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `git cherry` says nothing whatsoever about a merge commit, so a
+    /// branch whose only divergence *is* a merge commit gets two zeroes out
+    /// of it. Read as a [`Divergence`] of its own that is "nothing unique
+    /// here" — a sentence about a branch holding a merge the comparison
+    /// branch has never seen. The third count is what stops it being said:
+    /// one commit ahead, none of it classified.
+    ///
+    /// Equivalence must not resolve to `Equivalent` on the strength of
+    /// `unique_commits == 0` either, and does not: the per-commit shortcut
+    /// is reached only when every commit ahead was accounted for. Here the
+    /// tree comparison is asked instead and cannot answer — HEAD's tree
+    /// matches the merge base, so there is no changed path to compare — so
+    /// the result is an explicit unknown. Which is the honest reading:
+    /// neither method has anything to say about this shape.
+    #[test]
+    fn a_merge_only_divergence_is_not_an_absence_of_unique_work() {
+        let root = scratch_repo("merge-only-divergence");
+        // One commit reachable both ways, so that the divergence between
+        // the branches is the two *merges* of it and nothing else.
+        run(&root, &["checkout", "-q", "-b", "side"]);
+        commit(&root, "shared.txt", "s", "shared work");
+        // Distinct merge messages, because two merges of the same commit
+        // into the same parent within one wall-clock second are otherwise
+        // byte-identical commit objects — and then both branches point at
+        // one commit and the fixture stops describing a divergence at all.
+        for (branch, message) in [
+            ("trunk", "take side into trunk"),
+            ("feature", "take side here"),
+        ] {
+            if branch == "feature" {
+                run(&root, &["checkout", "-q", "-b", "feature", "side~1"]);
+            } else {
+                run(&root, &["checkout", "-q", "trunk"]);
+            }
+            let mut merge: Vec<&str> = AUTHOR.to_vec();
+            merge.extend(["merge", "--no-ff", "-m", message, "side"]);
+            run(&root, &merge);
+        }
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "feature"]);
+        // The premise: the two merge commits are distinct, so trunk really
+        // does not contain feature's.
+        assert_ne!(
+            git_out(&root, &["rev-parse", "HEAD"]),
+            git_out(&root, &["rev-parse", "refs/remotes/origin/trunk"]),
+            "both merges resolved to one commit — the fixture is not describing a merge-only divergence",
+        );
+
+        let integration = integration_of(&root);
+
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 0,
+                equivalent_commits: 0,
+                unclassified_commits: 1,
+            })
+        );
+        assert_eq!(
+            integration.equivalence,
+            PatchEquivalence::Unknown(ProbeReason::Failed)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The case the first method cannot see, and the reason the second one
+    /// exists. A squash combines several commits into one, which destroys
+    /// every individual patch id — `git cherry` reports all of them as
+    /// unique even though the content is already on trunk. Verified here:
+    /// the divergence count says two commits are absent, and equivalence
+    /// still says the work landed, by the content method.
+    #[test]
+    fn a_multi_commit_squash_is_found_by_content_not_by_patch_id() {
+        let root = scratch_repo("squash-merge");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        commit(&root, "a.txt", "alpha", "first");
+        commit(&root, "b.txt", "beta", "second");
+        run(&root, &["checkout", "-q", "trunk"]);
+        run(&root, &["merge", "--squash", "feature"]);
+        let mut squash: Vec<&str> = AUTHOR.to_vec();
+        squash.extend(["commit", "-m", "squashed feature"]);
+        run(&root, &squash);
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "feature"]);
+
+        let integration = integration_of(&root);
+
+        // Both commits are absent from trunk by patch id: this is the
+        // finding that killed the original design, asserted so a future
+        // reader does not reintroduce it.
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 2,
+                equivalent_commits: 0,
+                unclassified_commits: 0,
+            })
+        );
+        assert_eq!(
+            integration.equivalence,
+            PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A cherry-picked commit keeps its patch id, so the first method
+    /// finds it and the second is never asked. The count reports it as
+    /// absent-but-equivalent rather than as unique, which is the whole
+    /// point of splitting the two.
+    ///
+    /// Trunk gains a commit of its own *before* the pick, and that is
+    /// load-bearing rather than scene-setting. A commit id is a hash of the
+    /// tree, the parent, the message and both timestamps — so picking a
+    /// commit back onto the very parent it already had, in the same wall
+    /// clock second, reproduces it byte for byte. The two branches then
+    /// share one commit id, nothing is ahead of anything, and the fixture
+    /// silently stops describing a cherry-pick. It failed about half the
+    /// time before trunk moved, depending on which second the two commits
+    /// landed in.
+    #[test]
+    fn a_cherry_picked_commit_is_found_by_patch_id() {
+        let root = scratch_repo("cherry-pick");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        commit(&root, "a.txt", "alpha", "the one commit");
+        let picked = git_out(&root, &["rev-parse", "HEAD"]);
+        run(&root, &["checkout", "-q", "trunk"]);
+        commit(&root, "unrelated.txt", "u", "meanwhile on trunk");
+        let mut pick: Vec<&str> = AUTHOR.to_vec();
+        pick.extend(["cherry-pick", &picked]);
+        run(&root, &pick);
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "feature"]);
+        assert_ne!(
+            git_out(&root, &["rev-parse", "HEAD"]),
+            git_out(&root, &["rev-parse", "refs/remotes/origin/trunk"]),
+            "a pick that reproduced the original commit id is not a pick"
+        );
+
+        let integration = integration_of(&root);
+
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 0,
+                equivalent_commits: 1,
+                unclassified_commits: 0,
+            })
+        );
+        assert_eq!(
+            integration.equivalence,
+            PatchEquivalence::Equivalent(EquivalenceMethod::PerCommitPatchId)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The maintainer rebased the branch onto trunk and landed that, so
+    /// trunk holds an equivalent commit under a different id while the
+    /// local branch still holds the original. A real `git rebase`, not a
+    /// hand-built equivalent.
+    #[test]
+    fn rebased_equivalent_work_is_reported_as_integrated() {
+        let root = scratch_repo("rebased");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        commit(&root, "a.txt", "alpha", "the work");
+        run(&root, &["checkout", "-q", "trunk"]);
+        commit(&root, "unrelated.txt", "u", "meanwhile on trunk");
+        run(&root, &["checkout", "-q", "-b", "integrated", "feature"]);
+        let mut rebase: Vec<&str> = AUTHOR.to_vec();
+        rebase.extend(["rebase", "trunk"]);
+        run(&root, &rebase);
+        record_default(&root, "integrated");
+        run(&root, &["checkout", "-q", "feature"]);
+
+        let integration = integration_of(&root);
+
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 0,
+                equivalent_commits: 1,
+                unclassified_commits: 0,
+            })
+        );
+        assert_eq!(
+            integration.equivalence,
+            PatchEquivalence::Equivalent(EquivalenceMethod::PerCommitPatchId)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The direction the ticket cares about most: a branch that really was
+    /// merged, and then had work written on top of it. "Merged" was true
+    /// once; it is not an answer about what is in this working tree now.
+    ///
+    /// Everything asserted here is a fact that has to survive on its own,
+    /// because a reader who stops at the merge answer will stop at the
+    /// reassuring one: the new commit is counted as unique, equivalence
+    /// says the content is not over there, and the branch tip is newer
+    /// than the tip of the branch it merged into.
+    #[test]
+    fn commits_written_after_a_merge_are_not_covered_by_that_merge() {
+        let root = scratch_repo("post-merge-commits");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        commit(&root, "a.txt", "alpha", "the work that landed");
+        run(&root, &["checkout", "-q", "trunk"]);
+        let mut merge: Vec<&str> = AUTHOR.to_vec();
+        merge.extend(["merge", "--no-ff", "-m", "merge feature", "feature"]);
+        run(&root, &merge);
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "feature"]);
+        commit(&root, "after.txt", "newer", "written after the merge");
+
+        let integration = integration_of(&root);
+
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 1,
+                equivalent_commits: 0,
+                unclassified_commits: 0,
+            })
+        );
+        assert_eq!(integration.equivalence, PatchEquivalence::NotEquivalent);
+
+        let (ProbeOutcome::Observed(tip), ProbeOutcome::Observed(comparison)) = (
+            &integration.tip_committed_at,
+            &integration.comparison_tip_committed_at,
+        ) else {
+            panic!("both tips exist in this fixture: {integration:?}");
+        };
+        assert!(
+            tip >= comparison,
+            "the post-merge commit is the newer of the two"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `origin/HEAD` there is no axis, so nothing about the
+    /// comparison was asked — and `not_attempted` is what every field
+    /// about it says. `failed` would describe a repository that is in
+    /// perfectly good order, and in a feature whose whole subject is
+    /// telling those two apart that is the mistake that matters.
+    ///
+    /// HEAD's own commit time needs no axis and is still observed, which is
+    /// what stops this from being a test that passes because the probe gave
+    /// up early.
+    #[test]
+    fn a_missing_remote_ref_means_not_attempted_not_failed() {
+        let root = scratch_repo("integration-no-origin-head");
+        run(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let integration = integration_of(&root);
+
+        assert!(integration.tip_committed_at.is_observed());
+        assert_eq!(
+            integration.comparison_tip_committed_at,
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+        assert_eq!(
+            integration.equivalence,
+            PatchEquivalence::Unknown(ProbeReason::NotAttempted)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A recorded default branch this machine does not have: the question
+    /// applies, and git cannot answer it. `failed`, not `not_attempted` —
+    /// the reverse of the fixture above, and the pair is what makes either
+    /// assertion mean anything.
+    #[test]
+    fn a_dangling_default_ref_is_a_failure_not_an_unasked_question() {
+        let root = scratch_repo("integration-dangling-head");
+        run(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/gone",
+            ],
+        );
+
+        let integration = integration_of(&root);
+
+        assert_eq!(
+            integration.equivalence,
+            PatchEquivalence::Unknown(ProbeReason::Failed)
+        );
+        assert_eq!(
+            integration.divergence,
+            ProbeOutcome::Unavailable(ProbeReason::Failed)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The bound in [`Bounds`], exercised by shrinking it rather than by
+    /// building a two-hundred-commit fixture. Past the bound the expensive
+    /// methods are not run, and the output says `not_attempted` — a stated
+    /// refusal, distinct from the `failed` a timeout would have produced.
+    ///
+    /// Deleting the bound check makes this fail with `Equivalent`, which is
+    /// the mutation it is here to catch.
+    #[test]
+    fn more_divergence_than_the_bound_allows_is_not_attempted() {
+        let root = scratch_repo("bounded");
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        commit(&root, "a.txt", "alpha", "first");
+        commit(&root, "b.txt", "beta", "second");
+
+        let axis = "refs/remotes/origin/trunk";
+        let timeout = Duration::from_secs(30);
+        let bounded = Bounds {
+            max_divergent_commits: 1,
+            ..Bounds::DEFAULT
+        };
+
+        let (divergence, equivalence) = divergence_and_equivalence(&root, axis, bounded, timeout);
+        assert_eq!(
+            divergence,
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+        assert_eq!(
+            equivalence,
+            PatchEquivalence::Unknown(ProbeReason::NotAttempted)
+        );
+
+        // Same repository, room to work: the bound is what refused above,
+        // not something else about the fixture.
+        let (divergence, equivalence) =
+            divergence_and_equivalence(&root, axis, Bounds::DEFAULT, timeout);
+        assert_eq!(
+            divergence,
+            ProbeOutcome::Observed(Divergence {
+                unique_commits: 2,
+                equivalent_commits: 0,
+                unclassified_commits: 0,
+            })
+        );
+        assert_eq!(equivalence, PatchEquivalence::NotEquivalent);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The trap inside the content method: with no changed paths, `git diff
+    /// --quiet A B --` compares the two trees entire and would answer
+    /// "identical" about a comparison nobody asked for. An empty-commit
+    /// branch is exactly that shape, and the answer must be that there is
+    /// no answer.
+    #[test]
+    fn a_branch_that_changed_no_files_is_not_declared_equivalent() {
+        let root = scratch_repo("empty-commit");
+        record_default(&root, "trunk");
+        run(&root, &["checkout", "-q", "-b", "feature"]);
+        let mut empty: Vec<&str> = AUTHOR.to_vec();
+        empty.extend(["commit", "--allow-empty", "-m", "changes nothing"]);
+        run(&root, &empty);
+
+        let integration = integration_of(&root);
+
+        assert_ne!(
+            integration.equivalence,
+            PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical),
+            "an unasked comparison is not an identical one: {integration:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every token distinct and non-empty, on the same grounds as the two
+    /// vocabularies above: these reach the app, and two states sharing a
+    /// token would be two different answers rendered as one.
+    #[test]
+    fn every_integration_state_has_a_distinct_tag() {
+        let equivalence = [
+            PatchEquivalence::Equivalent(EquivalenceMethod::PerCommitPatchId).tag(),
+            PatchEquivalence::NotEquivalent.tag(),
+            PatchEquivalence::NotApplicable.tag(),
+            PatchEquivalence::Unknown(ProbeReason::Failed).tag(),
+        ];
+        for tag in &equivalence {
+            assert!(!tag.is_empty());
+        }
+        assert_eq!(
+            equivalence
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4
+        );
+
+        // The method is reported only for the state that has one, and the
+        // reason only for the state that has one. A caller reading either
+        // off the wrong state would be reading an invention.
+        assert_eq!(
+            PatchEquivalence::Equivalent(EquivalenceMethod::ContentIdentical).method(),
+            Some(EquivalenceMethod::ContentIdentical)
+        );
+        assert_eq!(PatchEquivalence::NotApplicable.method(), None);
+        assert_eq!(PatchEquivalence::NotEquivalent.reason(), None);
+        assert_eq!(PatchEquivalence::NotApplicable.reason(), None);
+        assert_eq!(
+            PatchEquivalence::Unknown(ProbeReason::TimedOut).reason(),
+            Some(ProbeReason::TimedOut)
+        );
+
+        let methods = [
+            EquivalenceMethod::PerCommitPatchId.tag(),
+            EquivalenceMethod::ContentIdentical.tag(),
+        ];
+        assert_ne!(methods[0], methods[1]);
+    }
+
+    /// `+` is a commit with no twin upstream and `-` is a commit with one.
+    /// Getting these backwards would report every cherry-picked branch as
+    /// holding unique work and every genuinely unique branch as landed —
+    /// the second being the direction that does harm.
+    #[test]
+    fn cherry_plus_is_unique_and_minus_is_equivalent() {
+        assert_eq!(parse_cherry(b"+ 1111111\n- 2222222\n- 3333333\n"), (1, 2));
+        assert_eq!(parse_cherry(b""), (0, 0));
+    }
 }
