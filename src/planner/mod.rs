@@ -57,6 +57,7 @@
 pub mod contract;
 pub mod dto;
 pub mod plan;
+pub mod probe;
 pub mod project;
 pub mod prompt;
 pub mod response;
@@ -73,6 +74,7 @@ pub use dto::{
     WorktreeView, MACHINE_EVIDENCE_REF, WORKFLOW_HISTORY_EVIDENCE_REF,
 };
 pub use plan::{build_workspace_request, plan_workspace, WorkspacePlanResult, WorkspaceRequest};
+pub use probe::{LocalProbeRunner, ProbeRunner};
 pub use project::{AliasTable, GraphProjection, ProbeSubject, SubjectTable};
 pub use prompt::system_prompt;
 pub use response::{
