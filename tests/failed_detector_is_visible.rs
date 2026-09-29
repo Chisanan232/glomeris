@@ -15,10 +15,11 @@
 //! produced by a real detector taking its real failure path: a `brew` shim
 //! first on `PATH` that exits non-zero, which
 //! `detectors::homebrew::HomebrewDetector` reports as
-//! `DetectorStatus::Failed`. Nothing here can reach real Homebrew or Docker
-//! state — both tools are shimmed for the child process, `$HOME` is an empty
-//! temporary directory, the only `--project-root` is a temp fixture, and
-//! `detect` is read-only in any case.
+//! `DetectorStatus::Failed`. Nothing here can reach real Homebrew, Docker,
+//! Cargo or Gradle state — both tools are shimmed for the child process,
+//! `$HOME` and the tool-home variables are pointed inside an empty temporary
+//! directory (see `Fixture::command`), the only `--project-root` is a temp
+//! fixture, and `detect` is read-only in any case.
 //!
 //! The `free` and `emergency` halves of this ticket are asserted in-crate
 //! (`executor::recovery_loop::run_tests` and `emergency::tests`) rather than
@@ -126,16 +127,34 @@ impl Fixture {
         }
     }
 
+    /// A child command with every host back-channel the detectors read
+    /// pointed inside this fixture.
+    ///
+    /// `HOME` and `PATH` are the obvious two. The tool-home variables
+    /// (HORO-1543) are the ones that bite silently: `cargo test` exports
+    /// `CARGO_HOME` into everything it spawns, so a child that inherited it
+    /// measured the developer's real `~/.cargo/registry` — hundreds of
+    /// megabytes of live machine state — while `$HOME` was this empty
+    /// temporary directory. Pointing them at `self.home` (where nothing has
+    /// been created) makes those detectors report `tool_absent`, which is
+    /// what this fixture's claim of host isolation requires.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(glomeris_bin());
+        cmd.env("HOME", &self.home)
+            .env("PATH", format!("{}:/usr/bin:/bin", self.shim_dir.display()))
+            .env("CARGO_HOME", self.home.join(".cargo"))
+            .env("GRADLE_USER_HOME", self.home.join(".gradle"))
+            .stdin(Stdio::null());
+        cmd
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         let mut full: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
         full.push("--project-root".to_string());
         full.push(self.project_root.to_string_lossy().into_owned());
 
-        Command::new(glomeris_bin())
+        self.command()
             .args(&full)
-            .env("HOME", &self.home)
-            .env("PATH", format!("{}:/usr/bin:/bin", self.shim_dir.display()))
-            .stdin(Stdio::null())
             .output()
             .expect("failed to spawn glomeris binary")
     }
@@ -378,14 +397,12 @@ fn detect_human_mode_does_not_call_a_partial_search_a_clean_bill_of_health() {
 
     // Deliberately bypasses `Fixture::run`, which always appends
     // `--project-root`: this case needs the empty-candidate-list branch.
-    let output = Command::new(glomeris_bin())
+    // `Fixture::command` is still used, so the child stays isolated from
+    // host caches — without that this case finds the developer's own
+    // registry and is no longer the empty-list branch at all.
+    let output = fixture
+        .command()
         .arg("detect")
-        .env("HOME", &fixture.home)
-        .env(
-            "PATH",
-            format!("{}:/usr/bin:/bin", fixture.shim_dir.display()),
-        )
-        .stdin(Stdio::null())
         .output()
         .expect("failed to spawn glomeris binary");
     assert!(output.status.success(), "glomeris detect should succeed");
