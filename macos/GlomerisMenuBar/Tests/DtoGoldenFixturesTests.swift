@@ -121,31 +121,49 @@ final class DtoGoldenFixturesTests: XCTestCase {
     }
 
     /// HORO-1484: per-detector health crosses the language boundary, and the
-    /// two zero-candidate detectors in the fixture are deliberately one
-    /// `tool_absent` and one `failed` — a mirror that collapses them (the
-    /// defect this ticket fixes, which lived on the Rust side) still decodes
-    /// both without throwing, so the assertion has to be on the distinction
-    /// rather than on decoding succeeding.
+    /// three zero-candidate detectors in the fixture are deliberately one
+    /// `tool_absent`, one `tool_not_running` (HORO-1544) and one `failed` — a
+    /// mirror that collapses them (the defect this ticket fixes, which lived
+    /// on the Rust side) still decodes all three without throwing, so the
+    /// assertion has to be on the distinction rather than on decoding
+    /// succeeding.
     func testDecodesPerDetectorHealthAndSeparatesAFailureFromAnAbsentTool() throws {
         let dto = try decodeFixture("detect_report.json", as: DetectReportDto.self)
 
-        XCTAssertEqual(dto.detectors.count, 4)
+        XCTAssertEqual(dto.detectors.count, 5)
         XCTAssertEqual(
             dto.detectors.map(\.detector),
-            ["cargo_target_dir", "docker_build_cache", "node_modules", "project_roots"],
+            [
+                "cargo_target_dir", "docker_build_cache", "node_modules", "docker_objects",
+                "project_roots",
+            ],
             "order is the registry's and is the only stable identity a row has"
         )
 
         let absent = try XCTUnwrap(dto.detectors.first { $0.detector == "node_modules" })
+        let stopped = try XCTUnwrap(dto.detectors.first { $0.detector == "docker_objects" })
         let failed = try XCTUnwrap(dto.detectors.first { $0.detector == "project_roots" })
 
         // Identical counts. Everything below has to come from `status`.
         XCTAssertEqual(absent.candidatesFound, 0)
+        XCTAssertEqual(stopped.candidatesFound, 0)
         XCTAssertEqual(failed.candidatesFound, 0)
 
         XCTAssertEqual(absent.status, "tool_absent")
         XCTAssertFalse(absent.didFail)
         XCTAssertNil(absent.reason, "an absent tool has nothing to explain")
+
+        // HORO-1544's fourth status, and the hardest of the four to keep
+        // separate: it carries no reason either, so `status` is the only thing
+        // telling it from the row above. A mirror that collapsed the two would
+        // report Docker as not installed while its images sit on the disk.
+        XCTAssertEqual(stopped.status, "tool_not_running")
+        XCTAssertFalse(stopped.didFail, "a stopped daemon is not a probe failure")
+        XCTAssertNil(stopped.reason, "a tool that is not running has no failure reason")
+        XCTAssertNotEqual(
+            stopped.status, absent.status,
+            "installed-but-not-answering is not the same answer as not installed"
+        )
 
         XCTAssertEqual(failed.status, "failed")
         XCTAssertTrue(failed.didFail)
