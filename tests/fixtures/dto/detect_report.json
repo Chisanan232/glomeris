@@ -44,13 +44,18 @@
       "candidates_found": 1
     },
     {
-      "detector": "node_modules",
+      "detector": "homebrew_cache",
       "status": "tool_absent",
       "candidates_found": 0
     },
     {
       "detector": "docker_objects",
       "status": "tool_not_running",
+      "candidates_found": 0
+    },
+    {
+      "detector": "node_modules",
+      "status": "not_configured",
       "candidates_found": 0
     },
     {

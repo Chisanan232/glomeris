@@ -231,8 +231,8 @@ fn detect_report_matches_golden_fixture() {
                 ),
             },
         ],
-        // All four outcomes in one fixture (HORO-1484, extended by
-        // HORO-1544), because the shape that matters is the one a consumer
+        // All five outcomes in one fixture (HORO-1484, extended by HORO-1544
+        // and HORO-1576), because the shape that matters is the one a consumer
         // has to tell apart: a detector that found nothing and a detector
         // that failed differ only in `status`, and `reason` is the field that
         // says why. Pinning them together is what stops `failed` from quietly
@@ -243,6 +243,15 @@ fn detect_report_matches_golden_fixture() {
         // `tool_absent`, so the two are distinguishable by `status` alone.
         // A client collapsing them would tell a developer Docker is not
         // installed while gigabytes of its images sit on the disk unseen.
+        //
+        // `not_configured` is the fifth, and carries no reason either — a
+        // third row that a `reason`-driven client cannot tell from the two
+        // above. It is also the only one of the five that is the *default*
+        // state of a real installation, which is why `node_modules` holds it
+        // here rather than the `tool_absent` it used to: that detector never
+        // asks whether node is installed, so it can no longer produce that
+        // word at all (HORO-1576). `homebrew_cache` carries `tool_absent`
+        // instead, which is a claim it does make and can support.
         detectors: vec![
             DetectorHealthReport {
                 detector: "cargo_target_dir".to_string(),
@@ -257,7 +266,7 @@ fn detect_report_matches_golden_fixture() {
                 reason: None,
             },
             DetectorHealthReport {
-                detector: "node_modules".to_string(),
+                detector: "homebrew_cache".to_string(),
                 status: "tool_absent",
                 candidates_found: 0,
                 reason: None,
@@ -269,14 +278,21 @@ fn detect_report_matches_golden_fixture() {
                 reason: None,
             },
             DetectorHealthReport {
+                detector: "node_modules".to_string(),
+                status: "not_configured",
+                candidates_found: 0,
+                reason: None,
+            },
+            DetectorHealthReport {
                 detector: "project_roots".to_string(),
                 status: "failed",
                 candidates_found: 0,
                 reason: Some("permission denied reading /Users/dev/private".to_string()),
             },
         ],
-        // False because of `project_roots` above: two candidates were
-        // found, and the list they are in is still not the whole picture.
+        // False because of `project_roots` and `node_modules` above: two
+        // candidates were found, one probe broke, one was never pointed at
+        // anything, and the list they are in is still not the whole picture.
         discovery_complete: false,
         // Empty on purpose, and the fixture has no `workspaces` key at all:
         // the field is `skip_serializing_if = "Vec::is_empty"`, so this
