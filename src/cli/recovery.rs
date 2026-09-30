@@ -204,19 +204,40 @@ pub fn build_recovery_preview_report(
                 .to_string(),
         );
     }
+    // Two sentences rather than one, because `discovery_complete` is false for
+    // two different reasons and they have different remedies (HORO-1576). A
+    // single "N detector(s) failed" line would have read "0 detector(s) failed
+    // ()" on a machine whose only gap is an unconfigured project root — a
+    // malfunction reported where there is none, and no hint of what to do.
     if !detect.discovery_complete {
-        let failed: Vec<&str> = detect
-            .detectors
-            .iter()
-            .filter(|d| d.status == "failed")
-            .map(|d| d.detector.as_str())
-            .collect();
-        caveats.push(format!(
-            "Discovery was incomplete: {} detector(s) failed ({}). \
-             The real opportunity may be larger than shown.",
-            failed.len(),
-            failed.join(", ")
-        ));
+        let named = |status: &str| -> Vec<&str> {
+            detect
+                .detectors
+                .iter()
+                .filter(|d| d.status == status)
+                .map(|d| d.detector.as_str())
+                .collect()
+        };
+
+        let failed = named("failed");
+        if !failed.is_empty() {
+            caveats.push(format!(
+                "Discovery was incomplete: {} detector(s) failed ({}). \
+                 The real opportunity may be larger than shown.",
+                failed.len(),
+                failed.join(", ")
+            ));
+        }
+
+        let not_examined = named("not_configured");
+        if !not_examined.is_empty() {
+            caveats.push(format!(
+                "{} detector(s) had nothing configured to look at ({}), so nothing of \
+                 theirs was examined. The real opportunity may be larger than shown.",
+                not_examined.len(),
+                not_examined.join(", ")
+            ));
+        }
     }
     if opportunity.is_lower_bound {
         caveats.push(
@@ -271,15 +292,27 @@ pub fn build_recovery_preview_report(
 /// sentences say what their failure *means*, which is the part no client should
 /// be deciding for itself.
 fn build_run_caveats(report: &RecoveryReport) -> Vec<String> {
-    if report.detector_failures.is_empty() {
+    if report.detector_failures.is_empty() && report.detectors_not_examined.is_empty() {
         return Vec::new();
     }
 
-    let mut caveats = vec![format!(
-        "Discovery was incomplete: {} detector(s) failed, so what they would have \
-         found is unknown and the real opportunity may be larger.",
-        report.detector_failures.len()
-    )];
+    let mut caveats = Vec::new();
+    if !report.detector_failures.is_empty() {
+        caveats.push(format!(
+            "Discovery was incomplete: {} detector(s) failed, so what they would have \
+             found is unknown and the real opportunity may be larger.",
+            report.detector_failures.len()
+        ));
+    }
+    // Its own sentence for the same reason as in the preview above: not a
+    // failure, and the only one of the two a user can act on (HORO-1576).
+    if !report.detectors_not_examined.is_empty() {
+        caveats.push(format!(
+            "{} detector(s) had nothing configured to look at, so nothing of theirs was \
+             examined and the real opportunity may be larger.",
+            report.detectors_not_examined.len()
+        ));
+    }
     if matches!(report.stop_reason, StopReason::SafeExhausted(_)) {
         caveats.push(
             "This run stopped because no safe candidate remained among the detectors \
@@ -355,7 +388,9 @@ pub fn build_recovery_run_report(
         final_free_human: human_bytes(report.final_free_bytes),
         target_met: target_met(&final_usage, target),
         detector_failures: report.detector_failures.clone(),
-        discovery_complete: report.detector_failures.is_empty(),
+        detectors_not_examined: report.detectors_not_examined.clone(),
+        discovery_complete: report.detector_failures.is_empty()
+            && report.detectors_not_examined.is_empty(),
         caveats: build_run_caveats(report),
     }
 }
@@ -789,6 +824,7 @@ mod tests {
             started_free_bytes: 60,
             final_free_bytes: final_free,
             detector_failures: vec![],
+            detectors_not_examined: vec![],
         }
     }
 

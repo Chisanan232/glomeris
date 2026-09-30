@@ -21,6 +21,7 @@
   "detector_failures": [
     "homebrew_cache: brew --cache exited 1"
   ],
+  "detectors_not_examined": [],
   "discovery_complete": false,
   "caveats": [
     "Discovery was incomplete: 1 detector(s) failed, so what they would have found is unknown and the real opportunity may be larger.",

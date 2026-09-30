@@ -116,6 +116,16 @@ final class ScanState: ObservableObject {
     /// it goes.
     @Published var failedDetectors: [DetectorHealthReportDto] = []
 
+    /// Detectors that had nothing to examine during the last scan (HORO-1576).
+    ///
+    /// The other half of "this list is not the whole picture", written in the
+    /// same assignment as `failedDetectors` and kept apart from it on purpose.
+    /// Both mean part of the search produced no knowledge; only the other one
+    /// means something went wrong. On a machine with no project root configured
+    /// this is the non-empty list and that one is empty, which is precisely the
+    /// case a single combined list would have described as three failures.
+    @Published var notConfiguredDetectors: [DetectorHealthReportDto] = []
+
     /// The git worktree families the last scan's candidates belong to
     /// (HORO-1511).
     ///

@@ -271,12 +271,21 @@ final class CandidatesSectionViewTests: XCTestCase {
             detector: id, status: "failed", candidatesFound: 0, reason: reason)
     }
 
+    /// A detector that examined nothing because nothing was configured for it
+    /// to examine (HORO-1576). No reason string, because nothing went wrong —
+    /// the CLI sends none for this status.
+    private func unconfiguredDetector(_ id: String) -> DetectorHealthReportDto {
+        DetectorHealthReportDto(
+            detector: id, status: "not_configured", candidatesFound: 0, reason: nil)
+    }
+
     /// The defect: an empty candidates list plus a failed detector rendered
     /// "Nothing worth reclaiming" under a checkmark — a clean bill of health for
     /// a search that did not finish.
     func testAnEmptyListAfterAFailedDetectorDoesNotClaimNothingIsWorthReclaiming() throws {
         let message = try XCTUnwrap(
-            IncompleteDiscoveryWording.emptyListMessage(for: [failedDetector("homebrew_cache")])
+            IncompleteDiscoveryWording.emptyListMessage(
+                for: [failedDetector("homebrew_cache")], notConfigured: [])
         )
 
         XCTAssertNotEqual(
@@ -305,8 +314,9 @@ final class CandidatesSectionViewTests: XCTestCase {
     /// what lets `stateMessage` fall through to the honest all-clear.
     func testNoIncompleteDiscoveryMessageWhenEveryDetectorAnswered() {
         XCTAssertNil(IncompleteDiscoveryWording.detail(for: []))
-        XCTAssertNil(IncompleteDiscoveryWording.emptyListMessage(for: []))
-        XCTAssertNil(IncompleteDiscoveryWording.advisoryMessage(for: []))
+        XCTAssertNil(IncompleteDiscoveryWording.notConfiguredDetail(for: []))
+        XCTAssertNil(IncompleteDiscoveryWording.emptyListMessage(for: [], notConfigured: []))
+        XCTAssertNil(IncompleteDiscoveryWording.advisoryMessage(for: [], notConfigured: []))
     }
 
     /// The advisory that sits under a non-empty list is a different sentence
@@ -315,8 +325,10 @@ final class CandidatesSectionViewTests: XCTestCase {
     /// the identical detail, so the panel cannot describe one failure two ways.
     func testTheAdvisoryUnderAListAndTheEmptyStateShareOneAccountOfTheFailure() throws {
         let failures = [failedDetector("homebrew_cache"), failedDetector("docker_images")]
-        let advisory = try XCTUnwrap(IncompleteDiscoveryWording.advisoryMessage(for: failures))
-        let emptyState = try XCTUnwrap(IncompleteDiscoveryWording.emptyListMessage(for: failures))
+        let advisory = try XCTUnwrap(
+            IncompleteDiscoveryWording.advisoryMessage(for: failures, notConfigured: []))
+        let emptyState = try XCTUnwrap(
+            IncompleteDiscoveryWording.emptyListMessage(for: failures, notConfigured: []))
 
         XCTAssertNotEqual(advisory.title, emptyState.title)
         XCTAssertEqual(advisory.detail, emptyState.detail)
@@ -336,6 +348,132 @@ final class CandidatesSectionViewTests: XCTestCase {
         )
         XCTAssertTrue(detail.contains("xcode_derived_data"), detail)
         XCTAssertFalse(detail.contains("()"), "an absent reason must not leave empty brackets: \(detail)")
+    }
+
+    // MARK: - Nothing configured to examine (HORO-1576)
+
+    /// The defect, in the state a brand-new installation is actually in: three
+    /// project-scoped detectors had no configured root, found nothing because
+    /// they opened nothing, and the panel rendered "Nothing worth reclaiming"
+    /// under a checkmark. The all-clear is a claim about directories nobody
+    /// looked in.
+    func testAnEmptyListWithNothingConfiguredDoesNotClaimNothingIsWorthReclaiming() throws {
+        let message = try XCTUnwrap(
+            IncompleteDiscoveryWording.emptyListMessage(
+                for: [],
+                notConfigured: [
+                    unconfiguredDetector("cargo_target_dir"),
+                    unconfiguredDetector("node_modules"),
+                    unconfiguredDetector("swiftpm_build_dir"),
+                ]
+            )
+        )
+
+        XCTAssertNotEqual(
+            message.title, "Nothing worth reclaiming",
+            "nothing was examined, so there is no basis for a claim about the machine"
+        )
+        XCTAssertNotEqual(
+            message.symbolName, "checkmark.circle",
+            "the all-clear glyph is exactly what an unexamined search must not show"
+        )
+        XCTAssertEqual(message.kind, .empty)
+        XCTAssertEqual(message.tone, .neutral)
+
+        let detail = try XCTUnwrap(message.detail)
+        for detector in ["cargo_target_dir", "node_modules", "swiftpm_build_dir"] {
+            XCTAssertTrue(detail.contains(detector), "must name what was not examined: \(detail)")
+        }
+        XCTAssertTrue(
+            detail.contains("Settings › Projects"),
+            "this is the one gap the user can close, so the message must say where: \(detail)"
+        )
+        XCTAssertFalse(
+            detail.contains("did not finish"),
+            "nothing malfunctioned; wording it as a failure sends the user hunting a bug: \(detail)"
+        )
+    }
+
+    /// The distinction, asserted as a distinction rather than as two separate
+    /// facts: an unconfigured check and a failed check must not arrive wearing
+    /// the same glyph or the same sentence, because only one of them is a
+    /// malfunction and only one of them has something the user can do about it.
+    func testAnUnconfiguredCheckIsNotPresentedAsAFailedOne() throws {
+        let unconfigured = try XCTUnwrap(
+            IncompleteDiscoveryWording.emptyListMessage(
+                for: [], notConfigured: [unconfiguredDetector("cargo_target_dir")]))
+        let failed = try XCTUnwrap(
+            IncompleteDiscoveryWording.emptyListMessage(
+                for: [failedDetector("homebrew_cache")], notConfigured: []))
+
+        XCTAssertNotEqual(unconfigured.title, failed.title)
+        XCTAssertNotEqual(unconfigured.symbolName, failed.symbolName)
+        XCTAssertNotEqual(
+            unconfigured.symbolName, "questionmark.circle",
+            "the partial-search glyph belongs to a probe that broke, not to an empty setting"
+        )
+        // Both advisories, too: the one that sits under a real list of rows is
+        // the sentence a user with candidates actually reads.
+        let unconfiguredAdvisory = try XCTUnwrap(
+            IncompleteDiscoveryWording.advisoryMessage(
+                for: [], notConfigured: [unconfiguredDetector("cargo_target_dir")]))
+        let failedAdvisory = try XCTUnwrap(
+            IncompleteDiscoveryWording.advisoryMessage(
+                for: [failedDetector("homebrew_cache")], notConfigured: []))
+        XCTAssertNotEqual(unconfiguredAdvisory.title, failedAdvisory.title)
+    }
+
+    /// Both gaps at once: neither may be dropped, and the failure takes the
+    /// title because a malfunction is the more urgent of the two.
+    ///
+    /// Mutation control for the whole split — a `combinedDetail` that returned
+    /// only the first non-nil sentence would pass every test above and fail
+    /// this one.
+    func testWhenBothGapsApplyBothAreStated() throws {
+        let message = try XCTUnwrap(
+            IncompleteDiscoveryWording.emptyListMessage(
+                for: [failedDetector("homebrew_cache")],
+                notConfigured: [unconfiguredDetector("node_modules")]
+            )
+        )
+
+        let detail = try XCTUnwrap(message.detail)
+        XCTAssertTrue(detail.contains("homebrew_cache"), detail)
+        XCTAssertTrue(detail.contains("node_modules"), detail)
+        XCTAssertTrue(detail.contains("did not finish"), detail)
+        XCTAssertTrue(detail.contains("nowhere to look"), detail)
+        XCTAssertEqual(
+            message.symbolName, "questionmark.circle",
+            "with a real failure in the mix, the more serious glyph wins"
+        )
+    }
+
+    func testTheUnconfiguredCountAgreesWithHowManyDetectorsAreNamed() throws {
+        let one = try XCTUnwrap(
+            IncompleteDiscoveryWording.notConfiguredDetail(for: [unconfiguredDetector("a")]))
+        XCTAssertTrue(one.contains("1 check had nowhere to look"), one)
+
+        let three = try XCTUnwrap(
+            IncompleteDiscoveryWording.notConfiguredDetail(for: [
+                unconfiguredDetector("a"), unconfiguredDetector("b"), unconfiguredDetector("c"),
+            ]))
+        XCTAssertTrue(three.contains("3 checks had nowhere to look"), three)
+        XCTAssertTrue(three.contains("a, b, c"), three)
+    }
+
+    /// The progress line, for the same reason the failed one exists: a detector
+    /// that examined nothing also streams `candidates_found: 0`, so the count
+    /// alone renders "Finished cargo_target_dir (0 found)" — a sentence about a
+    /// search that never happened.
+    func testTheProgressLineForAnUnexaminedDetectorDoesNotReportZeroFound() {
+        let text = ProgressStatusText.text(
+            for: .detectorFinished(
+                detector: "cargo_target_dir", candidatesFound: 0, outcome: "not_configured",
+                reason: nil))
+
+        XCTAssertFalse(text.contains("0 found"), text)
+        XCTAssertFalse(text.contains("did not complete"), "that is the failure wording: \(text)")
+        XCTAssertEqual(text, "Finished cargo_target_dir (nothing to look at)")
     }
 
     func testTheCountAgreesWithHowManyDetectorsAreNamed() throws {

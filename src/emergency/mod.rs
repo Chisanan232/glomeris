@@ -137,6 +137,23 @@ pub struct EmergencyReport {
     /// `ToolAbsent` is deliberately excluded: a tool that is not installed is
     /// normal, expected state, and the detector answered correctly.
     pub detector_failures: Vec<String>,
+    /// Detectors that never examined anything, as bare detector ids, because
+    /// what they examine has not been configured (HORO-1576).
+    ///
+    /// A second list rather than more entries in `detector_failures`, for the
+    /// same reason that field is separate from `errors`: nothing went wrong
+    /// here. A run that reports one of these did not break — it was never
+    /// pointed at the directories this detector reads — and calling that a
+    /// failure on a default installation would report a malfunction to every
+    /// user who has not configured a project root yet.
+    ///
+    /// Read together with `detector_failures` for one question only: whether
+    /// the counts above are a complete account. For that, the two are
+    /// equivalent, and both make them incomplete.
+    ///
+    /// Bounded by the registry's size for the same reason, and truncated for
+    /// the same reason: not at all.
+    pub detectors_not_examined: Vec<String>,
 }
 
 impl EmergencyReport {
@@ -171,6 +188,22 @@ impl std::fmt::Display for EmergencyReport {
             )?;
             for failure in &self.detector_failures {
                 writeln!(f, "    - {failure}")?;
+            }
+        }
+        // A separate line from the one above, and worded as a gap rather than
+        // a fault, because it is one: these detectors were given nothing to
+        // look at (HORO-1576). Folding the two counts into one "discovery
+        // incomplete" line would tell a user on a default installation that
+        // something failed.
+        if !self.detectors_not_examined.is_empty() {
+            writeln!(
+                f,
+                "  not examined: {} detector(s) had nothing configured to look at, so the \
+                 counts above do not cover them",
+                self.detectors_not_examined.len()
+            )?;
+            for detector in &self.detectors_not_examined {
+                writeln!(f, "    - {detector}")?;
             }
         }
         if self.errors.is_empty() {
@@ -379,6 +412,16 @@ pub fn run_emergency(
             // outcome stays visible on the discovery surfaces rather than
             // being folded into `ToolAbsent`.
             DetectorStatus::ToolNotRunning => {}
+            // Not a failure, and not an answer either: this detector was given
+            // nothing to examine (HORO-1576). It gets its own field for the
+            // same reason a failure does — it is a reason the counts in this
+            // report are not the whole picture — and a *different* field from
+            // a failure because nothing is broken.
+            DetectorStatus::NotConfigured => {
+                report
+                    .detectors_not_examined
+                    .push(detector_id.0.to_string());
+            }
             // A failure goes to its own field, not to the bounded advisory
             // `errors` list: it names which detector did not answer, and it
             // must not be droppable by a run that also had eight unrelated

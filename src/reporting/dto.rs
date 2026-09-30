@@ -1923,7 +1923,16 @@ pub struct RecoveryRunReport {
     pub target_met: bool,
     /// Detectors whose probe failed during the run, `<id>: <reason>`.
     pub detector_failures: Vec<String>,
-    /// `false` when `detector_failures` is non-empty.
+    /// Detectors that examined nothing during the run because what they
+    /// examine is not configured, as bare ids (HORO-1576).
+    ///
+    /// A separate list from `detector_failures` because nothing failed. Both
+    /// make `discovery_complete` false; only this one names something the user
+    /// can change.
+    pub detectors_not_examined: Vec<String>,
+    /// `false` when either `detector_failures` or `detectors_not_examined` is
+    /// non-empty — the run's counts are not the whole picture whether a probe
+    /// broke or was never pointed anywhere.
     pub discovery_complete: bool,
     /// The same caveat sentences the prose output prints, so a client cannot
     /// present a partial search as a complete one.

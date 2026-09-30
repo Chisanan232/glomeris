@@ -5,7 +5,22 @@
 //! not a detector's). It only checks each root in
 //! [`DiscoveryContext::known_project_roots`] for a `target/` directory —
 //! callers (CLI wiring, future config) are responsible for supplying that
-//! list. With an empty list, this detector reports [`DetectorStatus::ToolAbsent`].
+//! list.
+//!
+//! ## What this detector may conclude, and what it may not (HORO-1576)
+//!
+//! It never looks at cargo. It looks at directories under roots it was
+//! handed, which means `tool_absent` was never a conclusion available to it
+//! on any input: a machine with cargo on `PATH` and 25 GB of `target/` got
+//! told the tool was not installed, purely because nobody had configured a
+//! project root. The three answers it can honestly give are:
+//!
+//! - no roots to examine → [`DetectorStatus::NotConfigured`]. Nothing was
+//!   looked at, and the fix is a setting.
+//! - roots examined, no `target/` under any of them → `Found(vec![])`. The
+//!   search ran and came back empty, which is the same reasoning HORO-1575
+//!   applied to the shared caches.
+//! - a root could not be read → [`DetectorStatus::Failed`].
 //!
 //! `reclaimable_bytes` reuses the same [`estimate_logical_bytes`] estimate
 //! as `logical_bytes` (HORO-992): a `target/` directory is fully owned,
@@ -42,6 +57,13 @@ impl Detector for CargoDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        // Before anything is read: with no roots, the loop below would run
+        // zero times and every answer after it would be about a search that
+        // never happened (HORO-1576).
+        if ctx.known_project_roots.is_empty() {
+            return DetectorStatus::NotConfigured;
+        }
+
         let mut evidence = Vec::new();
         let mut saw_permission_error = false;
 
@@ -81,15 +103,15 @@ impl Detector for CargoDetector {
             }
         }
 
-        if evidence.is_empty() {
-            if saw_permission_error {
-                return DetectorStatus::Failed(
-                    "permission denied probing one or more known project roots".to_string(),
-                );
-            }
-            return DetectorStatus::ToolAbsent;
+        if evidence.is_empty() && saw_permission_error {
+            return DetectorStatus::Failed(
+                "permission denied probing one or more known project roots".to_string(),
+            );
         }
 
+        // Empty is `Found(vec![])`, never `ToolAbsent`: roots were examined and
+        // none held a `target/`. This detector has made no observation about
+        // cargo and is not entitled to a claim about it (HORO-1575/1576).
         DetectorStatus::Found(evidence)
     }
 }
@@ -200,20 +222,42 @@ mod tests {
         dir
     }
 
+    /// With nothing configured, nothing was examined — and that is a
+    /// different answer from either "cargo is missing" or "nothing is there"
+    /// (HORO-1576).
+    ///
+    /// Mutation control: restoring `ToolAbsent` here makes this fail, and it
+    /// is the assertion that was wrong before this ticket. A machine with
+    /// cargo installed and gigabytes of build output got `tool_absent` from
+    /// this exact input.
     #[test]
-    fn no_known_project_roots_is_tool_absent() {
+    fn no_known_project_roots_examined_nothing() {
         let ctx = DiscoveryContext::new("/tmp");
-        assert_eq!(CargoDetector.discover(&ctx), DetectorStatus::ToolAbsent);
+        assert_eq!(CargoDetector.discover(&ctx), DetectorStatus::NotConfigured);
     }
 
+    /// The discriminating pair to the test above, differing in exactly one
+    /// thing — whether a root was configured. A root that holds no `target/`
+    /// is a completed search, so it reports an empty result rather than
+    /// "nothing was examined", and never a claim about cargo.
     #[test]
-    fn project_root_without_target_dir_is_tool_absent() {
+    fn a_configured_root_without_a_target_dir_searched_and_found_nothing() {
         let root = make_temp_dir("cargo-no-target");
         let ctx = DiscoveryContext::new("/tmp").with_known_project_roots(vec![root.clone()]);
 
-        assert_eq!(CargoDetector.discover(&ctx), DetectorStatus::ToolAbsent);
-
+        let status = CargoDetector.discover(&ctx);
         fs::remove_dir_all(&root).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "a missing target/ must not become a zero-byte resource"
+            ),
+            DetectorStatus::NotConfigured => {
+                panic!("a root WAS configured and examined, so this search did happen")
+            }
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
     }
 
     #[test]

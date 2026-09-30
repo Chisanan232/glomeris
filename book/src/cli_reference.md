@@ -207,16 +207,21 @@ followed by one line per candidate: size, depth, path.
 ## `glomeris detect [--project-root <path>]... [--json] [--progress-json]`
 
 Not macOS-gated. Runs every detector in `DetectorRegistry::builtin()` exactly
-once per invocation and prints, per detector: `found (<N> evidence)`,
-`tool_absent`, or `failed: <reason>`. The candidate report printed below those
-lines comes out of that same single pass, so the two halves of the output
-cannot describe different probes of a filesystem that changes between them
-(HORO-1487).
+once per invocation and prints, per detector, one of five lines:
+`found (<N> evidence)`, `tool_absent`, `tool_not_running`,
+`not_configured (nothing to look at)`, or `failed: <reason>`. The candidate
+report printed below those lines comes out of that same single pass, so the
+two halves of the output cannot describe different probes of a filesystem
+that changes between them (HORO-1487).
 
 `--project-root <path>` is optional and repeatable — pass it once per
-project directory you want the cargo/node detectors to check for a
-`target/`/`node_modules/` dir. Without it, those two detectors have no
-project roots to scan and always report `tool_absent`.
+project directory you want the cargo/node/SwiftPM detectors to check for a
+`target/`/`node_modules/`/`.build/` dir. Without it, those three detectors
+have no project roots to scan and report `not_configured` (HORO-1576): they
+never ask whether cargo, node or Swift is installed, so the older
+`tool_absent` they used to print was a claim about your machine that no
+observation supported. `not_configured` is the one of the five states you can
+close yourself, and passing this flag is how.
 
 `--json` prints a `DetectReport` — one candidate line per discovered
 resource, including the already-computed
@@ -291,7 +296,8 @@ glomeris detect --project-root ~/dev/myproject --json
   "detectors": [
     {"detector": "cargo_target_dir", "status": "found", "candidates_found": 1},
     {"detector": "docker_build_cache", "status": "found", "candidates_found": 1},
-    {"detector": "node_modules", "status": "tool_absent", "candidates_found": 0},
+    {"detector": "docker_objects", "status": "tool_not_running", "candidates_found": 0},
+    {"detector": "node_modules", "status": "not_configured", "candidates_found": 0},
     {
       "detector": "homebrew_cache",
       "status": "failed",
@@ -304,19 +310,36 @@ glomeris detect --project-root ~/dev/myproject --json
 ```
 
 `detectors` reports one entry per detector that ran, in registry order, and
-`status` is `found`, `tool_absent` or `failed` — the same three tokens
-`--progress-json` uses below. `reason` is present only on `failed`, and is the
-detector's own account of what went wrong.
+`status` is one of five tokens — `found`, `tool_absent`, `tool_not_running`,
+`not_configured`, `failed` — the same five `--progress-json` uses below.
+`reason` is present only on `failed`, and is the detector's own account of what
+went wrong. The other four carry no reason, so a client must branch on `status`
+rather than on the presence of `reason`.
 
-`discovery_complete` (HORO-1484) is `false` when at least one detector failed,
-and it is derived from `detectors` rather than tracked separately, so the
-summary cannot disagree with the array it summarises. When it is `false`,
-`candidates` is **not** a complete account of what could be reclaimed, and no
-consumer may present it as one — "nothing worth reclaiming" is a claim about
-the machine, and a search that did not finish has not established it. A
-`tool_absent` detector does **not** make discovery incomplete: a tool that is
-not installed has nothing to report, which is a different fact from a tool that
-was asked and could not answer.
+`discovery_complete` (HORO-1484) is `false` when at least one detector either
+failed or was never pointed at anything, and it is derived from `detectors`
+rather than tracked separately, so the summary cannot disagree with the array it
+summarises. When it is `false`, `candidates` is **not** a complete account of
+what could be reclaimed, and no consumer may present it as one — "nothing worth
+reclaiming" is a claim about the machine, and a search that did not finish has
+not established it.
+
+Which of the five make discovery incomplete, and why:
+
+| Status | Incomplete? | What it means |
+|---|---|---|
+| `found` | no | The detector looked and reported what it saw. |
+| `tool_absent` | no | The tool is not installed, so it has nothing to report. |
+| `tool_not_running` | no | The tool is installed but its daemon is not up (HORO-1544) — still an answer about a reachable state, not a gap. |
+| `not_configured` | **yes** | The detector was handed no project root, so nobody looked (HORO-1576). |
+| `failed` | **yes** | The detector was asked and could not answer. |
+
+`not_configured` and `failed` are the two where no observation was made, which
+is why both clear the flag. They are still distinct, and a consumer must keep
+them apart: on a default installation the three project-scoped detectors are
+`not_configured` and nothing has failed, so presenting the two alike reports a
+malfunction on a working machine. `not_configured` is also the only one of the
+five the user can resolve, by naming a project root.
 
 `--progress-json` (HORO-1052) emits one NDJSON-encoded `ProgressEvent` line
 to **stderr** per detector start/finish while discovery runs — a way for a
@@ -335,17 +358,20 @@ glomeris detect --progress-json 2>&1 1>/dev/null
 {"phase":"detector_finished","detector":"cargo_target_dir","candidates_found":1,"outcome":"found"}
 {"phase":"detector_started","detector":"docker_images"}
 {"phase":"detector_finished","detector":"docker_images","candidates_found":0,"outcome":"tool_absent"}
+{"phase":"detector_started","detector":"node_modules"}
+{"phase":"detector_finished","detector":"node_modules","candidates_found":0,"outcome":"not_configured"}
 {"phase":"detector_started","detector":"homebrew_cache"}
 {"phase":"detector_finished","detector":"homebrew_cache","candidates_found":0,"outcome":"failed","reason":"brew --cache exited with status exit status: 1"}
 ```
 
-`outcome` (HORO-1484) is `found`, `tool_absent` or `failed`, and `reason` is
-present only on `failed`. The last two lines above are why it exists: a
-detector whose probe failed reports `candidates_found: 0`, exactly like one
-that looked and found nothing, so a consumer reading only the count shows
-"0 found" for a check that never ran. `docker_images` being absent is normal
-and expected; `homebrew_cache` failing is not, and the two must not be
-presented alike.
+`outcome` (HORO-1484) carries the same five tokens as `status` above, and
+`reason` is present only on `failed`. The last three lines are why it exists:
+every one of them reports `candidates_found: 0`, exactly like a detector that
+looked and found nothing, so a consumer reading only the count shows "0 found"
+for three checks with three different stories. `docker_images` being absent is
+normal and expected; `node_modules` having no configured root is normal too but
+is a gap the user can close; `homebrew_cache` failing is neither. None of the
+three may be presented alike.
 
 `detect`, `explain`, `llm-plan`, and `execute` all share this same
 discovery phase and all support `--progress-json` identically.

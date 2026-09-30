@@ -3,7 +3,10 @@
 //! Same shallow, config-driven shape as [`super::cargo::CargoDetector`]:
 //! checks each [`DiscoveryContext::known_project_roots`] entry for a
 //! `node_modules/` directory rather than discovering project roots on
-//! disk itself.
+//! disk itself. It follows that detector's HORO-1576 rule for the same
+//! reason — it never looks at node, so it cannot report on it: no roots is
+//! [`DetectorStatus::NotConfigured`], roots with no `node_modules/` is an
+//! empty `Found`, and an unreadable root is [`DetectorStatus::Failed`].
 //!
 //! `reclaimable_bytes` reuses the same [`estimate_logical_bytes`] estimate
 //! as `logical_bytes` (HORO-992): `node_modules/` is fully owned,
@@ -40,6 +43,13 @@ impl Detector for NodeDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        // Checked before any read, for the reason given in `cargo.rs`: with no
+        // roots the loop runs zero times, and every answer past it would
+        // describe a search that never happened (HORO-1576).
+        if ctx.known_project_roots.is_empty() {
+            return DetectorStatus::NotConfigured;
+        }
+
         let mut evidence = Vec::new();
         let mut saw_permission_error = false;
 
@@ -78,15 +88,14 @@ impl Detector for NodeDetector {
             }
         }
 
-        if evidence.is_empty() {
-            if saw_permission_error {
-                return DetectorStatus::Failed(
-                    "permission denied probing one or more known project roots".to_string(),
-                );
-            }
-            return DetectorStatus::ToolAbsent;
+        if evidence.is_empty() && saw_permission_error {
+            return DetectorStatus::Failed(
+                "permission denied probing one or more known project roots".to_string(),
+            );
         }
 
+        // Roots were examined and held no `node_modules/`: a completed search
+        // with an empty result, not a claim that node is missing.
         DetectorStatus::Found(evidence)
     }
 }
@@ -267,20 +276,35 @@ mod tests {
         dir
     }
 
+    /// Mutation control, as in `cargo.rs`: restoring `ToolAbsent` here fails,
+    /// and that claim was the defect — this detector never asks whether node
+    /// is installed (HORO-1576).
     #[test]
-    fn no_known_project_roots_is_tool_absent() {
+    fn no_known_project_roots_examined_nothing() {
         let ctx = DiscoveryContext::new("/tmp");
-        assert_eq!(NodeDetector.discover(&ctx), DetectorStatus::ToolAbsent);
+        assert_eq!(NodeDetector.discover(&ctx), DetectorStatus::NotConfigured);
     }
 
+    /// The discriminating pair: one configured root, so the search did happen
+    /// and came back empty.
     #[test]
-    fn project_root_without_node_modules_is_tool_absent() {
+    fn a_configured_root_without_node_modules_searched_and_found_nothing() {
         let root = make_temp_dir("node-no-modules");
         let ctx = DiscoveryContext::new("/tmp").with_known_project_roots(vec![root.clone()]);
 
-        assert_eq!(NodeDetector.discover(&ctx), DetectorStatus::ToolAbsent);
-
+        let status = NodeDetector.discover(&ctx);
         fs::remove_dir_all(&root).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "a missing node_modules must not become a zero-byte resource"
+            ),
+            DetectorStatus::NotConfigured => {
+                panic!("a root WAS configured and examined, so this search did happen")
+            }
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
     }
 
     #[test]

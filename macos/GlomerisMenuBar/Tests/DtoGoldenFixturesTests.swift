@@ -121,32 +121,34 @@ final class DtoGoldenFixturesTests: XCTestCase {
     }
 
     /// HORO-1484: per-detector health crosses the language boundary, and the
-    /// three zero-candidate detectors in the fixture are deliberately one
-    /// `tool_absent`, one `tool_not_running` (HORO-1544) and one `failed` — a
-    /// mirror that collapses them (the defect this ticket fixes, which lived
-    /// on the Rust side) still decodes all three without throwing, so the
-    /// assertion has to be on the distinction rather than on decoding
-    /// succeeding.
+    /// four zero-candidate detectors in the fixture are deliberately one
+    /// `tool_absent`, one `tool_not_running` (HORO-1544), one `not_configured`
+    /// (HORO-1576) and one `failed` — a mirror that collapses them (the defect
+    /// this ticket fixes, which lived on the Rust side) still decodes all four
+    /// without throwing, so the assertion has to be on the distinction rather
+    /// than on decoding succeeding.
     func testDecodesPerDetectorHealthAndSeparatesAFailureFromAnAbsentTool() throws {
         let dto = try decodeFixture("detect_report.json", as: DetectReportDto.self)
 
-        XCTAssertEqual(dto.detectors.count, 5)
+        XCTAssertEqual(dto.detectors.count, 6)
         XCTAssertEqual(
             dto.detectors.map(\.detector),
             [
-                "cargo_target_dir", "docker_build_cache", "node_modules", "docker_objects",
-                "project_roots",
+                "cargo_target_dir", "docker_build_cache", "homebrew_cache", "docker_objects",
+                "node_modules", "project_roots",
             ],
             "order is the registry's and is the only stable identity a row has"
         )
 
-        let absent = try XCTUnwrap(dto.detectors.first { $0.detector == "node_modules" })
+        let absent = try XCTUnwrap(dto.detectors.first { $0.detector == "homebrew_cache" })
         let stopped = try XCTUnwrap(dto.detectors.first { $0.detector == "docker_objects" })
+        let unconfigured = try XCTUnwrap(dto.detectors.first { $0.detector == "node_modules" })
         let failed = try XCTUnwrap(dto.detectors.first { $0.detector == "project_roots" })
 
         // Identical counts. Everything below has to come from `status`.
         XCTAssertEqual(absent.candidatesFound, 0)
         XCTAssertEqual(stopped.candidatesFound, 0)
+        XCTAssertEqual(unconfigured.candidatesFound, 0)
         XCTAssertEqual(failed.candidatesFound, 0)
 
         XCTAssertEqual(absent.status, "tool_absent")
@@ -165,15 +167,57 @@ final class DtoGoldenFixturesTests: XCTestCase {
             "installed-but-not-answering is not the same answer as not installed"
         )
 
+        // HORO-1576's fifth, a third reasonless row, and the only one of the
+        // five that is the ordinary state of a working installation: nothing
+        // was examined because nothing was configured to examine. Read as
+        // either of the two above it would claim node is not installed; read
+        // as the row below it would report a malfunction.
+        XCTAssertEqual(unconfigured.status, "not_configured")
+        XCTAssertTrue(unconfigured.wasNotConfigured)
+        XCTAssertFalse(unconfigured.didFail, "nothing went wrong; nothing was looked at")
+        XCTAssertNil(unconfigured.reason, "a probe that never ran has no failure reason")
+        XCTAssertNotEqual(
+            unconfigured.status, absent.status,
+            "having nowhere to look is not a finding about whether the tool exists"
+        )
+
         XCTAssertEqual(failed.status, "failed")
         XCTAssertTrue(failed.didFail)
+        XCTAssertFalse(failed.wasNotConfigured)
         XCTAssertEqual(failed.reason, "permission denied reading /Users/dev/private")
 
         XCTAssertEqual(dto.failedDetectors.map(\.detector), ["project_roots"])
+        XCTAssertEqual(
+            dto.notConfiguredDetectors.map(\.detector), ["node_modules"],
+            "the two gaps are separate lists, because only one of them is a malfunction"
+        )
         XCTAssertFalse(
             dto.discoveryComplete,
-            "one detector failed, so this report is not a complete account of the disk"
+            "one detector failed and one examined nothing, so this report is not a "
+                + "complete account of the disk"
         )
+    }
+
+    /// `discovery_complete` is `false` for the configuration gap alone, with no
+    /// failure anywhere — the shape a default installation actually produces,
+    /// and the one a client that reads only `failedDetectors` would render as a
+    /// complete, clean scan.
+    func testADetectorThatExaminedNothingAloneMakesDiscoveryIncomplete() throws {
+        let json = """
+        {"candidates":[],"discovery_complete":false,
+        "detectors":[{"detector":"homebrew_cache","status":"found","candidates_found":0},
+        {"detector":"cargo_target_dir","status":"not_configured","candidates_found":0},
+        {"detector":"node_modules","status":"not_configured","candidates_found":0}]}
+        """
+        let dto = try JSONDecoder().decode(DetectReportDto.self, from: Data(json.utf8))
+
+        XCTAssertFalse(dto.discoveryComplete)
+        XCTAssertTrue(
+            dto.failedDetectors.isEmpty,
+            "nothing malfunctioned, and a surface that says otherwise is reporting a phantom bug"
+        )
+        XCTAssertEqual(
+            dto.notConfiguredDetectors.map(\.detector), ["cargo_target_dir", "node_modules"])
     }
 
     /// The anti-vacuity partner to the test above: with every detector
@@ -190,6 +234,7 @@ final class DtoGoldenFixturesTests: XCTestCase {
 
         XCTAssertTrue(dto.discoveryComplete)
         XCTAssertTrue(dto.failedDetectors.isEmpty)
+        XCTAssertTrue(dto.notConfiguredDetectors.isEmpty)
         XCTAssertEqual(dto.detectors.count, 2)
         XCTAssertEqual(dto.detectors[0].candidatesFound, 2)
     }
@@ -215,6 +260,10 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertTrue(dto.detectors.isEmpty)
         XCTAssertTrue(dto.discoveryComplete)
         XCTAssertTrue(dto.failedDetectors.isEmpty)
+        XCTAssertTrue(
+            dto.notConfiguredDetectors.isEmpty,
+            "an older CLI reports no detector health at all, which is not a configuration gap"
+        )
         XCTAssertTrue(
             dto.workspaces.isEmpty,
             "an older CLI reports no families, which is not the same as having none"
@@ -802,6 +851,10 @@ final class DtoGoldenFixturesTests: XCTestCase {
         // The computed property the card uses instead of re-deriving failure
         // from `discoveryComplete`, which cannot name who failed.
         XCTAssertEqual(dto.failedDetectors.map(\.detector), ["homebrew_cache"])
+        XCTAssertTrue(
+            dto.notConfiguredDetectors.isEmpty,
+            "this preview's gap is a failure, and the two lists must not borrow each other"
+        )
     }
 
     /// The already-met goal, which is the state the card must not offer a

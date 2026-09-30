@@ -537,6 +537,12 @@ fn run_detect_command(args: &[String]) {
                 DetectorOutcome::ToolNotRunning => {
                     println!("{:<24} tool_not_running", id.0);
                 }
+                // Worded as the gap it is, not as an absence or a fault: this
+                // detector reads directories that nobody has named yet
+                // (HORO-1576).
+                DetectorOutcome::NotConfigured => {
+                    println!("{:<24} not_configured (nothing to look at)", id.0);
+                }
                 DetectorOutcome::Failed(reason) => {
                     println!("{:<24} failed: {reason}", id.0);
                 }

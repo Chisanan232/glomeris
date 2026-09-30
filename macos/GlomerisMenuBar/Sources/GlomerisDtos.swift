@@ -172,14 +172,17 @@ struct DetectCandidateReportDto: Decodable, Equatable, Identifiable {
 /// detector's outcome from the discovery pass that produced this report.
 ///
 /// `status` is one of `"found"`, `"tool_absent"`, `"tool_not_running"`,
-/// `"failed"`, produced by `cli::DetectorOutcome::tag()`. The four are NOT
-/// interchangeable and the app must not collapse them: `tool_absent` means
-/// the tool that would produce candidates is not installed, which is normal
-/// state and a real answer; `tool_not_running` means it is installed but was
-/// not answering, so its resources are presumably still there and this pass
-/// could not see them (HORO-1544); `failed` means the probe did not answer,
-/// so whatever that detector would have found is unknown. `reason` is
-/// present only for `failed`.
+/// `"not_configured"`, `"failed"`, produced by `cli::DetectorOutcome::tag()`.
+/// The five are NOT interchangeable and the app must not collapse them:
+/// `tool_absent` means the tool that would produce candidates is not
+/// installed, which is normal state and a real answer; `tool_not_running`
+/// means it is installed but was not answering, so its resources are
+/// presumably still there and this pass could not see them (HORO-1544);
+/// `not_configured` means the detector was given nothing to examine, so it
+/// says nothing about the tool or the disk and names the one gap the *user*
+/// can close (HORO-1576); `failed` means the probe did not answer, so
+/// whatever that detector would have found is unknown. `reason` is present
+/// only for `failed`.
 struct DetectorHealthReportDto: Decodable, Equatable, Identifiable {
     let detector: String
     let status: String
@@ -195,9 +198,18 @@ struct DetectorHealthReportDto: Decodable, Equatable, Identifiable {
 
     var id: String { detector }
 
-    /// Did this detector's probe fail? The one branch the UI is allowed to
-    /// make on `status`, kept here so no view re-spells the tag.
+    /// Did this detector's probe fail? One of the two branches the UI is
+    /// allowed to make on `status`, kept here so no view re-spells the tag.
     var didFail: Bool { status == "failed" }
+
+    /// Did this detector examine nothing at all, for want of configuration?
+    ///
+    /// The second allowed branch, and deliberately not folded into
+    /// `didFail` (HORO-1576). Both leave a hole in the pass, but only one of
+    /// them is a malfunction, and on a default installation this is the one
+    /// that happens — a user told "3 checks failed" would be looking for a bug
+    /// instead of for a setting.
+    var wasNotConfigured: Bool { status == "not_configured" }
 }
 
 /// Mirrors `reporting::dto::WorkspaceWorktreeReport` (HORO-1511) — one git
@@ -429,6 +441,20 @@ struct DetectReportDto: Decodable, Equatable {
     /// truth for a question that has one answer.
     var failedDetectors: [DetectorHealthReportDto] {
         detectors.filter(\.didFail)
+    }
+
+    /// Detectors that were given nothing to examine (HORO-1576) — the other
+    /// subset a surface must show rather than rendering the candidate list as
+    /// the whole picture.
+    ///
+    /// Separate from `failedDetectors` and not appended to it, because on a
+    /// default installation this one is non-empty and that one is not: the three
+    /// project-scoped detectors have no configured root until someone names one.
+    /// Folding them together would report a malfunction on a machine where
+    /// nothing has malfunctioned. `discoveryComplete` is `false` when either is
+    /// non-empty, so the flag still summarizes both.
+    var notConfiguredDetectors: [DetectorHealthReportDto] {
+        detectors.filter(\.wasNotConfigured)
     }
 
     /// Discovered resources grouped by the git worktree family they belong
@@ -1078,6 +1104,14 @@ struct RecoveryPreviewReportDto: Decodable, Equatable {
     /// `detectors` is the only way the two cannot drift apart.
     var failedDetectors: [DetectorHealthReportDto] {
         detectors.filter(\.didFail)
+    }
+
+    /// Detectors that were given nothing to examine (HORO-1576). The same split
+    /// as on `DetectReportDto`, and for the same reason: a recovery preview on a
+    /// default installation has three of these and no failures, and reporting
+    /// them as failures would say the product is broken when it is unconfigured.
+    var notConfiguredDetectors: [DetectorHealthReportDto] {
+        detectors.filter(\.wasNotConfigured)
     }
 }
 
