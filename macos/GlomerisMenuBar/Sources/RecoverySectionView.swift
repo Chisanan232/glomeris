@@ -112,7 +112,7 @@ struct RecoveryPreviewSummary: Equatable {
 
     init(_ dto: RecoveryPreviewReportDto) {
         goalText = dto.goal.description
-        currentText = String(format: "%.1f%% used", dto.current.usedPercent)
+        currentText = GlomerisUsedPercent.text(dto.current.usedPercent)
             + " — \(dto.current.freeHuman) free of \(dto.current.totalHuman)"
         pressureTerm = GlomerisVocabulary.pressure(dto.current.pressureState)
         goalIsAlreadyMet = dto.bytesNeeded == 0

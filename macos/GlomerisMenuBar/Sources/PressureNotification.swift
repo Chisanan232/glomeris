@@ -72,11 +72,13 @@ enum PressureNotificationContent {
         "dev.glomeris.pressure.\(key.episodeId).\(key.notificationsRaised)"
     }
 
-    /// e.g. `"Disk is 91.0% used"`. The same `%.1f%% used` rendering the Recovery
-    /// card and the history rows use, so one number does not appear in two
-    /// precisions across the app.
+    /// e.g. `"Disk is 91.0% used"`. `GlomerisUsedPercent` renders the figure,
+    /// as it does for the Recovery card and the history rows, so one number does
+    /// not appear in two precisions across the app — and, since HORO-1506, so a
+    /// banner cannot state a figure that reads as having reached the threshold
+    /// the CLI decided had not been reached.
     static func title(for banner: PressureBanner) -> String {
-        String(format: "Disk is %.1f%% used", banner.currentUsedPercent)
+        "Disk is \(GlomerisUsedPercent.text(banner.currentUsedPercent))"
     }
 
     /// The body, in the order a hurried reader needs it: what is true now, why

@@ -63,9 +63,10 @@ enum PressureAlertPresentation {
         report?.episode != nil || errorMessage != nil
     }
 
-    /// The headline: where the disk is, in the app's own `%.1f%% used` rendering.
+    /// The headline: where the disk is, in the one used-percentage rendering
+    /// this app has (`GlomerisUsedPercent`, HORO-1506).
     static func headline(report: PressureStatusReportDto) -> String {
-        String(format: "%.1f%% used", report.current.usedPercent)
+        GlomerisUsedPercent.text(report.current.usedPercent)
     }
 
     /// The label on the row saying what happens if the disk keeps filling up.
