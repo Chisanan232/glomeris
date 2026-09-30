@@ -19,6 +19,12 @@
 //! by a size/time budget (HORO-1016) — see [`estimate_logical_bytes`]'s
 //! own doc comment for what happens if that budget is hit before the walk
 //! finishes (a truthful lower bound, never a precision guarantee).
+//!
+//! The path is inferred from `$HOME`, so a missing `DerivedData` is judged by
+//! `~/Library/Developer/Xcode` above it via
+//! [`absence_under_tool_owned_parent`]: a present support directory means
+//! Xcode has run here and has no build output yet, which is not a reason to
+//! report Xcode as absent (HORO-1575).
 
 use std::path::PathBuf;
 
@@ -27,13 +33,20 @@ use crate::evidence::{
 };
 
 use super::{
-    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
-    DetectorId, DetectorStatus, DiscoveryContext,
+    absence_under_tool_owned_parent, discovery_evidence, estimate_logical_bytes, probe_mtime,
+    size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext,
 };
 
 pub struct XcodeDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::XcodeDerivedData];
+
+/// Xcode's own support directory, relative to `$HOME`. Only Xcode creates
+/// it, which is what makes its presence evidence about Xcode (HORO-1575).
+const XCODE_SUPPORT_RELATIVE_PATH: &str = "Library/Developer/Xcode";
+
+/// The one subdirectory of that support directory this detector names.
+const DERIVED_DATA_SUBDIR: &str = "DerivedData";
 
 impl Detector for XcodeDetector {
     fn id(&self) -> DetectorId {
@@ -45,14 +58,17 @@ impl Detector for XcodeDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
-        let derived_data = ctx.home_dir.join("Library/Developer/Xcode/DerivedData");
+        let xcode_support = ctx.home_dir.join(XCODE_SUPPORT_RELATIVE_PATH);
+        let derived_data = xcode_support.join(DERIVED_DATA_SUBDIR);
 
         let canonical: PathBuf = match derived_data.canonicalize() {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Xcode never used / no DerivedData yet — expected, not an
-                // error.
-                return DetectorStatus::ToolAbsent;
+                // No DerivedData. Whether that means Xcode is absent depends
+                // on `~/Library/Developer/Xcode` above it, which only Xcode
+                // creates: present means Xcode has run here and has no build
+                // output yet (HORO-1575).
+                return absence_under_tool_owned_parent(&xcode_support);
             }
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 return DetectorStatus::Failed(format!(
@@ -122,6 +138,8 @@ mod tests {
         dir
     }
 
+    /// No `~/Library/Developer/Xcode` at all: nothing has observed Xcode, so
+    /// `tool_absent` is the honest answer.
     #[test]
     fn missing_derived_data_dir_is_tool_absent() {
         let home = make_temp_dir("xcode-absent");
@@ -131,6 +149,34 @@ mod tests {
         assert_eq!(status, DetectorStatus::ToolAbsent);
 
         fs::remove_dir_all(&home).ok();
+    }
+
+    /// The discriminating pair to the test above: same missing
+    /// `DerivedData`, but `~/Library/Developer/Xcode` is there. That is the
+    /// state a developer is in immediately after "Clean Build Folder", and
+    /// reporting Xcode as not installed there is false (HORO-1575).
+    ///
+    /// The fixtures differ in exactly one thing — whether the support
+    /// directory exists.
+    #[test]
+    fn a_present_xcode_support_dir_with_no_derived_data_is_not_a_missing_xcode() {
+        let home = make_temp_dir("xcode-cleaned");
+        fs::create_dir_all(home.join("Library/Developer/Xcode/UserData")).unwrap();
+
+        let status = XcodeDetector.discover(&DiscoveryContext::new(&home));
+        fs::remove_dir_all(&home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "a cleaned build folder must not become a zero-byte resource"
+            ),
+            DetectorStatus::ToolAbsent => panic!(
+                "`~/Library/Developer/Xcode` exists, so Xcode has run here; \
+                 tool_absent is false"
+            ),
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
     }
 
     #[test]

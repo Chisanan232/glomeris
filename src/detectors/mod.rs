@@ -792,21 +792,62 @@ pub(crate) fn cache_dir_evidence(
 /// What a missing cache root means, which depends entirely on how the
 /// detector learned the path.
 ///
-/// The two are separate because `tool_absent` is documented, all the way
-/// out to `GlomerisDtos.swift`'s `DetectorHealthReportDto`, as "the tool
-/// that would produce candidates is not installed" — a claim that is
-/// evidence-backed in one case and knowably false in the other.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// The variants are separate because `tool_absent` is documented, all the
+/// way out to `GlomerisDtos.swift`'s `DetectorHealthReportDto`, as "the tool
+/// that would produce candidates is not installed". That is a claim about
+/// the *tool*, and a probe of one cache directory is only entitled to make
+/// it when something observable actually supports it (HORO-1575).
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RootAbsence {
     /// The path came from running the tool, so the tool is installed: it
     /// answered. A missing directory then means only that the tool has not
     /// written its cache yet — `Found(vec![])`, never `ToolAbsent`.
     ToolAnsweredWithAPathItHasNotWritten,
-    /// The path was inferred from `$HOME` or an environment variable and no
-    /// tool was ever run, so the directory's absence is the only evidence
-    /// available about the tool at all. This is the existing
-    /// `xcode`/`cargo`/`node` convention and maps to `ToolAbsent`.
-    NothingObservedAboutTheTool,
+    /// The path was inferred, and the given parent is a directory that only
+    /// this tool creates — a Gradle user home, a Cargo home, `~/.m2`,
+    /// `~/Library/Developer/Xcode`. Nothing here ran the tool, so the
+    /// parent's own presence is the only evidence available about it, and it
+    /// is real evidence: the tool has been here at least once.
+    ///
+    /// Judged by [`absence_under_tool_owned_parent`]: a present parent means
+    /// the tool exists but has not written *this* subdirectory, an absent one
+    /// is the `ToolAbsent` claim's only honest basis, and a parent that
+    /// cannot be read is `Failed` rather than either.
+    InferredUnderToolOwnedParent(PathBuf),
+    /// The path was inferred and sits under a directory shared with
+    /// unrelated software — `~/Library/Caches` holds entries for most of the
+    /// software on a Mac. Neither the root's absence nor its parent's
+    /// presence says anything at all about this tool, so the honest answer is
+    /// that nothing was found here: `Found(vec![])`, never `ToolAbsent`.
+    InferredUnderSharedParent,
+}
+
+/// Decides what a missing inferred cache root means from the one thing that
+/// can still be observed about its tool: whether the tool's own home
+/// directory is there (HORO-1575).
+///
+/// Kept separate from [`cache_root_status`] so the detector that builds its
+/// evidence by hand — `xcode_derived_data` — applies the identical rule
+/// instead of re-deriving it.
+///
+/// The `Err` arm matters as much as the other two. A parent that exists but
+/// cannot be read (a sandbox denial on `~/Library/Developer`, say) is not
+/// permission to claim either that the tool is missing or that it found
+/// nothing: it is `Failed`, which the CLI and the GUI both surface as "this
+/// detector did not answer".
+pub(crate) fn absence_under_tool_owned_parent(parent: &Path) -> DetectorStatus {
+    match parent.try_exists() {
+        // The tool's home is there, so the tool has been here; only this
+        // subdirectory has not been written yet.
+        Ok(true) => DetectorStatus::Found(Vec::new()),
+        // Nothing of the tool's exists under this home at all. This is the
+        // one case where `ToolAbsent` is an evidence-backed claim.
+        Ok(false) => DetectorStatus::ToolAbsent,
+        Err(e) => DetectorStatus::Failed(format!(
+            "failed to determine whether {} exists: {e}",
+            parent.to_string_lossy()
+        )),
+    }
 }
 
 /// [`cache_dir_evidence`] for a detector whose whole answer is one cache
@@ -826,8 +867,11 @@ pub(crate) fn cache_root_status(
             DetectorStatus::Found(vec![*evidence])
         }
         CacheDirProbe::Absent => match absence {
-            RootAbsence::ToolAnsweredWithAPathItHasNotWritten => DetectorStatus::Found(Vec::new()),
-            RootAbsence::NothingObservedAboutTheTool => DetectorStatus::ToolAbsent,
+            RootAbsence::ToolAnsweredWithAPathItHasNotWritten
+            | RootAbsence::InferredUnderSharedParent => DetectorStatus::Found(Vec::new()),
+            RootAbsence::InferredUnderToolOwnedParent(parent) => {
+                absence_under_tool_owned_parent(&parent)
+            }
         },
         CacheDirProbe::Failed(msg) => DetectorStatus::Failed(msg),
     }
@@ -969,6 +1013,73 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `ToolAbsent` claim's only honest basis: the tool's own home is
+    /// not there either (HORO-1575).
+    #[test]
+    fn a_missing_tool_home_is_the_one_basis_for_claiming_the_tool_is_absent() {
+        let parent = test_support::make_temp_dir("absence-parent-gone");
+        let gone = parent.join("never-created");
+        assert_eq!(
+            absence_under_tool_owned_parent(&gone),
+            DetectorStatus::ToolAbsent
+        );
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// The defect this rule exists to stop: the tool's home is right there,
+    /// so the tool has been here, and the only thing its missing cache
+    /// subdirectory establishes is that the cache is empty.
+    #[test]
+    fn a_present_tool_home_means_an_empty_cache_not_a_missing_tool() {
+        let parent = test_support::make_temp_dir("absence-parent-present");
+        match absence_under_tool_owned_parent(&parent) {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "a missing cache root must not become a zero-byte resource"
+            ),
+            other => panic!(
+                "a present tool home must not be reported as {other:?}: the tool \
+                 demonstrably ran here"
+            ),
+        }
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    /// A parent that cannot be read is neither answer. `try_exists` is what
+    /// makes this reachable at all — `Path::exists` collapses every error
+    /// into `false`, which would have reported the tool as absent on a
+    /// sandbox denial.
+    #[test]
+    fn an_unreadable_tool_home_is_failed_rather_than_absent_or_empty() {
+        let parent = test_support::make_temp_dir("absence-parent-unreadable");
+        let barrier = parent.join("barrier");
+        std::fs::create_dir(&barrier).unwrap();
+        let target = barrier.join("tool-home");
+        std::fs::create_dir(&target).unwrap();
+        // Remove search permission on the intermediate directory, so
+        // resolving `target` fails with EACCES rather than ENOENT.
+        let mut perms = std::fs::metadata(&barrier).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+        std::fs::set_permissions(&barrier, perms).unwrap();
+
+        let status = absence_under_tool_owned_parent(&target);
+
+        // Restore before asserting, so a failure still leaves a removable
+        // fixture behind.
+        let mut perms = std::fs::metadata(&barrier).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o700);
+        std::fs::set_permissions(&barrier, perms).unwrap();
+        std::fs::remove_dir_all(&parent).ok();
+
+        match status {
+            DetectorStatus::Failed(_) => {}
+            other => panic!(
+                "an unreadable tool home must be Failed, got {other:?}: not knowing \
+                 whether the tool is there is not the same as knowing it is not"
+            ),
+        }
+    }
 
     /// Pins the production wiring by identity and order rather than by a
     /// bare count: a detector silently dropped from `builtin()`, or renamed

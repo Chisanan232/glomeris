@@ -148,6 +148,13 @@ impl Detector for CargoRegistryCacheDetector {
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
         let registry = cargo_registry_dir(ctx.tool_home(ToolHomeVar::CargoHome), &ctx.home_dir);
+        // `registry` is always `<cargo home>/registry`, so the parent is the
+        // Cargo home — a directory only Cargo (or rustup, installing it)
+        // creates.
+        let cargo_home = registry
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| registry.clone());
 
         cache_root_status(
             self.id(),
@@ -161,7 +168,10 @@ impl Detector for CargoRegistryCacheDetector {
             Recoverability::RegenerableByTool,
             "Cargo registry cache under the Cargo home \
              (CARGO_HOME if set, otherwise ~/.cargo)",
-            RootAbsence::NothingObservedAboutTheTool,
+            // A present Cargo home with no `registry` means cargo is
+            // installed and has not fetched a dependency yet — not that cargo
+            // is missing (HORO-1575).
+            RootAbsence::InferredUnderToolOwnedParent(cargo_home),
         )
     }
 }
@@ -355,16 +365,42 @@ mod tests {
         fs::remove_dir_all(&home).ok();
     }
 
-    /// A Cargo home with no `registry` yet reports nothing, never a
-    /// zero-byte resource.
+    /// No Cargo home at all reports nothing, never a zero-byte resource.
     #[test]
-    fn a_missing_registry_is_tool_absent_not_zero_bytes() {
+    fn no_cargo_home_is_tool_absent_not_zero_bytes() {
         let home = make_temp_dir("cargo-home-empty");
         assert_eq!(
             CargoRegistryCacheDetector.discover(&DiscoveryContext::new(&home)),
             DetectorStatus::ToolAbsent
         );
         fs::remove_dir_all(&home).ok();
+    }
+
+    /// The discriminating pair to the test above: same missing `registry`,
+    /// but `~/.cargo` is there. Cargo is installed, so `tool_absent` would be
+    /// false (HORO-1575). The fixtures differ in exactly one thing — whether
+    /// `.cargo` exists.
+    #[test]
+    fn a_cargo_home_with_no_registry_yet_is_not_a_missing_cargo() {
+        let home = make_temp_dir("cargo-home-no-registry");
+        fs::create_dir_all(home.join(".cargo")).unwrap();
+        // `bin/` is what rustup writes when it installs the toolchain, so a
+        // Cargo home in this shape is the normal pre-first-build state.
+        fs::create_dir_all(home.join(".cargo/bin")).unwrap();
+
+        let status = CargoRegistryCacheDetector.discover(&DiscoveryContext::new(&home));
+        fs::remove_dir_all(&home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "an unfetched registry must not become a zero-byte resource"
+            ),
+            DetectorStatus::ToolAbsent => {
+                panic!("`~/.cargo` exists, so cargo is installed; tool_absent is false")
+            }
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
     }
 
     /// The `CargoHome` override has to reach `discover`, not merely

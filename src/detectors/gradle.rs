@@ -12,9 +12,16 @@
 //! command (`gradle --version` starts a JVM and does not print it anyway).
 //! So the location comes from `GRADLE_USER_HOME` when the caller observed it
 //! set, and `~/.gradle` otherwise — the same two rules Gradle itself applies
-//! ([`DiscoveryContext::tool_home`] supplies the override) — and a missing
-//! directory is [`RootAbsence::NothingObservedAboutTheTool`], because
-//! nothing here ever observed whether Gradle is installed.
+//! ([`DiscoveryContext::tool_home`] supplies the override).
+//!
+//! Because the path is inferred, a missing `caches` directory is judged by
+//! the Gradle user home above it
+//! ([`RootAbsence::InferredUnderToolOwnedParent`]). A Gradle user home that
+//! exists means Gradle has run here and simply has no cache yet, which is
+//! `Found(vec![])`; only a missing user home is grounds for claiming Gradle
+//! is not installed. Reporting `tool_absent` for a present user home told
+//! real Gradle users the tool they had just used was not installed
+//! (HORO-1575).
 //!
 //! `caches/` mixes downloaded dependency artifacts (`modules-2`) with local
 //! build-cache output (`build-cache-1`), so its contents come back partly
@@ -70,6 +77,12 @@ impl Detector for GradleCacheDetector {
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
         let caches = gradle_caches_dir(ctx.tool_home(ToolHomeVar::GradleUserHome), &ctx.home_dir);
+        // `caches` is always `<gradle user home>/caches`, so the parent is
+        // the Gradle user home itself — a directory only Gradle creates.
+        let gradle_user_home = caches
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| caches.clone());
 
         cache_root_status(
             self.id(),
@@ -79,7 +92,7 @@ impl Detector for GradleCacheDetector {
             Recoverability::RegenerableByRebuild,
             "Gradle cache directory under the Gradle user home \
              (GRADLE_USER_HOME if set, otherwise ~/.gradle)",
-            RootAbsence::NothingObservedAboutTheTool,
+            RootAbsence::InferredUnderToolOwnedParent(gradle_user_home),
         )
     }
 }
@@ -186,10 +199,11 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    /// A Gradle user home that exists but has no `caches` yet reports
-    /// nothing, never a zero-byte resource.
+    /// No Gradle user home at all: nothing here has observed Gradle, so
+    /// `tool_absent` is the honest answer — and still never a zero-byte
+    /// resource.
     #[test]
-    fn a_missing_cache_directory_is_tool_absent_not_zero_bytes() {
+    fn no_gradle_user_home_is_tool_absent_not_zero_bytes() {
         let home = crate::detectors::test_support::make_temp_dir("gradle-home-empty");
         assert_eq!(
             GradleCacheDetector.discover(&DiscoveryContext::new(&home)),
@@ -197,6 +211,61 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The HORO-1575 defect, as the discriminating pair to the test above:
+    /// the same missing `caches` directory, with `~/.gradle` present. Gradle
+    /// has demonstrably run here, so reporting it as not installed is false.
+    ///
+    /// The two fixtures differ in exactly one thing — whether `.gradle`
+    /// exists — so this cannot pass for any reason other than the
+    /// tool-owned-parent rule.
+    #[test]
+    fn a_gradle_user_home_with_no_caches_yet_is_not_a_missing_gradle() {
+        let home = crate::detectors::test_support::make_temp_dir("gradle-home-no-caches");
+        std::fs::create_dir_all(home.join(".gradle")).unwrap();
+        // Something Gradle itself would have written, and nothing else does.
+        std::fs::write(home.join(".gradle/gradle.properties"), b"# empty\n").unwrap();
+
+        let status = GradleCacheDetector.discover(&DiscoveryContext::new(&home));
+        std::fs::remove_dir_all(&home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "an unwritten cache must not become a zero-byte resource"
+            ),
+            DetectorStatus::ToolAbsent => panic!(
+                "`~/.gradle` exists, so Gradle is installed; reporting tool_absent \
+                 tells the user the tool they just used is missing (HORO-1575)"
+            ),
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
+    }
+
+    /// The `GRADLE_USER_HOME` override has to carry the rule with it: the
+    /// parent whose presence is judged must be the relocated user home, not
+    /// `~/.gradle`. The fixture home deliberately has no `.gradle`, so a
+    /// detector that judged the wrong parent would report `ToolAbsent`.
+    #[test]
+    fn the_rule_follows_a_relocated_gradle_user_home() {
+        let relocated = crate::detectors::test_support::make_temp_dir("gradle-relocated-no-caches");
+        let decoy_home = crate::detectors::test_support::make_temp_dir("gradle-no-dot-gradle");
+
+        let ctx = DiscoveryContext::new(&decoy_home)
+            .with_tool_home(ToolHomeVar::GradleUserHome, relocated.to_str().unwrap());
+        let status = GradleCacheDetector.discover(&ctx);
+
+        std::fs::remove_dir_all(&relocated).ok();
+        std::fs::remove_dir_all(&decoy_home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(evidence.is_empty()),
+            other => panic!(
+                "the relocated user home exists, so the answer must be Found(empty); \
+                 got {other:?}, which means the rule judged ~/.gradle instead"
+            ),
+        }
     }
 
     /// The `GradleUserHome` override has to reach `discover`, not merely

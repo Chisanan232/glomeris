@@ -22,6 +22,11 @@
 //! `Library/Caches`, so a future edit cannot quietly promote one of the
 //! other two into a reclaimable resource.
 //!
+//! That shared parent is also why a missing cache is
+//! [`RootAbsence::InferredUnderSharedParent`] and not a `tool_absent` claim:
+//! `~/Library/Caches` belongs to everything, so its state is no evidence
+//! about SwiftPM (HORO-1575).
+//!
 //! ## Ownership of a `.build` directory
 //!
 //! `.build` is an unremarkable directory name that other tools also use, so
@@ -79,7 +84,14 @@ impl Detector for SwiftPmCacheDetector {
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
             "SwiftPM's shared cache directory (~/Library/Caches/org.swift.swiftpm)",
-            RootAbsence::NothingObservedAboutTheTool,
+            // The parent here is `~/Library/Caches`, which holds entries for
+            // most of the software on a Mac and so says nothing whatever
+            // about SwiftPM. There is therefore no observation on which to
+            // base a `tool_absent` claim, and a missing cache reports that
+            // nothing was found rather than that Swift is not installed —
+            // which on a Mac with the command-line tools it always is
+            // (HORO-1575).
+            RootAbsence::InferredUnderSharedParent,
         )
     }
 }
@@ -225,14 +237,40 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
+    /// SwiftPM's cache sits under `~/Library/Caches`, shared with most of
+    /// the software on the machine, so neither its presence nor its absence
+    /// is evidence about SwiftPM. A missing cache therefore reports that
+    /// nothing was found — not that Swift is absent, which on a Mac with the
+    /// command-line tools it is not (HORO-1575).
+    ///
+    /// Both halves here are the shared-parent rule rather than a pair: with
+    /// `~/Library/Caches` present and with it absent, the answer is the same,
+    /// which is the whole point. A detector that judged the parent would give
+    /// two different answers and fail the second half.
     #[test]
-    fn no_cache_directory_is_tool_absent() {
-        let home = temp_dir("swiftpm-home-empty");
-        assert_eq!(
-            SwiftPmCacheDetector.discover(&DiscoveryContext::new(&home)),
-            DetectorStatus::ToolAbsent
-        );
-        std::fs::remove_dir_all(&home).ok();
+    fn a_missing_cache_reports_nothing_found_rather_than_a_missing_swift() {
+        for (label, create_caches_parent) in [("no-caches-parent", false), ("caches-parent", true)]
+        {
+            let home = temp_dir(&format!("swiftpm-home-{label}"));
+            if create_caches_parent {
+                std::fs::create_dir_all(home.join("Library/Caches")).unwrap();
+            }
+
+            let status = SwiftPmCacheDetector.discover(&DiscoveryContext::new(&home));
+            std::fs::remove_dir_all(&home).ok();
+
+            match status {
+                DetectorStatus::Found(evidence) => assert!(
+                    evidence.is_empty(),
+                    "{label}: a missing cache must not become a zero-byte resource"
+                ),
+                DetectorStatus::ToolAbsent => panic!(
+                    "{label}: `~/Library/Caches` says nothing about SwiftPM, so there is \
+                     no observation on which to claim Swift is not installed"
+                ),
+                other => panic!("{label}: expected Found(empty), got {other:?}"),
+            }
+        }
     }
 
     /// The ownership rule, as a positive control: the same `.build`
