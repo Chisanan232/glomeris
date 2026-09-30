@@ -136,7 +136,7 @@ struct RecoveryLiveProgress: Equatable {
 
         switch event {
         case .measured(let payload):
-            currentUsageText = String(format: "%.1f%% used", payload.usedPercent)
+            currentUsageText = GlomerisUsedPercent.text(payload.usedPercent)
                 + " — \(payload.freeHuman) free"
             reclaimedSoFarText = "\(payload.bytesFreedSoFarHuman) reclaimed so far"
             statusText = "Checked free space"

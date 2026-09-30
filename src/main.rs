@@ -1,4 +1,5 @@
 use glomeris::cli::help;
+use glomeris::reporting::used_percent::used_percent_text;
 use glomeris::{monitor, platform};
 use std::path::PathBuf;
 
@@ -3346,16 +3347,16 @@ fn episode_step(
     // needs these four moments and the numbers behind them.
     if let Some(id) = episode.opened {
         eprintln!(
-            "glomeris monitor: pressure episode #{id} opened at {:.1}% used (your alert \
+            "glomeris monitor: pressure episode #{id} opened at {} (your alert \
              threshold is {})",
-            outcome.used_percent,
+            used_percent_text(outcome.used_percent),
             settings.describe_notify_at()
         );
     }
     if let Some(id) = episode.closed {
         eprintln!(
-            "glomeris monitor: pressure episode #{id} closed at {:.1}% used",
-            outcome.used_percent
+            "glomeris monitor: pressure episode #{id} closed at {}",
+            used_percent_text(outcome.used_percent)
         );
     }
     if episode.notification_became_due {

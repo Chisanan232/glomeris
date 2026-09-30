@@ -1,0 +1,39 @@
+# HORO-1506: the shared used-percentage rendering convention.
+#
+# Rust's `reporting::used_percent` makes this file its output by definition
+# (`golden_fixture_pins_the_shared_convention`); the macOS app's
+# `GlomerisUsedPercent` is held to the same file by `GlomerisUsedPercentTests`.
+# Either implementation drifting fails in the language that drifted.
+#
+# Columns, tab-separated:
+#   <measured>	<figure>	<sentence>
+#
+# The rule: truncate to one decimal place, never round to nearest, so a
+# displayed figure can never read as at-or-past a threshold the decision did
+# not cross. Clamp to 0..=100. A non-finite reading is named, not zeroed.
+#
+0.0	0.0%	0.0% used
+0.04	0.0%	0.0% used
+0.1	0.1%	0.1% used
+1.0	1.0%	1.0% used
+9.99	9.9%	9.9% used
+26.8	26.8%	26.8% used
+42.0	42.0%	42.0% used
+50.05	50.0%	50.0% used
+72.046	72.0%	72.0% used
+74.999	74.9%	74.9% used
+75.0	75.0%	75.0% used
+88.0	88.0%	88.0% used
+89.9	89.9%	89.9% used
+89.96	89.9%	89.9% used
+89.99999	89.9%	89.9% used
+90.0	90.0%	90.0% used
+94.2	94.2%	94.2% used
+99.9	99.9%	99.9% used
+99.99	99.9%	99.9% used
+100.0	100.0%	100.0% used
+-0.5	0.0%	0.0% used
+140.0	100.0%	100.0% used
+nan	usage unavailable	usage unavailable
+inf	usage unavailable	usage unavailable
+-inf	usage unavailable	usage unavailable

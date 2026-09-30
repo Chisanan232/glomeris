@@ -131,6 +131,14 @@ targets:
       # target so the golden fixture can be asserted against the real function
       # rather than against a copy of it in the test file.
       - path: Sources/GlomerisByteFormat.swift
+      # HORO-1506: the port of Rust's `reporting::used_percent`. Compiled into
+      # the test target for the same reason as the byte formatter above — the
+      # golden fixture is only a contract if it is asserted against the real
+      # function — and for one more: the invariant this file exists to provide
+      # (a displayed figure never reads as having reached a threshold the CLI's
+      # comparison did not cross) is a claim over every whole-number threshold
+      # the settings stepper offers, which is a sweep, not a rendering.
+      - path: Sources/GlomerisUsedPercent.swift
       # HORO-1453: the single-instance rule. `decide` takes constructed instances
       # and returns a decision, so the convergence property is asserted against
       # the real function rather than against a restatement of it — and without

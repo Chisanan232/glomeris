@@ -106,7 +106,7 @@ struct HistoryEventRowViewModel: Equatable, Identifiable {
     init(_ dto: HistoryEventReportDto) {
         id = "\(dto.unixTimeSecs)-\(dto.from)-\(dto.to)"
         timeText = Self.formatTimestamp(dto.unixTimeSecs)
-        usedPercentText = String(format: "%.1f%% used", dto.usedPercent)
+        usedPercentText = GlomerisUsedPercent.text(dto.usedPercent)
         freeText = "\(dto.freeHuman) free"
         fromTerm = GlomerisVocabulary.pressure(dto.from)
         toTerm = GlomerisVocabulary.pressure(dto.to)

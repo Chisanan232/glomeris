@@ -25,6 +25,7 @@
 
 use crate::executor::recovery_loop::FreeTarget;
 use crate::monitor::fs_stat::FsUsage;
+use crate::reporting::used_percent::{configured_used_percent_figure, used_percent_text};
 use std::fmt;
 
 /// A recovery goal, always expressed as **target disk usage percentage** —
@@ -73,7 +74,8 @@ impl fmt::Display for GoalRejection {
                 current_used_percent,
             } => write!(
                 f,
-                "recovery goal {goal_used_percent}% used is not an improvement on the current {current_used_percent:.1}% used: choose a goal below current usage"
+                "recovery goal {goal_used_percent}% used is not an improvement on the current {}: choose a goal below current usage",
+                used_percent_text(*current_used_percent)
             ),
         }
     }
@@ -232,20 +234,9 @@ impl RecoveryGoal {
     pub fn describe(&self) -> String {
         format!(
             "{}% used ({}% free)",
-            trim_percent(self.used_percent),
-            trim_percent(self.free_percent())
+            configured_used_percent_figure(self.used_percent),
+            configured_used_percent_figure(self.free_percent())
         )
-    }
-}
-
-/// Render a percentage without a trailing `.0`, so a whole number reads as
-/// `60%` and a fractional one keeps its precision.
-fn trim_percent(value: f64) -> String {
-    if (value - value.round()).abs() < 1e-9 {
-        format!("{}", value.round() as i64)
-    } else {
-        let s = format!("{value:.2}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 

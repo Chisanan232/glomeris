@@ -65,6 +65,64 @@ struct DaemonHealthViewModel: Equatable {
     }
 }
 
+/// Pure view-model for the Disk space card, derived from one
+/// `StatusReportDto` (HORO-1506).
+///
+/// Extracted for the same reason `DaemonHealthViewModel` was: the AC being
+/// protected here is mechanical — the figure on screen, the figure VoiceOver
+/// reads and the bar's own spoken value must all be the same used-percentage on
+/// the same axis — and "the same" is only checkable by asserting on values. The
+/// card used to build all three inline, which is how they came to disagree:
+/// `"\(statusReport.freeHuman) free of \(statusReport.totalHuman)"` carried no
+/// percentage at all, while the bar spoke `Int(fraction * 100)` with no axis
+/// word. Nothing could observe that but a person with a screen reader.
+///
+/// It makes no decision. Every field is a rendering of `usedPercent` or of two
+/// strings the CLI already rendered; it never compares the percentage against a
+/// threshold, which remains the CLI's job (see `PressureEpisodeMonitor`).
+struct DiskCapacityViewModel: Equatable {
+    /// The card's primary figure, e.g. `"94.2% used"`.
+    let figureText: String
+
+    /// What VoiceOver reads for that figure, e.g. `"94.2 percent used"`.
+    let spokenFigure: String
+
+    /// The secondary line, e.g. `"26.8 GB free of 460.4 GB"`. The CLI's own
+    /// byte strings, verbatim — this app does not re-render a size it was given
+    /// a rendering for.
+    let bytesText: String
+
+    /// The bar's fill, `0...1`.
+    ///
+    /// Derived from the raw measurement rather than from the truncated display
+    /// figure: a bar is a continuous encoding and has no tenth to land on, and
+    /// clamping is all the correction it needs.
+    ///
+    /// A non-finite reading gives an empty bar, not a `NaN` one. `min`/`max` do
+    /// not filter `NaN` — both comparisons against it are false, so it passes
+    /// straight through a clamp — and a `NaN` reaching `ProgressView(value:)` is
+    /// not a rendering this app should find out about at the founder's desk.
+    /// Empty is also the honest shape: `figureText` says "usage unavailable"
+    /// beside it, so the bar is not standing in for a measurement.
+    let barFraction: Double
+
+    /// The bar's accessibility value: the same spoken figure, plus the absolute
+    /// context, as one string.
+    ///
+    /// The bar is one accessibility element and a listener can step onto it
+    /// alone, so it carries both — the neighbouring `Text` views are separate
+    /// elements. `SpokenLabel` does the joining, as everywhere else here.
+    let spokenBarValue: String
+
+    init(_ dto: StatusReportDto) {
+        figureText = GlomerisUsedPercent.text(dto.usedPercent)
+        spokenFigure = GlomerisUsedPercent.spoken(dto.usedPercent)
+        bytesText = "\(dto.freeHuman) free of \(dto.totalHuman)"
+        barFraction = dto.usedPercent.isFinite ? min(max(dto.usedPercent / 100, 0), 1) : 0
+        spokenBarValue = SpokenLabel.compose([spokenFigure, bytesText])
+    }
+}
+
 /// The two fetches this section performs, each with its own error slot.
 ///
 /// HORO-1297: they previously shared a single `lastErrorMessage`, and they
@@ -192,8 +250,24 @@ struct StatusHealthSectionView: View {
     // MARK: - Cards
 
     /// Disk space. The pressure badge is the headline because it is the one
-    /// thing worth glancing at; the byte figures are the supporting detail
-    /// under it, not the other way round.
+    /// thing worth glancing at; the percentage is the figure under it, and the
+    /// byte figures are the supporting detail under that.
+    ///
+    /// HORO-1506 put the percentage there. Before it, this card showed a badge,
+    /// a free/total byte pair and an untitled bar — so the only percentage
+    /// anywhere on it was inside the bar's progress value, which no human
+    /// reads. Both figures the user configures (the alert threshold and the
+    /// recovery goal) are expressed in percent used, so reading this card meant
+    /// dividing two byte counts in your head before you could tell whether you
+    /// were near either of them. The percentage leads and the bytes stay: they
+    /// answer a different question ("how much room is left"), and dropping them
+    /// would trade one mental conversion for the opposite one.
+    ///
+    /// Every value comes from `DiskCapacityViewModel`, which renders the
+    /// percentage through `GlomerisUsedPercent` rather than a local `%.1f` — see
+    /// that file for why the rule truncates. The figure's accessibility label is
+    /// the spoken form, so VoiceOver says "94.2 percent used" and not a bare
+    /// number.
     ///
     /// The failure message renders IN ADDITION to any report already on
     /// screen, never instead of it. A poll that fails after one has
@@ -205,10 +279,15 @@ struct StatusHealthSectionView: View {
         GlomerisCard(title: GlomerisVocabulary.pressureAxis) {
             if let statusReport {
                 let pressure = GlomerisVocabulary.pressure(statusReport.pressureState)
+                let capacity = DiskCapacityViewModel(statusReport)
                 GlomerisBadgeView(term: pressure)
-                Text("\(statusReport.freeHuman) free of \(statusReport.totalHuman)")
-                    .font(GlomerisDesign.primaryFont)
-                capacityBar(usedPercent: statusReport.usedPercent, tone: pressure.tone)
+                Text(capacity.figureText)
+                    .font(GlomerisDesign.titleFont)
+                    .accessibilityLabel(capacity.spokenFigure)
+                Text(capacity.bytesText)
+                    .font(GlomerisDesign.secondaryFont)
+                    .foregroundStyle(.secondary)
+                capacityBar(capacity: capacity, tone: pressure.tone)
             } else if fetchErrors.status == nil {
                 GlomerisStateMessageView(message: .loading("Checking disk space…"))
             }
@@ -327,16 +406,27 @@ struct StatusHealthSectionView: View {
     /// A capacity bar, tinted by the pressure tone the badge above already
     /// states in words. It is a redundant second encoding of one fact, not
     /// a new one — which is the only reason a bare colour is acceptable
-    /// here. Its accessibility label carries the percentage, because a
+    /// here. Its accessibility value carries the percentage, because a
     /// filled rectangle conveys nothing to VoiceOver.
+    ///
+    /// HORO-1506 replaced that value. It used to be built as
+    /// `"\(Int(fraction * 100)) percent"`, which was wrong twice over: no axis
+    /// word, so a listener could not tell used from free; and a separate
+    /// truncation to a whole number, so the same measurement was spoken as
+    /// "72 percent" here while the Recovery card rendered "72.0% used" from the
+    /// same field. It is now `GlomerisUsedPercent.spoken`, the one rule, so the
+    /// bar cannot disagree with the figure printed above it.
+    ///
+    /// Both the fill and the spoken value come from `DiskCapacityViewModel`, so
+    /// what this renders is the same three values the tests assert on — the bar
+    /// cannot be corrected without the assertion following it.
     @ViewBuilder
-    private func capacityBar(usedPercent: Double, tone: GlomerisTone) -> some View {
-        let fraction = min(max(usedPercent / 100, 0), 1)
-        ProgressView(value: fraction)
+    private func capacityBar(capacity: DiskCapacityViewModel, tone: GlomerisTone) -> some View {
+        ProgressView(value: capacity.barFraction)
             .progressViewStyle(.linear)
             .tint(tone.color)
             .accessibilityLabel("Disk used")
-            .accessibilityValue("\(Int(fraction * 100)) percent")
+            .accessibilityValue(capacity.spokenBarValue)
     }
 
     /// Both fetches write `@State`, so all three of these are pinned to the

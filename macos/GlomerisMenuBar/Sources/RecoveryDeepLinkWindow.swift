@@ -116,11 +116,8 @@ struct RecoveryDeepLinkWindowView: View {
         GlomerisCard(title: "Why you are seeing this") {
             GlomerisDetailRow(label: "Disk when alerted") {
                 Text(
-                    String(
-                        format: "%.1f%% used, %@ free",
-                        context.currentUsedPercent,
-                        context.currentFreeHuman
-                    )
+                    GlomerisUsedPercent.text(context.currentUsedPercent)
+                        + ", \(context.currentFreeHuman) free"
                 )
                 .font(GlomerisDesign.secondaryFont)
             }

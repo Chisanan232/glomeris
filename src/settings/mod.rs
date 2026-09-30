@@ -61,6 +61,7 @@ pub use store::{
 };
 
 use crate::executor::goal::{GoalRejection, RecoveryGoal};
+use crate::reporting::used_percent::configured_used_percent_figure;
 use std::fmt;
 
 /// Lowest configurable alert threshold. Below this the alert would be
@@ -304,7 +305,10 @@ impl RecoverySettings {
     /// JSON, the GUI label and the spoken accessibility string read the same
     /// words — the same reason [`RecoveryGoal::describe`] exists.
     pub fn describe_notify_at(&self) -> String {
-        format!("{}% used", trim_percent(self.notify_at_used_percent))
+        format!(
+            "{}% used",
+            configured_used_percent_figure(self.notify_at_used_percent)
+        )
     }
 }
 
@@ -320,18 +324,6 @@ fn validate_notify_at(used_percent: f64) -> Result<f64, SettingsRejection> {
         return Err(SettingsRejection::NotifyThresholdOutOfRange { used_percent });
     }
     Ok(used_percent)
-}
-
-/// Render a percentage without a trailing `.0`. Mirrors the helper in
-/// [`crate::executor::goal`] so the two surfaces format the same number the
-/// same way.
-fn trim_percent(value: f64) -> String {
-    if (value - value.round()).abs() < 1e-9 {
-        format!("{}", value.round() as i64)
-    } else {
-        let s = format!("{value:.2}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
 }
 
 #[cfg(test)]
