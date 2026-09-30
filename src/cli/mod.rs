@@ -1547,6 +1547,13 @@ pub fn print_daemon_status_report(report: &DaemonStatusReport) {
 }
 
 /// Prints a [`HistoryReport`] as concise, human-readable text.
+///
+/// HORO-1506: the usage column is the shared rendering, not a local `{:.2}%`.
+/// These rows are the record of which side of the alert threshold the disk was
+/// on at each transition, and rounding to nearest wrote 89.96 down as `90.00%`
+/// beside a `WARN -> CRITICAL` that the 90 boundary had not produced. A reader
+/// reconciling the history against the threshold has to be able to trust the
+/// digits. `--json` still carries the unrounded `f64` for anything counting.
 pub fn print_history_report(report: &HistoryReport) {
     if report.events.is_empty() {
         println!("no pressure history recorded");
@@ -1554,8 +1561,12 @@ pub fn print_history_report(report: &HistoryReport) {
     }
     for event in &report.events {
         println!(
-            "{}\t{} -> {}\t{:.2}%\tfree {}",
-            event.unix_time_secs, event.from, event.to, event.used_percent, event.free_human
+            "{}\t{} -> {}\t{}\tfree {}",
+            event.unix_time_secs,
+            event.from,
+            event.to,
+            used_percent_figure(event.used_percent),
+            event.free_human
         );
     }
 }
