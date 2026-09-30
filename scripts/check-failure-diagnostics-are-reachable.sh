@@ -126,6 +126,33 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKFLOW_DIR=".github/workflows"
 SCRIPT_DIR="scripts"
 
+usage() {
+  echo "usage: $(basename "$0") [--self-test]"
+  echo ""
+  echo "  (no arguments)  Checks this repository."
+  echo "  --self-test     Runs every errexit rule against throwaway fixtures,"
+  echo "                  proving each one fires. See the comment above run_self_test."
+}
+
+self_test=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-test)
+      self_test=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1"
+      usage
+      exit 2
+      ;;
+  esac
+done
+
 # Returns 0 and records the site if it has not been reported yet.
 #
 # `reported` is a local of whichever `assess` call is running, not a global, so
@@ -651,6 +678,212 @@ assess() (
   return 1
 )
 
+# --- self-test --------------------------------------------------------------
+#
+# Every rule above is asserted against a throwaway copy of this repository with
+# one violation planted in it. The copy is the real `.github/workflows` and
+# `scripts`, not an invented tree, so the pristine case proves the mutations
+# below are what the failures are detecting.
+#
+# The load-bearing pair is `errexit declared` and `errexit not declared`. Both
+# plant the identical violating block; only the `set -euo pipefail` line differs.
+# Before HORO-1539 the first failed and the second passed, which is how a
+# workflow block could carry an unreachable diagnostic and be reported clean.
+# Both must fail now, and a future change that narrows the workflow rule back to
+# self-declared errexit turns the second case red rather than going unnoticed.
+
+run_self_test() {
+  local work
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064  # $work must expand now, not when the trap fires.
+  trap "rm -rf '$work'" RETURN
+
+  local cases_run=0 cases_failed=0
+
+  # A fresh copy of this repository's workflows and scripts under $work/$1.
+  fixture() {
+    local dir="${work}/$1"
+    mkdir -p "${dir}/.github"
+    cp -R "${REPO_ROOT}/.github/workflows" "${dir}/.github/workflows"
+    cp -R "${REPO_ROOT}/${SCRIPT_DIR}" "${dir}/${SCRIPT_DIR}"
+    printf '%s' "$dir"
+  }
+
+  # Writes a workflow whose single `run:` block is the HORO-1473 violation: a
+  # plain assignment from a pipeline, and an emptiness check on the result that
+  # cannot run because the assignment aborts the body first.
+  #
+  # $2 an optional first body line, $3 a `shell:` key placed after the block,
+  # $4 one placed before it. The two positions are both legal YAML and the
+  # extractor has to attach either to the same step.
+  #
+  # shellcheck disable=SC2016  # The violation is the literal text `$(ls | wc -l)`
+  # and `-z "$count"`. Expanding either here would plant nothing to find.
+  plant_workflow() {
+    local dir="$1" firstline="$2" shell_after="$3" shell_before="$4"
+    {
+      printf 'name: errexit probe\n'
+      printf 'on: push\n'
+      printf 'jobs:\n'
+      printf '  errexit-probe:\n'
+      printf '    runs-on: ubuntu-latest\n'
+      printf '    steps:\n'
+      if [[ -n "$shell_before" ]]; then
+        printf '      - shell: %s\n' "$shell_before"
+        printf '        run: |\n'
+      else
+        printf '      - run: |\n'
+      fi
+      if [[ -n "$firstline" ]]; then
+        printf '          %s\n' "$firstline"
+      fi
+      printf '          count="$(ls | wc -l)"\n'
+      printf '          if [[ -z "$count" ]]; then echo "nothing"; fi\n'
+      if [[ -n "$shell_after" ]]; then
+        printf '        shell: %s\n' "$shell_after"
+      fi
+    } > "${dir}/${WORKFLOW_DIR}/zz-errexit-probe.yml"
+    return 0
+  }
+
+  # The same violation as a checked-in script, where errexit is the script's own
+  # to declare and the guard must keep taking it at its word.
+  #
+  # shellcheck disable=SC2016  # Literal for the same reason as plant_workflow.
+  plant_script() {
+    local dir="$1" firstline="$2"
+    {
+      printf '#!/usr/bin/env bash\n'
+      if [[ -n "$firstline" ]]; then
+        printf '%s\n' "$firstline"
+      fi
+      printf 'count="$(ls | wc -l)"\n'
+      printf 'if [[ -z "$count" ]]; then echo "nothing"; fi\n'
+    } > "${dir}/${SCRIPT_DIR}/zz-errexit-probe.sh"
+    return 0
+  }
+
+  # A workflow that moves the shell decision out of every step and into one
+  # `defaults:` key, which is the shape this guard cannot follow.
+  plant_defaults() {
+    local dir="$1"
+    {
+      printf 'name: defaults probe\n'
+      printf 'on: push\n'
+      printf 'defaults:\n'
+      printf '  run:\n'
+      printf '    shell: bash\n'
+      printf 'jobs:\n'
+      printf '  noop:\n'
+      printf '    runs-on: ubuntu-latest\n'
+      printf '    steps:\n'
+      printf '      - run: |\n'
+      printf '          echo ok\n'
+    } > "${dir}/${WORKFLOW_DIR}/zz-defaults-probe.yml"
+    return 0
+  }
+
+  quoted() {
+    local line
+    while IFS= read -r line; do
+      printf '      %s\n' "$line"
+    done <<< "$1"
+  }
+
+  # $1 what is being asserted, $2 the exit status it must produce, $3 the
+  # fixture to assess, $4 a phrase its output must contain. The phrase matters
+  # as much as the status: an exit 1 for the wrong reason is not a pass.
+  expect() {
+    local what="$1" want="$2" dir="$3" phrase="$4"
+    cases_run=$((cases_run + 1))
+    local out status=0
+    out="$(assess "$dir" 2>&1)" || status=$?
+    if [[ "$status" -ne "$want" ]]; then
+      echo "  SELF-TEST FAIL: ${what}"
+      echo "      expected exit ${want}, got ${status}"
+      quoted "$out"
+      cases_failed=$((cases_failed + 1))
+      return 0
+    fi
+    case "$out" in
+      *"$phrase"*) ;;
+      *)
+        echo "  SELF-TEST FAIL: ${what}"
+        echo "      exit ${status} was right, but the output never says why."
+        echo "      expected to contain: ${phrase}"
+        quoted "$out"
+        cases_failed=$((cases_failed + 1))
+        return 0
+        ;;
+    esac
+    echo "  ok: ${what}"
+  }
+
+  local reachable="every emptiness or length check is reachable"
+  local unreachable="is tested for emptiness or length in this shell body"
+  local dir
+
+  dir="$(fixture pristine)"
+  expect "this repository as it stands passes" 0 "$dir" "$reachable"
+
+  dir="$(fixture wf-errexit-declared)"
+  plant_workflow "$dir" "set -euo pipefail" "" ""
+  expect "a violating run: block that declares errexit is reported" \
+    1 "$dir" "$unreachable"
+
+  dir="$(fixture wf-errexit-undeclared)"
+  plant_workflow "$dir" "" "" ""
+  expect "the same block without an errexit line is reported, because GitHub adds -e" \
+    1 "$dir" "$unreachable"
+
+  dir="$(fixture wf-shell-python)"
+  plant_workflow "$dir" "" "python" ""
+  expect "a violating block under shell: python is left alone" 0 "$dir" "$reachable"
+
+  dir="$(fixture wf-shell-template)"
+  plant_workflow "$dir" "" "" "bash {0}"
+  expect "a custom shell: bash {0} template is taken as errexit off" 0 "$dir" "$reachable"
+
+  dir="$(fixture wf-shell-errexit-template)"
+  plant_workflow "$dir" "" "" "bash -eo pipefail {0}"
+  expect "a custom template that asks for -e is taken as errexit on" \
+    1 "$dir" "$unreachable"
+
+  dir="$(fixture wf-defaults-shell)"
+  plant_defaults "$dir"
+  expect "a workflow that sets a shell under defaults: is refused" \
+    1 "$dir" "sets a shell under 'defaults:'"
+
+  dir="$(fixture script-no-errexit)"
+  plant_script "$dir" ""
+  expect "a violating script that does not set errexit is left alone" \
+    0 "$dir" "$reachable"
+
+  dir="$(fixture script-errexit)"
+  plant_script "$dir" "set -euo pipefail"
+  expect "a violating script that sets errexit is reported" 1 "$dir" "$unreachable"
+
+  echo ""
+  if [[ "$cases_run" -ne 9 ]]; then
+    echo "FAIL: the self-test ran ${cases_run} case(s) and is specified to run 9."
+    echo "A self-test that quietly shrinks reports clean for the wrong reason."
+    return 1
+  fi
+
+  if [[ "$cases_failed" -ne 0 ]]; then
+    echo "FAIL: ${cases_failed} of ${cases_run} self-test case(s) did not behave as specified."
+    return 1
+  fi
+
+  echo "PASS: ${cases_run} self-test case(s) — every rule fires on its own violation"
+  echo "  and on nothing else."
+  return 0
+}
+
 # --- entry point ------------------------------------------------------------
 
-assess "$REPO_ROOT"
+if [[ "$self_test" -eq 1 ]]; then
+  run_self_test
+else
+  assess "$REPO_ROOT"
+fi
