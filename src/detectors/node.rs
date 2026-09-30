@@ -21,9 +21,9 @@ use crate::evidence::{
 };
 
 use super::{
-    cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
-    query_tool_single_path, size_estimate_budget, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext, RootAbsence, ToolQuery,
+    cache_root_status, discovery_evidence, documented_cache_root, estimate_logical_bytes,
+    probe_mtime, query_tool_single_path, size_estimate_budget, CacheRoute, Detector, DetectorId,
+    DetectorStatus, DiscoveryContext, RootAbsence, ToolEnvVar, ToolQuery, DOCUMENTED_ROUTE_ABSENCE,
 };
 
 pub struct NodeDetector;
@@ -93,10 +93,16 @@ impl Detector for NodeDetector {
 
 /// Detector for npm's content-addressable package cache (HORO-1543).
 ///
-/// The location comes from `npm config get cache`, not from `~/.npm`: npm
-/// resolves it through `.npmrc` files, `npm_config_cache` and
-/// `$XDG_CACHE_HOME`, and a path guessed from `$HOME` would be wrong for
-/// anyone who has moved it.
+/// The location is never a bare `~/.npm` guess. npm resolves it through
+/// `.npmrc` files and `npm_config_cache` (which npm reads in either its
+/// documented lowercase spelling or the uppercased one, both confirmed against
+/// npm 10), so a path assumed from `$HOME` alone would be wrong for anyone who
+/// has moved it. `$XDG_CACHE_HOME` is *not* part of that resolution — checked
+/// against the installed npm, which ignores it.
+///
+/// So: `npm_config_cache` first, then npm's documented `~/.npm` default when
+/// that directory is actually there, and `npm config get cache` when neither
+/// answers (HORO-1560 AC 2). See [`npm_documented_cacache_dir`].
 ///
 /// The resource is `<cache>/_cacache` rather than the cache directory npm
 /// names. That directory also holds `_logs` — npm's debug logs, which are
@@ -155,6 +161,33 @@ fn npm_cacache_dir(reported_cache_dir: &str) -> PathBuf {
     Path::new(reported_cache_dir.trim()).join(CACACHE_SUBDIR)
 }
 
+/// Where npm's own documented configuration puts its cache, narrowed to the
+/// `_cacache` subtree this detector reports — when that answers without
+/// running npm (HORO-1560 AC 2).
+///
+/// `npm_config_cache` (either documented spelling) first, then npm's
+/// documented default of `~/.npm`. Existence is checked on the cache
+/// *directory*, which is what npm's configuration names; a `_cacache` that is
+/// not there under a cache directory that is means npm has been here and
+/// downloaded nothing, which is [`DOCUMENTED_ROUTE_ABSENCE`]'s
+/// `Found(vec![])` and not an absent npm.
+///
+/// This route also sidesteps HORO-1556 entirely rather than mitigating it: an
+/// invocation that writes no log is better than one that writes a log it then
+/// has to suppress, and [`NPM_CACHE_QUERY`]'s `--logs-max=0` remains in place
+/// for the invocations that still happen.
+fn npm_documented_cacache_dir(ctx: &DiscoveryContext) -> Option<(PathBuf, CacheRoute)> {
+    let (cache_dir, route) = documented_cache_root(
+        ctx,
+        ToolEnvVar::NpmCache,
+        Some(ctx.home_dir.join(NPM_DEFAULT_CACHE_SUBDIR)),
+    )?;
+    Some((cache_dir.join(CACACHE_SUBDIR), route))
+}
+
+/// npm's documented default cache directory, relative to the user's home.
+const NPM_DEFAULT_CACHE_SUBDIR: &str = ".npm";
+
 impl Detector for NodePackageManagerCacheDetector {
     fn id(&self) -> DetectorId {
         DetectorId("npm_cache")
@@ -164,7 +197,19 @@ impl Detector for NodePackageManagerCacheDetector {
         CACHE_KINDS
     }
 
-    fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+    fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        if let Some((cacache, route)) = npm_documented_cacache_dir(ctx) {
+            return cache_root_status(
+                self.id(),
+                ResourceKind::NodePackageManagerCache,
+                &cacache,
+                Regenerability::RegenerableByTool,
+                Recoverability::RegenerableByTool,
+                &route.provenance("npm's package cache"),
+                DOCUMENTED_ROUTE_ABSENCE,
+            );
+        }
+
         match query_tool_single_path(NPM_PROGRAM, NPM_CACHE_QUERY) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
@@ -306,6 +351,107 @@ mod tests {
         }
 
         fs::remove_dir_all(&npm_cache).ok();
+    }
+
+    /// HORO-1560 AC 2 for npm, through `discover`: a `~/.npm` that is there is
+    /// npm's documented default, so the cache is measured without npm being
+    /// run — and the `_cacache` boundary still holds on this route, which is
+    /// the part a second code path could easily have lost.
+    #[test]
+    fn npms_documented_default_is_measured_without_running_npm() {
+        let home = make_temp_dir("npm-documented-home");
+        let cache = home.join(".npm");
+        fs::create_dir_all(cache.join("_cacache/content-v2")).unwrap();
+        fs::create_dir_all(cache.join("_logs")).unwrap();
+        fs::write(cache.join("_logs/debug.log"), vec![b'x'; 3_000]).unwrap();
+        fs::write(cache.join("_cacache/content-v2/blob"), vec![0u8; 1_024]).unwrap();
+
+        match NodePackageManagerCacheDetector.discover(&DiscoveryContext::new(&home)) {
+            DetectorStatus::Found(evidence) => {
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(1_024),
+                    "only _cacache, not the debug logs beside it"
+                );
+                assert!(
+                    ev.sources
+                        .iter()
+                        .any(|s| s.contains("the tool was not run")),
+                    "{:?}",
+                    ev.sources
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// Both spellings npm honours relocate the cache. The lowercase one is
+    /// what npm documents; a route that read only the uppercase form would
+    /// report the stale default directory for a machine using this one, which
+    /// is a wrong answer rather than a missing one.
+    #[test]
+    fn either_npm_config_cache_spelling_relocates_the_cache() {
+        for spelling in ["npm_config_cache", "NPM_CONFIG_CACHE"] {
+            let home = make_temp_dir("npm-relocated-home");
+            let decoy = home.join(".npm/_cacache");
+            fs::create_dir_all(&decoy).unwrap();
+            fs::write(decoy.join("decoy"), vec![0u8; 8_192]).unwrap();
+            let relocated = home.join("elsewhere");
+            fs::create_dir_all(relocated.join("_cacache")).unwrap();
+            fs::write(relocated.join("_cacache/real"), vec![0u8; 256]).unwrap();
+
+            let ctx = DiscoveryContext::new(&home).with_tool_env_spelling(
+                ToolEnvVar::NpmCache,
+                spelling,
+                relocated.to_str().unwrap(),
+            );
+
+            match NodePackageManagerCacheDetector.discover(&ctx) {
+                DetectorStatus::Found(evidence) => {
+                    assert_eq!(
+                        evidence[0].logical_bytes,
+                        crate::evidence::ProbeOutcome::Observed(256),
+                        "{spelling} must win over the stale ~/.npm"
+                    );
+                    assert!(evidence[0].sources.iter().any(|s| s.contains(spelling)));
+                }
+                other => panic!("expected Found for {spelling}, got {other:?}"),
+            }
+
+            fs::remove_dir_all(&home).ok();
+        }
+    }
+
+    /// A cache directory npm has created but not downloaded into yet: the
+    /// documented route answered about the directory, and `_cacache` below it
+    /// is simply not there. `Found(vec![])` — npm has been here, and there is
+    /// no resource to report.
+    #[test]
+    fn a_documented_cache_directory_without_cacache_is_no_resource() {
+        let home = make_temp_dir("npm-documented-empty");
+        fs::create_dir_all(home.join(".npm")).unwrap();
+
+        assert_eq!(
+            NodePackageManagerCacheDetector.discover(&DiscoveryContext::new(&home)),
+            DetectorStatus::Found(Vec::new())
+        );
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The anti-vacuity half: no `~/.npm` at all means the documented route
+    /// declines, so npm itself is still asked — which is the only thing that
+    /// can distinguish an absent npm from an npm with an empty cache.
+    #[test]
+    fn a_home_without_a_cache_directory_leaves_the_documented_route_silent() {
+        let home = make_temp_dir("npm-no-cache-dir");
+
+        assert!(npm_documented_cacache_dir(&DiscoveryContext::new(&home)).is_none());
+
+        fs::remove_dir_all(&home).ok();
     }
 
     /// An npm that answers with a cache directory it has not populated yet is

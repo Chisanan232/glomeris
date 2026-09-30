@@ -1050,6 +1050,17 @@ pub(crate) fn user_caches_dir(home: &Path) -> Option<PathBuf> {
     }
 }
 
+/// What a cache root reached through [`documented_cache_root`] means when it
+/// turns out not to be there after all.
+///
+/// That function only answers for a directory that exists, so this is reached
+/// only if the directory disappears between its check and the probe — a real
+/// race on a cache its tool is free to clear at any moment. Nothing on this
+/// route ran the tool, so nothing on it is entitled to say whether the tool is
+/// installed: [`RootAbsence::InferredUnderSharedParent`] is the variant that
+/// makes no claim about it (HORO-1575).
+pub(crate) const DOCUMENTED_ROUTE_ABSENCE: RootAbsence = RootAbsence::InferredUnderSharedParent;
+
 /// Where a tool's own documented configuration says its cache is, without
 /// running the tool (HORO-1560 AC 2).
 ///

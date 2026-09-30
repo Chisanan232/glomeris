@@ -31,6 +31,7 @@ use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 use super::{
     cache_root_status, documented_cache_root, query_tool_single_path, user_caches_dir, CacheRoute,
     Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence, ToolEnvVar, ToolQuery,
+    DOCUMENTED_ROUTE_ABSENCE,
 };
 
 pub struct PipCacheDetector;
@@ -69,17 +70,6 @@ fn pip_documented_cache_root(ctx: &DiscoveryContext) -> Option<(PathBuf, CacheRo
         user_caches_dir(&ctx.home_dir).map(|caches| caches.join("pip")),
     )
 }
-
-/// What a cache root reached without running the tool means when it turns out
-/// not to be there after all.
-///
-/// [`documented_cache_root`] only answers for a directory that exists, so this
-/// is reached only if the directory disappears between that check and the
-/// probe — a real race on a cache a tool is free to clear at any moment.
-/// Nothing here ran the tool, so nothing here is entitled to say whether the
-/// tool is installed: [`RootAbsence::InferredUnderSharedParent`] is the
-/// variant that makes no claim about it (HORO-1575).
-const DOCUMENTED_ROUTE_ABSENCE: RootAbsence = RootAbsence::InferredUnderSharedParent;
 
 impl Detector for PipCacheDetector {
     fn id(&self) -> DetectorId {
