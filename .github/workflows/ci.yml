@@ -421,6 +421,38 @@ jobs:
       - name: Check the app's project-root scoping matches the CLI
         run: bash scripts/check-app-cli-invocations-match-cli-contract.sh
 
+  used-percent-is-rendered-once:
+    # HORO-1506: where the disk is now, the alert threshold and the recovery goal
+    # are all percent-used, and the first two are compared against each other on
+    # every poll. Every comparison uses the unrounded f64; the renderings were
+    # local, eleven sites in Rust and seven in Swift, each with its own `{:.1}%`
+    # / `{:.2}%` / `%.1f%% used` / `Int(fraction * 100)`. Round-to-nearest
+    # disagrees with `>=` just under each tenth: 89.96 read as "90.0% used"
+    # against a 90% threshold the daemon had not crossed, so the card stated the
+    # threshold and nothing happened. The configured figures were `{:.2}` and got
+    # it backwards — a stored 87.456 read as "87.46% used", above its own
+    # boundary.
+    #
+    # Those sites all call one rule per language now, pinned to each other by
+    # tests/fixtures/used_percent_golden.tsv, and both rules are well tested. But
+    # a test only covers a function that is called: an eighteenth site added with
+    # a local format specifier would be covered by nothing and would look exactly
+    # like the seventeen that were wrong. "No *other* code renders this" is a
+    # property of the tree, not of any function — the same reasoning as
+    # no-policy-label-branching.
+    #
+    # The self-test runs first and in the same job, for the reason given under
+    # app-cli-invocations-match-cli-contract: these are negative assertions over
+    # source text, and a pattern that has quietly stopped matching anything
+    # reports PASS over a violating tree.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check every rule of the guard still fires
+        run: bash scripts/check-used-percent-is-rendered-once.sh --self-test
+      - name: Check a used-percentage is rendered in one place per language
+        run: bash scripts/check-used-percent-is-rendered-once.sh
+
   docs-cover-cli-commands:
     # HORO-1312: the book's CLI Reference had no mechanical tie to the command
     # surface, so it drifted and then excused the drift with a disclaimer
