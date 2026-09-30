@@ -138,6 +138,8 @@ mod tests {
         dir
     }
 
+    /// No `~/Library/Developer/Xcode` at all: nothing has observed Xcode, so
+    /// `tool_absent` is the honest answer.
     #[test]
     fn missing_derived_data_dir_is_tool_absent() {
         let home = make_temp_dir("xcode-absent");
@@ -147,6 +149,34 @@ mod tests {
         assert_eq!(status, DetectorStatus::ToolAbsent);
 
         fs::remove_dir_all(&home).ok();
+    }
+
+    /// The discriminating pair to the test above: same missing
+    /// `DerivedData`, but `~/Library/Developer/Xcode` is there. That is the
+    /// state a developer is in immediately after "Clean Build Folder", and
+    /// reporting Xcode as not installed there is false (HORO-1575).
+    ///
+    /// The fixtures differ in exactly one thing — whether the support
+    /// directory exists.
+    #[test]
+    fn a_present_xcode_support_dir_with_no_derived_data_is_not_a_missing_xcode() {
+        let home = make_temp_dir("xcode-cleaned");
+        fs::create_dir_all(home.join("Library/Developer/Xcode/UserData")).unwrap();
+
+        let status = XcodeDetector.discover(&DiscoveryContext::new(&home));
+        fs::remove_dir_all(&home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "a cleaned build folder must not become a zero-byte resource"
+            ),
+            DetectorStatus::ToolAbsent => panic!(
+                "`~/Library/Developer/Xcode` exists, so Xcode has run here; \
+                 tool_absent is false"
+            ),
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
     }
 
     #[test]

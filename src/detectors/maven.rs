@@ -479,4 +479,55 @@ mod tests {
         );
         std::fs::remove_dir_all(&home).ok();
     }
+
+    /// The discriminating pair to the test above: same missing
+    /// `repository/`, but `~/.m2` is there. Maven has run here, so
+    /// `tool_absent` would be false (HORO-1575). The fixtures differ in
+    /// exactly one thing — whether `.m2` exists.
+    #[test]
+    fn a_maven_home_with_no_repository_yet_is_not_a_missing_maven() {
+        let home = crate::detectors::test_support::make_temp_dir("maven-home-no-repo");
+        std::fs::create_dir_all(home.join(".m2")).unwrap();
+
+        let status = MavenLocalRepositoryDetector.discover(&DiscoveryContext::new(&home));
+        std::fs::remove_dir_all(&home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "an empty local repository must not become a zero-byte resource"
+            ),
+            DetectorStatus::ToolAbsent => {
+                panic!("`~/.m2` exists, so Maven has run here; tool_absent is false")
+            }
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
+    }
+
+    /// A `<localRepository>` that relocates the repository somewhere that
+    /// does not exist still answers from `~/.m2` — the settings file that
+    /// declared the relocation lives there, so its presence is what was
+    /// actually observed about Maven. Reporting `tool_absent` here would be
+    /// contradicted by the very file the detector had just read.
+    #[test]
+    fn a_relocated_repository_that_is_missing_still_answers_from_the_maven_home() {
+        let home = crate::detectors::test_support::make_temp_dir("maven-relocated-missing");
+        std::fs::create_dir_all(home.join(".m2")).unwrap();
+        std::fs::write(
+            home.join(".m2/settings.xml"),
+            b"<settings><localRepository>/nonexistent/glomeris-maven-repo</localRepository></settings>",
+        )
+        .unwrap();
+
+        let status = MavenLocalRepositoryDetector.discover(&DiscoveryContext::new(&home));
+        std::fs::remove_dir_all(&home).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(evidence.is_empty()),
+            other => panic!(
+                "expected Found(empty) -- `~/.m2/settings.xml` was read, so Maven is \
+                 demonstrably present; got {other:?}"
+            ),
+        }
+    }
 }
