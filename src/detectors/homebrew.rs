@@ -1,8 +1,15 @@
 //! Homebrew cache detector.
 //!
-//! Asks `brew --cache` where the cache is rather than hardcoding a path — the
-//! location can be overridden by `HOMEBREW_CACHE` and differs between
-//! Intel/Apple Silicon default prefixes.
+//! Does not hardcode a cache path: the location can be overridden by
+//! `HOMEBREW_CACHE` and differs between Intel/Apple Silicon default prefixes.
+//!
+//! What it does read, before considering a subprocess, is Homebrew's own
+//! documented configuration (HORO-1560 AC 2): `HOMEBREW_CACHE`, then the
+//! documented default `~/Library/Caches/Homebrew`. Homebrew does not consult
+//! `XDG_CACHE_HOME` on macOS — checked against the installed Homebrew, because
+//! it does on Linux. `brew --cache` remains the fallback for when neither of
+//! those names a directory that is there, which is also the case a
+//! `HOMEBREW_CACHE` set in a shell profile Glomeris never sources falls into.
 //!
 //! `reclaimable_bytes` (HORO-992): rather than parsing `brew cleanup -n`'s
 //! dry-run output (its exact wording/format is not a stable contract
@@ -36,13 +43,14 @@
 //!   reaching the same false `ToolAbsent` silently. [`query_tool_single_path`]
 //!   selects by shape and fails closed on genuine ambiguity (HORO-1557).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
-    cache_root_status, query_tool_single_path, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext, RootAbsence, ToolQuery,
+    cache_root_status, documented_cache_root, query_tool_single_path, user_caches_dir, CacheRoute,
+    Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence, ToolEnvVar, ToolQuery,
+    DOCUMENTED_ROUTE_ABSENCE,
 };
 
 pub struct HomebrewDetector;
@@ -59,6 +67,21 @@ pub(super) const BREW_PROGRAM: &str = "brew";
 /// prints the directory and downloads nothing.
 const CACHE_QUERY: &[&str] = &["--cache"];
 
+/// Homebrew's documented default cache directory, inside the platform's own
+/// cache directory.
+const CACHE_SUBDIR: &str = "Homebrew";
+
+/// Where Homebrew's own documented configuration puts its cache, when that
+/// answers without running `brew`. `HOMEBREW_CACHE` first, then the documented
+/// default.
+fn documented_cache_dir(ctx: &DiscoveryContext) -> Option<(PathBuf, CacheRoute)> {
+    documented_cache_root(
+        ctx,
+        ToolEnvVar::HomebrewCache,
+        user_caches_dir(&ctx.home_dir).map(|caches| caches.join(CACHE_SUBDIR)),
+    )
+}
+
 impl Detector for HomebrewDetector {
     fn id(&self) -> DetectorId {
         DetectorId("homebrew_cache")
@@ -68,7 +91,19 @@ impl Detector for HomebrewDetector {
         RESOURCE_KINDS
     }
 
-    fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+    fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        if let Some((root, route)) = documented_cache_dir(ctx) {
+            return cache_root_status(
+                self.id(),
+                ResourceKind::HomebrewCache,
+                &root,
+                Regenerability::RegenerableByTool,
+                Recoverability::RegenerableByTool,
+                &route.provenance("Homebrew's cache"),
+                DOCUMENTED_ROUTE_ABSENCE,
+            );
+        }
+
         status_for(query_tool_single_path(BREW_PROGRAM, CACHE_QUERY))
     }
 }
@@ -188,6 +223,102 @@ mod tests {
             DetectorStatus::Failed(msg) => assert_eq!(msg, "brew --cache exited with 1"),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    /// HORO-1560 AC 2 for Homebrew, end to end through `discover`: a cache at
+    /// the documented default location is measured and the evidence says no
+    /// tool was asked.
+    ///
+    /// Also the mutation test for that branch. Delete it and `discover` runs
+    /// the real `brew --cache`, which names this workstation's own cache
+    /// directory (wrong bytes) or reports `ToolAbsent` where Homebrew is not
+    /// installed — failing either way, never silently passing.
+    ///
+    /// macOS only: [`user_caches_dir`] declines to invent a default location on
+    /// a platform where it does not know Homebrew's, and this fixture is that
+    /// location.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_documented_default_location_is_measured_without_running_brew() {
+        let home = crate::detectors::test_support::make_temp_dir("brew-documented-home");
+        let cache = home.join("Library/Caches/Homebrew");
+        std::fs::create_dir_all(cache.join("downloads")).unwrap();
+        std::fs::write(cache.join("downloads/bottle.tar.gz"), vec![0u8; 4_096]).unwrap();
+
+        match HomebrewDetector.discover(&DiscoveryContext::new(&home)) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(4_096)
+                );
+                assert!(
+                    ev.sources
+                        .iter()
+                        .any(|s| s.contains("the tool was not run")),
+                    "the evidence must record that no tool was asked: {:?}",
+                    ev.sources
+                );
+                assert!(
+                    !ev.sources.iter().any(|s| s.contains("brew --cache")),
+                    "nothing may claim `brew --cache` reported this: {:?}",
+                    ev.sources
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `HOMEBREW_CACHE` outranks the default location, and the evidence names
+    /// the variable that answered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn homebrew_cache_outranks_the_default_location() {
+        let home = crate::detectors::test_support::make_temp_dir("brew-relocated-home");
+        let decoy = home.join("Library/Caches/Homebrew");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::write(decoy.join("decoy.tar.gz"), vec![0u8; 8_192]).unwrap();
+        let relocated = home.join("elsewhere");
+        std::fs::create_dir_all(&relocated).unwrap();
+        std::fs::write(relocated.join("real.tar.gz"), vec![0u8; 1_024]).unwrap();
+
+        let ctx = DiscoveryContext::new(&home)
+            .with_tool_env(ToolEnvVar::HomebrewCache, relocated.to_str().unwrap());
+
+        match HomebrewDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => {
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(1_024),
+                    "the relocated cache, not the stale default one"
+                );
+                assert!(
+                    ev.sources.iter().any(|s| s.contains("HOMEBREW_CACHE")),
+                    "{:?}",
+                    ev.sources
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The anti-vacuity half: with nothing at either documented location the
+    /// route declines to answer, so `brew --cache` stays reachable — which is
+    /// what keeps "Homebrew is installed but has downloaded nothing" and
+    /// "Homebrew is not installed" distinguishable (HORO-1558, AC 6).
+    #[test]
+    fn an_empty_home_leaves_the_documented_route_with_no_answer() {
+        let home = crate::detectors::test_support::make_temp_dir("brew-empty-home");
+
+        assert!(documented_cache_dir(&DiscoveryContext::new(&home)).is_none());
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// The query stays a read-only one. `brew --cache <formula>` downloads the
