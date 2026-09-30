@@ -35,7 +35,7 @@ use crate::monitor::fs_stat::FsUsage;
 use crate::monitor::ThresholdConfig;
 use crate::reporting::dto::{PressureEpisodeReport, PressureRejectionReport, PressureStatusReport};
 use crate::reporting::human_bytes;
-use crate::reporting::used_percent::used_percent_text;
+use crate::reporting::used_percent::{configured_used_percent_figure, used_percent_text};
 use crate::settings::RecoverySettings;
 
 use super::build_status_report;
@@ -138,7 +138,7 @@ pub fn describe_pressure_status(report: &PressureStatusReport) -> Vec<String> {
         // in an episode when their threshold is 75% used.
         format!(
             "episode clears at: {}% used or below",
-            trim_percent(report.clear_at_used_percent)
+            configured_used_percent_figure(report.clear_at_used_percent)
         ),
         format!("recovery goal:     {}", report.default_goal.description),
     ];
@@ -153,10 +153,10 @@ pub fn describe_pressure_status(report: &PressureStatusReport) -> Vec<String> {
         }
         Some(episode) => {
             lines.push(format!(
-                "episode:           #{} since {}% used, peak {}% used",
+                "episode:           #{} since {}, peak {}",
                 episode.episode_id,
-                trim_percent(episode.opened_used_percent),
-                trim_percent(episode.peak_used_percent)
+                used_percent_text(episode.opened_used_percent),
+                used_percent_text(episode.peak_used_percent)
             ));
             lines.push(format!(
                 "notification:      {}",
@@ -213,16 +213,6 @@ fn describe_notification_state(episode: &PressureEpisodeReport) -> String {
         }
         None => format!("{raised} — answered: {tag}"),
     }
-}
-
-/// `72` rather than `72.0`, and `72.5` kept as `72.5`.
-///
-/// The same choice [`crate::executor::goal::RecoveryGoal::describe`] makes,
-/// for the same reason: a threshold the user typed as a whole number must be
-/// echoed back as the number they typed.
-fn trim_percent(percent: f64) -> String {
-    let text = format!("{percent:.1}");
-    text.strip_suffix(".0").unwrap_or(&text).to_string()
 }
 
 #[cfg(test)]
@@ -423,6 +413,76 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("#1 since 92.5% used")),
             "{lines:#?}"
+        );
+    }
+
+    /// HORO-1506. Every percentage on this surface is rendered by
+    /// [`crate::reporting::used_percent`], and the two renderings it offers are
+    /// not interchangeable: a measurement is truncated to a tenth, a figure the
+    /// user configured is echoed back exactly.
+    ///
+    /// This surface is where the distinction earns its keep, because it is the
+    /// one place all four percentages appear together. The local helper these
+    /// lines used to share rendered every one of them with `{:.1}` — round to
+    /// nearest — so an episode that opened at 89.96% used was printed as
+    /// `#1 since 90% used`, two lines under a `notify me at: 90% used` that the
+    /// daemon had decided was not crossed.
+    #[test]
+    fn a_measurement_is_truncated_and_a_configured_boundary_is_exact() {
+        // A threshold with three decimals, and a reading just under it. The
+        // shared `report` helper pins the settings at whole numbers, so this one
+        // builds the report itself — the disagreement only appears when the
+        // configured figure has digits to round.
+        let mut t = tracker_at(87.456);
+        t.observe(89.96, 30 * GIB, 1_000);
+        let lines = describe_pressure_status(&build_pressure_status_report(
+            &t,
+            &settings(87.456, 70.0),
+            &usage(89.96),
+            &ThresholdConfig::default(),
+            1_000,
+            None,
+        ));
+        let line_with = |needle: &str| {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no line mentioning {needle} in {lines:#?}"))
+                .clone()
+        };
+
+        // The measurements: truncated, so neither can read as having reached 90.
+        assert!(
+            line_with("disk usage:").contains("89.9% used"),
+            "{lines:#?}"
+        );
+        let episode_line = line_with("episode:           #");
+        assert!(
+            episode_line.contains("#1 since 89.9% used"),
+            "{episode_line}"
+        );
+        assert!(episode_line.contains("peak 89.9% used"), "{episode_line}");
+        assert!(
+            !episode_line.contains("90"),
+            "the episode opened below the threshold and must not read as at it: {episode_line}"
+        );
+
+        // The configured figures: exact, so neither can read as above the
+        // boundary its own comparison uses. `{:.2}` gave "87.46" for the
+        // threshold and `{:.1}` gave "84.5" for the clear boundary; both sat
+        // above the real number, which is the direction that misleads.
+        let notify_line = line_with("notify me at:");
+        assert!(notify_line.contains("87.456% used"), "{notify_line}");
+        assert!(
+            !notify_line.contains("87.46%"),
+            "a threshold rounded up reads as one the daemon does not use: {notify_line}"
+        );
+        let clear_line = line_with("episode clears at:");
+        assert!(clear_line.contains("84.456% used"), "{clear_line}");
+        assert!(
+            !clear_line.contains("84.5"),
+            "a clear boundary rounded up claims an episode ends while it is still open: \
+             {clear_line}"
         );
     }
 
