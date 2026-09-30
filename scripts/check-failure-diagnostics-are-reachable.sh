@@ -81,6 +81,34 @@
 # implied: a regeneration could introduce this defect there and this guard
 # would not catch it.
 #
+# WHO TURNS ERREXIT ON (HORO-1539)
+# --------------------------------
+# The defect needs errexit in effect, and the two bodies scanned differ in who
+# supplies it.
+#
+# A `scripts/*.sh` file's errexit status is its own business, so it has to say
+# so: without the line, the assignment fails, execution carries on, and the
+# check below it runs and reports. Nothing is wrong there.
+#
+# A workflow `run:` block's errexit status belongs to the runner, and GitHub
+# invokes a step's default shell as `bash -e {0}` on Linux and macOS. So a
+# `run:` block with no errexit line of its own is EXACTLY as vulnerable as one
+# with it. This guard used to return 0 on such a block without looking, which
+# left one `ci.yml` block silently unanalysed on a rule GitHub does not impose.
+# Measured when HORO-1539 was filed: forcing every block to be analysed still
+# reported a pass, so nothing in the repository was broken by it. The defect was
+# that the guard would not have said so if something were.
+#
+# Blocks are therefore analysed as errexit-on, EXCEPT where the step's own
+# `shell:` key says otherwise — which is read rather than assumed, because
+# `shell: bash {0}` genuinely does run with errexit off, and `shell: python` is
+# not shell at all and would only manufacture findings if this guard's bash
+# patterns were pointed at it. A workflow that sets `defaults.run.shell` is
+# refused rather than guessed about: resolving a workflow-level default against a
+# job-level one is not implemented here, and quietly applying the step-level
+# answer to a file that overrides it is the same class of silent miss one layer
+# up.
+#
 # KNOWN LIMIT
 # -----------
 # A substitution's extent is found by counting parentheses, so a `(` or `)`
@@ -94,23 +122,41 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
 
 WORKFLOW_DIR=".github/workflows"
 SCRIPT_DIR="scripts"
-WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
 
-findings=0
-blocks_scanned=0
-files_scanned=0
+usage() {
+  echo "usage: $(basename "$0") [--self-test]"
+  echo ""
+  echo "  (no arguments)  Checks this repository."
+  echo "  --self-test     Runs every errexit rule against throwaway fixtures,"
+  echo "                  proving each one fires. See the comment above run_self_test."
+}
 
-# Sites already printed, as "label:line". The two triggers below overlap — a
-# helper call whose variable is also `-z`-tested satisfies both — and reporting
-# one site twice would inflate the count a reader uses to judge progress.
-reported=" "
+self_test=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --self-test)
+      self_test=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1"
+      usage
+      exit 2
+      ;;
+  esac
+done
 
 # Returns 0 and records the site if it has not been reported yet.
+#
+# `reported` is a local of whichever `assess` call is running, not a global, so
+# two assessments in one process cannot see each other's sites.
 claim_site() {
   case "$reported" in
     *" $1 "*) return 1 ;;
@@ -172,16 +218,58 @@ substitution_text() {
   ' "$1"
 }
 
+# The errexit mode for a workflow `run:` block whose step declared `shell: $1`,
+# with $1 empty when it declared none. Echoes `assume`, `require` or `skip`.
+#
+# Ends in `return 0` on purpose, and not only because it always succeeds: the
+# `case` patterns below contain a bare `|`, which this guard's own second trigger
+# reads as a pipeline that could fail, and a trailing `return 0` is how the rest
+# of this repository states that a function's status is its own.
+shell_mode() {
+  local declared="$1"
+  case "$declared" in
+    "" | bash | sh)
+      # GitHub's default for a `run:` step on Linux and macOS is `bash -e {0}`;
+      # `shell: bash` is `bash --noprofile --norc -eo pipefail {0}` and
+      # `shell: sh` is `sh -e {0}`. All three carry errexit without the body
+      # mentioning it.
+      echo assume
+      ;;
+    python | python3 | pwsh | powershell | cmd | node)
+      # Not shell at all. Pointing bash patterns at one of these is how widening
+      # a rule invents findings instead of finding them.
+      echo skip
+      ;;
+    *)
+      # A custom command template, so read it. `bash {0}` really does run with
+      # errexit off, which is the one case the old blanket rule got right.
+      if [[ "$declared" == *"-o errexit"* ]] \
+        || [[ "$declared" =~ (^|[[:space:]])-[A-Za-z]*e[A-Za-z]*([[:space:]]|$) ]]; then
+        echo assume
+      else
+        echo require
+      fi
+      ;;
+  esac
+  return 0
+}
+
 # Analyse one shell body. $1 = file of shell source, $2 = label for reporting,
 # $3 = line number in the original file that this body starts at (1 for a
-# whole script).
+# whole script), $4 = `require` if errexit has to be visible in the body for the
+# defect to exist, `assume` if whoever runs this body enables it for them.
 analyse() {
-  local body="$1" label="$2" offset="$3"
+  local body="$1" label="$2" offset="$3" errexit="${4:-require}"
 
-  # `set -e` has to be in effect for the abort to happen at all. A `run:` block
-  # without it is not subject to this defect: the assignment fails, the script
-  # carries on, and the check below it runs and reports. That is not a bug.
-  if ! grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$body"; then
+  # `set -e` has to be in effect for the abort to happen at all.
+  #
+  # Whether the body has to say so itself is the caller's to answer, because it
+  # depends on who runs the body. A standalone script's errexit status is its own
+  # business, so `require` is right for one of those: without the line the
+  # assignment fails, the script carries on, the check below it runs and reports,
+  # and that is not a bug.
+  if [[ "$errexit" == "require" ]] \
+    && ! grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$body"; then
     return 0
   fi
 
@@ -348,119 +436,454 @@ analyse() {
   done <<< "$(grep -nE '^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\([[:space:]]*\)[[:space:]]*\{' "$body" || true)"
 }
 
-# --- scripts ----------------------------------------------------------------
-
-shopt -s nullglob
-for f in "$SCRIPT_DIR"/*.sh; do
-  files_scanned=$((files_scanned + 1))
-  analyse "$f" "$f" 1
-done
-shopt -u nullglob
-
-# --- workflow run: blocks ---------------------------------------------------
-
-for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
-  [[ -f "$wf" ]] || continue
-
-  # Skip generated files, as documented in the header.
-  #
-  # Anchored to the banner a generator writes at the top, not searched
-  # file-wide: `ci.yml` has a comment about release.yml *being* generated, and
-  # matching that excluded 567 hand-written lines and seven `run:` blocks from
-  # this guard while it reported a pass. A generated file announces itself on
-  # its first line; a file merely discussing one does not.
-  #
-  # One awk rather than `head -5 | grep -q`, because that pipeline's status is
-  # not reliably grep's under this script's own `set -o pipefail`: `grep -q`
-  # leaves on the first match, which here is line 1, and a SIGPIPE'd `head`
-  # would be the rightmost non-zero status — turning a matched banner into
-  # "not generated". It holds today only because `head` writes all five lines
-  # before `grep` goes.
-  #
-  # `exit` with no status, and the verdict taken in END, because awk runs END
-  # on its way out of an `exit` in a rule: an `exit 0` there is overridden by
-  # whatever END exits with. Measured on that form — release.yml was scanned
-  # anyway, 29 `run:` blocks instead of 18.
-  if awk 'NR > 5 { exit }
-          tolower($0) ~ /(generated by|autogenerated|do not edit).*(dist|cargo-dist)/ { found = 1; exit }
-          END { exit !found }' "$wf"; then
-    echo "note: skipping ${wf} — generated; its generator owns its shell."
-    continue
-  fi
-
-  files_scanned=$((files_scanned + 1))
-
-  # Extract each `run:` block scalar. A block scalar's body is every following
-  # line indented deeper than the key, plus blank lines. Written as awk rather
-  # than a YAML parser so this guard needs nothing installed — the same reason
-  # every other check in this directory is shell.
-  #
-  # Emits one file per block, plus an index of "file<TAB>first-body-line".
-  awk -v outdir="$WORK" '
-    function indent_of(s) { match(s, /^[ ]*/); return RLENGTH }
-    /^[ ]*(-[ ]+)?run:[ ]*[|>]/ {
-      n++
-      out = outdir "/block-" n ".sh"
-      print out "\t" (NR + 1) > (outdir "/index")
-      inblock = 1
-      blockind = -1
-      next
-    }
-    inblock {
-      if ($0 ~ /^[ ]*$/) { print "" > out; next }
-      ci = indent_of($0)
-      if (blockind < 0) { blockind = ci }
-      if (ci < blockind) { inblock = 0 }
-      else { print substr($0, blockind + 1) > out; next }
-    }
-    { }
-  ' "$wf"
-
-  if [[ -f "$WORK/index" ]]; then
-    while IFS=$'\t' read -r blockfile startline; do
-      [[ -f "$blockfile" ]] || continue
-      blocks_scanned=$((blocks_scanned + 1))
-      analyse "$blockfile" "$wf" "$startline"
-    done < "$WORK/index"
-    rm -f "$WORK/index" "$WORK"/block-*.sh
-  fi
-done
-
-# --- anti-vacuity -----------------------------------------------------------
+# --- one assessment ---------------------------------------------------------
 #
-# Zero findings over zero input is the exact reading this guard exists to
-# prevent elsewhere, so it must not produce it itself.
+# Everything below runs against the checkout at $1, in a subshell, so that the
+# self-test can drive the real rules over fixtures rather than over a second
+# copy of them. A guard whose self-test exercises a paraphrase of its rules
+# proves nothing about the rules.
+#
+# Returns 0 when every emptiness or length check in that checkout is reachable.
+assess() (
+  local root="$1"
+  cd "$root" || {
+    echo "FAIL: ${root} is not a directory that can be entered."
+    return 1
+  }
 
-if [[ "$files_scanned" -eq 0 ]]; then
-  echo "FAIL: scanned no files at all. Run this from a full checkout."
-  exit 1
+  local WORK
+  WORK="$(mktemp -d)"
+  # shellcheck disable=SC2064  # $WORK must expand now, not at trap time.
+  trap "rm -rf '$WORK'" EXIT
+
+  local findings=0
+  local blocks_scanned=0
+  local files_scanned=0
+
+  # Sites already printed, as "label:line". The two triggers in `analyse`
+  # overlap — a helper call whose variable is also `-z`-tested satisfies both —
+  # and reporting one site twice would inflate the count a reader uses to judge
+  # progress.
+  local reported=" "
+
+  # --- scripts --------------------------------------------------------------
+
+  local f
+  shopt -s nullglob
+  for f in "$SCRIPT_DIR"/*.sh; do
+    files_scanned=$((files_scanned + 1))
+    analyse "$f" "$f" 1 require
+  done
+  shopt -u nullglob
+
+  # --- workflow run: blocks -------------------------------------------------
+
+  local wf blockfile startline blockshell mode defaults_shell
+  local blocks_skipped=0
+  for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
+    [[ -f "$wf" ]] || continue
+
+    # Skip generated files, as documented in the header.
+    #
+    # Anchored to the banner a generator writes at the top, not searched
+    # file-wide: `ci.yml` has a comment about release.yml *being* generated, and
+    # matching that excluded 567 hand-written lines and seven `run:` blocks from
+    # this guard while it reported a pass. A generated file announces itself on
+    # its first line; a file merely discussing one does not.
+    #
+    # One awk rather than `head -5 | grep -q`, because that pipeline's status is
+    # not reliably grep's under this script's own `set -o pipefail`: `grep -q`
+    # leaves on the first match, which here is line 1, and a SIGPIPE'd `head`
+    # would be the rightmost non-zero status — turning a matched banner into
+    # "not generated". It holds today only because `head` writes all five lines
+    # before `grep` goes.
+    #
+    # `exit` with no status, and the verdict taken in END, because awk runs END
+    # on its way out of an `exit` in a rule: an `exit 0` there is overridden by
+    # whatever END exits with. Measured on that form — release.yml was scanned
+    # anyway, 29 `run:` blocks instead of 18.
+    if awk 'NR > 5 { exit }
+            tolower($0) ~ /(generated by|autogenerated|do not edit).*(dist|cargo-dist)/ { found = 1; exit }
+            END { exit !found }' "$wf"; then
+      echo "note: skipping ${wf} — generated; its generator owns its shell."
+      continue
+    fi
+
+    # `defaults.run.shell` overrides the step-level `shell:` key resolved below,
+    # and resolving a workflow-level default against a job-level one is not
+    # implemented here. Refusing is the honest outcome: quietly applying the
+    # step-level answer to a file that overrides it is the same class of silent
+    # miss HORO-1539 is about, one layer up.
+    defaults_shell="$(awk '
+      function keycol(s) {
+        if (match(s, /^[ ]*-[ ]+/)) return RLENGTH
+        match(s, /^[ ]*/)
+        return RLENGTH
+      }
+      $0 ~ /^[ ]*$/ { next }
+      inside {
+        if (keycol($0) <= defcol) { inside = 0 }
+        else if ($0 ~ /^[ ]*shell:/) { print; exit }
+      }
+      !inside && $0 ~ /^[ ]*defaults:[ ]*$/ { inside = 1; defcol = keycol($0) }
+    ' "$wf" || true)"
+    if [[ -n "$defaults_shell" ]]; then
+      echo ""
+      echo "FAIL: ${wf} sets a shell under 'defaults:'."
+      echo "    ${defaults_shell#"${defaults_shell%%[![:space:]]*}"}"
+      echo ""
+      echo "That overrides the step-level 'shell:' key this guard reads, and resolving a"
+      echo "workflow-level default against a job-level one is not implemented here. This"
+      echo "guard will not guess which shell a block ran under. Teach it that shape, or"
+      echo "put the setting on the steps that need it."
+      return 1
+    fi
+
+    files_scanned=$((files_scanned + 1))
+
+    # Extract each `run:` block scalar. A block scalar's body is every following
+    # line indented deeper than the key, plus blank lines. Written as awk rather
+    # than a YAML parser so this guard needs nothing installed — the same reason
+    # every other check in this directory is shell.
+    #
+    # Emits one file per block, plus an index of
+    # "file<TAB>first-body-line<TAB>declared shell".
+    #
+    # The third field is why this is no longer a two-rule awk: the `shell:` key
+    # that governs a block is a sibling of its `run:` key and may sit on either
+    # side of it, so a block's entry cannot be written until its step ends. Keys
+    # of one step share a column, which is the column of `run:` itself and not
+    # the line's indentation — the first key of a step carries the list dash.
+    awk -v outdir="$WORK" '
+      function indent_of(s) { match(s, /^[ ]*/); return RLENGTH }
+      function keycol(s) {
+        if (match(s, /^[ ]*-[ ]+/)) return RLENGTH
+        return indent_of(s)
+      }
+      function shellval(s,   v, q) {
+        v = s
+        sub(/^[ ]*(-[ ]+)?shell:[ ]*/, "", v)
+        sub(/[ ]+#.*$/, "", v)
+        q = sprintf("%c%c", 34, 39)
+        gsub("^[" q "]+|[" q "]+$", "", v)
+        sub(/[ ]+$/, "", v)
+        return v
+      }
+      function flush() {
+        if (curblock != "") {
+          print curblock "\t" curstart "\t" curshell > (outdir "/index")
+          curblock = ""
+        }
+      }
+      BEGIN { pendcol = -1; stepcol = -1 }
+      {
+        if (inblock) {
+          if ($0 ~ /^[ ]*$/) { print "" > out; next }
+          ci = indent_of($0)
+          if (blockind < 0) { blockind = ci }
+          if (ci >= blockind) { print substr($0, blockind + 1) > out; next }
+          inblock = 0
+          close(out)
+        }
+
+        if ($0 ~ /^[ ]*$/) next
+
+        kc = keycol($0)
+        isitem = ($0 ~ /^[ ]*-[ ]/)
+
+        # A shallower key, or a new list item at the same column, ends the step
+        # the pending block belongs to, so its shell can no longer change.
+        if (curblock != "" && (kc < stepcol || (isitem && kc <= stepcol))) flush()
+
+        if (isitem || (pendcol >= 0 && kc < pendcol)) { pendshell = ""; pendcol = -1 }
+
+        if ($0 ~ /^[ ]*(-[ ]+)?shell:/) {
+          if (curblock != "" && kc == stepcol) { curshell = shellval($0) }
+          else { pendshell = shellval($0); pendcol = kc }
+          next
+        }
+
+        if ($0 ~ /^[ ]*(-[ ]+)?run:[ ]*[|>]/) {
+          flush()
+          n++
+          out = outdir "/block-" n ".sh"
+          curblock = out
+          curstart = NR + 1
+          stepcol = kc
+          curshell = (pendcol == kc) ? pendshell : ""
+          pendshell = ""
+          pendcol = -1
+          inblock = 1
+          blockind = -1
+          next
+        }
+      }
+      END { if (inblock) close(out); flush() }
+    ' "$wf"
+
+    if [[ -f "$WORK/index" ]]; then
+      while IFS=$'\t' read -r blockfile startline blockshell; do
+        [[ -f "$blockfile" ]] || continue
+        mode="$(shell_mode "$blockshell")"
+        if [[ "$mode" == "skip" ]]; then
+          blocks_skipped=$((blocks_skipped + 1))
+          echo "note: skipping the run: block at ${wf}:${startline} —" \
+            "shell: ${blockshell} is not shell, so a shell rule has nothing to say about it."
+          continue
+        fi
+        blocks_scanned=$((blocks_scanned + 1))
+        analyse "$blockfile" "$wf" "$startline" "$mode"
+      done < "$WORK/index"
+      rm -f "$WORK/index" "$WORK"/block-*.sh
+    fi
+  done
+
+  # --- anti-vacuity ---------------------------------------------------------
+  #
+  # Zero findings over zero input is the exact reading this guard exists to
+  # prevent elsewhere, so it must not produce it itself.
+
+  if [[ "$files_scanned" -eq 0 ]]; then
+    echo "FAIL: scanned no files at all. Run this from a full checkout."
+    return 1
+  fi
+
+  if [[ "$blocks_scanned" -eq 0 ]]; then
+    echo "FAIL: extracted no 'run:' blocks from ${WORKFLOW_DIR}."
+    echo "Either the workflows have none, or the extraction is broken. Both are"
+    echo "reasons to refuse rather than report clean."
+    return 1
+  fi
+
+  if [[ "$findings" -eq 0 ]]; then
+    echo "PASS: every emptiness or length check is reachable."
+    echo "  ${files_scanned} file(s), ${blocks_scanned} workflow run: block(s) scanned."
+    return 0
+  fi
+
+  echo ""
+  echo "FAIL: ${findings} failure diagnostic(s) that cannot run in the case they report."
+  echo ""
+  echo "Each site above pairs an assignment that aborts the script with a check"
+  echo "that claims to handle the abort. The check is dead code, and the failure it"
+  echo "was written for shows up as a red step with an empty log — less information"
+  echo "than no check at all, because the check reads like the case is covered."
+  echo ""
+  echo "Fix by making the assignment tolerant so the check can run:"
+  echo "    value=\"\$(grep -E \"^\$1=\" \"\$FILE\" | head -1 | cut -d= -f2 || true)\""
+  echo "then leave the existing emptiness check exactly as it is."
+  echo ""
+  echo "Do not instead delete the check. The check is the useful half; the"
+  echo "assignment is what was wrong."
+  return 1
+)
+
+# --- self-test --------------------------------------------------------------
+#
+# Every rule above is asserted against a throwaway copy of this repository with
+# one violation planted in it. The copy is the real `.github/workflows` and
+# `scripts`, not an invented tree, so the pristine case proves the mutations
+# below are what the failures are detecting.
+#
+# The load-bearing pair is `errexit declared` and `errexit not declared`. Both
+# plant the identical violating block; only the `set -euo pipefail` line differs.
+# Before HORO-1539 the first failed and the second passed, which is how a
+# workflow block could carry an unreachable diagnostic and be reported clean.
+# Both must fail now, and a future change that narrows the workflow rule back to
+# self-declared errexit turns the second case red rather than going unnoticed.
+
+run_self_test() {
+  local work
+  work="$(mktemp -d)"
+  # shellcheck disable=SC2064  # $work must expand now, not when the trap fires.
+  trap "rm -rf '$work'" RETURN
+
+  local cases_run=0 cases_failed=0
+
+  # A fresh copy of this repository's workflows and scripts under $work/$1.
+  fixture() {
+    local dir="${work}/$1"
+    mkdir -p "${dir}/.github"
+    cp -R "${REPO_ROOT}/.github/workflows" "${dir}/.github/workflows"
+    cp -R "${REPO_ROOT}/${SCRIPT_DIR}" "${dir}/${SCRIPT_DIR}"
+    printf '%s' "$dir"
+  }
+
+  # Writes a workflow whose single `run:` block is the HORO-1473 violation: a
+  # plain assignment from a pipeline, and an emptiness check on the result that
+  # cannot run because the assignment aborts the body first.
+  #
+  # $2 an optional first body line, $3 a `shell:` key placed after the block,
+  # $4 one placed before it. The two positions are both legal YAML and the
+  # extractor has to attach either to the same step.
+  #
+  # shellcheck disable=SC2016  # The violation is the literal text `$(ls | wc -l)`
+  # and `-z "$count"`. Expanding either here would plant nothing to find.
+  plant_workflow() {
+    local dir="$1" firstline="$2" shell_after="$3" shell_before="$4"
+    {
+      printf 'name: errexit probe\n'
+      printf 'on: push\n'
+      printf 'jobs:\n'
+      printf '  errexit-probe:\n'
+      printf '    runs-on: ubuntu-latest\n'
+      printf '    steps:\n'
+      if [[ -n "$shell_before" ]]; then
+        printf '      - shell: %s\n' "$shell_before"
+        printf '        run: |\n'
+      else
+        printf '      - run: |\n'
+      fi
+      if [[ -n "$firstline" ]]; then
+        printf '          %s\n' "$firstline"
+      fi
+      printf '          count="$(ls | wc -l)"\n'
+      printf '          if [[ -z "$count" ]]; then echo "nothing"; fi\n'
+      if [[ -n "$shell_after" ]]; then
+        printf '        shell: %s\n' "$shell_after"
+      fi
+    } > "${dir}/${WORKFLOW_DIR}/zz-errexit-probe.yml"
+    return 0
+  }
+
+  # The same violation as a checked-in script, where errexit is the script's own
+  # to declare and the guard must keep taking it at its word.
+  #
+  # shellcheck disable=SC2016  # Literal for the same reason as plant_workflow.
+  plant_script() {
+    local dir="$1" firstline="$2"
+    {
+      printf '#!/usr/bin/env bash\n'
+      if [[ -n "$firstline" ]]; then
+        printf '%s\n' "$firstline"
+      fi
+      printf 'count="$(ls | wc -l)"\n'
+      printf 'if [[ -z "$count" ]]; then echo "nothing"; fi\n'
+    } > "${dir}/${SCRIPT_DIR}/zz-errexit-probe.sh"
+    return 0
+  }
+
+  # A workflow that moves the shell decision out of every step and into one
+  # `defaults:` key, which is the shape this guard cannot follow.
+  plant_defaults() {
+    local dir="$1"
+    {
+      printf 'name: defaults probe\n'
+      printf 'on: push\n'
+      printf 'defaults:\n'
+      printf '  run:\n'
+      printf '    shell: bash\n'
+      printf 'jobs:\n'
+      printf '  noop:\n'
+      printf '    runs-on: ubuntu-latest\n'
+      printf '    steps:\n'
+      printf '      - run: |\n'
+      printf '          echo ok\n'
+    } > "${dir}/${WORKFLOW_DIR}/zz-defaults-probe.yml"
+    return 0
+  }
+
+  quoted() {
+    local line
+    while IFS= read -r line; do
+      printf '      %s\n' "$line"
+    done <<< "$1"
+  }
+
+  # $1 what is being asserted, $2 the exit status it must produce, $3 the
+  # fixture to assess, $4 a phrase its output must contain. The phrase matters
+  # as much as the status: an exit 1 for the wrong reason is not a pass.
+  expect() {
+    local what="$1" want="$2" dir="$3" phrase="$4"
+    cases_run=$((cases_run + 1))
+    local out status=0
+    out="$(assess "$dir" 2>&1)" || status=$?
+    if [[ "$status" -ne "$want" ]]; then
+      echo "  SELF-TEST FAIL: ${what}"
+      echo "      expected exit ${want}, got ${status}"
+      quoted "$out"
+      cases_failed=$((cases_failed + 1))
+      return 0
+    fi
+    case "$out" in
+      *"$phrase"*) ;;
+      *)
+        echo "  SELF-TEST FAIL: ${what}"
+        echo "      exit ${status} was right, but the output never says why."
+        echo "      expected to contain: ${phrase}"
+        quoted "$out"
+        cases_failed=$((cases_failed + 1))
+        return 0
+        ;;
+    esac
+    echo "  ok: ${what}"
+  }
+
+  local reachable="every emptiness or length check is reachable"
+  local unreachable="is tested for emptiness or length in this shell body"
+  local dir
+
+  dir="$(fixture pristine)"
+  expect "this repository as it stands passes" 0 "$dir" "$reachable"
+
+  dir="$(fixture wf-errexit-declared)"
+  plant_workflow "$dir" "set -euo pipefail" "" ""
+  expect "a violating run: block that declares errexit is reported" \
+    1 "$dir" "$unreachable"
+
+  dir="$(fixture wf-errexit-undeclared)"
+  plant_workflow "$dir" "" "" ""
+  expect "the same block without an errexit line is reported, because GitHub adds -e" \
+    1 "$dir" "$unreachable"
+
+  dir="$(fixture wf-shell-python)"
+  plant_workflow "$dir" "" "python" ""
+  expect "a violating block under shell: python is left alone" 0 "$dir" "$reachable"
+
+  dir="$(fixture wf-shell-template)"
+  plant_workflow "$dir" "" "" "bash {0}"
+  expect "a custom shell: bash {0} template is taken as errexit off" 0 "$dir" "$reachable"
+
+  dir="$(fixture wf-shell-errexit-template)"
+  plant_workflow "$dir" "" "" "bash -eo pipefail {0}"
+  expect "a custom template that asks for -e is taken as errexit on" \
+    1 "$dir" "$unreachable"
+
+  dir="$(fixture wf-defaults-shell)"
+  plant_defaults "$dir"
+  expect "a workflow that sets a shell under defaults: is refused" \
+    1 "$dir" "sets a shell under 'defaults:'"
+
+  dir="$(fixture script-no-errexit)"
+  plant_script "$dir" ""
+  expect "a violating script that does not set errexit is left alone" \
+    0 "$dir" "$reachable"
+
+  dir="$(fixture script-errexit)"
+  plant_script "$dir" "set -euo pipefail"
+  expect "a violating script that sets errexit is reported" 1 "$dir" "$unreachable"
+
+  echo ""
+  if [[ "$cases_run" -ne 9 ]]; then
+    echo "FAIL: the self-test ran ${cases_run} case(s) and is specified to run 9."
+    echo "A self-test that quietly shrinks reports clean for the wrong reason."
+    return 1
+  fi
+
+  if [[ "$cases_failed" -ne 0 ]]; then
+    echo "FAIL: ${cases_failed} of ${cases_run} self-test case(s) did not behave as specified."
+    return 1
+  fi
+
+  echo "PASS: ${cases_run} self-test case(s) — every rule fires on its own violation"
+  echo "  and on nothing else."
+  return 0
+}
+
+# --- entry point ------------------------------------------------------------
+
+if [[ "$self_test" -eq 1 ]]; then
+  run_self_test
+else
+  assess "$REPO_ROOT"
 fi
-
-if [[ "$blocks_scanned" -eq 0 ]]; then
-  echo "FAIL: extracted no 'run:' blocks from ${WORKFLOW_DIR}."
-  echo "Either the workflows have none, or the extraction is broken. Both are"
-  echo "reasons to refuse rather than report clean."
-  exit 1
-fi
-
-if [[ "$findings" -eq 0 ]]; then
-  echo "PASS: every emptiness or length check is reachable."
-  echo "  ${files_scanned} file(s), ${blocks_scanned} workflow run: block(s) scanned."
-  exit 0
-fi
-
-echo ""
-echo "FAIL: ${findings} failure diagnostic(s) that cannot run in the case they report."
-echo ""
-echo "Each site above pairs an assignment that aborts the script with a check"
-echo "that claims to handle the abort. The check is dead code, and the failure it"
-echo "was written for shows up as a red step with an empty log — less information"
-echo "than no check at all, because the check reads like the case is covered."
-echo ""
-echo "Fix by making the assignment tolerant so the check can run:"
-echo "    value=\"\$(grep -E \"^\$1=\" \"\$FILE\" | head -1 | cut -d= -f2 || true)\""
-echo "then leave the existing emptiness check exactly as it is."
-echo ""
-echo "Do not instead delete the check. The check is the useful half; the"
-echo "assignment is what was wrong."
-exit 1

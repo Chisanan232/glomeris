@@ -667,6 +667,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      # HORO-1539: this guard reads the `shell:` of every block it scans in order
+      # to decide whether GitHub will have turned errexit on, so it now has rules
+      # about workflow syntax that no workflow in this repository exercises. The
+      # self-test plants each one and is what keeps the widened rule from being
+      # narrowed back without anything going red.
+      - name: Prove the diagnostics guard's errexit rules fire
+        run: bash scripts/check-failure-diagnostics-are-reachable.sh --self-test
       - name: Check every failure diagnostic can actually run
         run: bash scripts/check-failure-diagnostics-are-reachable.sh
 
