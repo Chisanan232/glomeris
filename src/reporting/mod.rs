@@ -12,7 +12,9 @@ pub mod dto;
 pub mod impact;
 pub mod policy_label;
 pub mod ranking;
+pub mod used_percent;
 
 pub use bytes::human_bytes;
 pub use impact::{classify_impact, ImpactContext, ImpactThresholds, StorageImpactTier};
 pub use policy_label::{label_for, PolicyLabel};
+pub use used_percent::{displayed_used_percent, used_percent_figure, used_percent_text};
