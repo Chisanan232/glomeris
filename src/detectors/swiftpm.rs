@@ -22,6 +22,11 @@
 //! `Library/Caches`, so a future edit cannot quietly promote one of the
 //! other two into a reclaimable resource.
 //!
+//! That shared parent is also why a missing cache is
+//! [`RootAbsence::InferredUnderSharedParent`] and not a `tool_absent` claim:
+//! `~/Library/Caches` belongs to everything, so its state is no evidence
+//! about SwiftPM (HORO-1575).
+//!
 //! ## Ownership of a `.build` directory
 //!
 //! `.build` is an unremarkable directory name that other tools also use, so
@@ -79,7 +84,14 @@ impl Detector for SwiftPmCacheDetector {
             Regenerability::RegenerableByTool,
             Recoverability::RegenerableByTool,
             "SwiftPM's shared cache directory (~/Library/Caches/org.swift.swiftpm)",
-            RootAbsence::NothingObservedAboutTheTool,
+            // The parent here is `~/Library/Caches`, which holds entries for
+            // most of the software on a Mac and so says nothing whatever
+            // about SwiftPM. There is therefore no observation on which to
+            // base a `tool_absent` claim, and a missing cache reports that
+            // nothing was found rather than that Swift is not installed —
+            // which on a Mac with the command-line tools it always is
+            // (HORO-1575).
+            RootAbsence::InferredUnderSharedParent,
         )
     }
 }

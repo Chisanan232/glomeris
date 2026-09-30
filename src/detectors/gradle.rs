@@ -12,9 +12,16 @@
 //! command (`gradle --version` starts a JVM and does not print it anyway).
 //! So the location comes from `GRADLE_USER_HOME` when the caller observed it
 //! set, and `~/.gradle` otherwise — the same two rules Gradle itself applies
-//! ([`DiscoveryContext::tool_home`] supplies the override) — and a missing
-//! directory is [`RootAbsence::NothingObservedAboutTheTool`], because
-//! nothing here ever observed whether Gradle is installed.
+//! ([`DiscoveryContext::tool_home`] supplies the override).
+//!
+//! Because the path is inferred, a missing `caches` directory is judged by
+//! the Gradle user home above it
+//! ([`RootAbsence::InferredUnderToolOwnedParent`]). A Gradle user home that
+//! exists means Gradle has run here and simply has no cache yet, which is
+//! `Found(vec![])`; only a missing user home is grounds for claiming Gradle
+//! is not installed. Reporting `tool_absent` for a present user home told
+//! real Gradle users the tool they had just used was not installed
+//! (HORO-1575).
 //!
 //! `caches/` mixes downloaded dependency artifacts (`modules-2`) with local
 //! build-cache output (`build-cache-1`), so its contents come back partly
@@ -70,6 +77,12 @@ impl Detector for GradleCacheDetector {
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
         let caches = gradle_caches_dir(ctx.tool_home(ToolHomeVar::GradleUserHome), &ctx.home_dir);
+        // `caches` is always `<gradle user home>/caches`, so the parent is
+        // the Gradle user home itself — a directory only Gradle creates.
+        let gradle_user_home = caches
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| caches.clone());
 
         cache_root_status(
             self.id(),
@@ -79,7 +92,7 @@ impl Detector for GradleCacheDetector {
             Recoverability::RegenerableByRebuild,
             "Gradle cache directory under the Gradle user home \
              (GRADLE_USER_HOME if set, otherwise ~/.gradle)",
-            RootAbsence::NothingObservedAboutTheTool,
+            RootAbsence::InferredUnderToolOwnedParent(gradle_user_home),
         )
     }
 }

@@ -34,6 +34,12 @@
 //! merges a global `$M2_HOME/conf/settings.xml`, which this detector does not
 //! read: a global override would leave the default path simply not existing,
 //! which reports no resource — never a wrong path that does exist.
+//!
+//! Because the path is inferred rather than asked of `mvn`, a missing
+//! repository is judged by `~/.m2` above it
+//! ([`RootAbsence::InferredUnderToolOwnedParent`]): a present `~/.m2` means
+//! Maven has run here and its local repository is merely empty, and only a
+//! missing `~/.m2` is grounds for reporting Maven as absent (HORO-1575).
 
 use std::path::{Path, PathBuf};
 
@@ -54,6 +60,12 @@ const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 
 /// The `${user.home}` property Maven expands inside `<localRepository>`.
 const USER_HOME_PROPERTY: &str = "${user.home}";
+
+/// Maven's per-user directory, relative to `$HOME`. It holds
+/// `settings.xml` and, by default, `repository/`. Only Maven creates it, so
+/// its presence is what this detector treats as having observed Maven at all
+/// (HORO-1575).
+const MAVEN_HOME_DIR: &str = ".m2";
 
 /// What `settings.xml` says about `<localRepository>`.
 #[derive(Debug, PartialEq)]
@@ -176,14 +188,14 @@ fn maven_local_repository(setting: LocalRepositorySetting, home: &Path) -> Resul
             };
             Ok(expanded)
         }
-        LocalRepositorySetting::NotDeclared => Ok(home.join(".m2").join("repository")),
+        LocalRepositorySetting::NotDeclared => Ok(home.join(MAVEN_HOME_DIR).join("repository")),
         LocalRepositorySetting::Ambiguous(why) => Err(why),
     }
 }
 
 /// Reads `~/.m2/settings.xml`, if it is there and small enough to be one.
 fn read_user_settings(home: &Path) -> Result<LocalRepositorySetting, String> {
-    let settings = home.join(".m2").join("settings.xml");
+    let settings = home.join(MAVEN_HOME_DIR).join("settings.xml");
     match std::fs::metadata(&settings) {
         Ok(meta) if meta.len() > MAX_SETTINGS_BYTES => {
             return Err(format!(
@@ -252,7 +264,15 @@ impl Detector for MavenLocalRepositoryDetector {
             Regenerability::Unknown,
             Recoverability::RegenerableByTool,
             provenance,
-            RootAbsence::NothingObservedAboutTheTool,
+            // The path is inferred, so a missing repository is judged by
+            // `~/.m2` above it — a directory only Maven creates. A present
+            // `~/.m2` means Maven has run here and simply has nothing in its
+            // local repository, not that Maven is missing (HORO-1575). Note
+            // this is `~/.m2` even when `<localRepository>` relocated the
+            // repository elsewhere: the settings file that declared the
+            // relocation lives in `~/.m2`, so its presence is what was
+            // actually observed about Maven.
+            RootAbsence::InferredUnderToolOwnedParent(ctx.home_dir.join(MAVEN_HOME_DIR)),
         )
     }
 }

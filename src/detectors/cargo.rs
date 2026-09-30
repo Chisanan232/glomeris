@@ -148,6 +148,13 @@ impl Detector for CargoRegistryCacheDetector {
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
         let registry = cargo_registry_dir(ctx.tool_home(ToolHomeVar::CargoHome), &ctx.home_dir);
+        // `registry` is always `<cargo home>/registry`, so the parent is the
+        // Cargo home — a directory only Cargo (or rustup, installing it)
+        // creates.
+        let cargo_home = registry
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| registry.clone());
 
         cache_root_status(
             self.id(),
@@ -161,7 +168,10 @@ impl Detector for CargoRegistryCacheDetector {
             Recoverability::RegenerableByTool,
             "Cargo registry cache under the Cargo home \
              (CARGO_HOME if set, otherwise ~/.cargo)",
-            RootAbsence::NothingObservedAboutTheTool,
+            // A present Cargo home with no `registry` means cargo is
+            // installed and has not fetched a dependency yet — not that cargo
+            // is missing (HORO-1575).
+            RootAbsence::InferredUnderToolOwnedParent(cargo_home),
         )
     }
 }
