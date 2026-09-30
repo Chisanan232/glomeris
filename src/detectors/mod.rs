@@ -53,6 +53,16 @@ pub struct DetectorId(pub &'static str);
 /// 21 GB of images are not there, and reporting `Failed` tells them
 /// something broke when nothing did. It is a third fact and it needs a third
 /// word.
+///
+/// `NotConfigured` is HORO-1576's, for the project-scoped detectors, and the
+/// gap it fills is the same shape one step further out: a detector that was
+/// given nothing to examine has not observed anything at all, so none of the
+/// other four words is available to it. `ToolAbsent` asserts the tool is not
+/// installed; `Found(vec![])` asserts a search ran and came back empty;
+/// `ToolNotRunning` is about a client that did not answer; `Failed` asserts
+/// something went wrong. Nothing went wrong and nothing was looked at, which
+/// is a fifth fact — and the only one of the five that names something the
+/// *user* can change.
 #[derive(Debug, PartialEq)]
 pub enum DetectorStatus {
     Found(Vec<Evidence>),
@@ -61,6 +71,15 @@ pub enum DetectorStatus {
     /// running, or a client that cannot reach one. Says nothing about how
     /// much this detector would have found.
     ToolNotRunning,
+    /// This detector had nothing to examine, because what it examines is
+    /// configured and has not been configured: a project-scoped detector
+    /// with an empty [`DiscoveryContext::known_project_roots`].
+    ///
+    /// Says nothing whatever about the tool, about the disk, or about how
+    /// much there is to reclaim — only that this pass did not look. A caller
+    /// must therefore never fold it into an empty result: `candidates` is not
+    /// the whole picture in a pass that reports one of these.
+    NotConfigured,
     Failed(String),
 }
 
@@ -1483,6 +1502,7 @@ mod tests {
                 DetectorStatus::Found(evidence) => DetectorStatus::Found(evidence.clone()),
                 DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
                 DetectorStatus::ToolNotRunning => DetectorStatus::ToolNotRunning,
+                DetectorStatus::NotConfigured => DetectorStatus::NotConfigured,
                 DetectorStatus::Failed(msg) => DetectorStatus::Failed(msg.clone()),
             }
         }

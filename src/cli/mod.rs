@@ -249,6 +249,13 @@ pub enum DetectorOutcome {
     /// different fact: the resources are presumably still there, and this
     /// pass could not see them.
     ToolNotRunning,
+    /// The detector had nothing to examine, because what it examines has not
+    /// been configured (HORO-1576). Says nothing about the tool and nothing
+    /// about the disk: this pass did not look.
+    ///
+    /// The one outcome of the five whose cause is something the user can
+    /// change, which is why it cannot be folded into any of the others.
+    NotConfigured,
     /// The probe itself failed. Not evidence of "nothing to clean up".
     Failed(String),
 }
@@ -256,7 +263,7 @@ pub enum DetectorOutcome {
 impl DetectorOutcome {
     /// The tag every serialized surface uses for this outcome.
     ///
-    /// One producer for all four strings (HORO-1484), so `detect --json`,
+    /// One producer for all five strings (HORO-1484), so `detect --json`,
     /// the `--progress-json` stream and the book cannot drift into
     /// describing the same probe with different words.
     ///
@@ -269,6 +276,7 @@ impl DetectorOutcome {
             DetectorOutcome::Found { .. } => "found",
             DetectorOutcome::ToolAbsent => "tool_absent",
             DetectorOutcome::ToolNotRunning => "tool_not_running",
+            DetectorOutcome::NotConfigured => "not_configured",
             DetectorOutcome::Failed(_) => "failed",
         }
     }
@@ -283,6 +291,7 @@ impl DetectorOutcome {
             DetectorOutcome::Found { candidates } => *candidates,
             DetectorOutcome::ToolAbsent
             | DetectorOutcome::ToolNotRunning
+            | DetectorOutcome::NotConfigured
             | DetectorOutcome::Failed(_) => 0,
         }
     }
@@ -293,7 +302,27 @@ impl DetectorOutcome {
             DetectorOutcome::Failed(reason) => Some(reason),
             DetectorOutcome::Found { .. }
             | DetectorOutcome::ToolAbsent
-            | DetectorOutcome::ToolNotRunning => None,
+            | DetectorOutcome::ToolNotRunning
+            | DetectorOutcome::NotConfigured => None,
+        }
+    }
+
+    /// Whether this detector's answer leaves a hole in the pass: it did not
+    /// finish, or it never started.
+    ///
+    /// The predicate `discovery_complete` is derived from (HORO-1576), and a
+    /// deliberately different question from "did it find nothing". `ToolAbsent`
+    /// and `ToolNotRunning` are answers — the tool is not there, the daemon did
+    /// not reply — and a pass full of them is still a complete pass. `Failed`
+    /// and `NotConfigured` are the two outcomes where the pass genuinely does
+    /// not know, for the two different reasons a probe can fail to produce
+    /// knowledge: it broke, or it was never pointed at anything.
+    pub fn left_discovery_incomplete(&self) -> bool {
+        match self {
+            DetectorOutcome::Failed(_) | DetectorOutcome::NotConfigured => true,
+            DetectorOutcome::Found { .. }
+            | DetectorOutcome::ToolAbsent
+            | DetectorOutcome::ToolNotRunning => false,
         }
     }
 }
@@ -315,6 +344,7 @@ impl From<&DetectorStatus> for DetectorOutcome {
             },
             DetectorStatus::ToolAbsent => DetectorOutcome::ToolAbsent,
             DetectorStatus::ToolNotRunning => DetectorOutcome::ToolNotRunning,
+            DetectorStatus::NotConfigured => DetectorOutcome::NotConfigured,
             DetectorStatus::Failed(reason) => DetectorOutcome::Failed(reason.clone()),
         }
     }
@@ -396,10 +426,11 @@ pub fn discover_and_classify_pass(
                     candidates.push((ev, decision));
                 }
             }
-            // Nothing further to do for either: the outcome recorded above
-            // already carries which one it was, and a failure's reason.
+            // Nothing further to do for any of them: the outcome recorded
+            // above already carries which one it was, and a failure's reason.
             DetectorStatus::ToolAbsent
             | DetectorStatus::ToolNotRunning
+            | DetectorStatus::NotConfigured
             | DetectorStatus::Failed(_) => {}
         }
     }
@@ -515,9 +546,12 @@ pub fn build_detect_report(
     ranking::sort_detect_candidates(&mut candidates);
     // Derived from the same slice the array below is projected from, so the
     // summary cannot disagree with what it summarizes.
+    // The predicate lives on the outcome (HORO-1576) rather than being a
+    // `matches!` list here, so the two outcomes that leave a hole in the pass
+    // cannot drift apart from the two that are answers.
     let discovery_complete = !detectors
         .iter()
-        .any(|(_, outcome)| matches!(outcome, DetectorOutcome::Failed(_)));
+        .any(|(_, outcome)| outcome.left_discovery_incomplete());
     DetectReport {
         candidates,
         detectors: detectors
@@ -1621,14 +1655,32 @@ pub fn print_detect_report(report: &DetectReport) {
         if report.discovery_complete {
             println!("no candidates discovered");
         } else {
-            println!(
-                "no candidates discovered by the detectors that succeeded — \
-                 {} failed, so this is not a clean bill of health",
+            // Counted by status rather than by `reason.is_some()`, which was
+            // only ever a proxy for "failed" and would have counted neither
+            // half correctly once a second incomplete status existed
+            // (HORO-1576). Each clause is printed only when it has a count, so
+            // the sentence never says "0 failed" on a machine whose only gap
+            // is an unconfigured project root.
+            let count = |status: &str| {
                 report
                     .detectors
                     .iter()
-                    .filter(|d| d.reason.is_some())
+                    .filter(|d| d.status == status)
                     .count()
+            };
+            let failed = count("failed");
+            let not_examined = count("not_configured");
+            let mut reasons = Vec::new();
+            if failed > 0 {
+                reasons.push(format!("{failed} failed"));
+            }
+            if not_examined > 0 {
+                reasons.push(format!("{not_examined} had nothing configured to look at"));
+            }
+            println!(
+                "no candidates discovered by the detectors that looked — {}, \
+                 so this is not a clean bill of health",
+                reasons.join(" and ")
             );
         }
         return;
@@ -2532,6 +2584,7 @@ mod tests {
                 DetectorStatus::Found(evidences) => DetectorStatus::Found(evidences.clone()),
                 DetectorStatus::ToolAbsent => DetectorStatus::ToolAbsent,
                 DetectorStatus::ToolNotRunning => DetectorStatus::ToolNotRunning,
+                DetectorStatus::NotConfigured => DetectorStatus::NotConfigured,
                 DetectorStatus::Failed(reason) => DetectorStatus::Failed(reason.clone()),
             }
         }
@@ -2547,10 +2600,17 @@ mod tests {
         let (absent, absent_probes) = CountingDetector::new("absent", DetectorStatus::ToolAbsent);
         let (failed, failed_probes) =
             CountingDetector::new("failed", DetectorStatus::Failed("boom".to_string()));
+        // A detector that examined nothing is still probed: the pass asks it,
+        // and it is the detector that answers "there was nothing for me to
+        // look at" (HORO-1576). Skipping it in the loop instead would make the
+        // pass unable to tell anyone what to configure.
+        let (unconfigured, unconfigured_probes) =
+            CountingDetector::new("unconfigured", DetectorStatus::NotConfigured);
         let registry = DetectorRegistry::from_detectors(vec![
             Box::new(found),
             Box::new(absent),
             Box::new(failed),
+            Box::new(unconfigured),
         ]);
 
         let pass = discover_and_classify_pass(
@@ -2565,7 +2625,8 @@ mod tests {
         assert_eq!(found_probes.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(absent_probes.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(failed_probes.load(AtomicOrdering::SeqCst), 1);
-        assert_eq!(pass.detectors.len(), 3);
+        assert_eq!(unconfigured_probes.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(pass.detectors.len(), 4);
     }
 
     /// The two halves of the pass agree by construction: every `Found`
@@ -2596,6 +2657,7 @@ mod tests {
                 DetectorOutcome::Found { candidates } => *candidates,
                 DetectorOutcome::ToolAbsent
                 | DetectorOutcome::ToolNotRunning
+                | DetectorOutcome::NotConfigured
                 | DetectorOutcome::Failed(_) => 0,
             })
             .sum();

@@ -424,6 +424,15 @@ pub struct RecoveryReport {
     /// that is normal state, and its absence of candidates is a real
     /// answer rather than a missing one.
     pub detector_failures: Vec<String>,
+    /// Detectors that examined nothing during this run, as bare detector ids,
+    /// deduplicated and in first-seen order (HORO-1576).
+    ///
+    /// Withdraws a [`StopReason::SafeExhausted`] claim exactly as
+    /// `detector_failures` does, for a different reason: not that a probe
+    /// broke, but that it was never pointed at anything. Kept apart from
+    /// that field so a human-facing renderer can say which of the two
+    /// happened — one of them is something the user can fix.
+    pub detectors_not_examined: Vec<String>,
 }
 
 impl RecoveryReport {
@@ -436,15 +445,30 @@ impl RecoveryReport {
     /// prints the counts without these lines presents a partial search as a
     /// complete one.
     pub fn discovery_caveat_lines(&self) -> Vec<String> {
-        if self.detector_failures.is_empty() {
+        if self.detector_failures.is_empty() && self.detectors_not_examined.is_empty() {
             return Vec::new();
         }
-        let mut lines = vec![format!(
-            "discovery incomplete:   {} detector(s) failed",
-            self.detector_failures.len()
-        )];
-        for failure in &self.detector_failures {
-            lines.push(format!("  - {failure}"));
+        let mut lines = Vec::new();
+        if !self.detector_failures.is_empty() {
+            lines.push(format!(
+                "discovery incomplete:   {} detector(s) failed",
+                self.detector_failures.len()
+            ));
+            for failure in &self.detector_failures {
+                lines.push(format!("  - {failure}"));
+            }
+        }
+        // Its own heading, never merged into the count above: "failed" would
+        // report a malfunction for a detector that was simply not given
+        // anything to look at (HORO-1576).
+        if !self.detectors_not_examined.is_empty() {
+            lines.push(format!(
+                "not examined:           {} detector(s) had nothing configured to look at",
+                self.detectors_not_examined.len()
+            ));
+            for detector in &self.detectors_not_examined {
+                lines.push(format!("  - {detector}"));
+            }
         }
         if matches!(self.stop_reason, StopReason::SafeExhausted(_)) {
             lines.push(
@@ -523,14 +547,18 @@ fn resolve_action_id(ev: &Evidence, registry: &ActionRegistry) -> Option<ActionI
 fn candidates_with_actions(
     statuses: Vec<(crate::detectors::DetectorId, DetectorStatus)>,
     registry: &ActionRegistry,
-) -> (Vec<(Evidence, ActionId)>, Vec<String>) {
+) -> (Vec<(Evidence, ActionId)>, DiscoveryGaps) {
     let mut evidences = Vec::new();
-    let mut failures = Vec::new();
+    let mut gaps = DiscoveryGaps::default();
     for (id, status) in statuses {
         match status {
             DetectorStatus::Found(found) => evidences.extend(found),
             DetectorStatus::ToolAbsent | DetectorStatus::ToolNotRunning => {}
-            DetectorStatus::Failed(reason) => failures.push(format!("{}: {reason}", id.0)),
+            // Two different holes in the same pass, kept apart all the way to
+            // the report (HORO-1576): a probe that broke, and a probe that was
+            // never given anywhere to look.
+            DetectorStatus::NotConfigured => gaps.not_examined.push(id.0.to_string()),
+            DetectorStatus::Failed(reason) => gaps.failures.push(format!("{}: {reason}", id.0)),
         }
     }
     let candidates = evidences
@@ -540,7 +568,20 @@ fn candidates_with_actions(
             Some((ev, action_id))
         })
         .collect();
-    (candidates, failures)
+    (candidates, gaps)
+}
+
+/// The two ways one discovery pass can come back without knowing something:
+/// a detector that failed, and a detector that examined nothing because it
+/// had nothing configured to examine (HORO-1576).
+///
+/// One type so the loop accumulates both across iterations by the same rule,
+/// and two fields so [`RecoveryReport`] can keep telling them apart — the
+/// first is a fault, the second is a setting.
+#[derive(Default)]
+struct DiscoveryGaps {
+    failures: Vec<String>,
+    not_examined: Vec<String>,
 }
 
 /// One classified, sized candidate ready for approval.
@@ -1564,7 +1605,7 @@ fn build_report(
     total_bytes_freed: u64,
     started_free_bytes: u64,
     final_free_bytes: u64,
-    detector_failures: &[String],
+    gaps: &DiscoveryGaps,
 ) -> RecoveryReport {
     RecoveryReport {
         stop_reason,
@@ -1574,7 +1615,8 @@ fn build_report(
         total_bytes_freed,
         started_free_bytes,
         final_free_bytes,
-        detector_failures: detector_failures.to_vec(),
+        detector_failures: gaps.failures.clone(),
+        detectors_not_examined: gaps.not_examined.clone(),
     }
 }
 
@@ -1661,7 +1703,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 0,
                 // Nothing has been discovered yet, so there is nothing to
                 // report as incomplete.
-                &[],
+                &DiscoveryGaps::default(),
             );
         }
     };
@@ -1676,8 +1718,10 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
     let mut last_free_bytes = started_free_bytes;
     // First-seen order, deduplicated: a detector that fails the same way on
     // every iteration should be reported once, not once per iteration
-    // (HORO-1484).
-    let mut detector_failures: Vec<String> = Vec::new();
+    // (HORO-1484). Since HORO-1576 the same rule covers the detectors that
+    // examined nothing, which repeat across iterations for an even more
+    // obvious reason — the configuration does not change mid-run.
+    let mut gaps = DiscoveryGaps::default();
     // `Some` exactly for an automatic run (HORO-1510). The envelope and its
     // ledger are held together in one `Option` rather than in two, so there is
     // no representable state in which a run is narrowed by an envelope whose
@@ -1703,7 +1747,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                     total_bytes_freed,
                     started_free_bytes,
                     last_free_bytes,
-                    &detector_failures,
+                    &gaps,
                 );
             }
         };
@@ -1727,7 +1771,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
-                &detector_failures,
+                &gaps,
             );
         }
 
@@ -1754,7 +1798,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
-                &detector_failures,
+                &gaps,
             );
         }
 
@@ -1784,7 +1828,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                     total_bytes_freed,
                     started_free_bytes,
                     last_free_bytes,
-                    &detector_failures,
+                    &gaps,
                 );
             }
             // The pressure floor, checked once and deliberately never again.
@@ -1809,7 +1853,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                         total_bytes_freed,
                         started_free_bytes,
                         last_free_bytes,
-                        &detector_failures,
+                        &gaps,
                     );
                 }
             }
@@ -1829,7 +1873,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
-                &detector_failures,
+                &gaps,
             );
         }
 
@@ -1838,16 +1882,25 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             iteration: iterations_run + 1,
         });
         let statuses = detector_registry.discover_all(discovery_ctx);
-        let (candidates, failures) = candidates_with_actions(statuses, action_registry);
-        for failure in failures {
-            if !detector_failures.contains(&failure) {
-                detector_failures.push(failure);
+        let (candidates, iteration_gaps) = candidates_with_actions(statuses, action_registry);
+        for failure in iteration_gaps.failures {
+            if !gaps.failures.contains(&failure) {
+                gaps.failures.push(failure);
+            }
+        }
+        for detector in iteration_gaps.not_examined {
+            if !gaps.not_examined.contains(&detector) {
+                gaps.not_examined.push(detector);
             }
         }
         observer.observe(RecoveryProgress::Discovered {
             iteration: iterations_run + 1,
             candidates: candidates.len() as u32,
-            detectors_failed: detector_failures.len() as u32,
+            // Failures only, as the field name says: a detector that examined
+            // nothing did not fail, and counting it here would make the
+            // progress stream report a malfunction on a default installation
+            // (HORO-1576). The gap reaches the caller through the report.
+            detectors_failed: gaps.failures.len() as u32,
         });
 
         // 5-6. Refresh evidence, classify, select one candidate.
@@ -1895,7 +1948,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 total_bytes_freed,
                 started_free_bytes,
                 last_free_bytes,
-                &detector_failures,
+                &gaps,
             );
         };
 
@@ -2034,7 +2087,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                             total_bytes_freed,
                             started_free_bytes,
                             final_free_bytes,
-                            &detector_failures,
+                            &gaps,
                         );
                     }
                 }

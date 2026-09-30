@@ -1421,6 +1421,7 @@ fn recovery_run_report_matches_golden_fixture() {
         started_free_bytes: 60_000_000_000,
         final_free_bytes: 210_000_000_000,
         detector_failures: vec![],
+        detectors_not_examined: vec![],
     };
     // 210 GB free of 500 GB is 42% free, which clears the goal's 40% floor —
     // so `target_met` is decided by the re-measured reading, not by the
@@ -1462,6 +1463,7 @@ fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
         started_free_bytes: 60_000_000_000,
         final_free_bytes: 62_147_483_648,
         detector_failures: vec!["homebrew_cache: brew --cache exited 1".to_string()],
+        detectors_not_examined: vec![],
     };
     let report = build_recovery_run_report(None, &target, 500_000_000_000, &inner);
     assert_matches_fixture(&report, "recovery_run_report_raw_target.json");
@@ -1505,6 +1507,7 @@ fn recovery_run_report_for_an_envelope_refusal_matches_golden_fixture() {
         started_free_bytes: 60_000_000_000,
         final_free_bytes: 65_368_709_120,
         detector_failures: vec![],
+        detectors_not_examined: vec![],
     };
     // 65.4 GB free of 500 GB is 13% free, well short of the goal's 40% floor:
     // the run really did stop early, and `target_met` says so from the
@@ -1536,6 +1539,7 @@ fn a_pre_discovery_envelope_refusal_omits_the_remaining_breakdown() {
         started_free_bytes: 60_000_000_000,
         final_free_bytes: 60_000_000_000,
         detector_failures: vec![],
+        detectors_not_examined: vec![],
     };
     let report = build_recovery_run_report(
         None,
