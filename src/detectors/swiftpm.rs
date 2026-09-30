@@ -34,6 +34,13 @@
 //! detector reports one only where the project root also contains a
 //! `Package.swift` — the manifest that makes the directory SwiftPM's build
 //! output. Without that, the directory is skipped rather than guessed at.
+//!
+//! A root skipped for want of a manifest was still *examined*, which is why
+//! the HORO-1576 rule is about the root list and not about the evidence
+//! count: no roots at all is [`DetectorStatus::NotConfigured`], while roots
+//! that turned out to hold no Swift package are an empty `Found`. Neither is
+//! a claim that Swift is missing — on a Mac with the command-line tools it
+//! never is, and this detector would have no way to tell.
 
 use std::path::PathBuf;
 
@@ -106,6 +113,13 @@ impl Detector for SwiftPmBuildDirDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        // Before any read, and deliberately a test of the root list rather
+        // than of the evidence: a root skipped for want of a manifest was
+        // still examined (HORO-1576).
+        if ctx.known_project_roots.is_empty() {
+            return DetectorStatus::NotConfigured;
+        }
+
         let mut evidence = Vec::new();
         let mut saw_permission_error = false;
 
@@ -160,17 +174,18 @@ impl Detector for SwiftPmBuildDirDetector {
             }
         }
 
-        if evidence.is_empty() {
-            if saw_permission_error {
-                return DetectorStatus::Failed(
-                    "permission denied probing one or more known project roots for a \
-                     SwiftPM build directory"
-                        .to_string(),
-                );
-            }
-            return DetectorStatus::ToolAbsent;
+        if evidence.is_empty() && saw_permission_error {
+            return DetectorStatus::Failed(
+                "permission denied probing one or more known project roots for a \
+                 SwiftPM build directory"
+                    .to_string(),
+            );
         }
 
+        // Every configured root was examined; none held a SwiftPM build
+        // directory. The search ran, so this is an empty result — the same
+        // answer `SwiftPmCacheDetector` above already gives, for the same
+        // reason (HORO-1575/1576).
         DetectorStatus::Found(evidence)
     }
 }
@@ -287,12 +302,17 @@ mod tests {
 
         let ctx = DiscoveryContext::new("/tmp").with_known_project_roots(vec![root.clone()]);
 
-        // No manifest yet: the directory exists, and is still not claimed.
-        assert_eq!(
-            SwiftPmBuildDirDetector.discover(&ctx),
-            DetectorStatus::ToolAbsent,
-            "a .build directory alone does not establish that SwiftPM owns it"
-        );
+        // No manifest yet: the directory exists, and is still not claimed. The
+        // root WAS examined, so the answer is an empty search result — not
+        // `NotConfigured`, which would say nothing was looked at, and not
+        // `ToolAbsent`, which would claim Swift is missing (HORO-1576).
+        match SwiftPmBuildDirDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => assert!(
+                evidence.is_empty(),
+                "a .build directory alone does not establish that SwiftPM owns it"
+            ),
+            other => panic!("expected Found(empty) for an examined root, got {other:?}"),
+        }
 
         std::fs::write(root.join(MANIFEST_FILE), b"// swift-tools-version:5.9\n").unwrap();
 
@@ -314,27 +334,36 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// Mutation control: restoring `ToolAbsent` fails here. A Mac with the
+    /// command-line tools always has Swift, and this detector never asks
+    /// (HORO-1576).
     #[test]
-    fn no_known_project_roots_is_tool_absent() {
+    fn no_known_project_roots_examined_nothing() {
         let ctx = DiscoveryContext::new("/tmp");
         assert_eq!(
             SwiftPmBuildDirDetector.discover(&ctx),
-            DetectorStatus::ToolAbsent
+            DetectorStatus::NotConfigured
         );
     }
 
-    /// A manifest with no `.build` yet is not a zero-byte resource.
+    /// A manifest with no `.build` yet is not a zero-byte resource — and, as
+    /// the discriminating half of the pair above, not "nothing was examined"
+    /// either: this root was read, and it is a Swift package.
     #[test]
     fn a_manifest_without_a_build_dir_reports_nothing() {
         let root = temp_dir("swiftpm-manifest-only");
         std::fs::write(root.join(MANIFEST_FILE), b"// swift-tools-version:5.9\n").unwrap();
 
         let ctx = DiscoveryContext::new("/tmp").with_known_project_roots(vec![root.clone()]);
-        assert_eq!(
-            SwiftPmBuildDirDetector.discover(&ctx),
-            DetectorStatus::ToolAbsent
-        );
-
+        let status = SwiftPmBuildDirDetector.discover(&ctx);
         std::fs::remove_dir_all(&root).ok();
+
+        match status {
+            DetectorStatus::Found(evidence) => assert!(evidence.is_empty()),
+            DetectorStatus::NotConfigured => {
+                panic!("a root WAS configured and examined, so this search did happen")
+            }
+            other => panic!("expected Found(empty), got {other:?}"),
+        }
     }
 }
