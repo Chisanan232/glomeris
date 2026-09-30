@@ -81,6 +81,30 @@
 # implied: a regeneration could introduce this defect there and this guard
 # would not catch it.
 #
+# WHO TURNS ERREXIT ON (HORO-1539)
+# --------------------------------
+# The defect needs errexit in effect, and the two bodies scanned differ in who
+# supplies it.
+#
+# A `scripts/*.sh` file's errexit status is its own business, so it has to say
+# so: without the line, the assignment fails, execution carries on, and the
+# check below it runs and reports. Nothing is wrong there.
+#
+# A workflow `run:` block's errexit status belongs to the runner, and GitHub
+# invokes a step's default shell as `bash -e {0}` on Linux and macOS. So a
+# `run:` block with no errexit line of its own is EXACTLY as vulnerable as one
+# with it. This guard used to return 0 on such a block without looking, which
+# left one `ci.yml` block silently unanalysed on a rule GitHub does not impose.
+# Measured when HORO-1539 was filed: forcing every block to be analysed still
+# reported a pass, so nothing in the repository was broken by it. The defect was
+# that the guard would not have said so if something were.
+#
+# Blocks are therefore analysed as errexit-on, EXCEPT where the step's own
+# `shell:` key says otherwise — which is read rather than assumed, because
+# `shell: bash {0}` genuinely does run with errexit off, and `shell: python` is
+# not shell at all and would only manufacture findings if this guard's bash
+# patterns were pointed at it.
+#
 # KNOWN LIMIT
 # -----------
 # A substitution's extent is found by counting parentheses, so a `(` or `)`
@@ -161,6 +185,42 @@ substitution_text() {
       if (depth <= 0) exit
     }
   ' "$1"
+}
+
+# The errexit mode for a workflow `run:` block whose step declared `shell: $1`,
+# with $1 empty when it declared none. Echoes `assume`, `require` or `skip`.
+#
+# Ends in `return 0` on purpose, and not only because it always succeeds: the
+# `case` patterns below contain a bare `|`, which this guard's own second trigger
+# reads as a pipeline that could fail, and a trailing `return 0` is how the rest
+# of this repository states that a function's status is its own.
+shell_mode() {
+  local declared="$1"
+  case "$declared" in
+    "" | bash | sh)
+      # GitHub's default for a `run:` step on Linux and macOS is `bash -e {0}`;
+      # `shell: bash` is `bash --noprofile --norc -eo pipefail {0}` and
+      # `shell: sh` is `sh -e {0}`. All three carry errexit without the body
+      # mentioning it.
+      echo assume
+      ;;
+    python | python3 | pwsh | powershell | cmd | node)
+      # Not shell at all. Pointing bash patterns at one of these is how widening
+      # a rule invents findings instead of finding them.
+      echo skip
+      ;;
+    *)
+      # A custom command template, so read it. `bash {0}` really does run with
+      # errexit off, which is the one case the old blanket rule got right.
+      if [[ "$declared" == *"-o errexit"* ]] \
+        || [[ "$declared" =~ (^|[[:space:]])-[A-Za-z]*e[A-Za-z]*([[:space:]]|$) ]]; then
+        echo assume
+      else
+        echo require
+      fi
+      ;;
+  esac
+  return 0
 }
 
 # Analyse one shell body. $1 = file of shell source, $2 = label for reporting,
@@ -387,7 +447,8 @@ assess() (
 
   # --- workflow run: blocks -------------------------------------------------
 
-  local wf blockfile startline
+  local wf blockfile startline blockshell mode
+  local blocks_skipped=0
   for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
     [[ -f "$wf" ]] || continue
 
@@ -424,32 +485,93 @@ assess() (
     # than a YAML parser so this guard needs nothing installed — the same reason
     # every other check in this directory is shell.
     #
-    # Emits one file per block, plus an index of "file<TAB>first-body-line".
+    # Emits one file per block, plus an index of
+    # "file<TAB>first-body-line<TAB>declared shell".
+    #
+    # The third field is why this is no longer a two-rule awk: the `shell:` key
+    # that governs a block is a sibling of its `run:` key and may sit on either
+    # side of it, so a block's entry cannot be written until its step ends. Keys
+    # of one step share a column, which is the column of `run:` itself and not
+    # the line's indentation — the first key of a step carries the list dash.
     awk -v outdir="$WORK" '
       function indent_of(s) { match(s, /^[ ]*/); return RLENGTH }
-      /^[ ]*(-[ ]+)?run:[ ]*[|>]/ {
-        n++
-        out = outdir "/block-" n ".sh"
-        print out "\t" (NR + 1) > (outdir "/index")
-        inblock = 1
-        blockind = -1
-        next
+      function keycol(s) {
+        if (match(s, /^[ ]*-[ ]+/)) return RLENGTH
+        return indent_of(s)
       }
-      inblock {
-        if ($0 ~ /^[ ]*$/) { print "" > out; next }
-        ci = indent_of($0)
-        if (blockind < 0) { blockind = ci }
-        if (ci < blockind) { inblock = 0 }
-        else { print substr($0, blockind + 1) > out; next }
+      function shellval(s,   v, q) {
+        v = s
+        sub(/^[ ]*(-[ ]+)?shell:[ ]*/, "", v)
+        sub(/[ ]+#.*$/, "", v)
+        q = sprintf("%c%c", 34, 39)
+        gsub("^[" q "]+|[" q "]+$", "", v)
+        sub(/[ ]+$/, "", v)
+        return v
       }
-      { }
+      function flush() {
+        if (curblock != "") {
+          print curblock "\t" curstart "\t" curshell > (outdir "/index")
+          curblock = ""
+        }
+      }
+      BEGIN { pendcol = -1; stepcol = -1 }
+      {
+        if (inblock) {
+          if ($0 ~ /^[ ]*$/) { print "" > out; next }
+          ci = indent_of($0)
+          if (blockind < 0) { blockind = ci }
+          if (ci >= blockind) { print substr($0, blockind + 1) > out; next }
+          inblock = 0
+          close(out)
+        }
+
+        if ($0 ~ /^[ ]*$/) next
+
+        kc = keycol($0)
+        isitem = ($0 ~ /^[ ]*-[ ]/)
+
+        # A shallower key, or a new list item at the same column, ends the step
+        # the pending block belongs to, so its shell can no longer change.
+        if (curblock != "" && (kc < stepcol || (isitem && kc <= stepcol))) flush()
+
+        if (isitem || (pendcol >= 0 && kc < pendcol)) { pendshell = ""; pendcol = -1 }
+
+        if ($0 ~ /^[ ]*(-[ ]+)?shell:/) {
+          if (curblock != "" && kc == stepcol) { curshell = shellval($0) }
+          else { pendshell = shellval($0); pendcol = kc }
+          next
+        }
+
+        if ($0 ~ /^[ ]*(-[ ]+)?run:[ ]*[|>]/) {
+          flush()
+          n++
+          out = outdir "/block-" n ".sh"
+          curblock = out
+          curstart = NR + 1
+          stepcol = kc
+          curshell = (pendcol == kc) ? pendshell : ""
+          pendshell = ""
+          pendcol = -1
+          inblock = 1
+          blockind = -1
+          next
+        }
+      }
+      END { if (inblock) close(out); flush() }
     ' "$wf"
 
     if [[ -f "$WORK/index" ]]; then
-      while IFS=$'\t' read -r blockfile startline; do
+      while IFS=$'\t' read -r blockfile startline blockshell; do
         [[ -f "$blockfile" ]] || continue
+        mode="$(shell_mode "$blockshell")"
+        if [[ "$mode" == "skip" ]]; then
+          blocks_skipped=$((blocks_skipped + 1))
+          echo "note: skipping the run: block at ${wf}:${startline} —" \
+            "shell: ${blockshell} is not shell, so a shell rule has nothing to say about it."
+          continue
+        fi
         blocks_scanned=$((blocks_scanned + 1))
-        analyse "$blockfile" "$wf" "$startline" require
+        analyse "$blockfile" "$wf" "$startline" "$mode"
       done < "$WORK/index"
       rm -f "$WORK/index" "$WORK"/block-*.sh
     fi
