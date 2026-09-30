@@ -317,6 +317,18 @@ impl DetectorOutcome {
     /// and `NotConfigured` are the two outcomes where the pass genuinely does
     /// not know, for the two different reasons a probe can fail to produce
     /// knowledge: it broke, or it was never pointed at anything.
+    ///
+    /// If a sixth outcome is ever added and answers `true` here, the match below
+    /// stops compiling, which is the point — and the branch to add is not only
+    /// this one. The menu-bar panel does not read `discovery_complete`; it reads
+    /// two lists filtered by `status`, one per `true` arm here
+    /// (`DetectReportDto.failedDetectors` and `.notConfiguredDetectors` in
+    /// `GlomerisDtos.swift`), and words them differently because a malfunction
+    /// and an unfilled setting are different news. A sixth `true` arm with no
+    /// list of its own would leave the flag `false` while both lists are empty,
+    /// and the panel would print its all-clear over a search that did not
+    /// finish. Give it a list and its own wording, or prove it belongs in an
+    /// existing one.
     pub fn left_discovery_incomplete(&self) -> bool {
         match self {
             DetectorOutcome::Failed(_) | DetectorOutcome::NotConfigured => true,
