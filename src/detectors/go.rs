@@ -41,6 +41,11 @@ const MODULE_KINDS: &[ResourceKind] = &[ResourceKind::GoModuleCache];
 /// the probe worked perfectly and its answer is "there is no build cache".
 const GOCACHE_DISABLED: &str = "off";
 
+/// The program these detectors run. Named here rather than inline so
+/// [`super::SPAWNED_PROGRAMS`] can be built from the detectors' own
+/// declarations instead of a second list that could drift from them.
+pub(super) const GO_PROGRAM: &str = "go";
+
 /// What one line of `go env` output means.
 #[derive(Debug, PartialEq)]
 enum GoEnvAnswer<'a> {
@@ -69,7 +74,7 @@ fn go_env_cache_root(
     regenerability: Regenerability,
     recoverability: Recoverability,
 ) -> DetectorStatus {
-    match query_tool_single_path("go", &["env", var]) {
+    match query_tool_single_path(GO_PROGRAM, &["env", var]) {
         ToolQuery::Lines(lines) => match interpret_go_env_answer(&lines[0]) {
             GoEnvAnswer::CacheDisabled => DetectorStatus::Found(Vec::new()),
             GoEnvAnswer::Root(root) => cache_root_status(

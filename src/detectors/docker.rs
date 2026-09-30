@@ -50,6 +50,12 @@ pub struct DockerDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::DockerBuildCache];
 
+/// The program this detector and [`super::docker_objects`] run. Named here
+/// rather than inline so [`super::SPAWNED_PROGRAMS`] can be built from the
+/// detectors' own declarations instead of a second list that could drift
+/// from them.
+pub(super) const DOCKER_PROGRAM: &str = "docker";
+
 /// Find the `Type: "Build Cache"` row and extract the string value of
 /// `field_name` (e.g. `"Size"`, `"Reclaimable"`) out of `docker system df
 /// --format '{{json .}}'`'s newline-delimited JSON objects, without
@@ -160,7 +166,7 @@ impl Detector for DockerDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        let output = match Command::new("docker")
+        let output = match Command::new(DOCKER_PROGRAM)
             .args(["system", "df", "--format", "{{json .}}"])
             .output()
         {

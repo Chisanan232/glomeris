@@ -69,7 +69,7 @@ const SOURCE: &str = "docker system df -v --format '{{json .}}'";
 /// [`super::docker::failure_status`] went to the trouble of telling a stopped
 /// daemon, an absent binary and a real error apart.
 fn snapshot() -> Result<Value, DetectorStatus> {
-    let output = match Command::new("docker")
+    let output = match Command::new(super::docker::DOCKER_PROGRAM)
         .args(["system", "df", "-v", "--format", "{{json .}}"])
         .output()
     {

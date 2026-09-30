@@ -522,6 +522,31 @@ pub(crate) const SPAWNING_DETECTORS: &[&str] = &[
 pub(crate) const WORST_CASE_SPAWN_WAIT: Duration =
     Duration::from_secs(PROBE_DEADLINE.as_secs() * SPAWNING_DETECTORS.len() as u64);
 
+/// Every program a discovery pass may run on this machine, in the order a
+/// reader would look them up (HORO-1560).
+///
+/// Not test-only, unlike [`SPAWNING_DETECTORS`]: the honesty of the
+/// `detect`/`explain` safety label rests on *which* foreign programs a
+/// read-only-looking command can start, and the guard test that grounds that
+/// label observes these names on a `PATH` of recording stubs rather than
+/// trusting a sentence. A list a reader cannot reach from outside the crate
+/// could not be checked that way.
+///
+/// Built from the detectors' own declarations rather than retyped, so the
+/// names cannot drift from the call sites. The guard test
+/// `every_spawned_program_is_declared_once_and_listed` closes the other
+/// direction: a new spawn site must name its program through such a constant,
+/// and that constant's value must appear here.
+pub const SPAWNED_PROGRAMS: &[&str] = &[
+    homebrew::BREW_PROGRAM,
+    docker::DOCKER_PROGRAM,
+    go::GO_PROGRAM,
+    node::NPM_PROGRAM,
+    python::PIP_PROGRAM,
+    python::PIP3_PROGRAM,
+    python::UV_PROGRAM,
+];
+
 /// Runs `program args...` and returns stdout's non-empty lines.
 ///
 /// An argument array, never a shell string (HORO-1543 AC 7): there is no
@@ -2192,6 +2217,118 @@ mod single_absolute_path_tests {
         assert_eq!(
             select(&["warning: see /usr/local/share/doc", "/Users/dev/.npm"]),
             ToolQuery::Lines(vec!["/Users/dev/.npm".to_string()])
+        );
+    }
+}
+/// Tests for [`SPAWNED_PROGRAMS`] — which foreign programs a discovery pass
+/// can start on this machine (HORO-1560).
+///
+/// Separate from the probe-deadline guards next door: those bound how long a
+/// spawn may take, and this one bounds *what* may be spawned. The two answer
+/// to different claims — one to responsiveness, one to the honesty of the
+/// safety label on `detect`.
+#[cfg(test)]
+mod spawned_program_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// HORO-1560: every program a discovery pass can start is named at its
+    /// call site through a constant, and every one of those constants is
+    /// listed in [`SPAWNED_PROGRAMS`].
+    ///
+    /// This is what lets the read-only guard test ground the `detect` safety
+    /// label by *observation* — it puts a recording stub on `PATH` under each
+    /// of these names — instead of by a prose claim about which tools run. A
+    /// spawn site that hardcoded its program name would be invisible to that
+    /// stub `PATH`, and the label would go back to being unverified.
+    #[test]
+    fn every_spawned_program_is_declared_once_and_listed() {
+        for program in SPAWNED_PROGRAMS {
+            assert!(
+                !program.is_empty()
+                    && program
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{program:?} is not a bare program name, so the read-only \
+                 guard cannot create a stub file named after it"
+            );
+        }
+        let mut unique: Vec<&str> = SPAWNED_PROGRAMS.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            SPAWNED_PROGRAMS.len(),
+            "SPAWNED_PROGRAMS names the same program twice"
+        );
+
+        // Split so this test's own source contains none of the needles it
+        // searches for.
+        let spawn_needles = [
+            format!("{}{}", "query_tool_", "lines("),
+            format!("{}{}", "query_tool_", "lines_with_deadline("),
+            format!("{}{}", "query_tool_", "single_path("),
+            format!("{}{}", "Command", "::new("),
+        ];
+        let declaration = format!("{}{}", "_PROGRAM: ", "&str = \"");
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut declared: Vec<String> = Vec::new();
+        let mut hardcoded: Vec<String> = Vec::new();
+        let mut sites = 0usize;
+        super::tests::scan_rs_files(&manifest_dir.join("src/detectors"), &mut |path, content| {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let production = match content.split_once("#[cfg(test)]") {
+                Some((before, _)) => before,
+                None => content,
+            };
+            for line in production
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+            {
+                if let Some(value) = line
+                    .split_once(&declaration)
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(value, _)| value.to_string())
+                {
+                    declared.push(value);
+                }
+                for needle in &spawn_needles {
+                    for (at, _) in line.match_indices(needle.as_str()) {
+                        sites += 1;
+                        if line[at + needle.len()..].starts_with('"') {
+                            hardcoded.push(format!("{rel}: {}", line.trim()));
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(
+            sites >= SPAWNED_PROGRAMS.len(),
+            "found only {sites} spawn sites, fewer than the {} programs \
+             SPAWNED_PROGRAMS claims are reachable — the scan is not reading \
+             the source it thinks it is",
+            SPAWNED_PROGRAMS.len()
+        );
+        assert!(
+            hardcoded.is_empty(),
+            "{hardcoded:?} name a spawned program inline. Declare it as a \
+             `*_PROGRAM` constant and list it in SPAWNED_PROGRAMS, or the \
+             read-only guard cannot observe that program running (HORO-1560)"
+        );
+
+        declared.sort();
+        declared.dedup();
+        assert_eq!(
+            declared,
+            unique.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            "the programs declared at detector call sites and the programs \
+             SPAWNED_PROGRAMS lists have diverged"
         );
     }
 }

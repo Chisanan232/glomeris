@@ -49,6 +49,11 @@ pub struct HomebrewDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::HomebrewCache];
 
+/// The program this detector runs. Named here rather than inline so
+/// [`super::SPAWNED_PROGRAMS`] can be built from the detectors' own
+/// declarations instead of a second list that could drift from them.
+pub(super) const BREW_PROGRAM: &str = "brew";
+
 /// Asking Homebrew where its cache is. An argument array, never a shell
 /// string, and a read-only query: `brew --cache` with no formula argument
 /// prints the directory and downloads nothing.
@@ -64,7 +69,7 @@ impl Detector for HomebrewDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        status_for(query_tool_single_path("brew", CACHE_QUERY))
+        status_for(query_tool_single_path(BREW_PROGRAM, CACHE_QUERY))
     }
 }
 

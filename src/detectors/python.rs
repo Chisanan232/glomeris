@@ -40,7 +40,14 @@ const UV_KINDS: &[ResourceKind] = &[ResourceKind::UvCache];
 /// Python 2 era's bare `pip` stopped being installed), so trying only one
 /// name would report an absent ecosystem on a machine that has a populated
 /// pip cache. `ToolAbsent` is reported only when *no* name resolves.
-const PIP_PROGRAMS: &[&str] = &["pip", "pip3"];
+const PIP_PROGRAMS: &[&str] = &[PIP_PROGRAM, PIP3_PROGRAM];
+
+/// The programs these detectors run. Named here rather than inline so
+/// [`super::SPAWNED_PROGRAMS`] can be built from the detectors' own
+/// declarations instead of a second list that could drift from them.
+pub(super) const PIP_PROGRAM: &str = "pip";
+pub(super) const PIP3_PROGRAM: &str = "pip3";
+pub(super) const UV_PROGRAM: &str = "uv";
 
 impl Detector for PipCacheDetector {
     fn id(&self) -> DetectorId {
@@ -105,7 +112,7 @@ impl Detector for UvCacheDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        match query_tool_single_path("uv", &["cache", "dir"]) {
+        match query_tool_single_path(UV_PROGRAM, &["cache", "dir"]) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
                 ResourceKind::UvCache,

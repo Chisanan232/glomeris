@@ -129,6 +129,11 @@ const CACHE_KINDS: &[ResourceKind] = &[ResourceKind::NodePackageManagerCache];
 /// See [`NodePackageManagerCacheDetector`] for the siblings it must not.
 const CACACHE_SUBDIR: &str = "_cacache";
 
+/// The program this detector runs. Named here rather than inline so
+/// [`super::SPAWNED_PROGRAMS`] can be built from the detectors' own
+/// declarations instead of a second list that could drift from them.
+pub(super) const NPM_PROGRAM: &str = "npm";
+
 /// Asking npm where its cache is, without npm writing a log about it
 /// (HORO-1556).
 ///
@@ -160,7 +165,7 @@ impl Detector for NodePackageManagerCacheDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        match query_tool_single_path("npm", NPM_CACHE_QUERY) {
+        match query_tool_single_path(NPM_PROGRAM, NPM_CACHE_QUERY) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
                 ResourceKind::NodePackageManagerCache,
