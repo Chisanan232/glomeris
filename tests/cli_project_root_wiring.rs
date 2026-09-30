@@ -106,6 +106,15 @@ fn project_root_flag_parsed_from_cli_args_makes_real_detectors_find_fixtures() {
 /// the bug HORO-957 fixes: it was structurally impossible to discover a
 /// cargo `target/` or `node_modules/` dir through the shipped CLI no
 /// matter what was actually on disk.
+///
+/// What is asserted is the *word* as well as the outcome, and the word
+/// changed in HORO-1576. Not finding the fixture was always right here;
+/// calling it `ToolAbsent` was not, because neither detector ever asks
+/// whether cargo or node is installed — it only reads directories under
+/// roots it was handed, and it was handed none. `NotConfigured` says that
+/// and nothing more, which is also the one gap of the five a user can
+/// close: the fix for this state is the `--project-root` flag the positive
+/// half above passes.
 #[test]
 fn without_project_root_flag_the_same_fixture_is_not_discovered() {
     let project_root = make_project_root_fixture();
@@ -126,8 +135,8 @@ fn without_project_root_flag_the_same_fixture_is_not_discovered() {
         .expect("cargo_target_dir detector must be registered");
     assert_eq!(
         *cargo_status,
-        DetectorStatus::ToolAbsent,
-        "expected no known_project_roots to leave the cargo detector unable to find anything, \
+        DetectorStatus::NotConfigured,
+        "expected no known_project_roots to leave the cargo detector with nothing to examine, \
          even though a real target/ dir exists on disk at {}",
         project_root.display()
     );
@@ -138,8 +147,8 @@ fn without_project_root_flag_the_same_fixture_is_not_discovered() {
         .expect("node_modules detector must be registered");
     assert_eq!(
         *node_status,
-        DetectorStatus::ToolAbsent,
-        "expected no known_project_roots to leave the node detector unable to find anything, \
+        DetectorStatus::NotConfigured,
+        "expected no known_project_roots to leave the node detector with nothing to examine, \
          even though a real node_modules/ dir exists on disk at {}",
         project_root.display()
     );
