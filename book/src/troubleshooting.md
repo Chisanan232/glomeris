@@ -4,7 +4,7 @@
 
 | Tool | Used by | Purpose | If absent |
 |---|---|---|---|
-| `docker` | `detectors::docker` | `docker system df --format '{{json .}}'` to report build/image cache size | `ToolAbsent` — normal, expected, not an error |
+| `docker` | `detectors::docker` | `docker system df --format '{{json .}}'` to report build/image cache size | `ToolAbsent` — normal, expected, not an error; installed but stopped is `ToolNotRunning` instead |
 | `brew` | `detectors::homebrew` | `brew --cache` to find Homebrew's cache path | `ToolAbsent` — normal, expected |
 | `lsof` | `evidence::correlate::open_files`, `::process` | Find processes with a resource open, or with it as their cwd | That correlation field becomes `Unavailable(ToolAbsent)` for the affected resource; other fields are unaffected |
 | `git` | `evidence::correlate::git` | Determine repo root, dirty/untracked state, worktree-ness | `git_state` becomes `Unavailable(ToolAbsent)` for the affected resource |
@@ -15,23 +15,34 @@
 A missing tool is treated as a **normal, expected state** everywhere in this
 codebase, not an error — every detector's own doc comment says so
 explicitly (e.g. "not every detector's tool is installed on every machine").
-The one nuance: for Docker specifically, a running-but-unreachable daemon
-(e.g. Docker Desktop not started) is *also* folded into `ToolAbsent`, not a
-separate `Failed` state.
+The one nuance: for Docker specifically, an installed-but-unreachable daemon
+(e.g. Docker Desktop not started) is its own status, `ToolNotRunning`
+(HORO-1544), not `ToolAbsent` and not `Failed` — "Docker is not installed" and
+"Docker is installed and stopped" are different facts, and the second one is
+the one you can act on.
 
-Cargo, Node, and Xcode detectors never shell out to `cargo`/`node`/`npm`/
-`xcodebuild` at all — they only check the filesystem (`known_project_roots`
-for a `target`/`node_modules` directory, or
-`~/Library/Developer/Xcode/DerivedData`). Their `ToolAbsent` really means
-"expected resource not present" (no project roots configured, or the
-directory doesn't exist), not "binary missing from PATH."
+Cargo, Node, SwiftPM and Xcode detectors never shell out to
+`cargo`/`node`/`npm`/`swift`/`xcodebuild` at all — they only check the
+filesystem (`known_project_roots` for a `target`/`node_modules`/`.build`
+directory, or `~/Library/Developer/Xcode/DerivedData`). The first three
+therefore cannot report `ToolAbsent` at all (HORO-1576): a detector that never
+asks whether a tool is installed has no grounds to say it is not. With no
+project roots configured they report `NotConfigured`; with roots configured and
+nothing found there, `Found` with no evidence. Xcode's `ToolAbsent` still means
+"the DerivedData directory does not exist", not "binary missing from PATH".
 
-## "Why does `glomeris detect` show `tool_absent` for something I have installed?"
+## "Why does `glomeris detect` show `not_configured` for Cargo/Node/SwiftPM?"
 
-For Cargo/Node, `tool_absent` also appears if no `known_project_roots` were
-configured for the `DiscoveryContext` used — these two detectors never
-search the filesystem on their own; they only check specific roots handed to
-them. Check how the caller (CLI/daemon) constructed the `DiscoveryContext`.
+Because no project root was handed to the `DiscoveryContext` (HORO-1576).
+These three detectors never search the filesystem on their own; they only look
+under roots they are given. On the CLI, pass `--project-root <path>` once per
+project; in the menu-bar app, add folders under Settings › Projects. Until then
+`candidates` is silent about your projects rather than claiming there is nothing
+under them, and `discovery_complete` is `false` to say so.
+
+Before HORO-1576 this state was reported as `tool_absent`, which is why older
+output appeared to claim cargo or node was not installed on a machine where it
+was.
 
 ## "Why did a probe come back `Unavailable(Failed)` instead of `ToolAbsent`?"
 
@@ -42,25 +53,34 @@ succeeding but reporting a path this process can't `canonicalize`. This is
 deliberately never coerced into a safe default; treat it the same as "we
 don't know," not "nothing to clean up."
 
-## "Part of the scan failed — where do I see which detector?"
+## "Part of the scan did not look — where do I see which detector?"
 
-A failed detector and one whose tool is absent both contribute zero
-candidates, so a count alone cannot tell them apart while they mean opposite
-things: "we don't know what is there" versus "there is nothing there." Every
-surface therefore reports the outcome and not just the count.
+A detector that failed, one whose tool is absent and one that was handed
+nothing to examine all contribute zero candidates, so a count alone cannot
+tell them apart while they mean different things: "we don't know what is
+there", "there is nothing there", and "nobody looked". Every surface therefore
+reports the outcome and not just the count.
 
-| Surface | Where a failure appears |
+| Surface | Where a gap appears |
 |---|---|
-| `glomeris detect` | With no candidates at all, the line reads `no candidates discovered by the detectors that succeeded — N failed, so this is not a clean bill of health` rather than the bare `no candidates discovered` |
-| `glomeris detect --json` | A `detectors` array — one entry per detector, in registration order, with `status` (`found`/`tool_absent`/`failed`), `candidates_found`, and a `reason` present only on `failed` — plus a derived `discovery_complete` |
+| `glomeris detect` | With no candidates at all, the line reads `no candidates discovered by the detectors that looked — N failed and M had nothing configured to look at, so this is not a clean bill of health` rather than the bare `no candidates discovered`. Each clause is printed only when it has a count, so the sentence never says "0 failed" |
+| `glomeris detect --json` | A `detectors` array — one entry per detector, in registration order, with `status` (`found`/`tool_absent`/`tool_not_running`/`not_configured`/`failed`), `candidates_found`, and a `reason` present only on `failed` — plus a derived `discovery_complete` |
 | `glomeris detect --progress-json` | Each `detector_finished` event carries `outcome`, and `reason` when it failed |
-| `glomeris free`, `glomeris emergency` | A `discovery incomplete: N detector(s) failed` block naming each one; if the run stopped at `SafeExhausted`, it also says in so many words that this is not a finding that nothing safe is left |
-| Menu-bar app | "Nothing found where Glomeris could look" in place of the all-clear, or "This list may be incomplete" below a non-empty list — either way naming the checks that did not finish |
+| `glomeris free`, `glomeris emergency` | A `discovery incomplete: N detector(s) failed` block naming each one, and a separate `not examined: M detector(s) had nothing configured to look at` block naming those; if the run stopped at `SafeExhausted`, it also says in so many words that this is not a finding that nothing safe is left |
+| Menu-bar app | "Nothing found where Glomeris could look" in place of the all-clear, or "This list may be incomplete" below a non-empty list, when something failed. When the only gap is configuration it says "Nothing found where Glomeris was told to look" / "This list does not cover your projects" instead, and points at Settings › Projects — either way naming the checks concerned |
 
-An absent tool appears as `tool_absent` and does **not** make
-`discovery_complete` false. That is a real answer, not a missing one, and
-flagging it would make the caveat permanent on any machine without Docker —
-which is the fastest way to teach people to ignore it.
+The two gaps are always reported as two, never summed into one "N incomplete"
+count (HORO-1576). On a default installation the three project-scoped detectors
+are `not_configured` and nothing has failed, so a combined count would tell
+every new user that three checks broke and send them looking for a defect in
+Glomeris instead of for a setting.
+
+An absent tool appears as `tool_absent`, a stopped daemon as
+`tool_not_running`, and neither makes `discovery_complete` false. Those are
+real answers, not missing ones, and flagging them would make the caveat
+permanent on any machine without Docker — which is the fastest way to teach
+people to ignore it. `not_configured` and `failed` do make it false, because in
+both cases nothing was observed.
 
 ## "The menu-bar app says the `glomeris` CLI was not found, but I installed it"
 

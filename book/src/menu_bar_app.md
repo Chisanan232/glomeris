@@ -79,24 +79,35 @@ loop for candidates — `detect` runs only when you explicitly tap Refresh,
 streaming live per-detector progress via `--progress-json` while it works
 (button label switches to "Scanning…").
 
-Five states that are easy to conflate are kept distinct, because each is
+Six states that are easy to conflate are kept distinct, because each is
 a different claim about your disk:
 
 | State | What it says |
 |---|---|
 | "No scan yet" | Nothing has been looked at. **Not** a clean bill of health. |
 | "Nothing worth reclaiming" | Scanned, and there is genuinely nothing — good news. |
+| "Nothing found where Glomeris was told to look" | Scanned, found nothing, and part of the search was never pointed at anything. Names those checks and tells you to add a folder under Settings › Projects. Nothing malfunctioned. |
 | "Nothing found where Glomeris could look" | Scanned, found nothing, but part of the search never answered — so whatever is there is unknown rather than absent. Names which checks did not finish. |
 | "No candidates match this filter" | Things were found; you are just not looking at them. |
 | A scan failure | Says what failed. An empty list is never shown in its place. |
 
-The third state also has a non-empty counterpart (HORO-1484): when a detector
-fails but others still found candidates, the rows are shown as normal with
-"This list may be incomplete" added **below** them. The rows are real and stay
-on screen; what they may not do is look like the whole account. A detector
-whose tool is simply not installed is not a failure and produces neither
-message — `docker` being absent is normal, `brew` being asked and failing is
-not.
+The third and fourth states both have a non-empty counterpart (HORO-1484,
+HORO-1576): when part of the search produced no knowledge but others still
+found candidates, the rows are shown as normal with "This list does not cover
+your projects" (configuration gap) or "This list may be incomplete" (failure)
+added **below** them. The rows are real and stay on screen; what they may not
+do is look like the whole account.
+
+The two gaps are deliberately worded apart, and the configuration one never
+borrows the failure's wording or its question-mark glyph. On a machine where no
+project folder has been added yet — which is every machine on first launch —
+three checks are in that state and none of them is broken; telling you three
+checks "did not finish" would send you hunting for a defect in Glomeris instead
+of into Settings. When both apply at once, both sentences are shown.
+
+A detector whose tool is simply not installed, or whose daemon is merely
+stopped, is not a gap at all and produces neither message — `docker` being
+absent or not running is normal, `brew` being asked and failing is not.
 
 Each row shows the candidate's kind, what cleaning it would free, and its
 safety verdict in words. Tapping a row opens its detail view — there is no

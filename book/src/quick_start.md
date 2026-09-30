@@ -24,10 +24,20 @@ glomeris detect
 ```
 
 Runs every built-in detector (Xcode DerivedData, Homebrew cache, Cargo target
-dirs, `node_modules`, Docker build cache) once and prints one line per
-detector: `found (<N> evidence)`, `tool_absent`, or `failed: <reason>`.
-`tool_absent` is a normal, expected state — it means that tool isn't
-installed or has no cache yet, not an error.
+dirs, `node_modules`, SwiftPM `.build` dirs, Docker build cache) once and
+prints one line per detector: `found (<N> evidence)`, `tool_absent`,
+`tool_not_running`, `not_configured (nothing to look at)`, or
+`failed: <reason>`. `tool_absent` is a normal, expected state — it means that
+tool isn't installed or has no cache yet, not an error.
+
+`not_configured` is normal on a first run and is the one state you can close
+yourself: the Cargo, `node_modules` and SwiftPM detectors only look under
+project directories you name, so pass `--project-root <path>` once per project
+to include them.
+
+```sh
+glomeris detect --project-root ~/dev/myproject
+```
 
 ## Scan a directory for the largest entries
 
