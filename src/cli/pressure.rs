@@ -35,6 +35,7 @@ use crate::monitor::fs_stat::FsUsage;
 use crate::monitor::ThresholdConfig;
 use crate::reporting::dto::{PressureEpisodeReport, PressureRejectionReport, PressureStatusReport};
 use crate::reporting::human_bytes;
+use crate::reporting::used_percent::used_percent_text;
 use crate::settings::RecoverySettings;
 
 use super::build_status_report;
@@ -123,8 +124,10 @@ pub fn build_pressure_rejection_report(rejection: &EpisodeRejection) -> Pressure
 pub fn describe_pressure_status(report: &PressureStatusReport) -> Vec<String> {
     let mut lines = vec![
         format!(
-            "disk usage:        {:.1}% used ({} free of {})",
-            report.current.used_percent, report.current.free_human, report.current.total_human
+            "disk usage:        {} ({} free of {})",
+            used_percent_text(report.current.used_percent),
+            report.current.free_human,
+            report.current.total_human
         ),
         format!(
             "notify me at:      {} disk usage",

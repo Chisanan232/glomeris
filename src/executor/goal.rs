@@ -25,6 +25,7 @@
 
 use crate::executor::recovery_loop::FreeTarget;
 use crate::monitor::fs_stat::FsUsage;
+use crate::reporting::used_percent::used_percent_text;
 use std::fmt;
 
 /// A recovery goal, always expressed as **target disk usage percentage** —
@@ -73,7 +74,8 @@ impl fmt::Display for GoalRejection {
                 current_used_percent,
             } => write!(
                 f,
-                "recovery goal {goal_used_percent}% used is not an improvement on the current {current_used_percent:.1}% used: choose a goal below current usage"
+                "recovery goal {goal_used_percent}% used is not an improvement on the current {}: choose a goal below current usage",
+                used_percent_text(*current_used_percent)
             ),
         }
     }

@@ -57,6 +57,7 @@ use crate::reporting::dto::{
 use crate::reporting::impact::ImpactContext;
 use crate::reporting::policy_label::label_for;
 use crate::reporting::ranking;
+use crate::reporting::used_percent::used_percent_figure;
 use crate::workspace::history::{GitCliWorktreeCensus, StoreState, WorkspaceObservation};
 use crate::workspace::{
     group_families, GitCliBranchProbe, MachineContext, WorkspaceEvidenceGraph, WorkspaceFamily,
@@ -1522,8 +1523,8 @@ pub fn print_action_list_report(report: &ActionListReport) {
 pub fn print_status_report(report: &StatusReport) {
     println!("disk pressure state: {}", report.pressure_state);
     println!(
-        "used: {:.1}%   free: {} ({} bytes)   total: {} ({} bytes)",
-        report.used_percent,
+        "used: {}   free: {} ({} bytes)   total: {} ({} bytes)",
+        used_percent_figure(report.used_percent),
         report.free_human,
         report.free_bytes,
         report.total_human,

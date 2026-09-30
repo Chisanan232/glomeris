@@ -36,6 +36,7 @@ use crate::reporting::dto::{
     RecoveryRemainingReport, RecoveryRunReport,
 };
 use crate::reporting::human_bytes;
+use crate::reporting::used_percent::used_percent_text;
 
 /// The sentence every estimate-bearing surface carries. One producer, so the
 /// CLI, the JSON and the GUI cannot soften it differently.
@@ -493,8 +494,10 @@ impl<W: Write> RecoveryObserver for NdjsonProgressObserver<W> {
 pub fn print_recovery_preview_report(report: &RecoveryPreviewReport) {
     println!("recovery goal:          {}", report.goal.description);
     println!(
-        "current usage:          {:.1}% used ({} free of {})",
-        report.current.used_percent, report.current.free_human, report.current.total_human
+        "current usage:          {} ({} free of {})",
+        used_percent_text(report.current.used_percent),
+        report.current.free_human,
+        report.current.total_human
     );
     println!("pressure state:         {}", report.current.pressure_state);
     println!(
