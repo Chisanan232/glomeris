@@ -64,8 +64,13 @@ pub enum DetectorStatus {
     Failed(String),
 }
 
-/// An environment variable that relocates one tool's home directory, and so
-/// decides where that tool's cache actually lives.
+/// An environment variable through which a tool says where it keeps its
+/// files, and so decides where that tool's cache actually lives.
+///
+/// Some of these name a tool's home directory (`CARGO_HOME`) and some name a
+/// cache directory outright (`HOMEBREW_CACHE`); what they have in common is
+/// that the tool documents them, so reading one is an answer about this
+/// machine and not a guess.
 ///
 /// Carried on [`DiscoveryContext`] rather than read with `std::env::var`
 /// inside a `discover()` call. An env-var back-channel makes a detector
@@ -76,20 +81,20 @@ pub enum DetectorStatus {
 /// whose `$HOME` was an empty temporary directory (HORO-1543). Cargo sets
 /// `CARGO_HOME` in every process it spawns, so `cargo test` guarantees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolHomeVar {
+pub enum ToolEnvVar {
     CargoHome,
     GradleUserHome,
 }
 
-impl ToolHomeVar {
+impl ToolEnvVar {
     /// Declaration order is the iteration order of
     /// [`DiscoveryContext::from_process_env`].
-    pub const ALL: [ToolHomeVar; 2] = [ToolHomeVar::CargoHome, ToolHomeVar::GradleUserHome];
+    pub const ALL: [ToolEnvVar; 2] = [ToolEnvVar::CargoHome, ToolEnvVar::GradleUserHome];
 
     pub fn name(self) -> &'static str {
         match self {
-            ToolHomeVar::CargoHome => "CARGO_HOME",
-            ToolHomeVar::GradleUserHome => "GRADLE_USER_HOME",
+            ToolEnvVar::CargoHome => "CARGO_HOME",
+            ToolEnvVar::GradleUserHome => "GRADLE_USER_HOME",
         }
     }
 }
@@ -104,13 +109,13 @@ pub struct DiscoveryContext {
     pub known_project_roots: Vec<PathBuf>,
     /// Tool-home overrides, as captured at the process boundary. Empty
     /// unless a caller supplied them, which is what makes
-    /// [`DiscoveryContext::new`] hermetic — see [`ToolHomeVar`].
-    tool_homes: Vec<(ToolHomeVar, String)>,
+    /// [`DiscoveryContext::new`] hermetic — see [`ToolEnvVar`].
+    tool_env_vars: Vec<(ToolEnvVar, String)>,
 }
 
 impl DiscoveryContext {
     /// A context that knows nothing about the process environment: every
-    /// [`ToolHomeVar`] reads as unset, so a detector resolves its tool home
+    /// [`ToolEnvVar`] reads as unset, so a detector resolves its tool home
     /// from `home_dir` alone.
     ///
     /// This is the hermetic constructor, and the default on purpose. A
@@ -121,17 +126,17 @@ impl DiscoveryContext {
         Self {
             home_dir: home_dir.into(),
             known_project_roots: Vec::new(),
-            tool_homes: Vec::new(),
+            tool_env_vars: Vec::new(),
         }
     }
 
-    /// `new`, plus every [`ToolHomeVar`] this process actually has set. The
+    /// `new`, plus every [`ToolEnvVar`] this process actually has set. The
     /// constructor production code uses.
     pub fn from_process_env(home_dir: impl Into<PathBuf>) -> Self {
         let mut ctx = Self::new(home_dir);
-        for var in ToolHomeVar::ALL {
+        for var in ToolEnvVar::ALL {
             if let Ok(value) = std::env::var(var.name()) {
-                ctx.tool_homes.push((var, value));
+                ctx.tool_env_vars.push((var, value));
             }
         }
         ctx
@@ -145,16 +150,16 @@ impl DiscoveryContext {
     /// Sets one tool home explicitly, for tests that need to exercise the
     /// override branch without touching the process environment
     /// (`std::env::set_var` is unsound in Rust's threaded test harness).
-    pub fn with_tool_home(mut self, var: ToolHomeVar, value: impl Into<String>) -> Self {
-        self.tool_homes.retain(|(existing, _)| *existing != var);
-        self.tool_homes.push((var, value.into()));
+    pub fn with_tool_env(mut self, var: ToolEnvVar, value: impl Into<String>) -> Self {
+        self.tool_env_vars.retain(|(existing, _)| *existing != var);
+        self.tool_env_vars.push((var, value.into()));
         self
     }
 
-    /// The override for `var`, or `None` when it is unset. `None` means
+    /// What `var` is set to, or `None` when it is unset. `None` means
     /// "nothing said otherwise", never "the tool is absent".
-    pub fn tool_home(&self, var: ToolHomeVar) -> Option<&str> {
-        self.tool_homes
+    pub fn tool_env(&self, var: ToolEnvVar) -> Option<&str> {
+        self.tool_env_vars
             .iter()
             .find(|(existing, _)| *existing == var)
             .map(|(_, value)| value.as_str())
@@ -1406,7 +1411,7 @@ mod tests {
     /// spawns, an integration test that carefully pointed `$HOME` at an
     /// empty temporary directory still measured the developer's real
     /// `~/.cargo/registry`. The env-var back-channel is the defect;
-    /// [`ToolHomeVar`] plus [`DiscoveryContext::from_process_env`] is the
+    /// [`ToolEnvVar`] plus [`DiscoveryContext::from_process_env`] is the
     /// fix, and this test is what stops the back-channel coming back.
     ///
     /// Same lightweight source-text technique as the guard above, and the
@@ -1462,7 +1467,7 @@ mod tests {
             "detector production code must not read the process environment: \
              {offenders:?} — a detector that does answers from the host machine \
              even under a fixture DiscoveryContext. Carry the variable on \
-             DiscoveryContext as a ToolHomeVar instead (HORO-1543)"
+             DiscoveryContext as a ToolEnvVar instead (HORO-1543)"
         );
 
         // The other half: every production DiscoveryContext must be built
