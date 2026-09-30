@@ -6,12 +6,17 @@
 //! different owning tools — so folding them together would make one tool's
 //! absence look like the whole Python ecosystem's absence.
 //!
-//! Both locations come from the tool itself (`pip cache dir`, `uv cache
-//! dir`) rather than from a hardcoded `~/.cache/...` guess: pip's cache
-//! moves with `PIP_CACHE_DIR`, `XDG_CACHE_HOME` and the platform, uv's with
-//! `UV_CACHE_DIR`, and a guess that is wrong either reports nothing while
-//! gigabytes sit elsewhere, or names a directory belonging to something
-//! else entirely.
+//! Neither location is a hardcoded `~/.cache/...` guess: pip's cache moves
+//! with `PIP_CACHE_DIR` and the platform, uv's with `UV_CACHE_DIR`, and a
+//! guess that is wrong either reports nothing while gigabytes sit elsewhere,
+//! or names a directory belonging to something else entirely.
+//!
+//! What is *not* a guess is the tool's own documented configuration, and
+//! consulting that costs no subprocess (HORO-1560 AC 2): each detector reads
+//! the variable its tool documents, falls back to the location its tool
+//! documents as the default, and only asks the tool when neither of those
+//! names a directory that is there. See [`super::documented_cache_root`] for
+//! why an absent directory is not an answer.
 //!
 //! Adding Poetry or PDM later means adding a detector beside these two,
 //! each asking its own tool where its own cache is. Nothing in this module
@@ -19,13 +24,13 @@
 //! (HORO-1543: "architecture should permit future Poetry/PDM integration
 //! without hardcoded path deletion").
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::evidence::{Recoverability, Regenerability, ResourceKind};
 
 use super::{
-    cache_root_status, query_tool_single_path, Detector, DetectorId, DetectorStatus,
-    DiscoveryContext, RootAbsence, ToolQuery,
+    cache_root_status, documented_cache_root, query_tool_single_path, user_caches_dir, CacheRoute,
+    Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence, ToolEnvVar, ToolQuery,
 };
 
 pub struct PipCacheDetector;
@@ -49,6 +54,33 @@ pub(super) const PIP_PROGRAM: &str = "pip";
 pub(super) const PIP3_PROGRAM: &str = "pip3";
 pub(super) const UV_PROGRAM: &str = "uv";
 
+/// Where pip's own documented configuration puts its cache, when that
+/// answers without running pip.
+///
+/// `PIP_CACHE_DIR` first, then the documented default. On macOS that default
+/// is `~/Library/Caches/pip`, the platform's own cache directory — pip does
+/// *not* honour `XDG_CACHE_HOME` here, which was checked against the
+/// installed pip rather than inferred from pip's behaviour on Linux, where it
+/// does.
+fn pip_documented_cache_root(ctx: &DiscoveryContext) -> Option<(PathBuf, CacheRoute)> {
+    documented_cache_root(
+        ctx,
+        ToolEnvVar::PipCacheDir,
+        user_caches_dir(&ctx.home_dir).map(|caches| caches.join("pip")),
+    )
+}
+
+/// What a cache root reached without running the tool means when it turns out
+/// not to be there after all.
+///
+/// [`documented_cache_root`] only answers for a directory that exists, so this
+/// is reached only if the directory disappears between that check and the
+/// probe — a real race on a cache a tool is free to clear at any moment.
+/// Nothing here ran the tool, so nothing here is entitled to say whether the
+/// tool is installed: [`RootAbsence::InferredUnderSharedParent`] is the
+/// variant that makes no claim about it (HORO-1575).
+const DOCUMENTED_ROUTE_ABSENCE: RootAbsence = RootAbsence::InferredUnderSharedParent;
+
 impl Detector for PipCacheDetector {
     fn id(&self) -> DetectorId {
         DetectorId("pip_cache")
@@ -58,7 +90,19 @@ impl Detector for PipCacheDetector {
         PIP_KINDS
     }
 
-    fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+    fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        if let Some((root, route)) = pip_documented_cache_root(ctx) {
+            return cache_root_status(
+                self.id(),
+                ResourceKind::PipCache,
+                &root,
+                Regenerability::RegenerableByTool,
+                Recoverability::RegenerableByTool,
+                &route.provenance("pip's cache"),
+                DOCUMENTED_ROUTE_ABSENCE,
+            );
+        }
+
         let mut last_failure: Option<String> = None;
 
         for program in PIP_PROGRAMS {
@@ -204,6 +248,100 @@ mod tests {
         assert_eq!(status, DetectorStatus::Found(Vec::new()));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1560 AC 2 for pip, end to end through `discover`: a cache sitting
+    /// at the documented default location is measured, and the evidence says
+    /// so — no `pip` was run to find it. Asserted through `discover` rather
+    /// than through the resolver alone, because "no child process is spawned"
+    /// is a property of the whole call, not of one helper.
+    ///
+    /// macOS only: [`user_caches_dir`] declines to invent a default location
+    /// on a platform where it does not know pip's, and this fixture is that
+    /// location.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pips_documented_default_location_is_measured_without_running_pip() {
+        let home = crate::detectors::test_support::make_temp_dir("pip-documented-home");
+        let cache = home.join("Library/Caches/pip");
+        std::fs::create_dir_all(cache.join("wheels")).unwrap();
+        std::fs::write(cache.join("wheels/some_pkg.whl"), vec![0u8; 4_096]).unwrap();
+
+        match PipCacheDetector.discover(&DiscoveryContext::new(&home)) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(evidence.len(), 1);
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(4_096)
+                );
+                assert!(
+                    ev.sources
+                        .iter()
+                        .any(|s| s.contains("the tool was not run")),
+                    "the evidence must record that no tool was asked: {:?}",
+                    ev.sources
+                );
+                assert!(
+                    !ev.sources.iter().any(|s| s.contains("cache dir")),
+                    "nothing may claim `pip cache dir` reported this: {:?}",
+                    ev.sources
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `PIP_CACHE_DIR` outranks the default location, and the evidence names
+    /// the variable that answered.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pip_cache_dir_outranks_the_default_location() {
+        let home = crate::detectors::test_support::make_temp_dir("pip-relocated-home");
+        let decoy = home.join("Library/Caches/pip");
+        std::fs::create_dir_all(&decoy).unwrap();
+        std::fs::write(decoy.join("decoy.whl"), vec![0u8; 8_192]).unwrap();
+        let relocated = home.join("elsewhere");
+        std::fs::create_dir_all(&relocated).unwrap();
+        std::fs::write(relocated.join("real.whl"), vec![0u8; 1_024]).unwrap();
+
+        let ctx = DiscoveryContext::new(&home)
+            .with_tool_env(ToolEnvVar::PipCacheDir, relocated.to_str().unwrap());
+
+        match PipCacheDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => {
+                let ev = &evidence[0];
+                assert_eq!(
+                    ev.logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(1_024),
+                    "the relocated cache, not the stale default one"
+                );
+                assert!(
+                    ev.sources.iter().any(|s| s.contains("PIP_CACHE_DIR")),
+                    "{:?}",
+                    ev.sources
+                );
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// The anti-vacuity half of the two above: with nothing at either
+    /// documented location, the documented route declines to answer, so the
+    /// detector still falls through to asking pip. Removing the
+    /// existence check in [`documented_cache_root`] would make this return
+    /// `Some` for a directory that is not there.
+    #[test]
+    fn an_empty_home_leaves_the_documented_route_with_no_answer() {
+        let home = crate::detectors::test_support::make_temp_dir("pip-empty-home");
+
+        assert!(pip_documented_cache_root(&DiscoveryContext::new(&home)).is_none());
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A relative answer is refused rather than resolved against whatever
