@@ -103,7 +103,11 @@
 # `shell:` key says otherwise — which is read rather than assumed, because
 # `shell: bash {0}` genuinely does run with errexit off, and `shell: python` is
 # not shell at all and would only manufacture findings if this guard's bash
-# patterns were pointed at it.
+# patterns were pointed at it. A workflow that sets `defaults.run.shell` is
+# refused rather than guessed about: resolving a workflow-level default against a
+# job-level one is not implemented here, and quietly applying the step-level
+# answer to a file that overrides it is the same class of silent miss one layer
+# up.
 #
 # KNOWN LIMIT
 # -----------
@@ -447,7 +451,7 @@ assess() (
 
   # --- workflow run: blocks -------------------------------------------------
 
-  local wf blockfile startline blockshell mode
+  local wf blockfile startline blockshell mode defaults_shell
   local blocks_skipped=0
   for wf in "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml; do
     [[ -f "$wf" ]] || continue
@@ -476,6 +480,36 @@ assess() (
             END { exit !found }' "$wf"; then
       echo "note: skipping ${wf} — generated; its generator owns its shell."
       continue
+    fi
+
+    # `defaults.run.shell` overrides the step-level `shell:` key resolved below,
+    # and resolving a workflow-level default against a job-level one is not
+    # implemented here. Refusing is the honest outcome: quietly applying the
+    # step-level answer to a file that overrides it is the same class of silent
+    # miss HORO-1539 is about, one layer up.
+    defaults_shell="$(awk '
+      function keycol(s) {
+        if (match(s, /^[ ]*-[ ]+/)) return RLENGTH
+        match(s, /^[ ]*/)
+        return RLENGTH
+      }
+      $0 ~ /^[ ]*$/ { next }
+      inside {
+        if (keycol($0) <= defcol) { inside = 0 }
+        else if ($0 ~ /^[ ]*shell:/) { print; exit }
+      }
+      !inside && $0 ~ /^[ ]*defaults:[ ]*$/ { inside = 1; defcol = keycol($0) }
+    ' "$wf" || true)"
+    if [[ -n "$defaults_shell" ]]; then
+      echo ""
+      echo "FAIL: ${wf} sets a shell under 'defaults:'."
+      echo "    ${defaults_shell#"${defaults_shell%%[![:space:]]*}"}"
+      echo ""
+      echo "That overrides the step-level 'shell:' key this guard reads, and resolving a"
+      echo "workflow-level default against a job-level one is not implemented here. This"
+      echo "guard will not guess which shell a block ran under. Teach it that shape, or"
+      echo "put the setting on the steps that need it."
+      return 1
     fi
 
     files_scanned=$((files_scanned + 1))
