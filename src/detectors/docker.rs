@@ -50,6 +50,12 @@ pub struct DockerDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::DockerBuildCache];
 
+/// The program this detector and [`super::docker_objects`] run. Named here
+/// rather than inline so [`super::SPAWNED_PROGRAMS`] can be built from the
+/// detectors' own declarations instead of a second list that could drift
+/// from them.
+pub(super) const DOCKER_PROGRAM: &str = "docker";
+
 /// Find the `Type: "Build Cache"` row and extract the string value of
 /// `field_name` (e.g. `"Size"`, `"Reclaimable"`) out of `docker system df
 /// --format '{{json .}}'`'s newline-delimited JSON objects, without
@@ -160,7 +166,17 @@ impl Detector for DockerDetector {
     }
 
     fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
-        let output = match Command::new("docker")
+        // Why Docker has to be asked (HORO-1560 AC 3): there is no documented
+        // path route to prefer here, and adding one would be dishonest. Docker's
+        // build cache lives inside the daemon's storage driver — on macOS inside
+        // a VM disk image whose file size is the image's allocation, not the
+        // cache's — so no directory on this host has a size that means what this
+        // detector reports. Only the daemon can total it.
+        //
+        // What Docker does when asked: `docker system df` asks the daemon for
+        // its own usage totals and prints them. It reports; `docker system
+        // prune` is what deletes, and nothing here is near it.
+        let output = match Command::new(DOCKER_PROGRAM)
             .args(["system", "df", "--format", "{{json .}}"])
             .output()
         {

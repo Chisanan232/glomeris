@@ -2,13 +2,18 @@ glomeris detect — Find reclaimable candidates and how each is classified.
 
 usage: glomeris detect [--project-root <path>]... [--json] [--progress-json]
 
-Read-only — changes nothing.
+Read-only, and runs installed build tools to locate their caches.
 
 Runs every detector, correlates the evidence each one produces, and prints the
 candidates with their policy classification and size estimate. Deletes nothing
-and sends nothing anywhere. A candidate's size is not a safety judgement: a
-large AUTO_SAFE cache is an opportunity, and a small PROTECTED resource is
-still protected.
+of yours and sends nothing anywhere. To find where an ecosystem keeps its
+cache it first reads that tool's documented environment variable and
+documented default location; where neither answers, it runs the tool to ask. A
+tool run this way may maintain its own state — a version manager fronting it
+may provision a toolchain on first use — so this command is not the same
+promise as `status`, which runs nothing. A candidate's size is not a safety
+judgement: a large AUTO_SAFE cache is an opportunity, and a small PROTECTED
+resource is still protected.
 
 Options
   --project-root <path>

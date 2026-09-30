@@ -64,8 +64,13 @@ pub enum DetectorStatus {
     Failed(String),
 }
 
-/// An environment variable that relocates one tool's home directory, and so
-/// decides where that tool's cache actually lives.
+/// An environment variable through which a tool says where it keeps its
+/// files, and so decides where that tool's cache actually lives.
+///
+/// Some of these name a tool's home directory (`CARGO_HOME`) and some name a
+/// cache directory outright (`HOMEBREW_CACHE`); what they have in common is
+/// that the tool documents them, so reading one is an answer about this
+/// machine and not a guess.
 ///
 /// Carried on [`DiscoveryContext`] rather than read with `std::env::var`
 /// inside a `discover()` call. An env-var back-channel makes a detector
@@ -76,21 +81,70 @@ pub enum DetectorStatus {
 /// whose `$HOME` was an empty temporary directory (HORO-1543). Cargo sets
 /// `CARGO_HOME` in every process it spawns, so `cargo test` guarantees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolHomeVar {
+pub enum ToolEnvVar {
     CargoHome,
     GradleUserHome,
+    NpmCache,
+    GoCache,
+    GoModCache,
+    GoPath,
+    PipCacheDir,
+    UvCacheDir,
+    /// Not one tool's variable: `uv` documents XDG cache semantics on every
+    /// platform including macOS, so `XDG_CACHE_HOME` relocates `uv`'s cache
+    /// to `$XDG_CACHE_HOME/uv` — verified against the installed `uv` rather
+    /// than assumed, because the neighbouring tools here do *not* honour it.
+    XdgCacheHome,
+    HomebrewCache,
 }
 
-impl ToolHomeVar {
+impl ToolEnvVar {
     /// Declaration order is the iteration order of
     /// [`DiscoveryContext::from_process_env`].
-    pub const ALL: [ToolHomeVar; 2] = [ToolHomeVar::CargoHome, ToolHomeVar::GradleUserHome];
+    pub const ALL: [ToolEnvVar; 10] = [
+        ToolEnvVar::CargoHome,
+        ToolEnvVar::GradleUserHome,
+        ToolEnvVar::NpmCache,
+        ToolEnvVar::GoCache,
+        ToolEnvVar::GoModCache,
+        ToolEnvVar::GoPath,
+        ToolEnvVar::PipCacheDir,
+        ToolEnvVar::UvCacheDir,
+        ToolEnvVar::XdgCacheHome,
+        ToolEnvVar::HomebrewCache,
+    ];
 
-    pub fn name(self) -> &'static str {
+    /// Every spelling the tool documents for this variable, canonical first.
+    ///
+    /// Usually one. `npm` is the exception that makes this a slice: its
+    /// configuration variables are documented in the lowercase
+    /// `npm_config_*` form, and npm also reads the uppercased form, so
+    /// `npm_config_cache` and `NPM_CONFIG_CACHE` both relocate the cache —
+    /// both were confirmed against the installed `npm`. Consulting only one
+    /// of them would leave the other invisible, and reporting the documented
+    /// default path while npm is using a directory the other spelling named
+    /// is exactly the kind of confident wrong answer this route exists to
+    /// avoid.
+    pub fn names(self) -> &'static [&'static str] {
         match self {
-            ToolHomeVar::CargoHome => "CARGO_HOME",
-            ToolHomeVar::GradleUserHome => "GRADLE_USER_HOME",
+            ToolEnvVar::CargoHome => &["CARGO_HOME"],
+            ToolEnvVar::GradleUserHome => &["GRADLE_USER_HOME"],
+            ToolEnvVar::NpmCache => &["NPM_CONFIG_CACHE", "npm_config_cache"],
+            ToolEnvVar::GoCache => &["GOCACHE"],
+            ToolEnvVar::GoModCache => &["GOMODCACHE"],
+            ToolEnvVar::GoPath => &["GOPATH"],
+            ToolEnvVar::PipCacheDir => &["PIP_CACHE_DIR"],
+            ToolEnvVar::UvCacheDir => &["UV_CACHE_DIR"],
+            ToolEnvVar::XdgCacheHome => &["XDG_CACHE_HOME"],
+            ToolEnvVar::HomebrewCache => &["HOMEBREW_CACHE"],
         }
+    }
+
+    /// The canonical spelling, for messages. Never used to *read* the
+    /// environment — [`DiscoveryContext::from_process_env`] reads every
+    /// spelling in [`ToolEnvVar::names`].
+    pub fn name(self) -> &'static str {
+        self.names()[0]
     }
 }
 
@@ -102,15 +156,21 @@ pub struct DiscoveryContext {
     /// detectors that need this do nothing when it's empty rather than
     /// guessing at project locations.
     pub known_project_roots: Vec<PathBuf>,
-    /// Tool-home overrides, as captured at the process boundary. Empty
-    /// unless a caller supplied them, which is what makes
-    /// [`DiscoveryContext::new`] hermetic — see [`ToolHomeVar`].
-    tool_homes: Vec<(ToolHomeVar, String)>,
+    /// What the tools' own variables say, as captured at the process
+    /// boundary: the variable, the spelling that was set, and its value.
+    /// Empty unless a caller supplied them, which is what makes
+    /// [`DiscoveryContext::new`] hermetic — see [`ToolEnvVar`].
+    ///
+    /// Keyed by (variable, spelling) rather than by variable, because two
+    /// documented spellings of the same variable can both be set and
+    /// disagree, and collapsing them here would hide that from
+    /// [`DiscoveryContext::tool_env`].
+    tool_env_vars: Vec<(ToolEnvVar, &'static str, String)>,
 }
 
 impl DiscoveryContext {
     /// A context that knows nothing about the process environment: every
-    /// [`ToolHomeVar`] reads as unset, so a detector resolves its tool home
+    /// [`ToolEnvVar`] reads as unset, so a detector resolves its tool home
     /// from `home_dir` alone.
     ///
     /// This is the hermetic constructor, and the default on purpose. A
@@ -121,17 +181,19 @@ impl DiscoveryContext {
         Self {
             home_dir: home_dir.into(),
             known_project_roots: Vec::new(),
-            tool_homes: Vec::new(),
+            tool_env_vars: Vec::new(),
         }
     }
 
-    /// `new`, plus every [`ToolHomeVar`] this process actually has set. The
+    /// `new`, plus every [`ToolEnvVar`] this process actually has set. The
     /// constructor production code uses.
     pub fn from_process_env(home_dir: impl Into<PathBuf>) -> Self {
         let mut ctx = Self::new(home_dir);
-        for var in ToolHomeVar::ALL {
-            if let Ok(value) = std::env::var(var.name()) {
-                ctx.tool_homes.push((var, value));
+        for var in ToolEnvVar::ALL {
+            for name in var.names() {
+                if let Ok(value) = std::env::var(name) {
+                    ctx.tool_env_vars.push((var, name, value));
+                }
             }
         }
         ctx
@@ -142,22 +204,78 @@ impl DiscoveryContext {
         self
     }
 
-    /// Sets one tool home explicitly, for tests that need to exercise the
-    /// override branch without touching the process environment
-    /// (`std::env::set_var` is unsound in Rust's threaded test harness).
-    pub fn with_tool_home(mut self, var: ToolHomeVar, value: impl Into<String>) -> Self {
-        self.tool_homes.retain(|(existing, _)| *existing != var);
-        self.tool_homes.push((var, value.into()));
+    /// Sets one tool variable explicitly, under its canonical spelling, for
+    /// tests that need to exercise the override branch without touching the
+    /// process environment (`std::env::set_var` is unsound in Rust's threaded
+    /// test harness).
+    pub fn with_tool_env(self, var: ToolEnvVar, value: impl Into<String>) -> Self {
+        let name = var.name();
+        self.with_tool_env_spelling(var, name, value)
+    }
+
+    /// [`DiscoveryContext::with_tool_env`] for one named spelling of `var`,
+    /// so a test can set two spellings of the same variable and exercise what
+    /// happens when they disagree.
+    ///
+    /// # Panics
+    ///
+    /// If `name` is not one of `var`'s documented spellings. A test that sets
+    /// a spelling the product never reads would pass while proving nothing.
+    pub fn with_tool_env_spelling(
+        mut self,
+        var: ToolEnvVar,
+        name: &'static str,
+        value: impl Into<String>,
+    ) -> Self {
+        assert!(
+            var.names().contains(&name),
+            "{name} is not a documented spelling of {var:?} ({:?})",
+            var.names()
+        );
+        self.tool_env_vars
+            .retain(|(existing, spelling, _)| !(*existing == var && *spelling == name));
+        self.tool_env_vars.push((var, name, value.into()));
         self
     }
 
-    /// The override for `var`, or `None` when it is unset. `None` means
-    /// "nothing said otherwise", never "the tool is absent".
-    pub fn tool_home(&self, var: ToolHomeVar) -> Option<&str> {
-        self.tool_homes
+    /// The spelling of `var` that answered and what it said, or `None`.
+    ///
+    /// `None` means "nothing said otherwise", never "the tool is absent".
+    /// It also covers the one genuinely ambiguous case: two documented
+    /// spellings set to different values. Which one the tool would honour is
+    /// its own precedence rule, not something to be guessed at here, so
+    /// nothing is reported and the caller falls back to asking the tool,
+    /// which is authoritative about its own configuration.
+    pub fn tool_env_spelling(&self, var: ToolEnvVar) -> Option<(&'static str, &str)> {
+        let mut set = self
+            .tool_env_vars
             .iter()
-            .find(|(existing, _)| *existing == var)
-            .map(|(_, value)| value.as_str())
+            .filter(|(existing, _, _)| *existing == var)
+            .map(|(_, name, value)| (*name, value.as_str()));
+        let first = set.next()?;
+        if set.any(|(_, value)| value != first.1) {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// [`DiscoveryContext::tool_env_spelling`] without the spelling, for
+    /// callers that only need the value.
+    pub fn tool_env(&self, var: ToolEnvVar) -> Option<&str> {
+        self.tool_env_spelling(var).map(|(_, value)| value)
+    }
+
+    /// Whether any documented spelling of `var` is set, whatever they say.
+    ///
+    /// The difference between this and `tool_env(var).is_some()` is the
+    /// ambiguous case, and it matters: a variable that is set but unreadable
+    /// still establishes that the user has configured this tool's location,
+    /// so falling back to the tool's *default* location would report a
+    /// directory the tool is demonstrably not using.
+    pub fn tool_env_is_set(&self, var: ToolEnvVar) -> bool {
+        self.tool_env_vars
+            .iter()
+            .any(|(existing, _, _)| *existing == var)
     }
 }
 
@@ -522,6 +640,31 @@ pub(crate) const SPAWNING_DETECTORS: &[&str] = &[
 pub(crate) const WORST_CASE_SPAWN_WAIT: Duration =
     Duration::from_secs(PROBE_DEADLINE.as_secs() * SPAWNING_DETECTORS.len() as u64);
 
+/// Every program a discovery pass may run on this machine, in the order a
+/// reader would look them up (HORO-1560).
+///
+/// Not test-only, unlike [`SPAWNING_DETECTORS`]: the honesty of the
+/// `detect`/`explain` safety label rests on *which* foreign programs a
+/// read-only-looking command can start, and the guard test that grounds that
+/// label observes these names on a `PATH` of recording stubs rather than
+/// trusting a sentence. A list a reader cannot reach from outside the crate
+/// could not be checked that way.
+///
+/// Built from the detectors' own declarations rather than retyped, so the
+/// names cannot drift from the call sites. The guard test
+/// `every_spawned_program_is_declared_once_and_listed` closes the other
+/// direction: a new spawn site must name its program through such a constant,
+/// and that constant's value must appear here.
+pub const SPAWNED_PROGRAMS: &[&str] = &[
+    homebrew::BREW_PROGRAM,
+    docker::DOCKER_PROGRAM,
+    go::GO_PROGRAM,
+    node::NPM_PROGRAM,
+    python::PIP_PROGRAM,
+    python::PIP3_PROGRAM,
+    python::UV_PROGRAM,
+];
+
 /// Runs `program args...` and returns stdout's non-empty lines.
 ///
 /// An argument array, never a shell string (HORO-1543 AC 7): there is no
@@ -847,6 +990,135 @@ pub(crate) fn absence_under_tool_owned_parent(parent: &Path) -> DetectorStatus {
             "failed to determine whether {} exists: {e}",
             parent.to_string_lossy()
         )),
+    }
+}
+
+/// How a cache root's location was established, before any tool was run.
+///
+/// Recorded on the evidence's own provenance list, so `detect --json` always
+/// carries which route answered. A byte count reached through a documented
+/// default path and one reached by asking the tool are equally real
+/// measurements of the same directory, but they are not equally strong claims
+/// about *whose* directory it is, and a reader is entitled to know which of
+/// the two they are looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheRoute {
+    /// A documented environment variable, under the spelling carried here,
+    /// named the directory.
+    EnvVar(&'static str),
+    /// No documented variable said otherwise, and the tool's documented
+    /// default directory is there.
+    DocumentedDefault,
+}
+
+impl CacheRoute {
+    /// The provenance sentence for [`cache_root_status`]'s `provenance`
+    /// argument. `subject` describes the resource in the detector's own
+    /// words, the same way the spawning detectors' literals do.
+    pub(crate) fn provenance(self, subject: &str) -> String {
+        match self {
+            CacheRoute::EnvVar(name) => {
+                format!("{subject}, at the directory {name} names — the tool was not run")
+            }
+            CacheRoute::DocumentedDefault => format!(
+                "{subject}, at the tool's documented default location — the tool was not run"
+            ),
+        }
+    }
+}
+
+/// `~/Library/Caches`, which is where several of these tools document their
+/// default cache location on macOS.
+///
+/// `None` on other platforms rather than a guess at their layout: the whole
+/// point of the documented-default route is that the path is something the
+/// tool states, and a path this code invented would be neither documented nor
+/// a default. Callers then fall through to asking the tool, which is where
+/// every one of these detectors was before.
+///
+/// Takes `home` rather than reading `$HOME` so a fixture context resolves
+/// against its own directory (HORO-1543).
+pub(crate) fn user_caches_dir(home: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        Some(home.join("Library/Caches"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = home;
+        None
+    }
+}
+
+/// What a cache root reached through [`documented_cache_root`] means when it
+/// turns out not to be there after all.
+///
+/// That function only answers for a directory that exists, so this is reached
+/// only if the directory disappears between its check and the probe — a real
+/// race on a cache its tool is free to clear at any moment. Nothing on this
+/// route ran the tool, so nothing on it is entitled to say whether the tool is
+/// installed: [`RootAbsence::InferredUnderSharedParent`] is the variant that
+/// makes no claim about it (HORO-1575).
+pub(crate) const DOCUMENTED_ROUTE_ABSENCE: RootAbsence = RootAbsence::InferredUnderSharedParent;
+
+/// Where a tool's own documented configuration says its cache is, without
+/// running the tool (HORO-1560 AC 2).
+///
+/// Order: a documented environment variable beats the documented default
+/// path, and either beats spawning the tool. `None` means the documented
+/// routes did not answer and the caller should ask the tool, which remains
+/// the fallback.
+///
+/// ## Why only a directory that already exists counts as an answer
+///
+/// A documented location holding nothing says nothing about the resource, and
+/// the *tool* can still distinguish the two states that would otherwise be
+/// folded together: "not installed" and "installed, has written no cache yet".
+/// Reporting the first as the second is the exact defect HORO-1558 and
+/// HORO-1575 were filed for. So an absent directory falls through to the
+/// spawn, which keeps every status this module reports at least as strong as
+/// it was — this route removes spawns, never information.
+///
+/// A value that is empty or relative also falls through. What a tool resolves
+/// a relative cache path against is its own business, and a path this code
+/// assembled from a guess about that would be a fabrication dressed as an
+/// observation.
+///
+/// ## The limitation this route knowingly has
+///
+/// A tool relocated through its own *config file* — `.npmrc`, go's `env`
+/// file — is invisible here; only the tool knows about those. The
+/// existing-directory rule is what keeps that from producing a wrong answer:
+/// such a tool usually has no directory at the default location, so the tool
+/// is asked. Where a stale default directory does exist, the bytes reported
+/// are that directory's real bytes, attributed to the tool that created it —
+/// a resource that is genuinely on this machine either way.
+pub(crate) fn documented_cache_root(
+    ctx: &DiscoveryContext,
+    var: ToolEnvVar,
+    documented_default: Option<PathBuf>,
+) -> Option<(PathBuf, CacheRoute)> {
+    let (path, route) = match ctx.tool_env_spelling(var) {
+        Some((name, value)) => {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                return None;
+            }
+            (path, CacheRoute::EnvVar(name))
+        }
+        // Set, and the documented spellings disagree. The default location is
+        // not the fallback here: the user has configured this tool's cache
+        // somewhere, so its default directory is one the tool is
+        // demonstrably not using, and only the tool knows which of the two it
+        // honours.
+        None if ctx.tool_env_is_set(var) => return None,
+        None => (documented_default?, CacheRoute::DocumentedDefault),
+    };
+
+    if path.is_dir() {
+        Some((path, route))
+    } else {
+        None
     }
 }
 
@@ -1381,7 +1653,7 @@ mod tests {
     /// spawns, an integration test that carefully pointed `$HOME` at an
     /// empty temporary directory still measured the developer's real
     /// `~/.cargo/registry`. The env-var back-channel is the defect;
-    /// [`ToolHomeVar`] plus [`DiscoveryContext::from_process_env`] is the
+    /// [`ToolEnvVar`] plus [`DiscoveryContext::from_process_env`] is the
     /// fix, and this test is what stops the back-channel coming back.
     ///
     /// Same lightweight source-text technique as the guard above, and the
@@ -1437,7 +1709,7 @@ mod tests {
             "detector production code must not read the process environment: \
              {offenders:?} — a detector that does answers from the host machine \
              even under a fixture DiscoveryContext. Carry the variable on \
-             DiscoveryContext as a ToolHomeVar instead (HORO-1543)"
+             DiscoveryContext as a ToolEnvVar instead (HORO-1543)"
         );
 
         // The other half: every production DiscoveryContext must be built
@@ -2192,6 +2464,391 @@ mod single_absolute_path_tests {
         assert_eq!(
             select(&["warning: see /usr/local/share/doc", "/Users/dev/.npm"]),
             ToolQuery::Lines(vec!["/Users/dev/.npm".to_string()])
+        );
+    }
+}
+/// Tests for [`SPAWNED_PROGRAMS`] — which foreign programs a discovery pass
+/// can start on this machine (HORO-1560).
+///
+/// Separate from the probe-deadline guards next door: those bound how long a
+/// spawn may take, and this one bounds *what* may be spawned. The two answer
+/// to different claims — one to responsiveness, one to the honesty of the
+/// safety label on `detect`.
+#[cfg(test)]
+mod spawned_program_tests {
+    use super::*;
+    use std::path::Path;
+
+    /// HORO-1560: every program a discovery pass can start is named at its
+    /// call site through a constant, and every one of those constants is
+    /// listed in [`SPAWNED_PROGRAMS`].
+    ///
+    /// This is what lets the read-only guard test ground the `detect` safety
+    /// label by *observation* — it puts a recording stub on `PATH` under each
+    /// of these names — instead of by a prose claim about which tools run. A
+    /// spawn site that hardcoded its program name would be invisible to that
+    /// stub `PATH`, and the label would go back to being unverified.
+    #[test]
+    fn every_spawned_program_is_declared_once_and_listed() {
+        for program in SPAWNED_PROGRAMS {
+            assert!(
+                !program.is_empty()
+                    && program
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{program:?} is not a bare program name, so the read-only \
+                 guard cannot create a stub file named after it"
+            );
+        }
+        let mut unique: Vec<&str> = SPAWNED_PROGRAMS.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            SPAWNED_PROGRAMS.len(),
+            "SPAWNED_PROGRAMS names the same program twice"
+        );
+
+        // Split so this test's own source contains none of the needles it
+        // searches for.
+        let spawn_needles = [
+            format!("{}{}", "query_tool_", "lines("),
+            format!("{}{}", "query_tool_", "lines_with_deadline("),
+            format!("{}{}", "query_tool_", "single_path("),
+            format!("{}{}", "Command", "::new("),
+        ];
+        let declaration = format!("{}{}", "_PROGRAM: ", "&str = \"");
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut declared: Vec<String> = Vec::new();
+        let mut hardcoded: Vec<String> = Vec::new();
+        let mut sites = 0usize;
+        super::tests::scan_rs_files(&manifest_dir.join("src/detectors"), &mut |path, content| {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let production = match content.split_once("#[cfg(test)]") {
+                Some((before, _)) => before,
+                None => content,
+            };
+            for line in production
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+            {
+                if let Some(value) = line
+                    .split_once(&declaration)
+                    .and_then(|(_, rest)| rest.split_once('"'))
+                    .map(|(value, _)| value.to_string())
+                {
+                    declared.push(value);
+                }
+                for needle in &spawn_needles {
+                    for (at, _) in line.match_indices(needle.as_str()) {
+                        sites += 1;
+                        if line[at + needle.len()..].starts_with('"') {
+                            hardcoded.push(format!("{rel}: {}", line.trim()));
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(
+            sites >= SPAWNED_PROGRAMS.len(),
+            "found only {sites} spawn sites, fewer than the {} programs \
+             SPAWNED_PROGRAMS claims are reachable — the scan is not reading \
+             the source it thinks it is",
+            SPAWNED_PROGRAMS.len()
+        );
+        assert!(
+            hardcoded.is_empty(),
+            "{hardcoded:?} name a spawned program inline. Declare it as a \
+             `*_PROGRAM` constant and list it in SPAWNED_PROGRAMS, or the \
+             read-only guard cannot observe that program running (HORO-1560)"
+        );
+
+        declared.sort();
+        declared.dedup();
+        assert_eq!(
+            declared,
+            unique.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+            "the programs declared at detector call sites and the programs \
+             SPAWNED_PROGRAMS lists have diverged"
+        );
+    }
+
+    /// HORO-1560 AC 3: every probe that still has to spawn a tool says so at
+    /// its call site — why the tool has to be asked, and what the tool does
+    /// when asked.
+    ///
+    /// The point is not tidiness. Once a cache location can be read from a
+    /// tool's documented configuration (AC 2), a spawn that remains is a claim
+    /// that reading was not enough, and that claim is the thing a reviewer has
+    /// to be able to check. Left undocumented, a probe kept out of habit looks
+    /// exactly like a probe kept out of necessity.
+    ///
+    /// Same source-text technique as the guards above, and the same reason: an
+    /// AST pass would be a lot of machinery to answer a question about where a
+    /// comment sits relative to a call.
+    ///
+    /// `mod.rs` is excluded because it is where the spawn *helpers* live — the
+    /// one `Command::new` in this file is the implementation every call site
+    /// goes through, not a call site with a tool of its own to justify.
+    #[test]
+    fn every_spawn_site_says_why_the_tool_has_to_be_asked() {
+        // Split so this test's own source contains neither the needles it
+        // searches for nor the marker it looks for.
+        let spawn_needles = [
+            format!("{}{}", "query_tool_", "lines("),
+            format!("{}{}", "query_tool_", "lines_with_deadline("),
+            format!("{}{}", "query_tool_", "single_path("),
+            format!("{}{}", "Command", "::new("),
+        ];
+        let marker = format!("{}{}", "has to be ", "asked");
+
+        /// How far above a spawn the explanation may sit. Wide enough for a
+        /// helper's doc comment to cover the spawn inside that helper's body,
+        /// narrow enough that an unrelated comment elsewhere in the function
+        /// cannot vouch for it.
+        const WINDOW: usize = 24;
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut undocumented: Vec<String> = Vec::new();
+        let mut files_with_sites: Vec<String> = Vec::new();
+
+        super::tests::scan_rs_files(&manifest_dir.join("src/detectors"), &mut |path, content| {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "src/detectors/mod.rs" {
+                return;
+            }
+            let production = match content.split_once("#[cfg(test)]") {
+                Some((before, _)) => before,
+                None => content,
+            };
+            let lines: Vec<&str> = production.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if !spawn_needles
+                    .iter()
+                    .any(|needle| line.contains(needle.as_str()))
+                {
+                    continue;
+                }
+                if !files_with_sites.contains(&rel) {
+                    files_with_sites.push(rel.clone());
+                }
+                let above = &lines[n.saturating_sub(WINDOW)..n];
+                if !above.iter().any(|l| l.contains(&marker)) {
+                    undocumented.push(format!("{rel}:{}", n + 1));
+                }
+            }
+        });
+
+        assert!(
+            undocumented.is_empty(),
+            "these probes spawn a tool without saying why it {marker} at the \
+             call site: {undocumented:?} — say what the documented route \
+             cannot see and what the tool does when asked, or read the \
+             location instead of spawning (HORO-1560 AC 2/AC 3)"
+        );
+
+        // Non-vacuity: the scan must be reading the source it thinks it is. A
+        // detector module that starts spawning arrives here rather than
+        // silently outside the guard's attention.
+        files_with_sites.sort();
+        assert_eq!(
+            files_with_sites,
+            [
+                "src/detectors/docker.rs",
+                "src/detectors/docker_objects.rs",
+                "src/detectors/go.rs",
+                "src/detectors/homebrew.rs",
+                "src/detectors/node.rs",
+                "src/detectors/python.rs",
+            ],
+            "the set of detector modules that spawn a tool has changed"
+        );
+    }
+}
+
+/// The route order [`documented_cache_root`] implements, and the cases where
+/// it deliberately declines to answer (HORO-1560 AC 2).
+#[cfg(test)]
+mod documented_route_tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        test_support::make_temp_dir(name)
+    }
+
+    /// A documented variable is the strongest statement available about where
+    /// a cache is, so it wins over a default directory that also exists.
+    #[test]
+    fn a_documented_variable_beats_a_documented_default_that_also_exists() {
+        let named = temp("route-named");
+        let default = temp("route-default");
+        let ctx = DiscoveryContext::new("/nonexistent-home")
+            .with_tool_env(ToolEnvVar::PipCacheDir, named.to_str().unwrap());
+
+        let (path, route) = documented_cache_root(&ctx, ToolEnvVar::PipCacheDir, Some(default))
+            .expect("a variable naming an existing directory answers");
+
+        assert_eq!(path, named);
+        assert_eq!(route, CacheRoute::EnvVar("PIP_CACHE_DIR"));
+    }
+
+    #[test]
+    fn the_documented_default_answers_when_no_variable_is_set() {
+        let default = temp("route-default-only");
+        let ctx = DiscoveryContext::new("/nonexistent-home");
+
+        let (path, route) =
+            documented_cache_root(&ctx, ToolEnvVar::PipCacheDir, Some(default.clone()))
+                .expect("an existing default directory answers");
+
+        assert_eq!(path, default);
+        assert_eq!(route, CacheRoute::DocumentedDefault);
+    }
+
+    /// The rule that keeps this route from costing information. A directory
+    /// that is not there says nothing about the resource *or* the tool, and
+    /// the tool can still tell those two apart (HORO-1558, HORO-1575). Remove
+    /// the existence check and both halves of this test fail.
+    #[test]
+    fn a_documented_location_that_is_not_there_is_not_an_answer() {
+        let parent = temp("route-absent");
+        let missing = parent.join("never-written");
+
+        let unset = DiscoveryContext::new("/nonexistent-home");
+        assert!(
+            documented_cache_root(&unset, ToolEnvVar::PipCacheDir, Some(missing.clone())).is_none(),
+            "an absent default directory must fall through to asking the tool"
+        );
+
+        let named = unset.with_tool_env(ToolEnvVar::PipCacheDir, missing.to_str().unwrap());
+        assert!(
+            documented_cache_root(&named, ToolEnvVar::PipCacheDir, None).is_none(),
+            "a variable naming an absent directory must fall through too"
+        );
+    }
+
+    /// A file where a cache directory was promised is not a cache directory,
+    /// and reporting its bytes as the cache's would be a wrong answer rather
+    /// than a missing one.
+    #[test]
+    fn a_documented_location_that_is_a_file_is_not_an_answer() {
+        let dir = temp("route-file");
+        let file = dir.join("not-a-directory");
+        fs::write(&file, b"x").expect("write decoy file");
+        let ctx = DiscoveryContext::new("/nonexistent-home");
+
+        assert!(documented_cache_root(&ctx, ToolEnvVar::PipCacheDir, Some(file)).is_none());
+    }
+
+    /// What a tool resolves a relative cache path against is the tool's own
+    /// business, so this code does not get to decide it.
+    #[test]
+    fn a_relative_or_empty_variable_value_is_not_an_answer() {
+        for value in ["", ".cache/pip", "~/Library/Caches/pip"] {
+            let ctx = DiscoveryContext::new("/nonexistent-home")
+                .with_tool_env(ToolEnvVar::PipCacheDir, value);
+            assert!(
+                documented_cache_root(&ctx, ToolEnvVar::PipCacheDir, None).is_none(),
+                "{value:?} is not an absolute path and must not be treated as one"
+            );
+        }
+    }
+
+    /// Both spellings npm honours, agreeing. One answer, and the spelling
+    /// that was actually set is the one recorded.
+    #[test]
+    fn two_documented_spellings_that_agree_answer_once() {
+        let cache = temp("route-npm-agree");
+        let value = cache.to_str().unwrap();
+        let ctx = DiscoveryContext::new("/nonexistent-home")
+            .with_tool_env_spelling(ToolEnvVar::NpmCache, "npm_config_cache", value)
+            .with_tool_env_spelling(ToolEnvVar::NpmCache, "NPM_CONFIG_CACHE", value);
+
+        let (path, route) = documented_cache_root(&ctx, ToolEnvVar::NpmCache, None)
+            .expect("agreeing spellings answer");
+
+        assert_eq!(path, cache);
+        assert_eq!(route, CacheRoute::EnvVar("npm_config_cache"));
+    }
+
+    /// Disagreeing spellings are the one genuinely ambiguous case. npm's
+    /// precedence between them is npm's rule, not something to guess at, so
+    /// nothing is reported — and, in particular, the documented *default* is
+    /// not reported either, because npm is demonstrably using neither.
+    #[test]
+    fn two_documented_spellings_that_disagree_answer_nothing() {
+        let a = temp("route-npm-a");
+        let b = temp("route-npm-b");
+        let default = temp("route-npm-default");
+        let ctx = DiscoveryContext::new("/nonexistent-home")
+            .with_tool_env_spelling(
+                ToolEnvVar::NpmCache,
+                "npm_config_cache",
+                a.to_str().unwrap(),
+            )
+            .with_tool_env_spelling(
+                ToolEnvVar::NpmCache,
+                "NPM_CONFIG_CACHE",
+                b.to_str().unwrap(),
+            );
+
+        assert!(ctx.tool_env(ToolEnvVar::NpmCache).is_none());
+        assert!(
+            documented_cache_root(&ctx, ToolEnvVar::NpmCache, Some(default)).is_none(),
+            "an ambiguous configuration must reach npm itself, not the default path"
+        );
+    }
+
+    /// Two variables reading the same environment name would make one tool's
+    /// configuration answer for another's.
+    #[test]
+    fn every_documented_spelling_belongs_to_exactly_one_variable() {
+        let mut seen: Vec<&str> = Vec::new();
+        for var in ToolEnvVar::ALL {
+            assert!(
+                !var.names().is_empty(),
+                "{var:?} documents no spelling, so nothing can ever read it"
+            );
+            assert_eq!(var.name(), var.names()[0], "{var:?}");
+            for name in var.names() {
+                assert!(
+                    !seen.contains(name),
+                    "{name} is claimed by more than one ToolEnvVar"
+                );
+                seen.push(name);
+            }
+        }
+        assert!(
+            seen.len() > ToolEnvVar::ALL.len(),
+            "no variable has a second spelling, so the slice-shaped names() is untested"
+        );
+    }
+
+    /// The provenance sentence says the tool was not run. That sentence is
+    /// carried out to `detect --json`, so a reader can tell a measurement
+    /// reached without the tool from one the tool pointed at.
+    #[test]
+    fn the_provenance_records_which_route_answered() {
+        assert_eq!(
+            CacheRoute::EnvVar("PIP_CACHE_DIR").provenance("pip's cache"),
+            "pip's cache, at the directory PIP_CACHE_DIR names — the tool was not run"
+        );
+        assert_eq!(
+            CacheRoute::DocumentedDefault.provenance("pip's cache"),
+            "pip's cache, at the tool's documented default location — the tool was not run"
         );
     }
 }

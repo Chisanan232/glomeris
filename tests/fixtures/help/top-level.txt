@@ -6,7 +6,7 @@ decides; the executor verifies.
 
 usage: glomeris <command> [options]
 
-INSPECT — look at this machine. Nothing is changed.
+INSPECT — look at this machine. Glomeris itself writes nothing.
   status            Current disk-pressure state and the thresholds behind it.
   scan              Largest directories under one path, by size.
   detect            Find reclaimable candidates and how each is classified.

@@ -25,7 +25,7 @@ use crate::evidence::{
 use super::{
     cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
     size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence,
-    ToolHomeVar,
+    ToolEnvVar,
 };
 
 pub struct CargoDetector;
@@ -119,10 +119,10 @@ const REGISTRY_SUBDIR: &str = "registry";
 /// Cargo's own two rules.
 ///
 /// Pure so it is testable: the `CARGO_HOME` override arrives through
-/// [`DiscoveryContext::tool_home`] rather than from the process environment,
+/// [`DiscoveryContext::tool_env`] rather than from the process environment,
 /// so a fixture context can exercise both rules. Reading it here directly
 /// would make this detector answer from the developer's real registry even
-/// under a fixture `home_dir` — see [`super::ToolHomeVar`], which exists
+/// under a fixture `home_dir` — see [`super::ToolEnvVar`], which exists
 /// because that is exactly what happened.
 ///
 /// An empty or whitespace-only `CARGO_HOME` falls back to `~/.cargo` rather
@@ -147,7 +147,7 @@ impl Detector for CargoRegistryCacheDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
-        let registry = cargo_registry_dir(ctx.tool_home(ToolHomeVar::CargoHome), &ctx.home_dir);
+        let registry = cargo_registry_dir(ctx.tool_env(ToolEnvVar::CargoHome), &ctx.home_dir);
         // `registry` is always `<cargo home>/registry`, so the parent is the
         // Cargo home — a directory only Cargo (or rustup, installing it)
         // creates.
@@ -405,7 +405,7 @@ mod tests {
 
     /// The `CargoHome` override has to reach `discover`, not merely
     /// `cargo_registry_dir`: the pure test above would still pass if
-    /// `discover` ignored `ctx.tool_home` and always resolved from
+    /// `discover` ignored `ctx.tool_env` and always resolved from
     /// `home_dir`. So the fixture registry lives somewhere `home_dir` cannot
     /// reach, and `home_dir` points at a decoy that holds a *different* number
     /// of bytes — a detector reading the wrong one reports 1_024 and fails.
@@ -428,7 +428,7 @@ mod tests {
         .unwrap();
 
         let ctx = DiscoveryContext::new(&decoy_home)
-            .with_tool_home(ToolHomeVar::CargoHome, relocated.to_str().unwrap());
+            .with_tool_env(ToolEnvVar::CargoHome, relocated.to_str().unwrap());
 
         match CargoRegistryCacheDetector.discover(&ctx) {
             DetectorStatus::Found(evidence) => {

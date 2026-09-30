@@ -69,7 +69,16 @@ const SOURCE: &str = "docker system df -v --format '{{json .}}'";
 /// [`super::docker::failure_status`] went to the trouble of telling a stopped
 /// daemon, an absent binary and a real error apart.
 fn snapshot() -> Result<Value, DetectorStatus> {
-    let output = match Command::new("docker")
+    // Why Docker has to be asked (HORO-1560 AC 3): this detector reports
+    // individual containers, images and volumes — their ids, sizes, and when
+    // each was last used. None of that exists as a readable file on this host;
+    // it is the daemon's own bookkeeping. There is no documented path route to
+    // prefer, so there is nothing here for HORO-1560 AC 2 to apply to.
+    //
+    // What Docker does when asked: `docker system df -v` is the same reporting
+    // command as in [`super::docker`] with per-object detail added. It reads
+    // the daemon's state and prints it; it removes nothing.
+    let output = match Command::new(super::docker::DOCKER_PROGRAM)
         .args(["system", "df", "-v", "--format", "{{json .}}"])
         .output()
     {
