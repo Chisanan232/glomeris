@@ -143,6 +143,15 @@ fn documented_module_cache_root(ctx: &DiscoveryContext) -> Option<(PathBuf, Cach
 }
 
 /// Asks `go env <var>` for one absolute cache root and builds its evidence.
+///
+/// Why go has to be asked (HORO-1560 AC 3): `go env -w` persists `GOCACHE`,
+/// `GOMODCACHE` and `GOPATH` into go's own env file
+/// (`os.UserConfigDir()/go/env`), where no environment variable is visible. A
+/// machine configured that way has a cache the documented route cannot find,
+/// and go is the only thing that can read that file's precedence correctly.
+///
+/// What go does when asked: `go env <var>` prints the resolved value on one
+/// line. It reads; only `go env -w`/`-u` write, and neither appears here.
 fn go_env_cache_root(
     detector: DetectorId,
     kind: ResourceKind,

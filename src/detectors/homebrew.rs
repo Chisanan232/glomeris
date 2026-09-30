@@ -104,6 +104,16 @@ impl Detector for HomebrewDetector {
             );
         }
 
+        // Why Homebrew has to be asked (HORO-1560 AC 3): `HOMEBREW_CACHE` is
+        // normally set in a shell profile, which Glomeris never sources, so a
+        // relocated cache is invisible to the documented route above. And only
+        // `brew` can tell a Homebrew that has downloaded nothing from one that
+        // is not installed — the distinction this detector exists to keep
+        // honest (HORO-1558).
+        //
+        // What Homebrew does when asked: `brew --cache`, with no formula
+        // argument, prints the cache directory and downloads nothing. See
+        // [`CACHE_QUERY`] for why that argument must stay absent.
         status_for(query_tool_single_path(BREW_PROGRAM, CACHE_QUERY))
     }
 }

@@ -210,6 +210,17 @@ impl Detector for NodePackageManagerCacheDetector {
             );
         }
 
+        // Why npm has to be asked (HORO-1560 AC 3): npm's cache can be
+        // relocated by an `.npmrc` — project, user or global — and that is a
+        // config file, not an environment variable, so the documented route
+        // above cannot see it. npm is also the only thing that can tell an npm
+        // that is not installed from one that is installed and has downloaded
+        // nothing.
+        //
+        // What npm does when asked: `npm config get cache` resolves its config
+        // cascade and prints the cache directory. Its help says "Read-only —
+        // changes nothing", and `--logs-max=0` keeps the invocation from
+        // leaving a log behind (HORO-1556).
         match query_tool_single_path(NPM_PROGRAM, NPM_CACHE_QUERY) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),

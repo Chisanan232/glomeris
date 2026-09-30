@@ -2578,6 +2578,105 @@ mod spawned_program_tests {
              SPAWNED_PROGRAMS lists have diverged"
         );
     }
+
+    /// HORO-1560 AC 3: every probe that still has to spawn a tool says so at
+    /// its call site — why the tool has to be asked, and what the tool does
+    /// when asked.
+    ///
+    /// The point is not tidiness. Once a cache location can be read from a
+    /// tool's documented configuration (AC 2), a spawn that remains is a claim
+    /// that reading was not enough, and that claim is the thing a reviewer has
+    /// to be able to check. Left undocumented, a probe kept out of habit looks
+    /// exactly like a probe kept out of necessity.
+    ///
+    /// Same source-text technique as the guards above, and the same reason: an
+    /// AST pass would be a lot of machinery to answer a question about where a
+    /// comment sits relative to a call.
+    ///
+    /// `mod.rs` is excluded because it is where the spawn *helpers* live — the
+    /// one `Command::new` in this file is the implementation every call site
+    /// goes through, not a call site with a tool of its own to justify.
+    #[test]
+    fn every_spawn_site_says_why_the_tool_has_to_be_asked() {
+        // Split so this test's own source contains neither the needles it
+        // searches for nor the marker it looks for.
+        let spawn_needles = [
+            format!("{}{}", "query_tool_", "lines("),
+            format!("{}{}", "query_tool_", "lines_with_deadline("),
+            format!("{}{}", "query_tool_", "single_path("),
+            format!("{}{}", "Command", "::new("),
+        ];
+        let marker = format!("{}{}", "has to be ", "asked");
+
+        /// How far above a spawn the explanation may sit. Wide enough for a
+        /// helper's doc comment to cover the spawn inside that helper's body,
+        /// narrow enough that an unrelated comment elsewhere in the function
+        /// cannot vouch for it.
+        const WINDOW: usize = 24;
+
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut undocumented: Vec<String> = Vec::new();
+        let mut files_with_sites: Vec<String> = Vec::new();
+
+        super::tests::scan_rs_files(&manifest_dir.join("src/detectors"), &mut |path, content| {
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if rel == "src/detectors/mod.rs" {
+                return;
+            }
+            let production = match content.split_once("#[cfg(test)]") {
+                Some((before, _)) => before,
+                None => content,
+            };
+            let lines: Vec<&str> = production.lines().collect();
+            for (n, line) in lines.iter().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if !spawn_needles
+                    .iter()
+                    .any(|needle| line.contains(needle.as_str()))
+                {
+                    continue;
+                }
+                if !files_with_sites.contains(&rel) {
+                    files_with_sites.push(rel.clone());
+                }
+                let above = &lines[n.saturating_sub(WINDOW)..n];
+                if !above.iter().any(|l| l.contains(&marker)) {
+                    undocumented.push(format!("{rel}:{}", n + 1));
+                }
+            }
+        });
+
+        assert!(
+            undocumented.is_empty(),
+            "these probes spawn a tool without saying why it {marker} at the \
+             call site: {undocumented:?} — say what the documented route \
+             cannot see and what the tool does when asked, or read the \
+             location instead of spawning (HORO-1560 AC 2/AC 3)"
+        );
+
+        // Non-vacuity: the scan must be reading the source it thinks it is. A
+        // detector module that starts spawning arrives here rather than
+        // silently outside the guard's attention.
+        files_with_sites.sort();
+        assert_eq!(
+            files_with_sites,
+            [
+                "src/detectors/docker.rs",
+                "src/detectors/docker_objects.rs",
+                "src/detectors/go.rs",
+                "src/detectors/homebrew.rs",
+                "src/detectors/node.rs",
+                "src/detectors/python.rs",
+            ],
+            "the set of detector modules that spawn a tool has changed"
+        );
+    }
 }
 
 /// The route order [`documented_cache_root`] implements, and the cases where

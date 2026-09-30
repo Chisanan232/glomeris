@@ -95,6 +95,17 @@ impl Detector for PipCacheDetector {
 
         let mut last_failure: Option<String> = None;
 
+        // Why pip has to be asked (HORO-1560 AC 3): `cache-dir` in `pip.conf`
+        // relocates the cache through a config file rather than a variable, so
+        // the documented route above cannot see it, and pip resolves that file
+        // from several locations with its own precedence. pip is also the only
+        // thing that can tell an absent pip from one that has downloaded
+        // nothing.
+        //
+        // What pip does when asked: `pip cache dir` prints the cache directory.
+        // It is the read-only member of the `pip cache` family — unlike `purge`
+        // and `remove`, which are the reason the subcommand is spelled out here
+        // rather than assembled.
         for program in PIP_PROGRAMS {
             match query_tool_single_path(program, &["cache", "dir"]) {
                 ToolQuery::Lines(lines) => {
@@ -190,6 +201,15 @@ impl Detector for UvCacheDetector {
             );
         }
 
+        // Why uv has to be asked (HORO-1560 AC 3): `cache-dir` in `uv.toml` or
+        // `[tool.uv]` in a `pyproject.toml` relocates the cache through a config
+        // file, which the documented route above cannot see, and uv resolves
+        // those per-directory. uv is also the only thing that can tell an absent
+        // uv from one that has downloaded nothing.
+        //
+        // What uv does when asked: `uv cache dir` prints the cache directory.
+        // Read-only, and deliberately not `uv cache clean`'s neighbour by
+        // accident — the subcommand is spelled out rather than built.
         match query_tool_single_path(UV_PROGRAM, &["cache", "dir"]) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
