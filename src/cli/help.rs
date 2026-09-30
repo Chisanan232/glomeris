@@ -208,7 +208,12 @@ impl Group {
     /// which is the point of grouping them at all.
     pub fn caption(self) -> &'static str {
         match self {
-            Group::Inspect => "look at this machine. Nothing is changed.",
+            // Not "Nothing is changed." (HORO-1560): that is a promise about
+            // the whole filesystem, and two of the four commands in this group
+            // run an installed build tool to find out where its cache is. What
+            // is true of all four is the narrower statement, and each command's
+            // own safety line says whether it runs anything.
+            Group::Inspect => "look at this machine. Glomeris itself writes nothing.",
             Group::Plan => "decide what to do. Nothing is executed.",
             Group::Act => "change this machine. Policy decides every deletion.",
             Group::Observe => "what happened before. Nothing on this machine is deleted.",
@@ -400,7 +405,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "detect",
         group: Group::Inspect,
-        safety: Safety::ReadOnly,
+        safety: Safety::ConsultsInstalledTools,
         summary: "Find reclaimable candidates and how each is classified.",
         usage: &[
             "detect",
@@ -410,9 +415,14 @@ pub const COMMANDS: &[CommandSpec] = &[
         ],
         details: "Runs every detector, correlates the evidence each one produces, and prints \
                   the candidates with their policy classification and size estimate. Deletes \
-                  nothing and sends nothing anywhere. A candidate's size is not a safety \
-                  judgement: a large AUTO_SAFE cache is an opportunity, and a small PROTECTED \
-                  resource is still protected.",
+                  nothing of yours and sends nothing anywhere. To find where an ecosystem \
+                  keeps its cache it first reads that tool's documented environment variable \
+                  and documented default location; where neither answers, it runs the tool to \
+                  ask. A tool run this way may maintain its own state — a version manager \
+                  fronting it may provision a toolchain on first use — so this command is not \
+                  the same promise as `status`, which runs nothing. A candidate's size is not \
+                  a safety judgement: a large AUTO_SAFE cache is an opportunity, and a small \
+                  PROTECTED resource is still protected.",
         subcommands: &[],
         options: &[
             OptionSpec {
@@ -447,7 +457,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "explain",
         group: Group::Inspect,
-        safety: Safety::ReadOnly,
+        safety: Safety::ConsultsInstalledTools,
         summary: "Why one resource is classified the way it is.",
         usage: &[
             "explain <resource_id_or_path>",
@@ -459,7 +469,10 @@ pub const COMMANDS: &[CommandSpec] = &[
                   observed, which rule that triggered, and what would be offered for it. This \
                   is the command to reach for when a classification looks wrong — it shows \
                   the reasoning, not just the verdict. With --json it also emits the \
-                  fingerprint_token that `execute` requires for an ASK-classified resource.",
+                  fingerprint_token that `execute` requires for an ASK-classified resource. \
+                  It runs the same discovery pass as `detect`, so the same note applies: \
+                  locating a cache may mean running the tool that owns it, and a tool run \
+                  that way may maintain its own state.",
         subcommands: &[],
         options: &[
             OptionSpec {

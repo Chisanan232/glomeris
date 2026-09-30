@@ -52,11 +52,12 @@ decided by the policy engine, and never appear in a help safety label. See
 
 ### Safety is declared per verb, not only per command
 
-Four labels exist, in ascending order of consequence:
+Five labels exist, in ascending order of consequence:
 
 | Label | Means |
 |---|---|
-| `Read-only — changes nothing.` | Nothing is written. |
+| `Read-only — changes nothing.` | Nothing is written, and no other program is run. |
+| `Read-only, and runs installed build tools to locate their caches.` | Glomeris writes nothing of yours. It asks an installed tool where its cache is when no documented environment variable or default location answers, and a tool run that way may maintain its own state — a version manager fronting it may provision a toolchain on first use. |
 | `Advisory — proposes, never executes.` | Produces a plan; executes none of it. |
 | `Writes only Glomeris's own state — never your files.` | Writes the launch agent plist, the monitor's history and heartbeat, the Autopilot envelope, or your stored preferences. Nothing you own. |
 | `Can delete data — every deletion is policy-gated.` | Deletes. |
