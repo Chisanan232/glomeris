@@ -368,24 +368,45 @@ enum ProgressStatusText {
             if outcome == "failed" {
                 return "Finished \(detector) (did not complete)"
             }
+            // HORO-1576, and the same collapse one step further out: a
+            // detector with nothing configured to examine also reports zero,
+            // so "(0 found)" would describe a search that never happened. It
+            // is not a failure either, so it must not borrow the line above.
+            if outcome == "not_configured" {
+                return "Finished \(detector) (nothing to look at)"
+            }
             return "Finished \(detector) (\(candidatesFound) found)"
         }
     }
 }
 
-/// How the panel says "part of the search never answered" (HORO-1484).
+/// How the panel says "part of the search never answered" (HORO-1484) — and,
+/// separately, "part of the search was never pointed at anything"
+/// (HORO-1576).
 ///
 /// A pure type rather than three computed properties on the view, for the same
 /// reason `ProgressStatusText` above is one: the view's own state is `private`
 /// and not reachable from a test, so wording that lives there can only be
 /// checked by grepping the source — and a guard that reads source text cannot
 /// tell whether the sentence it found is the one a user would actually see.
-/// Here the decision is a function of the failed-detector list alone, and the
+/// Here the decision is a function of the two detector lists alone, and the
 /// tests call it.
 ///
-/// Both messages return `nil` for an empty list, so "only say this when the
-/// search really was incomplete" is one rule in one place rather than an `if`
-/// repeated at each call site.
+/// ## Why two lists and not one "incomplete" list
+///
+/// Both gaps make the candidate list less than the whole account, so folding
+/// them together is tempting and is the defect HORO-1576 is about. A detector
+/// that failed is a malfunction; a detector with no configured project root is
+/// a setting nobody has filled in, and on a default installation there are
+/// three of those. One list would print "3 checks did not finish" to every new
+/// user and send them hunting for a bug in Glomeris instead of pointing them at
+/// Settings. So the two are counted apart, worded apart, and given different
+/// glyphs, and the only thing they share is that neither may be silently
+/// dropped.
+///
+/// Every message returns `nil` when both lists are empty, so "only say this
+/// when the search really was incomplete" is one rule in one place rather than
+/// an `if` repeated at each call site.
 enum IncompleteDiscoveryWording {
     /// One sentence naming what did not answer. Shared by both messages below,
     /// so the empty-list state and the additive advisory cannot describe the
@@ -407,24 +428,78 @@ enum IncompleteDiscoveryWording {
             + "so this is not a complete picture: \(described.joined(separator: ", "))."
     }
 
+    /// The same sentence for the other gap (HORO-1576): checks that were given
+    /// nothing to examine.
+    ///
+    /// Names them for the same reason the failures are named, and then says what
+    /// to do about it, which is the one thing that separates this state from
+    /// every other incomplete answer in the app — the user can close this gap
+    /// themselves, and the sentence is unactionable without saying where. No
+    /// reason string is quoted because there is none: nothing went wrong, so the
+    /// CLI reports no failure text for these.
+    static func notConfiguredDetail(
+        for notConfiguredDetectors: [DetectorHealthReportDto]
+    ) -> String? {
+        if notConfiguredDetectors.isEmpty { return nil }
+        let named = notConfiguredDetectors.map(\.detector).joined(separator: ", ")
+        let subject = notConfiguredDetectors.count == 1 ? "check had" : "checks had"
+        return "\(notConfiguredDetectors.count) \(subject) nowhere to look, so what is "
+            + "under your projects is unknown rather than absent: \(named). "
+            + "Add a folder in Settings › Projects to include them."
+    }
+
+    /// Both sentences, in the order of what a reader can act on first. `nil`
+    /// when neither gap applies, which is what makes "say nothing unless the
+    /// search really was incomplete" a single rule.
+    ///
+    /// Neither list is defaulted anywhere in this type, deliberately: a call
+    /// site that omitted the second one would compile and would quietly go back
+    /// to reporting one gap while hiding the other, which is the defect
+    /// HORO-1576 reported.
+    private static func combinedDetail(
+        failed: [DetectorHealthReportDto],
+        notConfigured: [DetectorHealthReportDto]
+    ) -> String? {
+        let parts = [detail(for: failed), notConfiguredDetail(for: notConfigured)]
+            .compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
     /// Replaces the "Nothing worth reclaiming" all-clear when the list is empty
-    /// AND something failed.
+    /// AND part of the search either failed or never ran.
     ///
     /// The title deliberately claims less than the all-clear it stands in for:
-    /// it describes where Glomeris managed to look, not what is on the disk.
+    /// it describes where Glomeris managed to look, not what is on the disk. Two
+    /// titles because the two causes are different news — and when both apply
+    /// the failure takes the title, because a malfunction is the more urgent of
+    /// the two and the configuration gap still gets its own sentence below it.
     static func emptyListMessage(
-        for failedDetectors: [DetectorHealthReportDto]
+        for failedDetectors: [DetectorHealthReportDto],
+        notConfigured notConfiguredDetectors: [DetectorHealthReportDto]
     ) -> GlomerisStateMessage? {
-        guard let detail = detail(for: failedDetectors) else { return nil }
+        guard
+            let detail = combinedDetail(
+                failed: failedDetectors, notConfigured: notConfiguredDetectors)
+        else { return nil }
+        if failedDetectors.isEmpty {
+            return .notConfigured("Nothing found where Glomeris was told to look", detail: detail)
+        }
         return .partialSearch("Nothing found where Glomeris could look", detail: detail)
     }
 
     /// Sits *below* a non-empty list, never in place of it. The rows found are
     /// real; what they may not do is look like the whole account.
     static func advisoryMessage(
-        for failedDetectors: [DetectorHealthReportDto]
+        for failedDetectors: [DetectorHealthReportDto],
+        notConfigured notConfiguredDetectors: [DetectorHealthReportDto]
     ) -> GlomerisStateMessage? {
-        guard let detail = detail(for: failedDetectors) else { return nil }
+        guard
+            let detail = combinedDetail(
+                failed: failedDetectors, notConfigured: notConfiguredDetectors)
+        else { return nil }
+        if failedDetectors.isEmpty {
+            return .notConfigured("This list does not cover your projects", detail: detail)
+        }
         return .partialSearch("This list may be incomplete", detail: detail)
     }
 }
@@ -495,7 +570,8 @@ struct CandidatesSectionView: View {
             // the rows above are real as far as they go, so they stay on screen.
             // What they may not do is stand there looking like the whole account
             // of what could be reclaimed when one of the places Glomeris looks
-            // never answered.
+            // never answered — or, since HORO-1576, was never given anywhere to
+            // look.
             //
             // Suppressed when the state message above is already carrying the
             // same sentence — an empty list after an incomplete search says it
@@ -503,9 +579,11 @@ struct CandidatesSectionView: View {
             // of the same conditions, so the two cannot disagree about when they
             // apply.
             if let advisory = IncompleteDiscoveryWording.advisoryMessage(
-                for: scan.failedDetectors),
+                for: scan.failedDetectors, notConfigured: scan.notConfiguredDetectors),
                 stateMessage
-                    != IncompleteDiscoveryWording.emptyListMessage(for: scan.failedDetectors) {
+                    != IncompleteDiscoveryWording.emptyListMessage(
+                        for: scan.failedDetectors,
+                        notConfigured: scan.notConfiguredDetectors) {
                 GlomerisStateMessageView(message: advisory)
             }
 
@@ -663,7 +741,15 @@ struct CandidatesSectionView: View {
         // reclaiming" is a claim about the machine and this scan did not earn
         // it — one of the places Glomeris looks never answered, so whatever is
         // there is unknown rather than absent.
-        if let partial = IncompleteDiscoveryWording.emptyListMessage(for: scan.failedDetectors) {
+        //
+        // HORO-1576 put the commonest case of that on the same path: on an
+        // installation with no project root configured, three detectors examined
+        // nothing, so the all-clear below would be claiming a clean bill of
+        // health over directories nobody opened. That is the state a new user
+        // sees first, which is the reason it may not be the one state that
+        // reassures without evidence.
+        if let partial = IncompleteDiscoveryWording.emptyListMessage(
+            for: scan.failedDetectors, notConfigured: scan.notConfiguredDetectors) {
             return partial
         }
         return .empty(
@@ -812,6 +898,10 @@ struct CandidatesSectionView: View {
             // (HORO-1484): the list and whether the search that produced it
             // completed must never be one scan out of step.
             scan.failedDetectors = result.output.failedDetectors
+            // And the other gap, from the same report in the same turn
+            // (HORO-1576), for the same reason: a list shown with last scan's
+            // account of what was examined is a list nobody can trust.
+            scan.notConfiguredDetectors = result.output.notConfiguredDetectors
             // Same turn again (HORO-1511), and here it is load-bearing rather
             // than tidy: the families name their members by resource id and
             // the developer-projects card resolves those ids against
