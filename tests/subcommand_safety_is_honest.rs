@@ -39,17 +39,15 @@
 //!   after. "Changes nothing" is a claim about behaviour, and the only
 //!   honest way to assert it is to observe it.
 //!
-//! # Whose writes the comparison is about (HORO-1556)
+//! # Whose writes the comparison is about (HORO-1556, HORO-1560)
 //!
 //! `detect` asks installed build tools where their caches are, by running
 //! them: `npm config get cache`, `go env GOCACHE`, `pip cache dir`,
 //! `uv cache dir`, `brew --cache`, `docker system df`. Several of those write
-//! to `$HOME` as a side effect of being asked anything at all —
-//! observed on the workstation this was written on:
+//! to `$HOME` as a side effect of being asked anything at all — observed on
+//! the workstation this was written on, inside a `HOME` that was created
+//! empty a moment earlier:
 //!
-//! * `npm` wrote `.npm/_logs/<timestamp>-debug-0.log`, i.e. a log file
-//!   *inside the cache directory being measured*. This one is Glomeris's to
-//!   fix and is fixed: the probe passes `--logs-max=0`.
 //! * `go env` wrote a telemetry counter under
 //!   `Library/Application Support/go/telemetry/local/`. `go help telemetry`
 //!   documents the mode as settable only by `go telemetry off` — a user
@@ -59,21 +57,36 @@
 //!   `Library/Caches/BytecodeAlliance.wasmtime/`, because on this machine
 //!   they are `proto` shims and `proto` compiles its WASM plugins on first
 //!   use. That is a property of the user's installation, not of the tool.
+//! * `npm` created its own cache directory. It no longer writes
+//!   `_logs/<timestamp>-debug-0.log` *inside the directory being measured* —
+//!   that write was Glomeris's to fix, and the probe passes `--logs-max=0`
+//!   (HORO-1556) — but the `mkdir` is still a write.
 //!
-//! So "running a read-only surface leaves `$HOME` byte-identical" is not a
-//! property Glomeris can have once it executes third-party programs, and a
-//! test asserting it passes or fails according to which build tools the
-//! machine running it happens to have. The two tests below split the claim
-//! along the line that decides it — who wrote — rather than weakening it:
+//! So "changes nothing" was never true of `detect`, and no wording could have
+//! made it true while the answer comes from running somebody else's program.
+//! A version manager fronting one of those tools can go further and provision
+//! a whole toolchain on first use. That is why `detect` and `explain` are
+//! declared `Safety::ConsultsInstalledTools` rather than `Safety::ReadOnly`
+//! (HORO-1560), and why the tests below are split along the same line instead
+//! of being weakened until one claim covers both:
 //!
-//! * with no tool reachable on `PATH`, nothing but Glomeris can write, and
-//!   `$HOME` must be byte-identical. Deterministic on any machine, and it is
-//!   the claim `Safety::ReadOnly` actually makes.
-//! * with the real `PATH`, and therefore real tools running, no
-//!   Glomeris-owned state may appear. That is what catches the regressions
-//!   this file was written for — `settings show` writing out the defaults it
-//!   just reported, `pressure show` opening an episode — in the configuration
-//!   a user actually runs.
+//! * the surfaces still declared `ReadOnly` are held to byte-for-byte
+//!   identity — with nothing on `PATH`, and again with the machine's real
+//!   `PATH`. The second assertion is what the split buys: those surfaces
+//!   start no other program at all, so nothing is left that could write, and
+//!   the claim holds in the configuration a user actually runs. It is also
+//!   what catches the regressions this file was written for — `settings show`
+//!   writing out the defaults it just reported, `pressure show` opening an
+//!   episode.
+//! * the surfaces declared `ConsultsInstalledTools` are held to the claim
+//!   their own label makes: no state Glomeris owns, and whatever a foreign
+//!   tool left behind is *recorded* rather than asserted to be nothing.
+//! * which surfaces start another program is not taken on trust either. Every
+//!   surface in both sets is run against a `PATH` of recording stubs named
+//!   after `glomeris::detectors::SPAWNED_PROGRAMS`, and each label is checked
+//!   against what was observed to run. Declaring `detect` read-only again
+//!   fails there, which is the property that makes the split more than a
+//!   rename.
 //!
 //! # What is deliberately not executed, and why
 //!
@@ -108,6 +121,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use glomeris::cli::help::{self, Safety};
+use glomeris::detectors::SPAWNED_PROGRAMS;
 
 fn glomeris_bin() -> &'static str {
     env!("CARGO_BIN_EXE_glomeris")
@@ -368,23 +382,23 @@ fn run_with_home_and_no_tools(
 /// episode store, the settings file and the Autopilot envelope.
 const GLOMERIS_OWNED_PREFIXES: &[&str] = &["Library/Application Support/Glomeris"];
 
-/// Every surface the table declares `ReadOnly`, as the argv that exercises it.
+/// Every surface the table declares with `safety`, named as `"command verb"`.
 ///
 /// Derived from `help::COMMANDS` rather than listed, so a command or verb that
-/// becomes `ReadOnly` is covered by the assertion below the moment it is
-/// declared — and one that has no invocation here fails rather than being
-/// skipped.
-fn read_only_surfaces() -> Vec<String> {
+/// acquires one of these labels is covered by the assertions below the moment
+/// it is declared — and one that has no invocation here fails rather than
+/// being skipped.
+fn surfaces_declared(safety: Safety) -> Vec<String> {
     let mut surfaces = Vec::new();
     for command in help::COMMANDS {
         if command.subcommands.is_empty() {
-            if command.safety == Safety::ReadOnly {
+            if command.safety == safety {
                 surfaces.push(command.name.to_string());
             }
             continue;
         }
         for sub in command.subcommands {
-            if sub.safety == Safety::ReadOnly {
+            if sub.safety == safety {
                 surfaces.push(format!("{} {}", command.name, sub.name));
             }
         }
@@ -393,14 +407,34 @@ fn read_only_surfaces() -> Vec<String> {
     surfaces
 }
 
-/// How to invoke each read-only surface, including the `--json` variant where
+/// The two labels that look alike to a reader skimming `--help` and are held
+/// to different claims below (HORO-1560).
+///
+/// `ReadOnly` promises the whole filesystem is untouched, including by
+/// anything Glomeris starts. `ConsultsInstalledTools` promises only that
+/// Glomeris writes nothing *of its own*. Nothing else in the table may reach
+/// the tests below: a surface labelled `Destructive` must not be run at all.
+const INSPECTING_LABELS: &[Safety] = &[Safety::ReadOnly, Safety::ConsultsInstalledTools];
+
+/// Which of [`INSPECTING_LABELS`] a surface named by [`surfaces_declared`]
+/// carries.
+fn declared_safety(surface: &str) -> Safety {
+    for label in INSPECTING_LABELS {
+        if surfaces_declared(*label).iter().any(|s| s == surface) {
+            return *label;
+        }
+    }
+    panic!("'{surface}' is not declared with any label this test may run");
+}
+
+/// How to invoke each inspecting surface, including the `--json` variant where
 /// one exists, since a different output path could take a different code path.
 ///
 /// `explain` needs something to explain: it is given a path outside the
 /// disposable `HOME`, so that a surface which turned out to write beside the
 /// resource it was asked about would be visible as a change to the `HOME`
 /// tree rather than hidden in it.
-fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
+fn inspect_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
     let argv = |args: &[&str]| args.iter().map(|a| a.to_string()).collect::<Vec<String>>();
     vec![
         ("status".to_string(), argv(&["status"])),
@@ -492,31 +526,50 @@ fn read_only_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
     ]
 }
 
+/// The invocations covering surfaces declared with `safety`, having first
+/// checked that the invocation list and the table agree about who is in which
+/// set.
+///
+/// The coverage check is over *both* labels at once, deliberately. Checking
+/// one at a time would let a surface move from `ReadOnly` to
+/// `ConsultsInstalledTools` — the weaker claim — and disappear from the strict
+/// test without anything noticing that it had stopped being covered.
+fn invocations_declared(scratch: &Path, safety: Safety) -> Vec<(String, Vec<String>)> {
+    let invocations = inspect_invocations(scratch);
+
+    let covered: BTreeSet<String> = invocations.iter().map(|(s, _)| s.clone()).collect();
+    let required: BTreeSet<String> = INSPECTING_LABELS
+        .iter()
+        .flat_map(|label| surfaces_declared(*label))
+        .collect();
+    assert_eq!(
+        covered, required,
+        "the surfaces this test runs are not the ones the table declares as looking \
+         but not writing; a surface with no invocation here would be asserted about \
+         by nobody"
+    );
+
+    invocations
+        .into_iter()
+        .filter(|(surface, _)| declared_safety(surface) == safety)
+        .collect()
+}
+
 /// AC 2 and AC 3, observed: every surface labelled "Read-only — changes
 /// nothing." leaves the tree it would write to byte-for-byte identical, and
 /// `daemon status` is among them rather than having been relabelled away.
 ///
-/// Runs with no tool reachable on `PATH`, so Glomeris is the only thing that
-/// could write — see this file's header for what the build tools `detect`
-/// consults do to `$HOME` when they are reachable, and for the companion test
-/// that covers that configuration.
+/// Runs with no tool reachable on `PATH`. This is the deterministic form of
+/// the claim — it holds on a machine with no build tools installed as much as
+/// on this one — and the companion test below runs the same set against the
+/// real `PATH`, which is the configuration a user is in.
 #[test]
 fn read_only_surfaces_leave_a_disposable_home_untouched() {
     let scratch = make_temp_dir("horo1485-scratch");
     fs::write(scratch.join("a-file"), vec![0u8; 1024]).expect("write scratch file");
     let no_tools = make_temp_dir("horo1485-no-tools");
 
-    let invocations = read_only_invocations(&scratch);
-
-    let covered: BTreeSet<String> = invocations.iter().map(|(s, _)| s.clone()).collect();
-    let required: BTreeSet<String> = read_only_surfaces().into_iter().collect();
-    assert_eq!(
-        covered, required,
-        "the read-only surfaces this test runs are not the ones the table declares \
-         read-only; a surface with no invocation here would be asserted about by nobody"
-    );
-
-    for (surface, args) in &invocations {
+    for (surface, args) in &invocations_declared(&scratch, Safety::ReadOnly) {
         let home = make_temp_dir("horo1485-home");
         let before = snapshot(&home);
 
@@ -544,23 +597,85 @@ fn read_only_surfaces_leave_a_disposable_home_untouched() {
     }
 }
 
-/// The other half of the read-only claim (HORO-1556): with the machine's real
-/// `PATH`, and therefore the real `npm`, `go`, `pip`, `uv`, `brew` and
-/// `docker` running, no read-only surface creates any state Glomeris owns.
+/// The strict claim in the configuration a user is actually in (HORO-1560):
+/// with the machine's real `PATH`, a surface declared `ReadOnly` still leaves
+/// its `HOME` byte-for-byte identical.
 ///
-/// This is the configuration a user runs in, and the one the test above
-/// deliberately does not use — see this file's header for the writes the build
-/// tools make on their own account, and why no environment can stop them.
-/// What remains provable there, and is proved here, is that none of those
-/// writes are Glomeris's: a surface that reported your settings by writing
-/// them out, or answered "is a notification owed?" by opening an episode,
-/// would put a file under `Library/Application Support/Glomeris` and fail.
+/// This assertion did not exist before the tool-consulting label did, and it
+/// is the reason the label was added rather than the wording softened. While
+/// `detect` was in this set the strict comparison could only be made with an
+/// empty `PATH`, because `detect` runs build tools and they write on their own
+/// account. Taking `detect` out leaves a set that starts no other program at
+/// all — so there is nothing left that could write, and the strongest form of
+/// the claim becomes provable exactly where it matters.
+///
+/// `only_the_tool_consulting_surfaces_start_another_program` is what keeps
+/// that reasoning honest: it observes that these surfaces start nothing,
+/// rather than assuming it from the label.
 #[test]
-fn read_only_surfaces_create_no_glomeris_state_even_with_real_tools_on_path() {
+fn read_only_surfaces_leave_a_disposable_home_untouched_with_the_real_path() {
+    let scratch = make_temp_dir("horo1560-scratch");
+    fs::write(scratch.join("a-file"), vec![0u8; 1024]).expect("write scratch file");
+
+    for (surface, args) in &invocations_declared(&scratch, Safety::ReadOnly) {
+        let home = make_temp_dir("horo1560-home");
+        let before = snapshot(&home);
+
+        let output = run_with_home(args, &home);
+        assert!(
+            output.status.code().is_some(),
+            "`glomeris {}` was killed by a signal rather than exiting",
+            args.join(" ")
+        );
+
+        let after = snapshot(&home);
+        assert_eq!(
+            before,
+            after,
+            "'{surface}' is declared \"Read-only — changes nothing.\" but \
+             `glomeris {}` changed its HOME on a machine with the real PATH \
+             (exit {:?}). If this surface has started consulting an installed \
+             tool, the honest fix is Safety::ConsultsInstalledTools, not a \
+             looser comparison. Paths after: {:?}",
+            args.join(" "),
+            output.status.code(),
+            after.keys().collect::<Vec<_>>()
+        );
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    fs::remove_dir_all(&scratch).ok();
+}
+
+/// The claim a tool-consulting surface *does* make (HORO-1556, HORO-1560):
+/// with the machine's real `PATH`, and therefore the real `npm`, `go`, `pip`,
+/// `uv`, `brew` and `docker` running, it creates no state Glomeris owns.
+///
+/// What a foreign tool wrote is recorded in the assertion message rather than
+/// asserted to be nothing. Glomeris cannot enforce a zero there — `go env`
+/// writes a telemetry counter no environment can suppress — and a test that
+/// asserted one anyway would pass or fail according to which build tools the
+/// machine happens to have. What is enforceable, and enforced, is that none of
+/// those writes are Glomeris's: a surface that reported your settings by
+/// writing them out, or answered "is a notification owed?" by opening an
+/// episode, would put a file under `Library/Application Support/Glomeris` and
+/// fail here.
+#[test]
+fn a_tool_consulting_surface_writes_no_glomeris_state_and_its_foreign_writes_are_recorded() {
     let scratch = make_temp_dir("horo1556-scratch");
     fs::write(scratch.join("a-file"), vec![0u8; 1024]).expect("write scratch file");
 
-    for (surface, args) in &read_only_invocations(&scratch) {
+    let consulting = invocations_declared(&scratch, Safety::ConsultsInstalledTools);
+    // The set is derived from the table, so an empty one would agree with
+    // every assertion in the loop and report a pass. `detect` is in it.
+    assert!(
+        !consulting.is_empty(),
+        "no surface is declared Safety::ConsultsInstalledTools, so this test \
+         asserts nothing — and `detect` runs build tools whatever the table says"
+    );
+
+    for (surface, args) in &consulting {
         let home = make_temp_dir("horo1556-home");
 
         let output = run_with_home(args, &home);
@@ -570,25 +685,150 @@ fn read_only_surfaces_create_no_glomeris_state_even_with_real_tools_on_path() {
             args.join(" ")
         );
 
-        let owned: Vec<PathBuf> = snapshot(&home)
-            .into_keys()
-            .filter(|path| {
+        let (owned, foreign): (Vec<PathBuf>, Vec<PathBuf>) =
+            snapshot(&home).into_keys().partition(|path| {
                 GLOMERIS_OWNED_PREFIXES
                     .iter()
                     .any(|prefix| path.starts_with(prefix))
-            })
-            .collect();
+            });
         assert!(
             owned.is_empty(),
-            "'{surface}' is declared read-only but `glomeris {}` created state \
-             Glomeris owns (exit {:?}): {owned:?}",
+            "'{surface}' is declared to write nothing of its own but `glomeris {}` \
+             created state Glomeris owns (exit {:?}): {owned:?}. Foreign writes \
+             observed alongside it: {foreign:?}",
             args.join(" "),
             output.status.code()
+        );
+        // A label that promised the filesystem was untouched would be a false
+        // claim the moment a foreign tool wrote anything here — which is the
+        // defect HORO-1560 was filed for.
+        assert!(
+            foreign.is_empty() || !declared_safety(surface).promises_nothing_changes(),
+            "'{surface}' promises nothing changes, and yet running `glomeris {}` \
+             left {} path(s) behind that Glomeris does not own: {foreign:?}",
+            args.join(" "),
+            foreign.len()
         );
 
         fs::remove_dir_all(&home).ok();
     }
 
+    fs::remove_dir_all(&scratch).ok();
+}
+
+/// A directory of executables named after [`SPAWNED_PROGRAMS`], each of which
+/// records that it was run and answers nothing.
+///
+/// Answering nothing is deliberate: a stub that printed a plausible cache path
+/// would send the detector off to measure a directory, which is a second thing
+/// for the test to reason about. An empty answer reaches the detector as a
+/// failed probe, and a failed probe is not what is under test here — *that the
+/// program started at all* is.
+fn recording_stub_path(dir: &Path, log: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = dir.join("bin");
+    fs::create_dir_all(&bin).expect("create stub bin dir");
+    for program in SPAWNED_PROGRAMS {
+        let stub = bin.join(program);
+        fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' {program} >> '{}'\nexit 0\n",
+                log.display()
+            ),
+        )
+        .expect("write stub");
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("chmod stub");
+    }
+    bin
+}
+
+/// AC 5, and what makes the split more than a rename: which surfaces start
+/// another program is *observed*, and each label is checked against the
+/// observation (HORO-1560).
+///
+/// Every inspecting surface is run against a `PATH` containing nothing but
+/// recording stubs named after the programs a detector can spawn. A surface
+/// declared "Read-only — changes nothing." must start none of them, because
+/// that label is a promise about the whole filesystem and Glomeris cannot make
+/// it on another program's behalf. A surface declared to consult installed
+/// tools must start at least one, so the warning is not being handed out to
+/// verbs that do not need it — a reader who is warned once for nothing
+/// discounts the next warning too.
+///
+/// Both directions bite. Declaring `detect` `ReadOnly` again fails the first
+/// assertion; labelling a surface that runs nothing as tool-consulting fails
+/// the second.
+#[test]
+fn only_the_tool_consulting_surfaces_start_another_program() {
+    let scratch = make_temp_dir("horo1560-spawn-scratch");
+    fs::write(scratch.join("a-file"), vec![0u8; 1024]).expect("write scratch file");
+    let stubs = make_temp_dir("horo1560-stubs");
+    let log = stubs.join("invoked.log");
+    let stub_path = recording_stub_path(&stubs, &log);
+
+    let mut anything_spawned = false;
+    for (surface, args) in &inspect_invocations(&scratch) {
+        let home = make_temp_dir("horo1560-spawn-home");
+        fs::write(&log, "").expect("truncate the invocation log");
+
+        let output = Command::new(glomeris_bin())
+            .args(args)
+            .env("HOME", &home)
+            .env("PATH", &stub_path)
+            .stdin(Stdio::null())
+            .output()
+            .expect("failed to spawn glomeris binary");
+        assert!(
+            output.status.code().is_some(),
+            "`glomeris {}` was killed by a signal rather than exiting",
+            args.join(" ")
+        );
+
+        let mut spawned: Vec<String> = fs::read_to_string(&log)
+            .expect("read the invocation log")
+            .lines()
+            .map(str::to_string)
+            .collect();
+        spawned.sort();
+        spawned.dedup();
+        anything_spawned |= !spawned.is_empty();
+
+        match declared_safety(surface) {
+            Safety::ReadOnly => assert!(
+                spawned.is_empty(),
+                "'{surface}' is declared \"Read-only — changes nothing.\" but \
+                 `glomeris {}` started {spawned:?}. Glomeris cannot promise that \
+                 another program changes nothing — a version manager fronting one \
+                 of these can install a whole toolchain. Declare this surface \
+                 Safety::ConsultsInstalledTools instead",
+                args.join(" ")
+            ),
+            Safety::ConsultsInstalledTools => assert!(
+                !spawned.is_empty(),
+                "'{surface}' is declared to run installed tools, but `glomeris {}` \
+                 started none of {SPAWNED_PROGRAMS:?}. A warning given to a verb \
+                 that does not need it teaches the reader to ignore the next one",
+                args.join(" ")
+            ),
+            other => panic!("'{surface}' reached this test with label {other:?}"),
+        }
+
+        fs::remove_dir_all(&home).ok();
+    }
+
+    // The stubs are only reachable if the binary resolves these programs
+    // through `PATH` at all. If it stopped doing so — a hardcoded
+    // `/opt/homebrew/bin/brew`, say — every surface would look like it started
+    // nothing and this test would read as a pass.
+    assert!(
+        anything_spawned,
+        "no surface started any of {SPAWNED_PROGRAMS:?}, so the stub PATH observed \
+         nothing and every assertion above was vacuous"
+    );
+
+    fs::remove_dir_all(&stubs).ok();
     fs::remove_dir_all(&scratch).ok();
 }
 
