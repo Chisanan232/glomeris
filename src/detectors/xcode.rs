@@ -19,6 +19,12 @@
 //! by a size/time budget (HORO-1016) — see [`estimate_logical_bytes`]'s
 //! own doc comment for what happens if that budget is hit before the walk
 //! finishes (a truthful lower bound, never a precision guarantee).
+//!
+//! The path is inferred from `$HOME`, so a missing `DerivedData` is judged by
+//! `~/Library/Developer/Xcode` above it via
+//! [`absence_under_tool_owned_parent`]: a present support directory means
+//! Xcode has run here and has no build output yet, which is not a reason to
+//! report Xcode as absent (HORO-1575).
 
 use std::path::PathBuf;
 
@@ -27,13 +33,20 @@ use crate::evidence::{
 };
 
 use super::{
-    discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, Detector,
-    DetectorId, DetectorStatus, DiscoveryContext,
+    absence_under_tool_owned_parent, discovery_evidence, estimate_logical_bytes, probe_mtime,
+    size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext,
 };
 
 pub struct XcodeDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::XcodeDerivedData];
+
+/// Xcode's own support directory, relative to `$HOME`. Only Xcode creates
+/// it, which is what makes its presence evidence about Xcode (HORO-1575).
+const XCODE_SUPPORT_RELATIVE_PATH: &str = "Library/Developer/Xcode";
+
+/// The one subdirectory of that support directory this detector names.
+const DERIVED_DATA_SUBDIR: &str = "DerivedData";
 
 impl Detector for XcodeDetector {
     fn id(&self) -> DetectorId {
@@ -45,14 +58,17 @@ impl Detector for XcodeDetector {
     }
 
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
-        let derived_data = ctx.home_dir.join("Library/Developer/Xcode/DerivedData");
+        let xcode_support = ctx.home_dir.join(XCODE_SUPPORT_RELATIVE_PATH);
+        let derived_data = xcode_support.join(DERIVED_DATA_SUBDIR);
 
         let canonical: PathBuf = match derived_data.canonicalize() {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Xcode never used / no DerivedData yet — expected, not an
-                // error.
-                return DetectorStatus::ToolAbsent;
+                // No DerivedData. Whether that means Xcode is absent depends
+                // on `~/Library/Developer/Xcode` above it, which only Xcode
+                // creates: present means Xcode has run here and has no build
+                // output yet (HORO-1575).
+                return absence_under_tool_owned_parent(&xcode_support);
             }
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 return DetectorStatus::Failed(format!(
