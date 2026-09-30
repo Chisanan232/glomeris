@@ -25,6 +25,7 @@
   "final_free_human": "60.9 GB",
   "target_met": false,
   "detector_failures": [],
+  "detectors_not_examined": [],
   "discovery_complete": true,
   "caveats": []
 }
