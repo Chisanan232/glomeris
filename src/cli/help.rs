@@ -59,8 +59,41 @@
 /// rather than left to look alphabetical-by-accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Safety {
-    /// Reads and reports. Changes nothing, sends nothing.
+    /// Reads and reports. Changes nothing, sends nothing — and runs no other
+    /// program that could change anything on its own account.
+    ///
+    /// The last clause is the part HORO-1560 added, and it is what makes this
+    /// variant's label true rather than nearly true. See
+    /// [`Safety::ConsultsInstalledTools`] for the surfaces that used to wear
+    /// this claim and could not honour it.
     ReadOnly,
+    /// Reads and reports, writes nothing of its own — and gets some of its
+    /// answers by running a build tool that is installed on this machine.
+    ///
+    /// # Why this is not [`Safety::ReadOnly`] (HORO-1560)
+    ///
+    /// `detect` and `explain` have to find out where each ecosystem keeps its
+    /// cache. Where a documented environment variable or a documented default
+    /// path answers that, nothing is spawned — see
+    /// `crate::detectors::resolve_cache_path`. Where neither does, the only
+    /// remaining source of the answer is the tool itself, so the tool is run.
+    ///
+    /// Running it is where the claim breaks. On a workstation where `npm`,
+    /// `pip`, `uv` or `go` is fronted by a version manager, invoking the name
+    /// can make that version manager provision itself: download a plugin,
+    /// unpack a toolchain, populate its own caches — 4.3 MB of it, observed,
+    /// inside a `HOME` that was empty a moment earlier. None of it is
+    /// Glomeris's, none of it is under a path Glomeris named, and all of it was
+    /// caused by a command whose help text said it changed nothing.
+    ///
+    /// The honest position is not to promise that a program we did not write
+    /// performs no I/O. It is to say that we run it. A user who knows that can
+    /// reason about the 4.3 MB; a user told "changes nothing" cannot.
+    ///
+    /// Ordered above [`Safety::ReadOnly`] and below [`Safety::Advisory`]:
+    /// running a tool that is already on this machine is a smaller consequence
+    /// than sending a summary of the machine to a network provider.
+    ConsultsInstalledTools,
     /// Produces a proposal. Executes nothing. May contact a configured
     /// provider (`llm-plan`, `llm-check`) — which is network access, not
     /// filesystem mutation, and is called out separately where it applies.
@@ -85,6 +118,7 @@ impl Safety {
     /// cannot quietly leave it uncovered by the ones that check every label.
     pub const ALL: &'static [Safety] = &[
         Safety::ReadOnly,
+        Safety::ConsultsInstalledTools,
         Safety::Advisory,
         Safety::WritesOwnState,
         Safety::Destructive,
@@ -95,9 +129,34 @@ impl Safety {
     pub fn label(self) -> &'static str {
         match self {
             Safety::ReadOnly => "Read-only — changes nothing.",
+            Safety::ConsultsInstalledTools => {
+                "Read-only, and runs installed build tools to locate their caches."
+            }
             Safety::Advisory => "Advisory — proposes, never executes.",
             Safety::WritesOwnState => "Writes only Glomeris's own state — never your files.",
             Safety::Destructive => "Can delete data — every deletion is policy-gated.",
+        }
+    }
+
+    /// Whether this label promises, without qualification, that running the
+    /// command leaves the machine as it was (HORO-1560 AC 1 and AC 5).
+    ///
+    /// The one variant that may say so is [`Safety::ReadOnly`], and only
+    /// because nothing wearing it runs another program — which
+    /// `tests/subcommand_safety_is_honest.rs` establishes by observation, with
+    /// recording stubs on `PATH`, rather than by reading this function.
+    ///
+    /// Exists so the claim can be *tested* instead of grepped for: a future
+    /// variant that quietly reintroduced an unconditional promise would have to
+    /// answer `true` here to be believed, and answering `true` is what the
+    /// guard test checks against what the surface was observed to do.
+    pub fn promises_nothing_changes(self) -> bool {
+        match self {
+            Safety::ReadOnly => true,
+            Safety::ConsultsInstalledTools
+            | Safety::Advisory
+            | Safety::WritesOwnState
+            | Safety::Destructive => false,
         }
     }
 }
@@ -2311,6 +2370,69 @@ mod tests {
                 assert!(
                     !label.contains(policy_token),
                     "{label:?} describes a command using a resource's policy class"
+                );
+            }
+        }
+    }
+
+    /// The ordering [`Safety`]'s doc calls load-bearing, for the variant
+    /// HORO-1560 inserted. Written as the two comparisons that would break if
+    /// it were appended to the end of the enum instead — where `a.max(b)` would
+    /// make a command with one tool-consulting verb out-rank a destructive one.
+    #[test]
+    fn consulting_a_tool_ranks_between_reading_and_advising() {
+        assert!(Safety::ConsultsInstalledTools > Safety::ReadOnly);
+        assert!(Safety::ConsultsInstalledTools < Safety::Advisory);
+        assert_eq!(
+            Safety::ReadOnly.max(Safety::ConsultsInstalledTools),
+            Safety::ConsultsInstalledTools
+        );
+        assert_eq!(
+            Safety::ConsultsInstalledTools.max(Safety::Destructive),
+            Safety::Destructive
+        );
+    }
+
+    /// HORO-1560 AC 1 and AC 5, at the level of the vocabulary: exactly one
+    /// safety class is entitled to promise that nothing changes, and its label
+    /// is the only one that reads as an unconditional statement about the
+    /// machine.
+    ///
+    /// The second half is the anti-vacuity half. `ReadOnly`'s label is the
+    /// sentence the bug was about, and it is still here — because the fix was
+    /// to narrow who may wear it, not to soften it. So the assertion that has
+    /// to hold is that no *other* class borrows that sentence's unconditional
+    /// shape: a future edit that gave `ConsultsInstalledTools` the words
+    /// "changes nothing" would reintroduce the exact false claim, and fails
+    /// here. `tests/subcommand_safety_is_honest.rs` closes the other half, that
+    /// the surfaces wearing `ReadOnly` really do run nothing.
+    #[test]
+    fn only_the_class_that_runs_nothing_promises_that_nothing_changes() {
+        let promising: Vec<Safety> = Safety::ALL
+            .iter()
+            .copied()
+            .filter(|s| s.promises_nothing_changes())
+            .collect();
+        assert_eq!(
+            promising,
+            vec![Safety::ReadOnly],
+            "only a class that runs no other program may promise the machine is unchanged"
+        );
+
+        for safety in Safety::ALL {
+            if safety.promises_nothing_changes() {
+                continue;
+            }
+            let label = safety.label();
+            for unconditional in [
+                "changes nothing",
+                "Nothing is changed",
+                "nothing is changed",
+            ] {
+                assert!(
+                    !label.contains(unconditional),
+                    "{safety:?} does not run nothing, so its label must not say {unconditional:?}: \
+                     {label:?}"
                 );
             }
         }
