@@ -21,6 +21,15 @@
 //! directory (see `Fixture::command`), the only `--project-root` is a temp
 //! fixture, and `detect` is read-only in any case.
 //!
+//! The third state in that set — a tool that is genuinely not installed — is
+//! pinned here too (HORO-1551). `ToolAbsent` is the one of the three whose
+//! wire word had no end-to-end assertion: the only tests naming
+//! `"tool_absent"` round-tripped a DTO or constructed the value directly, so
+//! nothing covered the `DetectorStatus` → `DetectorOutcome` mapping the CLI
+//! actually runs. Collapsing an absent tool into `failed` there would have
+//! been caught only indirectly, through `discovery_complete`, and only in the
+//! run where nothing else had failed.
+//!
 //! The `free` and `emergency` halves of this ticket are asserted in-crate
 //! (`executor::recovery_loop::run_tests` and `emergency::tests`) rather than
 //! here, deliberately: both commands really delete things, and the in-crate
@@ -311,6 +320,107 @@ fn detect_json_reports_complete_discovery_when_every_detector_answered() {
     );
 
     fixture.cleanup();
+}
+
+/// Detectors this fixture makes genuinely absent, by pointing their tool-home
+/// variables at an empty temporary `$HOME` (see `Fixture::command`). Nothing
+/// has ever written `$HOME/.cargo` or `$HOME/.gradle` there, so
+/// `tool_absent` is the honest answer for both — the same rule
+/// `absence_under_tool_owned_parent` applies (HORO-1575).
+const ABSENT_TOOL_DETECTORS: &[&str] = &["cargo_registry_cache", "gradle_cache"];
+
+/// HORO-1551 (§19): a tool that is genuinely not installed reaches
+/// `detect --json` as `tool_absent`, in the same document as a detector that
+/// failed and detectors that found things.
+///
+/// The three states have to stay three words all the way to the wire. The
+/// existing tests above pin `failed` and `tool_not_running`; this pins the
+/// third, which is the one a well-meaning simplification is most likely to
+/// fold into `failed` — "the probe did not produce a resource" reads the same
+/// from inside the mapping, and the difference only matters to the person
+/// reading the report: a missing tool is a normal, complete answer, and a
+/// failure means what that tool owns is unknown.
+///
+/// Both fixtures are checked so the word cannot drift with the run's overall
+/// completeness. In the failing fixture the absent tools sit beside a `failed`
+/// detector in a run whose `discovery_complete` is already `false`; in the
+/// succeeding one they sit in a run that claims completeness. Either
+/// direction of collapse — absent reported as failed, or failed reported as
+/// absent — changes one of these assertions.
+#[test]
+fn detect_json_reports_a_genuinely_absent_tool_as_tool_absent_not_failed() {
+    for brew_fails in [true, false] {
+        let fixture = Fixture::new("horo1551-tool-absent", brew_fails);
+        let output = fixture.run(&["detect", "--json"]);
+        assert!(
+            output.status.success(),
+            "glomeris detect --json should succeed (brew_fails={brew_fails}); stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).expect("detect --json must print one JSON document");
+
+        for id in ABSENT_TOOL_DETECTORS {
+            let entry = detector_entry(&report, id);
+            assert_eq!(
+                entry.get("status").and_then(|v| v.as_str()),
+                Some("tool_absent"),
+                "{id} has no tool home under this fixture's empty $HOME, so it is \
+                 absent — not failed, and not an answer of zero \
+                 (brew_fails={brew_fails}); got: {entry}"
+            );
+            assert!(
+                entry.get("reason").is_none(),
+                "an absent tool is a normal, expected state and carries no failure \
+                 reason (brew_fails={brew_fails}); got: {entry}"
+            );
+            assert_eq!(
+                entry.get("candidates_found").and_then(|v| v.as_u64()),
+                Some(0),
+                "an uninstalled tool owns nothing, so it must not contribute a \
+                 candidate (brew_fails={brew_fails}); got: {entry}"
+            );
+        }
+
+        // The discriminating half: in the failing fixture a real failure is
+        // present in the very same document, so this cannot pass by every
+        // detector reporting one single word. In the succeeding fixture the
+        // absent tools coexist with a complete run, so `tool_absent` is not
+        // being read off `discovery_complete` either.
+        let brew = detector_entry(&report, "homebrew_cache");
+        let expected_brew = if brew_fails { "failed" } else { "found" };
+        assert_eq!(
+            brew.get("status").and_then(|v| v.as_str()),
+            Some(expected_brew),
+            "the shimmed brew decides this one (brew_fails={brew_fails}); got: {brew}"
+        );
+        assert_eq!(
+            report.get("discovery_complete").and_then(|v| v.as_bool()),
+            Some(!brew_fails),
+            "an absent tool is an answer, so it must never be what makes a run \
+             incomplete; only the failed detector may do that \
+             (brew_fails={brew_fails}); got:\n{stdout}"
+        );
+
+        // Anti-vacuity: the run really did discover things. Absence asserted
+        // over a run that found nothing would pass for the wrong reason.
+        let found: Vec<&str> = report["detectors"]
+            .as_array()
+            .expect("`detectors` must be an array")
+            .iter()
+            .filter(|e| e.get("status").and_then(|v| v.as_str()) == Some("found"))
+            .filter_map(|e| e.get("detector").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            found.contains(&"cargo_target_dir"),
+            "the cargo fixture must be found, so absence is asserted against a \
+             run that demonstrably worked (brew_fails={brew_fails}); found: {found:?}"
+        );
+
+        fixture.cleanup();
+    }
 }
 
 /// AC 1/AC 3 at the wire: the `--progress-json` stream the menu-bar app
