@@ -411,10 +411,10 @@ struct GlomerisStateMessage: Equatable {
         )
     }
 
-    /// `symbolName` is overridable for the three named factories below, and
-    /// for nothing else. All three exist because the default checkmark is a
-    /// claim — "I looked, and it is fine" — and there are emptinesses that
-    /// have not earned it.
+    /// `symbolName` is overridable for the named factories below, and for
+    /// nothing else. Every one of them exists because the default checkmark
+    /// is a claim — "I looked, and it is fine" — and there are emptinesses
+    /// that have not earned it.
     static func empty(
         _ title: String,
         detail: String? = nil,
@@ -485,6 +485,25 @@ struct GlomerisStateMessage: Equatable {
     /// and a glyph that says the answer is incomplete rather than good.
     static func partialSearch(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
         empty(title, detail: detail, symbolName: "questionmark.circle")
+    }
+
+    /// Nothing to show because part of the search was never pointed at
+    /// anything (HORO-1576) — an emptiness that is nobody's malfunction and
+    /// is the one in this family the user can close themselves.
+    ///
+    /// The fifth, and the reason it is not the fourth: a detector with no
+    /// configured project root did not fail, and `partialSearch`'s question
+    /// mark alongside "did not finish" wording reads as a bug report. On a
+    /// default installation three detectors are in exactly this state, so
+    /// that reading would ship a phantom malfunction to every new user and
+    /// send them looking for a defect instead of for a setting. `empty`'s
+    /// checkmark is wrong for the opposite reason — it would claim a clean
+    /// bill of health over directories nobody looked in. So: neutral tone,
+    /// and a glyph that points at configuration, because the honest next
+    /// step here is to name a project root rather than to trust the list or
+    /// to file a bug.
+    static func notConfigured(_ title: String, detail: String? = nil) -> GlomerisStateMessage {
+        empty(title, detail: detail, symbolName: "gearshape")
     }
 
     /// Something the user asked for happened. `message` is expected to be
