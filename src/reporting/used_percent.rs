@@ -120,6 +120,35 @@ pub fn used_percent_text(measured: f64) -> String {
     }
 }
 
+/// `"75"`, `"72.5"`, `"87.456"` — a *configured* percentage, rendered exactly.
+///
+/// The other function in this module renders a measurement, which has decimals
+/// nobody chose and is therefore truncated to a readable tenth. A threshold or a
+/// recovery goal is the opposite: it is a number the user typed, every digit of
+/// it is theirs, and it is the right-hand side of the comparison rather than the
+/// left. So it is echoed back unchanged, with only a trailing `.0` dropped so a
+/// whole number reads as one.
+///
+/// It lives beside the measurement rule because the two are compared against
+/// each other on every poll and must not be rounded in opposite directions.
+/// `settings` and `executor::goal` each had a private copy that claimed in its
+/// doc comment to keep a fractional value's precision and in fact rendered it
+/// `{:.2}`, which rounds up: a stored threshold of 87.456 was shown as
+/// `87.46% used`, i.e. above the boundary the daemon actually notifies at, while
+/// the current reading beside it is truncated downwards. A user reading both
+/// would place themselves below a threshold they had already crossed. Rendering
+/// the configured figure exactly removes that direction of disagreement rather
+/// than trading it for another, and it is also what the macOS app's
+/// `RecoverySettingsFigure` has always done, so the two languages now agree
+/// here as well.
+pub fn configured_used_percent_figure(value: f64) -> String {
+    if value.is_finite() && (value - value.round()).abs() < 1e-9 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +173,81 @@ mod tests {
                 "a one-decimal value must render as itself: {value}"
             );
         }
+    }
+
+    #[test]
+    fn a_configured_figure_is_echoed_back_exactly() {
+        // A whole number the user typed reads as one.
+        assert_eq!(configured_used_percent_figure(75.0), "75");
+        assert_eq!(configured_used_percent_figure(0.0), "0");
+        assert_eq!(configured_used_percent_figure(100.0), "100");
+        // A fractional one keeps every digit of it. The private copies this
+        // replaced rendered the last of these as "87.46" — a threshold shown
+        // above the one the daemon notifies at.
+        assert_eq!(configured_used_percent_figure(72.5), "72.5");
+        assert_eq!(configured_used_percent_figure(87.456), "87.456");
+        assert_eq!(configured_used_percent_figure(89.96), "89.96");
+    }
+
+    #[test]
+    fn a_configured_figure_never_reads_above_the_value_it_renders() {
+        // The direction that matters: the displayed threshold must not sit above
+        // the boundary the comparison uses, or a user places themselves below a
+        // threshold they have already crossed. Exact rendering gives this for
+        // free, which is the reason it is exact; this asserts it for the whole
+        // settable range at a precision finer than the renderer's old one.
+        for thousandths in 0..=100_000u32 {
+            let value = f64::from(thousandths) / 1000.0;
+            let rendered = configured_used_percent_figure(value);
+            let parsed: f64 = rendered
+                .parse()
+                .unwrap_or_else(|_| panic!("{rendered} must parse back as a number"));
+            assert!(
+                parsed <= value + 1e-9,
+                "{rendered} reads above the configured {value}"
+            );
+            assert!(
+                parsed >= value - 1e-9,
+                "{rendered} reads below the configured {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_figure_and_a_measurement_cannot_straddle_a_threshold() {
+        // The two renderings in this module are compared against each other by
+        // eye on every `pressure show`. This is that comparison: for a reading
+        // just past a fractional threshold, the current-usage line must not read
+        // as being below the threshold line.
+        let threshold = 87.456;
+        let measured = 87.458; // the daemon has notified: 87.458 >= 87.456
+        let shown_threshold: f64 = configured_used_percent_figure(threshold)
+            .parse()
+            .expect("a configured figure is a number");
+        let shown_measured = displayed_used_percent(measured).expect("a finite reading renders");
+        // Truncation can legitimately show 87.4 against a threshold of 87.456,
+        // so the screen cannot claim the crossing — but it must not claim the
+        // *opposite* either, which is what the old pair did by rounding the
+        // threshold up to 87.46 while truncating the reading to 87.4.
+        assert!(
+            shown_threshold <= threshold,
+            "the displayed threshold {shown_threshold} sits above the real {threshold}"
+        );
+        assert!(
+            shown_measured <= measured,
+            "the displayed reading {shown_measured} sits above the real {measured}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_configured_figure_is_not_turned_into_a_number() {
+        // Validation rejects these before they can be stored, so this is a guard
+        // on the renderer rather than a reachable state. It matters because
+        // `f64::round() as i64` saturates silently: an `inf` reaching the
+        // whole-number branch would print as 9223372036854775807.
+        assert_eq!(configured_used_percent_figure(f64::NAN), "NaN");
+        assert_eq!(configured_used_percent_figure(f64::INFINITY), "inf");
+        assert_eq!(configured_used_percent_figure(f64::NEG_INFINITY), "-inf");
     }
 
     #[test]
