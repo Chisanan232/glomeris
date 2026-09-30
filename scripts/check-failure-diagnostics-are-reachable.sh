@@ -165,14 +165,20 @@ substitution_text() {
 
 # Analyse one shell body. $1 = file of shell source, $2 = label for reporting,
 # $3 = line number in the original file that this body starts at (1 for a
-# whole script).
+# whole script), $4 = `require` if errexit has to be visible in the body for the
+# defect to exist, `assume` if whoever runs this body enables it for them.
 analyse() {
-  local body="$1" label="$2" offset="$3"
+  local body="$1" label="$2" offset="$3" errexit="${4:-require}"
 
-  # `set -e` has to be in effect for the abort to happen at all. A `run:` block
-  # without it is not subject to this defect: the assignment fails, the script
-  # carries on, and the check below it runs and reports. That is not a bug.
-  if ! grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$body"; then
+  # `set -e` has to be in effect for the abort to happen at all.
+  #
+  # Whether the body has to say so itself is the caller's to answer, because it
+  # depends on who runs the body. A standalone script's errexit status is its own
+  # business, so `require` is right for one of those: without the line the
+  # assignment fails, the script carries on, the check below it runs and reports,
+  # and that is not a bug.
+  if [[ "$errexit" == "require" ]] \
+    && ! grep -qE '^[[:space:]]*set[[:space:]]+-[a-z]*e' "$body"; then
     return 0
   fi
 
@@ -375,7 +381,7 @@ assess() (
   shopt -s nullglob
   for f in "$SCRIPT_DIR"/*.sh; do
     files_scanned=$((files_scanned + 1))
-    analyse "$f" "$f" 1
+    analyse "$f" "$f" 1 require
   done
   shopt -u nullglob
 
@@ -443,7 +449,7 @@ assess() (
       while IFS=$'\t' read -r blockfile startline; do
         [[ -f "$blockfile" ]] || continue
         blocks_scanned=$((blocks_scanned + 1))
-        analyse "$blockfile" "$wf" "$startline"
+        analyse "$blockfile" "$wf" "$startline" require
       done < "$WORK/index"
       rm -f "$WORK/index" "$WORK"/block-*.sh
     fi
