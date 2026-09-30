@@ -146,6 +146,38 @@ impl Detector for PipCacheDetector {
     }
 }
 
+/// uv's documented default cache location.
+///
+/// uv follows XDG cache semantics on every platform it supports, macOS
+/// included: `$XDG_CACHE_HOME/uv` when that variable is set, `~/.cache/uv`
+/// otherwise. Confirmed against the installed uv, and the reason
+/// [`user_caches_dir`] is not involved here — uv is the one tool in this
+/// module that does *not* keep its cache under `~/Library/Caches` on macOS,
+/// and assuming it matched its neighbours would have named a directory that
+/// does not exist while gigabytes sat in the real one.
+///
+/// `None` when `XDG_CACHE_HOME` is set to something that is not an absolute
+/// path: what uv resolves that against is uv's business, so the caller asks
+/// uv rather than assembling a path from a guess.
+fn uv_default_cache_dir(ctx: &DiscoveryContext) -> Option<PathBuf> {
+    // `XDG_CACHE_HOME` has a single documented spelling, so the ambiguous
+    // case `tool_env` also answers `None` for cannot arise here.
+    match ctx.tool_env(ToolEnvVar::XdgCacheHome) {
+        Some(xdg) => {
+            let base = PathBuf::from(xdg);
+            base.is_absolute().then(|| base.join("uv"))
+        }
+        None => Some(ctx.home_dir.join(".cache/uv")),
+    }
+}
+
+/// Where uv's own documented configuration puts its cache, when that answers
+/// without running uv. `UV_CACHE_DIR` first, then
+/// [`uv_default_cache_dir`].
+fn uv_documented_cache_root(ctx: &DiscoveryContext) -> Option<(PathBuf, CacheRoute)> {
+    documented_cache_root(ctx, ToolEnvVar::UvCacheDir, uv_default_cache_dir(ctx))
+}
+
 impl Detector for UvCacheDetector {
     fn id(&self) -> DetectorId {
         DetectorId("uv_cache")
@@ -155,7 +187,19 @@ impl Detector for UvCacheDetector {
         UV_KINDS
     }
 
-    fn discover(&self, _ctx: &DiscoveryContext) -> DetectorStatus {
+    fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+        if let Some((root, route)) = uv_documented_cache_root(ctx) {
+            return cache_root_status(
+                self.id(),
+                ResourceKind::UvCache,
+                &root,
+                Regenerability::RegenerableByTool,
+                Recoverability::RegenerableByTool,
+                &route.provenance("uv's cache"),
+                DOCUMENTED_ROUTE_ABSENCE,
+            );
+        }
+
         match query_tool_single_path(UV_PROGRAM, &["cache", "dir"]) {
             ToolQuery::Lines(lines) => cache_root_status(
                 self.id(),
@@ -340,6 +384,109 @@ mod tests {
         let home = crate::detectors::test_support::make_temp_dir("pip-empty-home");
 
         assert!(pip_documented_cache_root(&DiscoveryContext::new(&home)).is_none());
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// uv's default is `~/.cache/uv`, not `~/Library/Caches/uv`, on macOS as
+    /// everywhere else. This is the assertion that would have caught the
+    /// tempting-and-wrong version of this change, where uv's default was
+    /// assumed to match its neighbours' in this module.
+    #[test]
+    fn uvs_documented_default_is_the_xdg_location_not_the_macos_one() {
+        let home = crate::detectors::test_support::make_temp_dir("uv-documented-home");
+        let cache = home.join(".cache/uv");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("archive.tar"), vec![0u8; 2_048]).unwrap();
+
+        assert_eq!(
+            uv_default_cache_dir(&DiscoveryContext::new(&home)),
+            Some(cache.clone())
+        );
+
+        match UvCacheDetector.discover(&DiscoveryContext::new(&home)) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(
+                    evidence[0].logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(2_048)
+                );
+                assert!(evidence[0]
+                    .sources
+                    .iter()
+                    .any(|s| s.contains("the tool was not run")));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `XDG_CACHE_HOME` relocates uv's cache, and it is the only variable in
+    /// this module that relocates a directory belonging to a *different*
+    /// variable's tool — so the `uv` suffix has to be appended to it rather
+    /// than the whole value taken as the cache root.
+    #[test]
+    fn xdg_cache_home_relocates_uvs_cache_under_a_uv_subdirectory() {
+        let home = crate::detectors::test_support::make_temp_dir("uv-xdg-home");
+        let xdg = home.join("xdg");
+        std::fs::create_dir_all(xdg.join("uv")).unwrap();
+        std::fs::write(xdg.join("uv/archive.tar"), vec![0u8; 512]).unwrap();
+
+        let ctx = DiscoveryContext::new(&home)
+            .with_tool_env(ToolEnvVar::XdgCacheHome, xdg.to_str().unwrap());
+
+        assert_eq!(uv_default_cache_dir(&ctx), Some(xdg.join("uv")));
+        match UvCacheDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => assert_eq!(
+                evidence[0].logical_bytes,
+                crate::evidence::ProbeOutcome::Observed(512)
+            ),
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// `UV_CACHE_DIR` is the cache root itself, so it outranks the XDG chain
+    /// rather than being combined with it.
+    #[test]
+    fn uv_cache_dir_outranks_the_xdg_chain() {
+        let home = crate::detectors::test_support::make_temp_dir("uv-explicit-home");
+        std::fs::create_dir_all(home.join(".cache/uv")).unwrap();
+        std::fs::write(home.join(".cache/uv/decoy.tar"), vec![0u8; 4_096]).unwrap();
+        let explicit = home.join("explicit");
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::write(explicit.join("real.tar"), vec![0u8; 64]).unwrap();
+
+        let ctx = DiscoveryContext::new(&home)
+            .with_tool_env(ToolEnvVar::UvCacheDir, explicit.to_str().unwrap());
+
+        match UvCacheDetector.discover(&ctx) {
+            DetectorStatus::Found(evidence) => {
+                assert_eq!(
+                    evidence[0].logical_bytes,
+                    crate::evidence::ProbeOutcome::Observed(64)
+                );
+                assert!(evidence[0]
+                    .sources
+                    .iter()
+                    .any(|s| s.contains("UV_CACHE_DIR")));
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// A relative `XDG_CACHE_HOME` produces no documented default at all,
+    /// rather than a path this code invented by resolving it somewhere.
+    #[test]
+    fn a_relative_xdg_cache_home_yields_no_documented_default() {
+        let home = crate::detectors::test_support::make_temp_dir("uv-relative-xdg");
+        let ctx = DiscoveryContext::new(&home).with_tool_env(ToolEnvVar::XdgCacheHome, "cache");
+
+        assert_eq!(uv_default_cache_dir(&ctx), None);
+        assert!(uv_documented_cache_root(&ctx).is_none());
 
         std::fs::remove_dir_all(&home).ok();
     }
