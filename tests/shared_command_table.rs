@@ -288,12 +288,18 @@ fn a_subcommand_usage_error_prints_that_subcommands_usage_only() {
 /// `--version` exists and agrees with the version help reports about itself.
 /// Added in HORO-1311 because a bare invocation printing a bare version
 /// string was the only way to get it, which is not where anyone looks.
+///
+/// HORO-1612 made `--version`/bare invocation append `(dev build, rev ...)`
+/// whenever the build is not exactly at its release tag (see
+/// `version_dev_release_distinction.rs` for the dedicated test on that
+/// behavior) -- this test only checks the version number prefix, not the
+/// full line, so it stays true for both a release build and a dev build.
 #[test]
 fn version_is_reported_by_flag_and_by_bare_invocation() {
     let expected = format!("glomeris {}", env!("CARGO_PKG_VERSION"));
 
     for flag in ["--version", "-V"] {
-        assert_eq!(stdout_of(&[flag]).trim_end(), expected);
+        assert!(stdout_of(&[flag]).trim_end().starts_with(&expected));
     }
 
     let bare = stdout_of(&[]);
