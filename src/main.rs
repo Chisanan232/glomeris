@@ -40,7 +40,7 @@ fn main() {
         // they need on their first.
         Some("help") => run_help_command(&args[1..]),
         Some("--version") | Some("-V") => {
-            println!("glomeris {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", version_line());
         }
         Some("daemon") => run_daemon_command(&args[1..]),
         Some("actions") => run_actions_command(&args[1..]),
@@ -77,9 +77,23 @@ fn main() {
             // it. The version line stays — scripts and bug reports rely on it —
             // with one line added pointing at the help that now has something
             // worth reading.
-            println!("glomeris {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", version_line());
             println!("Run `glomeris --help` to see what it can do.");
         }
+    }
+}
+
+/// `glomeris {version}` for a build matching its release tag exactly (clean,
+/// no extra commits); `glomeris {version} (dev build, rev {rev})` for
+/// anything else -- extra commits, a dirty tree, or no matching tag -- so a
+/// dev artifact never claims to be the exact tagged release (HORO-1609).
+/// `GLOMERIS_BUILD_REV` is embedded by `build.rs` at compile time; reading
+/// `--version` never shells out to `git` at runtime.
+fn version_line() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match env!("GLOMERIS_BUILD_REV") {
+        "release" => format!("glomeris {version}"),
+        rev => format!("glomeris {version} (dev build, rev {rev})"),
     }
 }
 
