@@ -1,0 +1,12 @@
+{
+  "base_url": "https://chisanan232.github.io/glomeris/",
+  "docs_url": "https://chisanan232.github.io/glomeris/",
+  "required_navigation": [
+    "installation.html",
+    "safety_model.html",
+    "https://github.com/Chisanan232/glomeris"
+  ],
+  "analytics": {
+    "enabled": false
+  }
+}
