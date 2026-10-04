@@ -3,12 +3,20 @@ name: Docs
 on:
   push:
     branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/docs.yml'
+      - 'book/**'
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'public-surface.json'
+      - 'scripts/prepare_pages.py'
+      - 'scripts/test_prepare_pages.py'
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -18,10 +26,15 @@ jobs:
   build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.8.1
+
+      - name: Test Pages preparation
+        run: python3 -m unittest discover -s scripts -p 'test_prepare_pages.py'
 
       - name: Install mdBook
         run: cargo install mdbook --locked --version 0.5.2
@@ -30,7 +43,7 @@ jobs:
         run: mdbook build book
 
       - name: Build rustdoc
-        run: cargo doc --no-deps
+        run: cargo doc --no-deps --locked
 
       - name: Assemble combined site
         run: |
@@ -48,18 +61,36 @@ jobs:
           <p>Redirecting to <a href="glomeris/index.html">rustdoc</a>...</p>
           EOF
 
+      - name: Add canonical and discovery metadata
+        run: python3 scripts/prepare_pages.py site
+
+      - name: Check the assembled public surface
+        run: |
+          set -euo pipefail
+          CHECKER="$RUNNER_TEMP/public_surface.py"
+          curl -fsSL \
+            https://raw.githubusercontent.com/horonomy/.github/76cde284d122b7f21deebb935c711dfbc0c61b41/scripts/public_surface.py \
+            -o "$CHECKER"
+          echo "ebac17496629b9de5bcd78f64b3ab835022d4f25d566ec1b89449f4f44d0f3bb  $CHECKER" \
+            | shasum -a 256 -c -
+          python3 "$CHECKER" public-surface.json site
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.0
