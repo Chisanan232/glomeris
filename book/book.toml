@@ -11,5 +11,8 @@ edit-url-template = "https://github.com/Chisanan232/glomeris/edit/main/book/{pat
 default-theme = "light"
 preferred-dark-theme = "navy"
 
+[output.html.playground]
+runnable = false
+
 [output.html.search]
 enable = true
