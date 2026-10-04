@@ -104,7 +104,16 @@ class PreparePagesTest(unittest.TestCase):
         prepare(self.root)
 
         support = self.root / "rustdoc/trait.impl/glomeris/trait.Example.js"
-        self.assertEqual(support.read_text(), "// No public implementors.\n")
+        self.assertEqual(support.read_text(), "// Rustdoc emitted no public implementors.\n")
+
+    def test_rejects_a_rustdoc_implementor_index_outside_the_artifact(self):
+        self.write(
+            "rustdoc/item.html",
+            '<html><head></head><script src="../../../trait.impl/escape.js"></script></html>',
+        )
+
+        with self.assertRaises(ValueError):
+            prepare(self.root)
 
     def test_does_not_materialize_an_external_rustdoc_script(self):
         self.write(

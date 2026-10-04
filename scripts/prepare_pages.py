@@ -95,7 +95,9 @@ def _ensure_rustdoc_support(page: Path, root: Path, document: str) -> None:
         support.relative_to(root)
         if not support.exists():
             support.parent.mkdir(parents=True, exist_ok=True)
-            support.write_text("// No public implementors.\n", encoding="utf-8")
+            # Rustdoc references this index even when every implementation's type
+            # lives in a private module, in which case it emits no index file.
+            support.write_text("// Rustdoc emitted no public implementors.\n", encoding="utf-8")
 
 
 def prepare(root: Path) -> int:
