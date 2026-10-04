@@ -121,7 +121,7 @@ pub struct EmergencyReport {
     /// Detectors that FAILED during discovery, as `"<detector id>: <reason>"`.
     ///
     /// Separate from `errors` on purpose (HORO-1484). `errors` is advisory
-    /// context that [`EmergencyReport::push_error`] is free to drop once it
+    /// context that `EmergencyReport::push_error` is free to drop once it
     /// reaches [`MAX_ERRORS`]; a failed detector is not advisory — it is the
     /// reason the rest of this report cannot be read as a complete account of
     /// what was available to reclaim. Non-empty means discovery was
