@@ -1,6 +1,6 @@
 # ADR-0001: Process-aware, dependency-aware recovery (post-incident architecture gate)
 
-- Status: Proposed, independent adversarial review complete (2 must-fix findings resolved in this revision: §4.3 PATH-shadowing resolution, §4.3 relative-path tokenization; 3 should-address findings incorporated: §4.2 dedup scope, §4.3/§10 closed-source-list gap, §6 lsof cross-UID residual risk; 1 nitpick incorporated: §14 completeness-rank scope). No code-claim inaccuracies found against `main` @ 23e08dc. Reviewer found no break in the hard invariants (no new policy class, no kill capability, no LLM-reachable deletion authority, no automatic ASK/PROTECTED→AUTO_SAFE widening). **Still requires founder approval on §16 before any implementation PR.**
+- Status: **Accepted.** Independent adversarial review complete (2 must-fix findings resolved: §4.3 PATH-shadowing resolution, §4.3 relative-path tokenization; 3 should-address findings incorporated: §4.2 dedup scope, §4.3/§10 closed-source-list gap, §6 lsof cross-UID residual risk; 1 nitpick incorporated: §14 completeness-rank scope). No code-claim inaccuracies found against `main` @ 23e08dc. No break in the hard invariants (no new policy class, no kill capability, no LLM-reachable deletion authority, no automatic ASK/PROTECTED→AUTO_SAFE widening). **Founder decisions on §16 recorded below; HORO-1823+ implementation authorized.**
 - Ticket: HORO-1822 (Epic HORO-1043; discovery source HVDL-26)
 - Date: 2026-10-10
 - Deciders: founder (approval, HORO-1629 wording), independent security reviewer
@@ -594,8 +594,22 @@ Fixtures live under `tests/fixtures/` or temp directories. Never read the develo
   - **Reverting HORO-1825 requires reverting HORO-1824's discovery widening first.** Shared-target discovery must never be live without the dependency guard.
   - Sampling (1827) is opt-in and off by default. Turning it off leaves a bounded ring file that `emergency` may delete as tool-owned state, following the HORO-1468 precedent.
 
-## 16. Decisions reserved for the founder (not made by this ADR)
+## 16. Decisions reserved for the founder — RESOLVED 2026-10-10
 
-1. **HORO-1629 final wording** — AC5 requires explicit founder sign-off; §11's draft is a proposal, not a decision.
-2. **Shared/redirected Cargo targets staying permanently non-preauthorizable** — this ADR defaults to never-AUTO_SAFE; loosening later is the safe direction, but is a product call, not an engineering one.
-3. **Adding the `toml` crate** (Codex `notify` parsing) — AGENTS.md requires approval before any new dependency; without it, HORO-1825's Codex-config coverage stays fail-closed/ASK.
+1. **HORO-1629 final wording — APPROVED.**
+   - Settings warning (exact, approved default):
+     > "This folder appears to contain multiple projects rather than being a project root. Glomeris checks only the selected folder and does not automatically scan nested projects. Add each project separately to include its build artifacts."
+   - Scan-coverage line (exact, approved default):
+     > "Examined {count} configured project root(s). Nested projects were not scanned automatically."
+   - Show the warning only when bounded evidence supports it (satisfies AC3/AC4: no new unbounded traversal, honest about partial/failed reads). No recursive discovery by default. Implement within the existing HORO-1629 — no duplicate ticket.
+2. **Shared/redirected Cargo targets staying permanently non-preauthorizable — APPROVED, confirmed as previously defaulted.**
+   - Explicit ASK (or PROTECTED, per evidence) is preserved; absence of active compilation is explicitly **not** sufficient evidence of cleanup safety on its own (consistent with §3.4/§3.5 and the claims table in §4.1 — no claim alone removes a veto).
+   - A future instance-specific, manually-approved cleanup workflow is **not authorized by this ADR** — it would need its own ticket, its own verified resource identity, dependency analysis, and its own deterministic authorization path through the existing `policy::approval` seal. This ADR does not expand deletion authority.
+3. **`toml` crate for Codex `notify` parsing — CONDITIONALLY APPROVED.** Before adding it, HORO-1825's implementation must, in order:
+   - Confirm no already-vendored/transitive dependency can parse the subset of TOML needed (check first; don't assume `toml` is necessary).
+   - If still needed: select a maintained version, record the justification in the HORO-1825 PR description.
+   - Run `cargo deny check` (license/advisory/supply-chain — already required by CLAUDE.md) and record the `Cargo.lock` diff in the PR.
+   - Parsing stays strictly read-only (consistent with §4.3's existing read-only guard and preservation test) — never executes a config value, never exposes a credential it happens to parse near.
+   - Invalid/unrecognized security-relevant configuration is rejected, not guessed at (fail-closed, consistent with §8).
+   - Positive, malformed, adversarial and fail-closed tests are added (folds into HORO-1825's existing §13 anti-vacuity test obligations).
+   - If these checks pass, the crate may be added without a further approval round-trip. If it introduces a material new security risk, HORO-1825 keeps the existing fail-closed fallback (Codex `config.toml` present ⇒ `unresolved` ⇒ ASK, per §4.3/§8) and escalates the finding instead of merging it.
