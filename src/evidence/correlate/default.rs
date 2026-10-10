@@ -97,27 +97,30 @@ impl Default for DefaultEvidenceCollector {
     }
 }
 
-/// Fills in `identity` for every [`ProcessRef`] in `refs`, in place, via
-/// one batched [`ProcessIdentityProbe`] call across every pid in `refs`
-/// combined. The holder itself is NEVER removed or filtered by this
-/// step; only its `identity` field changes, and it always changes to
-/// SOME `Unavailable`/`Observed` value — enrichment was attempted for
-/// every pid in `refs`, so a pid missing from the probe's result map
-/// (exited, a transient gap, or the whole probe call failing) is set to
-/// `Unavailable(Failed)` here rather than left at its prior
-/// `Unavailable(NotAttempted)` default, which would misreport "never
-/// even tried".
-fn enrich_identities(
+/// Applies an already-collected identity map to every [`ProcessRef`] in
+/// `refs`, in place. The holder itself is NEVER removed or filtered by
+/// this step; only its `identity` field changes, and it always changes
+/// to SOME `Unavailable`/`Observed` value — enrichment was attempted for
+/// every pid passed into the identity probe that produced `identities`,
+/// so a pid missing from the result map (exited, a transient gap, or the
+/// whole probe call failing) is set to `Unavailable(Failed)` here rather
+/// than left at its prior `Unavailable(NotAttempted)` default, which
+/// would misreport "never even tried".
+///
+/// Deliberately takes an already-collected `&HashMap`, not a probe to
+/// call — see [`collect`]'s single call to
+/// [`ProcessIdentityProbe::identities_for`], covering every pid across
+/// `open_by_process`, `process_cwd_match` and `running_inside` combined.
+/// Calling the underlying probe once per list (as an earlier version of
+/// this code did) would multiply the identity probe's own subprocess
+/// timeout budget by up to 3x against a single `collect()` call's
+/// `ProbeBudget` — exactly the risk the module doc comment on
+/// `process_identity.rs` says the batched-per-pid design exists to
+/// avoid.
+fn apply_identities(
     refs: &mut [ProcessRef],
-    probe: &dyn ProcessIdentityProbe,
-    timeout: std::time::Duration,
+    identities: &HashMap<u32, ProbeOutcome<ProcessIdentity>>,
 ) {
-    if refs.is_empty() {
-        return;
-    }
-    let pids: Vec<u32> = refs.iter().map(|r| r.pid).collect();
-    let identities: HashMap<u32, ProbeOutcome<ProcessIdentity>> =
-        probe.identities_for(&pids, timeout);
     for r in refs.iter_mut() {
         r.identity = identities
             .get(&r.pid)
@@ -162,18 +165,40 @@ impl EvidenceCollector for DefaultEvidenceCollector {
         // already produced above — each probe's own holder-discovery
         // result is already finalized at this point; this step only adds
         // `identity`, never changes which pids are present.
-        if let ProbeOutcome::Observed(procs) = &mut open_by_process {
-            enrich_identities(procs, self.process_identity.as_ref(), budget.timeout);
+        //
+        // The identity probe itself is called exactly ONCE per
+        // `collect()`, over the union of pids across all three lists —
+        // not once per list. Each of the probe's own subprocess calls
+        // (`ps`/`launchctl`/`lsof`) is already batched across pids
+        // internally; calling it three separate times here would still
+        // multiply ITS timeout budget by up to 3x against this single
+        // `collect()` call's `budget.timeout` (worst case ~3x
+        // `REVALIDATION_TIMEOUT`), which is exactly what the batching
+        // exists to avoid.
+        let mut pids: Vec<u32> = Vec::new();
+        if let ProbeOutcome::Observed(procs) = &open_by_process {
+            pids.extend(procs.iter().map(|p| p.pid));
         }
-        if let ProbeOutcome::Observed(procs) = &mut process_cwd_match {
-            enrich_identities(procs, self.process_identity.as_ref(), budget.timeout);
+        if let ProbeOutcome::Observed(procs) = &process_cwd_match {
+            pids.extend(procs.iter().map(|p| p.pid));
         }
-        if let ProbeOutcome::Observed(report) = &mut executable_dependency {
-            enrich_identities(
-                &mut report.running_inside,
-                self.process_identity.as_ref(),
-                budget.timeout,
-            );
+        if let ProbeOutcome::Observed(report) = &executable_dependency {
+            pids.extend(report.running_inside.iter().map(|p| p.pid));
+        }
+        pids.sort_unstable();
+        pids.dedup();
+
+        if !pids.is_empty() {
+            let identities = self.process_identity.identities_for(&pids, budget.timeout);
+            if let ProbeOutcome::Observed(procs) = &mut open_by_process {
+                apply_identities(procs, &identities);
+            }
+            if let ProbeOutcome::Observed(procs) = &mut process_cwd_match {
+                apply_identities(procs, &identities);
+            }
+            if let ProbeOutcome::Observed(report) = &mut executable_dependency {
+                apply_identities(&mut report.running_inside, &identities);
+            }
         }
 
         CorrelationResult {
@@ -406,6 +431,89 @@ mod tests {
             process_cwd_match[0].identity,
             ProbeOutcome::Unavailable(ProbeReason::Failed)
         );
+    }
+
+    /// The identity probe must be called exactly ONCE per `collect()`,
+    /// over the union of pids across `open_by_process`,
+    /// `process_cwd_match` AND `executable_dependency.running_inside` —
+    /// never once per list. `FakeHostDependencyWithRunning` below
+    /// reports pid 1 as `running_inside` too (the same pid
+    /// `FakeOpenFiles` already reports), so this also proves a pid
+    /// appearing in more than one list is still only looked up once.
+    #[test]
+    fn identity_probe_is_called_exactly_once_per_collect_over_the_union_of_pids() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct FakeHostDependencyWithRunning;
+        impl HostDependencyProbe for FakeHostDependencyWithRunning {
+            fn probe(
+                &self,
+                _resource_path: &Path,
+                _timeout: Duration,
+            ) -> ProbeOutcome<crate::evidence::ExecutableDependencyReport> {
+                let mut report = crate::evidence::ExecutableDependencyReport::empty();
+                // pid 1 overlaps with FakeOpenFiles's pid 1; pid 3 is
+                // unique to this list.
+                report.running_inside = vec![
+                    ProcessRef::new(1, "open_files".to_string()),
+                    ProcessRef::new(3, "running".to_string()),
+                ];
+                ProbeOutcome::Observed(report)
+            }
+        }
+
+        struct CountingProcessIdentity {
+            calls: Arc<AtomicUsize>,
+            seen_pids: Arc<std::sync::Mutex<Vec<u32>>>,
+        }
+        impl ProcessIdentityProbe for CountingProcessIdentity {
+            fn identities_for(
+                &self,
+                pids: &[u32],
+                _timeout: Duration,
+            ) -> HashMap<u32, ProbeOutcome<ProcessIdentity>> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.seen_pids.lock().unwrap().extend_from_slice(pids);
+                HashMap::new()
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen_pids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collector = DefaultEvidenceCollector::with_process_identity(
+            Box::new(FakeOpenFiles),
+            Box::new(FakeProcessCwd),
+            Box::new(FakeGit),
+            Box::new(FakeToolLiveness),
+            Some(Box::new(FakeHostDependencyWithRunning)),
+            Box::new(CountingProcessIdentity {
+                calls: calls.clone(),
+                seen_pids: seen_pids.clone(),
+            }),
+        );
+        let id = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/tmp/example")),
+        );
+
+        collector.collect(
+            &id,
+            ProbeBudget {
+                timeout: Duration::from_secs(1),
+            },
+        );
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "identity probe must be called exactly once per collect(), not once per list"
+        );
+        let mut seen = seen_pids.lock().unwrap().clone();
+        seen.sort_unstable();
+        seen.dedup();
+        // pid 1: open_files AND running_inside; pid 2: cwd; pid 3: running_inside only.
+        assert_eq!(seen, vec![1, 2, 3]);
     }
 
     #[test]

@@ -227,6 +227,19 @@ fn run_launchctl_list(launchctl_bin: &Path, timeout: Duration) -> Option<HashSet
     command.arg("list");
     match run_with_timeout(command, timeout) {
         CommandOutcome::Completed(output) => {
+            // Same "non-zero + empty stderr is not necessarily a failure"
+            // shape as `run_ps`/`run_lsof_txt`, applied here too for
+            // consistency — `launchctl list` has no equivalent of `ps -p`
+            // emitting a legitimate non-zero "nothing matched" on an
+            // otherwise-successful query, so in practice this branch
+            // reads a genuinely failed launchctl invocation as `Some(no
+            // pids found)` rather than `None` (`Unknown` for everyone).
+            // This has NO policy effect — `derive_claim` maps both
+            // `Supervisor::None` and `Supervisor::Unknown` to the same
+            // `ProcessClaim::Unknown` — but it is a data-quality
+            // inconsistency flagged for whoever next changes this
+            // function: a true launchctl failure should arguably return
+            // `None` even with empty stderr, unlike `ps -p`'s case.
             if !output.status.success() && !output.stderr.is_empty() {
                 return None;
             }
@@ -433,6 +446,21 @@ pub fn identity_tuple_matches(
 /// covers the policy-facing "is anything using this resource" veto; its
 /// own `Unavailable` already fails closed to `Partial` => `ASK`
 /// independently of this probe's result.
+///
+/// **Not yet wired into any production call site** (deliberately — see
+/// this function's own doc comment above and the PR body: it is
+/// explanation-only evidence this ticket implements and verifies but
+/// does not connect to `classify`/completeness). Because of that, the
+/// following is currently inert rather than live, but **must be fixed
+/// before whichever future ticket wires this into `classify` or
+/// `Evidence` completeness**: `entries.flatten()` below silently drops
+/// any per-entry `read_dir` error (e.g. a permission-denied directory
+/// entry), and `candidate.exists()` silently treats a `stat` failure
+/// (permission denied, a race) the same as "genuinely absent" — both
+/// collapse into `Observed(false)` ("no holder") rather than
+/// `Unavailable`. That is a fail-OPEN shape once this is live
+/// (`false`/"safe" where the true answer is "could not tell"), even
+/// though today, unwired, it has no behavioral consequence.
 pub fn build_lock_holder(
     target_dir: &Path,
     lsof_bin: &Path,
