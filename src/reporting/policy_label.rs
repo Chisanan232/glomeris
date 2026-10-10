@@ -79,6 +79,10 @@ pub fn label_for(decision: &PolicyDecision) -> PolicyLabel {
             ReasonCode::EvidenceIncomplete
                 | ReasonCode::EvidenceProbeFailed
                 | ReasonCode::EvidenceStale
+                // HORO-1825 §5: a fail-closed catch for an unresolved
+                // executable-dependency reference is an evidence-quality
+                // gap, not a real judgment about this specific resource.
+                | ReasonCode::ExecutableDependencyUnknown
         )
     });
 

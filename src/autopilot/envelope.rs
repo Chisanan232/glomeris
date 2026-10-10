@@ -132,6 +132,20 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         // the rule above at once, and refused for both reasons.
         ReasonCode::DockerActivityUnknown => false,
 
+        // HORO-1825. A currently-running process's executable mapping
+        // resolves inside this resource — live use, exactly like
+        // `ResourceInActiveUse` above, and not a thing anybody can
+        // consent to in advance either.
+        ReasonCode::ExecutableRunningFromResource => false,
+
+        // HORO-1825. Absence of knowledge about whether something
+        // depends on this resource as an installed executable — the
+        // single worst thing to pre-authorize, for the same reason
+        // `EvidenceIncomplete`/`RegenerabilityUnknown` are refused above:
+        // pre-authorizing ignorance is indistinguishable from switching
+        // the check off.
+        ReasonCode::ExecutableDependencyUnknown => false,
+
         // Protected reasons. `authorize` refuses these unconditionally, so
         // an envelope entry naming one could never do anything except
         // mislead whoever read the envelope.
@@ -142,7 +156,8 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         | ReasonCode::ProtectedUserDocuments
         | ReasonCode::ProtectedSystemPath
         | ReasonCode::ProtectedUnsafeMountOrSymlink
-        | ReasonCode::ProtectedUnknownResourceKind => false,
+        | ReasonCode::ProtectedUnknownResourceKind
+        | ReasonCode::ProtectedExecutableDependency => false,
 
         // AutoSafe reasons are not Ask reasons; an `ASK` pre-authorization
         // naming one describes a decision that cannot occur.

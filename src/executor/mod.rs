@@ -204,7 +204,20 @@ fn completeness_rank_from_decision(decision: &PolicyDecision) -> u8 {
     if decision.reasons.contains(&ReasonCode::EvidenceProbeFailed) {
         return 2;
     }
-    if decision.reasons.contains(&ReasonCode::EvidenceIncomplete) {
+    // HORO-1825 §14 (same shape as the §14-flagged `TargetOwnershipUnknown`
+    // addendum for HORO-1824): `ExecutableDependencyUnknown` is a
+    // degraded-completeness reason, not a plain active-use veto. Without
+    // this, a plan consented to under `ExecutableDependencyUnknown` would
+    // compute `planned_rank = 0` while fresh revalidation correctly
+    // computes a higher rank, tripping a spurious `EvidenceDegraded` abort
+    // on every execution of an executable-bearing kind whose dependency
+    // probe is unresolved. Fails closed either way; this just keeps that
+    // class executable once it legitimately clears.
+    if decision.reasons.contains(&ReasonCode::EvidenceIncomplete)
+        || decision
+            .reasons
+            .contains(&ReasonCode::ExecutableDependencyUnknown)
+    {
         return 1;
     }
     0

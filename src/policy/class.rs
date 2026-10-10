@@ -29,6 +29,12 @@ pub enum ReasonCode {
     ProtectedSystemPath,
     ProtectedUnsafeMountOrSymlink,
     ProtectedUnknownResourceKind,
+    /// HORO-1825 §5 step 2b: a recognized hook/daemon/LaunchAgent config
+    /// (or a PATH entry) references a file inside this resource, so it is
+    /// an installed executable dependency — unconditionally `Protected`,
+    /// regardless of staleness, matching `ProtectedCredentialMaterial`'s
+    /// rationale.
+    ProtectedExecutableDependency,
     // -> Ask
     EvidenceIncomplete,
     EvidenceStale,
@@ -61,6 +67,14 @@ pub enum ReasonCode {
     /// [`Self::RebuildCostHigh`]: an unanswered question must not read as
     /// either answer.
     DockerActivityUnknown,
+    /// HORO-1825 §5 step 6.1: a currently-running process's executable
+    /// mapping resolves inside this resource.
+    ExecutableRunningFromResource,
+    /// HORO-1825 §5 step 6.2: at least one reference from a recognized
+    /// source, or a running process, could not be resolved to a confirmed
+    /// in/out verdict for an executable-bearing kind — fail-closed, never
+    /// a clean negative.
+    ExecutableDependencyUnknown,
     // -> AutoSafe
     EvidenceFreshAndComplete,
     RegenerableByTool,
@@ -80,6 +94,7 @@ impl ReasonCode {
             ReasonCode::ProtectedSystemPath => "protected_system_path",
             ReasonCode::ProtectedUnsafeMountOrSymlink => "protected_unsafe_mount_or_symlink",
             ReasonCode::ProtectedUnknownResourceKind => "protected_unknown_resource_kind",
+            ReasonCode::ProtectedExecutableDependency => "protected_executable_dependency",
             ReasonCode::EvidenceIncomplete => "evidence_incomplete",
             ReasonCode::EvidenceStale => "evidence_stale",
             ReasonCode::EvidenceProbeFailed => "evidence_probe_failed",
@@ -91,6 +106,8 @@ impl ReasonCode {
             ReasonCode::OwningToolLive => "owning_tool_live",
             ReasonCode::DockerObjectInUse => "docker_object_in_use",
             ReasonCode::DockerActivityUnknown => "docker_activity_unknown",
+            ReasonCode::ExecutableRunningFromResource => "executable_running_from_resource",
+            ReasonCode::ExecutableDependencyUnknown => "executable_dependency_unknown",
             ReasonCode::EvidenceFreshAndComplete => "evidence_fresh_and_complete",
             ReasonCode::RegenerableByTool => "regenerable_by_tool",
             ReasonCode::NoActiveUseObserved => "no_active_use_observed",
@@ -109,6 +126,7 @@ impl ReasonCode {
         ReasonCode::ProtectedSystemPath,
         ReasonCode::ProtectedUnsafeMountOrSymlink,
         ReasonCode::ProtectedUnknownResourceKind,
+        ReasonCode::ProtectedExecutableDependency,
         ReasonCode::EvidenceIncomplete,
         ReasonCode::EvidenceStale,
         ReasonCode::EvidenceProbeFailed,
@@ -120,6 +138,8 @@ impl ReasonCode {
         ReasonCode::OwningToolLive,
         ReasonCode::DockerObjectInUse,
         ReasonCode::DockerActivityUnknown,
+        ReasonCode::ExecutableRunningFromResource,
+        ReasonCode::ExecutableDependencyUnknown,
         ReasonCode::EvidenceFreshAndComplete,
         ReasonCode::RegenerableByTool,
         ReasonCode::NoActiveUseObserved,
@@ -176,20 +196,23 @@ mod tests {
                 ReasonCode::ProtectedSystemPath => 5,
                 ReasonCode::ProtectedUnsafeMountOrSymlink => 6,
                 ReasonCode::ProtectedUnknownResourceKind => 7,
-                ReasonCode::EvidenceIncomplete => 8,
-                ReasonCode::EvidenceStale => 9,
-                ReasonCode::EvidenceProbeFailed => 10,
-                ReasonCode::ResourceInActiveUse => 11,
-                ReasonCode::GitWorktreeDirty => 12,
-                ReasonCode::RebuildCostHigh => 13,
-                ReasonCode::RegenerabilityUnknown => 14,
-                ReasonCode::RecoverabilityIrreversible => 15,
-                ReasonCode::OwningToolLive => 16,
-                ReasonCode::DockerObjectInUse => 17,
-                ReasonCode::DockerActivityUnknown => 18,
-                ReasonCode::EvidenceFreshAndComplete => 19,
-                ReasonCode::RegenerableByTool => 20,
-                ReasonCode::NoActiveUseObserved => 21,
+                ReasonCode::ProtectedExecutableDependency => 8,
+                ReasonCode::EvidenceIncomplete => 9,
+                ReasonCode::EvidenceStale => 10,
+                ReasonCode::EvidenceProbeFailed => 11,
+                ReasonCode::ResourceInActiveUse => 12,
+                ReasonCode::GitWorktreeDirty => 13,
+                ReasonCode::RebuildCostHigh => 14,
+                ReasonCode::RegenerabilityUnknown => 15,
+                ReasonCode::RecoverabilityIrreversible => 16,
+                ReasonCode::OwningToolLive => 17,
+                ReasonCode::DockerObjectInUse => 18,
+                ReasonCode::DockerActivityUnknown => 19,
+                ReasonCode::ExecutableRunningFromResource => 20,
+                ReasonCode::ExecutableDependencyUnknown => 21,
+                ReasonCode::EvidenceFreshAndComplete => 22,
+                ReasonCode::RegenerableByTool => 23,
+                ReasonCode::NoActiveUseObserved => 24,
             };
             assert_eq!(
                 index,
@@ -200,7 +223,7 @@ mod tests {
         }
         assert_eq!(
             ReasonCode::ALL.len(),
-            22,
+            25,
             "ReasonCode::ALL has gained, lost, or duplicated an entry"
         );
     }
