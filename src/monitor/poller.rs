@@ -60,6 +60,14 @@ pub struct PollOutcome {
     pub observed_state: PressureState,
     pub used_percent: f64,
     pub free_bytes: u64,
+    /// The same tick's total capacity, from the single `FsStat::stat` call
+    /// below — not a second measurement. Added for HORO-1827's volume
+    /// sampling, which needs both halves of a [`crate::monitor::volume_sample::VolumeSample`]
+    /// and must not take a second `statvfs` call to get them (ADR-0001 §14:
+    /// "No background inference per tick: sampling is statvfs only" — one
+    /// call, already made for pressure classification, is reused rather
+    /// than duplicated).
+    pub total_bytes: u64,
     pub transitioned: bool,
     pub notify_error: Option<String>,
     pub persist_error: Option<String>,
@@ -90,6 +98,7 @@ pub fn poll_once(
         observed_state,
         used_percent,
         free_bytes: usage.free_bytes,
+        total_bytes: usage.total_bytes,
         transitioned: false,
         notify_error: None,
         persist_error: None,

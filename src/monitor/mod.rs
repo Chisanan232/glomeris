@@ -7,12 +7,15 @@ pub mod clock;
 pub mod config;
 pub mod episode;
 pub mod episode_store;
+pub mod feasibility;
 pub mod fs_stat;
 pub mod notifier;
 pub mod persistence;
 pub mod poller;
 pub mod pressure;
+pub mod stability;
 pub mod state_machine;
+pub mod volume_sample;
 
 pub use clock::{Clock, FakeClock, SystemClock};
 pub use config::ThresholdConfig;
@@ -23,6 +26,7 @@ pub use episode::{
 pub use episode_store::{
     default_episode_state_path, load_tracker_at, read_episode_state, save_tracker_at, EpisodeState,
 };
+pub use feasibility::{assess as assess_feasibility, FeasibilityInputs, FeasibilityVerdict};
 pub use fs_stat::{FsStat, FsUsage};
 pub use notifier::Notifier;
 pub use persistence::{
@@ -32,4 +36,11 @@ pub use persistence::{
 };
 pub use poller::{poll_once, run, PollConfig, PollOutcome};
 pub use pressure::PressureState;
+pub use stability::{
+    analyze as analyze_stability, StabilityAnalysis, StabilityVerdict, Trend, MIN_OBSERVATION_SECS,
+};
 pub use state_machine::{PressureStateMachine, Transition};
+pub use volume_sample::{
+    read_samples as read_volume_samples, write_samples as write_volume_samples, VolumeSample,
+    VolumeSampleRing, MAX_SAMPLES, SAMPLE_EVERY_N_TICKS,
+};
