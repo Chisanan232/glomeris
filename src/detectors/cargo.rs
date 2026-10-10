@@ -113,40 +113,95 @@ const RUSTUP_TOOLCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// real host machine even under a fixture [`DiscoveryContext`]) — callers
 /// pass [`DiscoveryContext::home_dir`] in production and a fixture
 /// directory in tests.
-fn resolve_trusted_toolchain(home: &Path) -> Option<String> {
-    static TOOLCHAIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    TOOLCHAIN
-        .get_or_init(|| {
-            // This tool has to be asked: `rustup show active-toolchain`
-            // is the only documented way to learn which toolchain this
-            // process would ordinarily select — there is no config file
-            // Glomeris can read instead, and reading `rustup`'s own
-            // internal override-resolution state file directly would be
-            // exactly the fragile, version-coupled reimplementation
-            // ADR-0001 §10 alternative 8 rejects for Cargo's own config.
-            // Run from `$HOME` (never `project_root`) specifically so
-            // THIS probe cannot itself be steered by an untrusted
-            // `rust-toolchain.toml`.
-            let mut command = Command::new(RUSTUP_PROGRAM);
-            command
-                .arg("show")
-                .arg("active-toolchain")
-                .current_dir(home);
-            let output = match run_with_timeout(command, RUSTUP_TOOLCHAIN_TIMEOUT) {
-                CommandOutcome::Completed(output) if output.status.success() => output,
-                _ => return None,
-            };
-            let stdout = String::from_utf8(output.stdout).ok()?;
-            // Real format observed: "stable-aarch64-apple-darwin (default)\n"
-            // — the toolchain name is the first whitespace-delimited token.
-            let name = stdout.split_whitespace().next()?;
-            if name.is_empty() {
-                None
-            } else {
-                Some(name.to_string())
-            }
-        })
-        .clone()
+pub(crate) fn resolve_trusted_toolchain(home: &Path) -> ToolchainPin {
+    // Availability fix (flagged by independent review): whether `rustup`
+    // is INSTALLED AT ALL is a stable machine fact, cached permanently —
+    // but whether one particular `rustup show active-toolchain` call
+    // SUCCEEDED is not. A transient `rustup` timeout or a momentarily
+    // broken toolchain link must not permanently disable Cargo target
+    // ownership resolution for the rest of this process's lifetime,
+    // which is what caching `None` forever in a single `OnceLock` would
+    // do — this is a long-running process (daemon-like usage), not a
+    // one-shot CLI invocation, so "cache the first failure forever" is a
+    // real availability regression, not merely a cosmetic one.
+    if !rustup_is_present() {
+        // No rustup proxy at all (e.g. a Homebrew-installed `cargo` with
+        // no rustup in front of it) means there is no `rust-toolchain.toml`
+        // steering risk to pin against in the first place — the whole
+        // concern this function exists for is moot. `NoProxy` tells the
+        // caller to proceed WITHOUT setting `RUSTUP_TOOLCHAIN` at all,
+        // never to fail closed over a risk that structurally cannot
+        // apply on this machine.
+        return ToolchainPin::NoProxy;
+    }
+
+    // This tool has to be asked: `rustup show active-toolchain` is the
+    // only documented way to learn which toolchain this process would
+    // ordinarily select — there is no config file Glomeris can read
+    // instead, and reading `rustup`'s own internal override-resolution
+    // state file directly would be exactly the fragile, version-coupled
+    // reimplementation ADR-0001 §10 alternative 8 rejects for Cargo's own
+    // config. Run from `$HOME` (never `project_root`) specifically so
+    // THIS probe cannot itself be steered by an untrusted
+    // `rust-toolchain.toml`. Re-run on every call (not memoized): see the
+    // availability note above.
+    let mut command = Command::new(RUSTUP_PROGRAM);
+    command
+        .arg("show")
+        .arg("active-toolchain")
+        .current_dir(home);
+    let output = match run_with_timeout(command, RUSTUP_TOOLCHAIN_TIMEOUT) {
+        CommandOutcome::Completed(output) if output.status.success() => output,
+        // Rustup IS present but this particular call failed/timed out —
+        // unresolved, fail the caller closed. Never cached (see above).
+        _ => return ToolchainPin::Unresolved,
+    };
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return ToolchainPin::Unresolved;
+    };
+    // Real format observed: "stable-aarch64-apple-darwin (default)\n" —
+    // the toolchain name is the first whitespace-delimited token.
+    match stdout.split_whitespace().next() {
+        Some(name) if !name.is_empty() => ToolchainPin::Pinned(name.to_string()),
+        _ => ToolchainPin::Unresolved,
+    }
+}
+
+/// Outcome of [`resolve_trusted_toolchain`] — see its doc comment.
+pub(crate) enum ToolchainPin {
+    /// A specific toolchain to pin via `RUSTUP_TOOLCHAIN`.
+    Pinned(String),
+    /// No `rustup` proxy is present at all — there is no
+    /// `rust-toolchain.toml` steering risk to pin against, so the caller
+    /// should proceed without setting `RUSTUP_TOOLCHAIN`.
+    NoProxy,
+    /// `rustup` IS present, but this call could not resolve its active
+    /// toolchain (timeout, non-zero exit, unparseable output). The
+    /// caller MUST fail closed rather than proceed with no pin, since a
+    /// proxy that could steer toolchain selection is known to exist.
+    Unresolved,
+}
+
+/// Whether the `rustup` binary exists at all, cached for the life of the
+/// process — a stable machine fact, never expected to flip mid-run.
+/// Checked via a bare presence probe (`rustup --version`), separately
+/// from [`resolve_trusted_toolchain`]'s own per-call `show
+/// active-toolchain`, so a transient failure of THAT specific call is
+/// never confused with "rustup isn't installed".
+fn rustup_is_present() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        // This tool has to be asked: there is no documented file or env
+        // var that says whether `rustup` is installed short of trying
+        // to run it. `--version` is read-only and the cheapest possible
+        // call.
+        let mut command = Command::new(RUSTUP_PROGRAM);
+        command.arg("--version");
+        matches!(
+            run_with_timeout(command, RUSTUP_TOOLCHAIN_TIMEOUT),
+            CommandOutcome::Completed(output) if output.status.success()
+        )
+    })
 }
 
 /// Raw fields read out of `cargo metadata --format-version 1 --no-deps
@@ -196,7 +251,17 @@ fn run_cargo_metadata(
     // resolved from a NEUTRAL cwd makes rustup ignore any override under
     // `project_root` entirely. A pin that cannot be established is not a
     // reason to proceed without one.
-    let trusted_toolchain = resolve_trusted_toolchain(home)?;
+    let trusted_toolchain = match resolve_trusted_toolchain(home) {
+        ToolchainPin::Pinned(toolchain) => Some(toolchain),
+        // No proxy present at all — no steering risk to pin against;
+        // proceed without setting `RUSTUP_TOOLCHAIN`.
+        ToolchainPin::NoProxy => None,
+        // Rustup IS present but could not resolve its active toolchain —
+        // fail this whole probe closed rather than proceed with no pin
+        // while a proxy that COULD steer toolchain selection is known to
+        // exist.
+        ToolchainPin::Unresolved => return None,
+    };
 
     // This tool has to be asked: no documented config file or env var
     // exposes Cargo's fully-merged, precedence-resolved target directory
@@ -218,8 +283,10 @@ fn run_cargo_metadata(
         .current_dir(project_root)
         .env_remove("CARGO_TARGET_DIR")
         .env_remove("CARGO_BUILD_TARGET_DIR")
-        .env("RUSTUP_AUTO_INSTALL", "0")
-        .env("RUSTUP_TOOLCHAIN", &trusted_toolchain);
+        .env("RUSTUP_AUTO_INSTALL", "0");
+    if let Some(toolchain) = &trusted_toolchain {
+        command.env("RUSTUP_TOOLCHAIN", toolchain);
+    }
     if let Some(home) = cargo_home_override {
         command.env("CARGO_HOME", home);
     }
@@ -267,12 +334,27 @@ fn run_cargo_metadata(
 /// `home` is passed straight through to [`resolve_trusted_toolchain`] —
 /// see its doc comment for why it must be injected rather than read from
 /// the ambient environment here.
-pub(crate) fn resolve_cargo_target_scope(
+/// Canonicalized, security-checked answer from one `cargo metadata` call
+/// against `project_root` — the subprocess-and-validation half of
+/// [`resolve_cargo_target_scope`], split out so [`CargoDetector::discover`]
+/// can resolve a root's answer ONCE and derive scope for BOTH a direct
+/// locator and a widening candidate from it, rather than spawning
+/// `cargo`/`rustup` twice for the same root.
+struct ResolvedCargoFields {
+    resolved_target: PathBuf,
+    resolved_build_dir: Option<PathBuf>,
+    workspace_root: PathBuf,
+}
+
+/// Runs `cargo metadata` against `project_root`, canonicalizes its
+/// answer, and rejects it outright if it is implausible as a build
+/// directory. See [`resolve_cargo_target_scope`]'s doc comment for the
+/// full security rationale this shares.
+fn resolve_cargo_fields(
     project_root: &Path,
-    locator: &Path,
     cargo_home_override: Option<&str>,
     home: &Path,
-) -> ProbeOutcome<CargoTargetScope> {
+) -> ProbeOutcome<ResolvedCargoFields> {
     let Some(fields) = run_cargo_metadata(project_root, cargo_home_override, home) else {
         return ProbeOutcome::Unavailable(ProbeReason::Failed);
     };
@@ -290,9 +372,6 @@ pub(crate) fn resolve_cargo_target_scope(
         .build_directory
         .and_then(|b| b.canonicalize().ok())
         .filter(|b| *b != resolved_target);
-    let locator_canonical = locator
-        .canonicalize()
-        .unwrap_or_else(|_| locator.to_path_buf());
 
     // Security (flagged by independent review): `target_directory` comes
     // from `cargo metadata`, which applies WHATEVER `.cargo/config.toml`
@@ -317,48 +396,166 @@ pub(crate) fn resolve_cargo_target_scope(
         return ProbeOutcome::Unavailable(ProbeReason::Failed);
     }
 
-    let scope = if resolved_target.starts_with(&workspace_root) {
+    ProbeOutcome::Observed(ResolvedCargoFields {
+        resolved_target,
+        resolved_build_dir,
+        workspace_root,
+    })
+}
+
+/// Pure partition of one LOCATOR against an already-resolved
+/// `resolved_target`/`workspace_root` pair (ADR-0001 §4.2).
+///
+/// Security/correctness fix (flagged by independent review): the
+/// partition is keyed on the LOCATOR's own relationship to
+/// `workspace_root` — never on `resolved_target`'s. The ADR's own prose
+/// for `Orphan` ("the locator is `<root>/target`, but the root resolves
+/// elsewhere — pre-shared-config leftovers") says nothing about where
+/// `resolved_target` ends up: a locator that is an ordinary, no-longer-
+/// used directory UNDER the workspace is always safe to clean regardless
+/// of where cargo redirected to, because nothing else in the world can
+/// point at that specific directory — only `resolved_target` itself (the
+/// directory cargo ACTUALLY uses) can be shared. Keying on
+/// `resolved_target` instead (an earlier version of this function did)
+/// collapsed every leftover-locator case — the exact ~109 GiB
+/// per-worktree incident shape documented in `~/.claude/CLAUDE.md` — into
+/// `Redirected`, which is both wrong (nothing else uses `<root>/target`
+/// once cargo stops pointing at it) and directly blocks reclaiming the
+/// thing the HORO-1822 incident was about.
+///
+/// All three arguments MUST already be canonical.
+fn scope_for_locator(
+    locator_canonical: &Path,
+    resolved_target: &Path,
+    workspace_root: &Path,
+) -> TargetScope {
+    if locator_canonical.starts_with(workspace_root) {
         if locator_canonical == resolved_target {
             TargetScope::Local
         } else {
             // Under the workspace root, but not the directory actually
-            // searched — a pre-shared-config leftover.
+            // used — a pre-shared-config leftover. Safe regardless of
+            // where `resolved_target` itself sits: THIS directory has no
+            // sharers.
             TargetScope::Orphan
         }
     } else {
+        // The locator itself (after resolving its own symlink chain, if
+        // any) sits outside the workspace — e.g. a symlinked-out
+        // `target/`, or (for a discovery-widened resource, where
+        // `locator == resolved_target` by construction) `resolved_target`
+        // genuinely escaping every contributing workspace.
         TargetScope::Redirected
-    };
+    }
+}
 
-    // Security (flagged by independent review): computed fresh from
-    // `locator`/`project_root` on EVERY call — discovery AND revalidation
-    // alike — rather than carried forward as remembered state. A resource
-    // surfaced by discovery widening always has `locator == resolved_target`
-    // by construction (that is what widening means), which makes `scope`
-    // alone an unsafe signal for it: re-resolving from the SAME
-    // `project_root` at execution time would trivially recompute `Local`
-    // whenever `resolved_target` happens to sit under that root's
-    // workspace, silently erasing the `Orphan`/`Redirected` judgment
-    // discovery made. `is_direct_locator` cannot erode the same way: a
-    // widened resource's `locator` is NEVER `<project_root>/target`
-    // (widening only fires when it differs — see `CargoDetector::discover`),
-    // so this is `false` for it on every call, forever, independent of
-    // `scope`'s own value at that moment. See `classify()`'s own use of
-    // this field for the resulting policy rule.
-    // Canonicalized on both sides, same reasoning as every other
-    // comparison in this function: `project_root` itself may be a
-    // non-canonical path (e.g. `/tmp/...` where the real filesystem
-    // entry is `/private/tmp/...` on macOS), and comparing a canonical
-    // `locator_canonical` against a non-canonical `project_root.join(...)`
-    // would read the same directory as two different ones.
+/// Whether `locator_canonical` is literally `<project_root>/target` —
+/// see [`CargoTargetScope::is_direct_locator`]'s doc comment for why this
+/// is computed fresh, as a structural fact independent of `scope`, on
+/// every call.
+///
+/// Canonicalizes `project_root` before joining: it may be a non-canonical
+/// path (e.g. `/tmp/...` where the real filesystem entry is
+/// `/private/tmp/...` on macOS), and comparing a canonical
+/// `locator_canonical` against a non-canonical `project_root.join(...)`
+/// would read the same directory as two different ones.
+fn is_direct_locator_of(locator_canonical: &Path, project_root: &Path) -> bool {
     let project_root_canonical = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let is_direct_locator = locator_canonical == project_root_canonical.join("target");
+    locator_canonical == project_root_canonical.join("target")
+}
+
+/// `(dev, ino)` of `path`, or `Err` if it cannot be stat'd (e.g. it
+/// disappeared between discovery and this call). Used only to key
+/// [`CargoDetector::discover`]'s physical-identity dedup map — never a
+/// policy input.
+fn dev_ino(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).map(|m| (m.dev(), m.ino()))
+}
+
+/// Builds the [`ProbeOutcome<CargoTargetScope>`] for one `locator`
+/// against an ALREADY-resolved `fields_outcome` (from one
+/// [`resolve_cargo_fields`] call for `project_root`) — used by
+/// `CargoDetector::discover` so a root's direct and widened candidates
+/// share the one `cargo metadata`/`rustup` subprocess pair rather than
+/// each re-running [`resolve_cargo_target_scope`] (which would spawn
+/// both again).
+fn scope_outcome_for(
+    locator: &Path,
+    project_root: &Path,
+    fields_outcome: &ProbeOutcome<ResolvedCargoFields>,
+) -> ProbeOutcome<CargoTargetScope> {
+    let fields = match fields_outcome {
+        ProbeOutcome::Observed(fields) => fields,
+        ProbeOutcome::Unavailable(reason) => return ProbeOutcome::Unavailable(*reason),
+    };
+    let Ok(locator_canonical) = locator.canonicalize() else {
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    };
+    let scope = scope_for_locator(
+        &locator_canonical,
+        &fields.resolved_target,
+        &fields.workspace_root,
+    );
+    let is_direct_locator = is_direct_locator_of(&locator_canonical, project_root);
+    ProbeOutcome::Observed(CargoTargetScope {
+        resolved_target: fields.resolved_target.clone(),
+        resolved_build_dir: fields.resolved_build_dir.clone(),
+        workspace_root: fields.workspace_root.clone(),
+        scope,
+        is_direct_locator,
+    })
+}
+
+/// Resolves [`CargoTargetScope`] for one discovered Cargo target
+/// directory (HORO-1824 §4.2).
+///
+/// `locator` is the resource's own (already-canonicalized) path — the
+/// `<root>/target` the detector found, or the resolved target a
+/// discovery-widening pass is attaching scope to.
+///
+/// Every path comparison here is canonicalized on both sides before
+/// comparing — never raw string equality, which on macOS would read
+/// `/var/...` and `/private/var/...` as different directories when they
+/// are the same one. A `locator` that cannot itself be canonicalized
+/// fails the whole probe closed (security, flagged by independent
+/// review): every real caller passes a `locator` that exists on disk, so
+/// a failure here means the resource disappeared between discovery and
+/// this call — genuinely unknown, never "treat the raw path as if it
+/// were canonical" (which would reliably misclassify a locator that IS
+/// under `workspace_root` as `Redirected` purely from `/tmp` vs
+/// `/private/tmp`-style noncanonical-path drift).
+///
+/// `home` is passed straight through to [`resolve_trusted_toolchain`] —
+/// see its doc comment for why it must be injected rather than read from
+/// the ambient environment here.
+pub(crate) fn resolve_cargo_target_scope(
+    project_root: &Path,
+    locator: &Path,
+    cargo_home_override: Option<&str>,
+    home: &Path,
+) -> ProbeOutcome<CargoTargetScope> {
+    let fields = match resolve_cargo_fields(project_root, cargo_home_override, home) {
+        ProbeOutcome::Observed(fields) => fields,
+        ProbeOutcome::Unavailable(reason) => return ProbeOutcome::Unavailable(reason),
+    };
+    let Ok(locator_canonical) = locator.canonicalize() else {
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    };
+
+    let scope = scope_for_locator(
+        &locator_canonical,
+        &fields.resolved_target,
+        &fields.workspace_root,
+    );
+    let is_direct_locator = is_direct_locator_of(&locator_canonical, project_root);
 
     ProbeOutcome::Observed(CargoTargetScope {
-        resolved_target,
-        resolved_build_dir,
-        workspace_root,
+        resolved_target: fields.resolved_target,
+        resolved_build_dir: fields.resolved_build_dir,
+        workspace_root: fields.workspace_root,
         scope,
         is_direct_locator,
     })
@@ -383,11 +580,12 @@ fn has_rust_source(src_dir: &Path) -> bool {
 }
 
 /// Protectiveness ranking for [`TargetScope`] — higher is more protective.
-/// Used ONLY to pick which scope wins when discovery widening deduplicates
-/// multiple configured roots onto the same physical (dev, ino) (ADR-0001
-/// §4.2: "dedup takes the most-protective scope, not the first-discovered
-/// one"). Never a policy input on its own — `classify` reads
-/// `TargetScope` directly, not this ranking.
+/// Used ONLY to pick which scope wins when two candidates (whether both
+/// are "direct" `<root>/target` locators, both are widened, or one of
+/// each — see [`upsert_candidate`]) dedup onto the same physical (dev,
+/// ino) (ADR-0001 §4.2: "dedup takes the most-protective scope, not the
+/// first-discovered one"). Never a policy input on its own — `classify`
+/// reads `TargetScope` directly, not this ranking.
 fn scope_rank(scope: TargetScope) -> u8 {
     match scope {
         TargetScope::Local => 0,
@@ -396,60 +594,90 @@ fn scope_rank(scope: TargetScope) -> u8 {
     }
 }
 
-/// Inserts or merges one discovery-widening candidate for the resolved
-/// target identified by `key` (its (dev, ino)).
+/// Inserts or merges one candidate resource for the physical directory
+/// identified by `key` (its (dev, ino)) into `by_physical`.
 ///
-/// First root to reach a given `key` builds the widened [`Evidence`] (its
+/// Security fix (flagged by independent review): this is the SAME map
+/// for every candidate `CargoDetector::discover` ever produces — a
+/// root's own "direct" `<root>/target` locator and a DIFFERENT root's
+/// widened candidate for that same physical directory dedup against each
+/// other here, not in two separate collections merged by simple
+/// concatenation. An earlier version kept "direct" entries and "widened"
+/// entries in two different collections and only deduplicated within the
+/// widened one — which meant root A's own `Local`, un-vetoed direct
+/// entry for a physical directory could sit right next to root B's
+/// independently-discovered `Redirected` widened entry for the EXACT
+/// SAME physical directory, as two separate `Evidence` records under one
+/// `ResourceId`. A consumer that happened to pick A's copy (or a
+/// revalidation keyed off A's `source_project_root`) would then see
+/// `AutoSafe` for a resource a second workspace genuinely shares — the
+/// HORO-1822 "a Local root masks a redirecting root" finding, recurring
+/// one level up, in the direct-vs-widened dimension this time.
+///
+/// First candidate to reach a given `key` builds the [`Evidence`] (its
 /// own estimate, its own `source_project_root` — "used only for
-/// `--manifest-path`", per the ADR, so the FIRST root's manifest lookup is
-/// the one that is actually used later). Every subsequent root that
-/// resolves to the same `key` only ever contributes its own scope
-/// comparison: if its OWN independent resolution outranks the
-/// already-merged scope, the merged entry's scope is raised. A root whose
-/// own resolution happens to be `Local` must never mask a second root
-/// that independently redirects into the same physical directory — this
-/// is the exact bug HORO-1822's own review round found and the ADR
-/// documents.
-fn merge_widened_scope(
-    widened: &mut HashMap<(u64, u64), Evidence>,
+/// `--manifest-path`", per the ADR, so the FIRST root's manifest lookup
+/// is the one actually used later). Every subsequent candidate for the
+/// same `key` only ever contributes its own scope comparison: if its OWN
+/// independent resolution outranks the already-merged scope, the merged
+/// entry's scope is raised — never lowered.
+fn upsert_candidate(
+    by_physical: &mut HashMap<(u64, u64), Evidence>,
     key: (u64, u64),
+    locator: PathBuf,
     root: PathBuf,
-    resolved_target: PathBuf,
     scope_outcome: ProbeOutcome<CargoTargetScope>,
     detector_id: DetectorId,
 ) {
-    let Some(incoming_scope) = scope_outcome.observed().map(|s| s.scope) else {
-        return;
-    };
-
-    if let Some(existing) = widened.get_mut(&key) {
+    if let Some(existing) = by_physical.get_mut(&key) {
+        let Some(incoming) = scope_outcome.observed() else {
+            return;
+        };
         let existing_scope = match &existing.cargo_target_scope {
-            Some(ProbeOutcome::Observed(s)) => s.scope,
+            Some(ProbeOutcome::Observed(s)) => s.clone(),
             _ => return,
         };
-        if scope_rank(incoming_scope) > scope_rank(existing_scope) {
-            if let Some(ProbeOutcome::Observed(s)) = &mut existing.cargo_target_scope {
-                s.scope = incoming_scope;
-            }
+        // Merge, never simply overwrite: the surviving scope is the most
+        // protective of the two (never lowered by a later, less-protective
+        // contributor), and `is_direct_locator` is true only if EVERY
+        // contributor independently saw this physical directory as its
+        // own plain `<root>/target` — one contributor reaching it only
+        // via widening is enough to prove sharing is real, regardless of
+        // what a DIFFERENT contributor's own direct relationship to it
+        // happens to be.
+        let merged_scope = if scope_rank(incoming.scope) > scope_rank(existing_scope.scope) {
+            incoming.scope
+        } else {
+            existing_scope.scope
+        };
+        let merged_is_direct = incoming.is_direct_locator && existing_scope.is_direct_locator;
+        if merged_scope != existing_scope.scope
+            || merged_is_direct != existing_scope.is_direct_locator
+        {
+            existing.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+                scope: merged_scope,
+                is_direct_locator: merged_is_direct,
+                ..existing_scope
+            }));
         }
         return;
     }
 
-    let estimate = estimate_logical_bytes(&resolved_target, size_estimate_budget());
+    let estimate = estimate_logical_bytes(&locator, size_estimate_budget());
     let logical_bytes = estimate.bytes.clone();
     let resource = ResourceId::new(
         ResourceKind::CargoTargetDir,
-        ResourceLocator::Path(resolved_target.clone()),
+        ResourceLocator::Path(locator.clone()),
     )
     .with_source_project_root(root);
     let mut ev = discovery_evidence(
         resource,
         detector_id,
-        &resolved_target,
+        &locator,
         logical_bytes.clone(),
         logical_bytes,
         estimate.is_lower_bound(),
-        probe_mtime(&resolved_target),
+        probe_mtime(&locator),
         Regenerability::RegenerableByRebuild,
         Recoverability::RegenerableByRebuild,
         NativeCleanup::Unsupported,
@@ -458,7 +686,7 @@ fn merge_widened_scope(
         ev.push_source(note);
     }
     ev.cargo_target_scope = Some(scope_outcome);
-    widened.insert(key, ev);
+    by_physical.insert(key, ev);
 }
 
 pub struct CargoDetector;
@@ -496,87 +724,83 @@ impl Detector for CargoDetector {
             .unwrap_or_else(|| ctx.home_dir.join(".cargo").to_string_lossy().into_owned());
         let cargo_home_override = Some(cargo_home_override_owned.as_str());
 
-        let mut evidence = Vec::new();
         let mut saw_permission_error = false;
-        // HORO-1824 §4.2 discovery widening: keyed by the resolved target's
-        // (dev, ino), so a second configured root resolving to the SAME
-        // physical directory (via a shared/global config) merges rather
-        // than double-counting. "Dedup takes the most-protective scope,
-        // not the first-discovered one" — see `merge_widened_scope` below.
-        let mut widened: HashMap<(u64, u64), Evidence> = HashMap::new();
+        // HORO-1824 §4.2: keyed by the PHYSICAL (dev, ino) of the actual
+        // resource — a direct `<root>/target` locator and a different
+        // root's widened candidate for the exact same physical directory
+        // both land in this ONE map and dedup against each other there.
+        // See `upsert_candidate`'s own doc comment for why a two-map
+        // design (direct entries concatenated with a separately-deduped
+        // widened map) was unsafe.
+        let mut by_physical: HashMap<(u64, u64), Evidence> = HashMap::new();
 
         for root in &ctx.known_project_roots {
             let target_dir: PathBuf = root.join("target");
-            match target_dir.canonicalize() {
-                Ok(canonical) => {
-                    let resource = ResourceId::new(
-                        ResourceKind::CargoTargetDir,
-                        ResourceLocator::Path(canonical.clone()),
-                    )
-                    .with_source_project_root(root.clone());
-                    let estimate = estimate_logical_bytes(&canonical, size_estimate_budget());
-                    let logical_bytes = estimate.bytes.clone();
-                    let mut ev = discovery_evidence(
-                        resource,
-                        self.id(),
-                        &canonical,
-                        logical_bytes.clone(),
-                        logical_bytes,
-                        estimate.is_lower_bound(),
-                        probe_mtime(&canonical),
-                        Regenerability::RegenerableByRebuild,
-                        Recoverability::RegenerableByRebuild,
-                        NativeCleanup::Unsupported,
-                    );
-                    if let Some(note) = estimate.lower_bound_note() {
-                        ev.push_source(note);
-                    }
-
-                    let scope_outcome = resolve_cargo_target_scope(
-                        root,
-                        &canonical,
-                        cargo_home_override,
-                        &ctx.home_dir,
-                    );
-                    ev.cargo_target_scope = Some(scope_outcome.clone());
-
-                    // Discovery widening: when cargo's own resolution lands
-                    // somewhere other than `<root>/target`, that somewhere
-                    // is a resource this detector would otherwise never
-                    // surface — most consequentially a shared/redirected
-                    // target holding a live installed executable
-                    // dependency (HORO-1825's guard only runs on resources
-                    // that are actually discovered). Skipped entirely when
-                    // the resolver itself failed: widening onto an
-                    // unresolved path would be a guess, not a discovery.
-                    if let ProbeOutcome::Observed(scope) = &scope_outcome {
-                        if scope.resolved_target != canonical {
-                            if let Ok(resolved_meta) = std::fs::metadata(&scope.resolved_target) {
-                                use std::os::unix::fs::MetadataExt;
-                                let key = (resolved_meta.dev(), resolved_meta.ino());
-                                merge_widened_scope(
-                                    &mut widened,
-                                    key,
-                                    root.clone(),
-                                    scope.resolved_target.clone(),
-                                    scope_outcome.clone(),
-                                    self.id(),
-                                );
-                            }
-                        }
-                    }
-
-                    evidence.push(ev);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            let direct_canonical = match target_dir.canonicalize() {
+                Ok(canonical) => Some(canonical),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     saw_permission_error = true;
+                    None
                 }
-                Err(_) => continue,
+                Err(_) => None,
+            };
+
+            // Resolved ONCE per root regardless of whether a direct
+            // `<root>/target` exists — a root with NO local target/ at
+            // all (the normal shape for a freshly checked-out worktree)
+            // but a config redirecting elsewhere would otherwise never
+            // surface that shared target unless SOME OTHER root happened
+            // to have a stray local `target/` dir to widen from.
+            let fields_outcome = resolve_cargo_fields(root, cargo_home_override, &ctx.home_dir);
+
+            if let Some(canonical) = &direct_canonical {
+                let Ok(key) = dev_ino(canonical) else {
+                    continue;
+                };
+                let scope_outcome = scope_outcome_for(canonical, root, &fields_outcome);
+                upsert_candidate(
+                    &mut by_physical,
+                    key,
+                    canonical.clone(),
+                    root.clone(),
+                    scope_outcome,
+                    self.id(),
+                );
+            }
+
+            // Discovery widening: when cargo's own resolution lands
+            // somewhere other than the direct `<root>/target` locator (or
+            // there is no direct locator to compare against at all),
+            // that somewhere is a resource this detector would otherwise
+            // never surface — most consequentially a shared/redirected
+            // target holding a live installed executable dependency
+            // (HORO-1825's guard only runs on resources that are actually
+            // discovered). Skipped entirely when the resolver itself
+            // failed, or the resolved target doesn't actually exist on
+            // disk: widening onto an unresolved or nonexistent path would
+            // be a guess, not a discovery.
+            if let ProbeOutcome::Observed(fields) = &fields_outcome {
+                let differs_from_direct =
+                    direct_canonical.as_ref() != Some(&fields.resolved_target);
+                if differs_from_direct {
+                    if let Ok(key) = dev_ino(&fields.resolved_target) {
+                        let scope_outcome =
+                            scope_outcome_for(&fields.resolved_target, root, &fields_outcome);
+                        upsert_candidate(
+                            &mut by_physical,
+                            key,
+                            fields.resolved_target.clone(),
+                            root.clone(),
+                            scope_outcome,
+                            self.id(),
+                        );
+                    }
+                }
             }
         }
 
-        evidence.extend(widened.into_values());
+        let evidence: Vec<Evidence> = by_physical.into_values().collect();
 
         if evidence.is_empty() && saw_permission_error {
             return DetectorStatus::Failed(
@@ -721,7 +945,61 @@ mod tests {
         .unwrap();
     }
 
+    /// Recursively snapshots every path under `root`, relative to `root`,
+    /// paired with its length and modification time — used to prove a
+    /// probe wrote nothing (ADR-0001 §4.2: "HORO-1824 must prove by
+    /// fixture that it creates or modifies no files").
+    fn snapshot_tree(root: &Path) -> std::collections::BTreeMap<PathBuf, (u64, SystemTime)> {
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = entry.metadata() else { continue };
+                if meta.is_dir() {
+                    stack.push(path.clone());
+                }
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+                let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+                out.insert(rel, (meta.len(), mtime));
+            }
+        }
+        out
+    }
+
     // ---- HORO-1824 §4.2 resolver tests ----
+
+    /// ADR-0001 §4.2: "HORO-1824 must prove by fixture that it creates or
+    /// modifies no files." Snapshots the fixture tree before and after a
+    /// real `resolve_cargo_target_scope` call and asserts byte-for-byte
+    /// identity — no new file (no `Cargo.lock`), no changed mtime on any
+    /// existing one.
+    #[test]
+    fn resolve_cargo_target_scope_writes_no_files() {
+        let root = make_temp_dir("scope-no-writes");
+        pin_locally(&root);
+        write_manifest(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let before = snapshot_tree(&root);
+        let outcome = resolve_cargo_target_scope(&root, &target_dir, None, Path::new("/tmp"));
+        assert!(
+            matches!(outcome, ProbeOutcome::Observed(_)),
+            "the probe itself must succeed for this to be a meaningful proof, got {outcome:?}"
+        );
+        let after = snapshot_tree(&root);
+
+        assert_eq!(
+            before, after,
+            "resolve_cargo_target_scope must create or modify no files under the project root"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
 
     /// The ordinary case: a real Cargo project with no override anywhere
     /// resolves `Local`.
@@ -768,22 +1046,34 @@ mod tests {
     /// shape this ticket exists to catch, reproduced locally so the test
     /// never depends on the developer's real `~/.cargo/config.toml`.
     #[test]
-    fn resolve_cargo_target_scope_is_redirected_when_config_points_outside_workspace() {
+    fn resolve_cargo_target_scope_is_redirected_when_locator_is_a_symlink_escaping_workspace() {
         let root = make_temp_dir("scope-redirected-root");
         write_manifest(&root);
+        // Pin cargo's own resolution to the plain, un-redirected
+        // `<root>/target` — the fixture's redirect comes entirely from
+        // the SYMLINK below, not from config. Without this, this
+        // machine's own global `~/.cargo/config.toml` redirect would
+        // make `resolved_target` the developer's real shared-target dir
+        // instead of the fixture's own `shared`, unrelated to what this
+        // test means to exercise.
+        pin_locally(&root);
         let shared = make_temp_dir("scope-redirected-shared");
-        fs::create_dir_all(root.join(".cargo")).unwrap();
-        fs::write(
-            root.join(".cargo/config.toml"),
-            format!(
-                "[build]\ntarget-dir = \"{}\"\n",
-                shared.to_string_lossy().replace('\\', "\\\\")
-            ),
-        )
-        .unwrap();
+        fs::create_dir_all(&shared).unwrap();
 
-        let locator = root.join("target"); // never created — Redirected means Cargo never put anything here
-        let outcome = resolve_cargo_target_scope(&root, &locator, None, Path::new("/tmp"));
+        // The LOCATOR itself — `<root>/target` — is a symlink whose
+        // canonical resolution lands outside `workspace_root`. This is
+        // the ADR's own "symlinked-out target/" shape, and the only way a
+        // DIRECT (non-widened) locator can be `Redirected`: a plain
+        // config override with no local symlink never creates a
+        // `<root>/target` at all (nothing for discovery to find
+        // directly) — that case is only reachable via widening (its own
+        // dedicated test), where `locator == resolved_target` by
+        // construction.
+        let symlinked_target = root.join("target");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&shared, &symlinked_target).unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &symlinked_target, None, Path::new("/tmp"));
         match outcome {
             ProbeOutcome::Observed(scope) => {
                 assert_eq!(scope.scope, TargetScope::Redirected);
@@ -796,20 +1086,67 @@ mod tests {
         fs::remove_dir_all(&shared).ok();
     }
 
-    /// `parent_repo` / stale-leftover fixture: the locator (`<root>/target`)
-    /// is a real, pre-existing directory, but the root's OWN config
-    /// redirects elsewhere — the configured root no longer shares the
-    /// directory sitting at the locator. `Orphan`, not `Local`.
+    /// `stale_completed_worktree` / `parent_repo` fixture, and the exact
+    /// shape of the real HORO-1822 incident on this machine (per-worktree
+    /// `target/` leftovers, with `~/.cargo/config.toml` now redirecting
+    /// every workspace to one shared `target-dir` OUTSIDE every one of
+    /// them): the locator (`<root>/target`) is a real, pre-existing,
+    /// ordinary directory UNDER the workspace root, but the root's OWN
+    /// config now redirects the ACTUAL target elsewhere, including
+    /// outside the workspace entirely. `Orphan`, never `Redirected` —
+    /// nothing else can ever point at `<root>/target` specifically, so
+    /// cleaning THIS directory carries no cross-workspace blast radius
+    /// regardless of where cargo itself now resolves to. This is the
+    /// anti-vacuity proof that the scope partition is keyed on the
+    /// LOCATOR's relationship to `workspace_root`, never on
+    /// `resolved_target`'s.
     #[test]
-    fn resolve_cargo_target_scope_is_orphan_when_root_no_longer_shares_the_locator() {
+    fn resolve_cargo_target_scope_is_orphan_for_a_stale_leftover_even_when_redirect_is_external() {
+        let root = make_temp_dir("scope-orphan-external-root");
+        write_manifest(&root);
+        let shared = make_temp_dir("scope-orphan-external-shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = \"{}\"\n",
+                shared.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        // A real, ordinary leftover directory — NOT a symlink — still
+        // sits at `<root>/target` from before the redirect was added.
+        let stale_locator = root.join("target");
+        fs::create_dir_all(&stale_locator).unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &stale_locator, None, Path::new("/tmp"));
+        match outcome {
+            ProbeOutcome::Observed(scope) => {
+                assert_eq!(
+                    scope.scope,
+                    TargetScope::Orphan,
+                    "a stale leftover under the workspace must be Orphan even when cargo's \
+                     real target is now outside the workspace entirely"
+                );
+                assert_eq!(scope.resolved_target, shared.canonicalize().unwrap());
+                assert!(scope.is_direct_locator);
+            }
+            other => panic!("expected Observed(Orphan), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&shared).ok();
+    }
+
+    /// The nested-config variant of the same Orphan shape: the redirect
+    /// target stays INSIDE the workspace (a project that switched its
+    /// local target-dir from `target` to `build`) — confirms Orphan does
+    /// not depend on the redirect being external.
+    #[test]
+    fn resolve_cargo_target_scope_is_orphan_when_redirect_stays_inside_workspace() {
         let root = make_temp_dir("scope-orphan-root");
         write_manifest(&root);
-        // A NESTED config redirects to a different directory NAME, but
-        // one that is still under the SAME workspace root — e.g. a
-        // project that switched its local target-dir from `target` to
-        // `build`. `resolved_target` (`<root>/build`) stays under
-        // `workspace_root` (`<root>`), which is what distinguishes this
-        // from `Redirected` (resolved_target OUTSIDE workspace_root).
         fs::create_dir_all(root.join(".cargo")).unwrap();
         fs::write(
             root.join(".cargo/config.toml"),
@@ -826,14 +1163,6 @@ mod tests {
         match outcome {
             ProbeOutcome::Observed(scope) => {
                 assert_eq!(scope.scope, TargetScope::Orphan);
-                // Even though `scope` is the "safe" Orphan value, this
-                // locator is NOT the plain `<root>/target` cargo would
-                // actually use — wait, it literally IS `<root>/target`
-                // here, so it IS the direct locator; the point of this
-                // fixture is Orphan, not widening. `is_direct_locator`
-                // is about whether the EVIDENCE's own locator equals
-                // `<project_root>/target`, which is true here regardless
-                // of where cargo itself resolved to.
                 assert!(scope.is_direct_locator);
             }
             other => panic!("expected Observed(Orphan), got {other:?}"),
@@ -923,7 +1252,11 @@ mod tests {
         )
         .unwrap();
 
+        // The locator must exist on disk (matching every real caller),
+        // so this test actually exercises the implausible-source
+        // rejection rather than an unrelated canonicalize failure.
         let locator = root.join("target");
+        fs::create_dir_all(&locator).unwrap();
         let outcome = resolve_cargo_target_scope(&root, &locator, None, Path::new("/tmp"));
         assert_eq!(
             outcome,
@@ -1073,6 +1406,130 @@ mod tests {
         }
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// Security regression (independent review, critical finding): root A
+    /// has its own ordinary local `target/` (which, on its own, is
+    /// `Local` and would be AUTO_SAFE-eligible). Root B has NO local
+    /// `target/` at all, but its own config redirects to the EXACT
+    /// physical directory A's `target/` is. Before this fix, A's direct
+    /// entry and B's widened entry for that SAME physical directory were
+    /// two separate `Evidence` records under one identical `ResourceId`
+    /// — a consumer reading A's copy (or any revalidation keyed off A's
+    /// `source_project_root`) would see `AutoSafe` for a directory a
+    /// second workspace genuinely shares. This test proves exactly one
+    /// `Evidence` is produced for that physical directory, and that it
+    /// carries the merged, most-protective judgment.
+    #[test]
+    fn a_direct_entry_and_a_widened_entry_for_the_same_physical_directory_merge_into_one() {
+        let root_a = make_temp_dir("dedup-root-a");
+        write_manifest(&root_a);
+        fs::create_dir_all(root_a.join("target")).unwrap();
+        let shared_target = root_a.join("target").canonicalize().unwrap();
+
+        let root_b = make_temp_dir("dedup-root-b");
+        write_manifest(&root_b);
+        // Root B has no local `target/` directory of its own at all —
+        // the normal shape for a freshly checked-out worktree whose
+        // config already redirects elsewhere.
+        fs::create_dir_all(root_b.join(".cargo")).unwrap();
+        fs::write(
+            root_b.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = \"{}\"\n",
+                shared_target.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let fixture_home = make_temp_dir("dedup-fixture-home");
+        let ctx = DiscoveryContext::new(&fixture_home)
+            .with_known_project_roots(vec![root_a.clone(), root_b.clone()]);
+
+        let evidence = match CargoDetector.discover(&ctx) {
+            DetectorStatus::Found(ev) => ev,
+            other => panic!("expected Found, got {other:?}"),
+        };
+
+        let matching: Vec<&Evidence> = evidence
+            .iter()
+            .filter(
+                |e| matches!(&e.resource.locator, ResourceLocator::Path(p) if p == &shared_target),
+            )
+            .collect();
+        assert_eq!(
+            matching.len(),
+            1,
+            "a direct entry and a widened entry for the same physical directory must merge \
+             into exactly one Evidence, got {}: {matching:?}",
+            matching.len()
+        );
+
+        match &matching[0].cargo_target_scope {
+            Some(ProbeOutcome::Observed(scope)) => {
+                assert_eq!(
+                    scope.scope,
+                    TargetScope::Redirected,
+                    "the merged entry must carry the MOST PROTECTIVE scope across every \
+                     contributing root — root B's independent view, not root A's"
+                );
+                assert!(
+                    !scope.is_direct_locator,
+                    "root B proved this directory is reached via widening, not as anyone's \
+                     own plain target — the merged entry must never read as fully direct"
+                );
+            }
+            other => panic!("expected Observed scope, got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root_a).ok();
+        fs::remove_dir_all(&root_b).ok();
+        fs::remove_dir_all(&fixture_home).ok();
+    }
+
+    /// Security regression companion: root B has NO local `target/` at
+    /// all (unlike the test above, there is no "direct" contributor to
+    /// even collide with) — confirming widening fires purely from a
+    /// root's own config redirect, not merely as a byproduct of some
+    /// OTHER root's stray local target dir happening to match.
+    #[test]
+    fn widening_surfaces_a_redirect_even_with_no_direct_contributor_anywhere() {
+        let shared = make_temp_dir("widen-no-direct-shared");
+        fs::create_dir_all(&shared).unwrap();
+
+        let root = make_temp_dir("widen-no-direct-root");
+        write_manifest(&root);
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = \"{}\"\n",
+                shared.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        // No `root.join("target")` is ever created.
+
+        let fixture_home = make_temp_dir("widen-no-direct-home");
+        let ctx = DiscoveryContext::new(&fixture_home).with_known_project_roots(vec![root.clone()]);
+
+        let evidence = match CargoDetector.discover(&ctx) {
+            DetectorStatus::Found(ev) => ev,
+            other => panic!("expected Found, got {other:?}"),
+        };
+
+        let shared_canonical = shared.canonicalize().unwrap();
+        assert!(
+            evidence.iter().any(
+                |e| matches!(&e.resource.locator, ResourceLocator::Path(p) if p == &shared_canonical)
+            ),
+            "the redirected target must be surfaced purely from this root's own config, \
+             with no local target/ dir on disk anywhere to widen from instead"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&shared).ok();
+        fs::remove_dir_all(&fixture_home).ok();
     }
 
     /// HORO-1017: the discovered `Evidence`'s `resource.source_project_root`
