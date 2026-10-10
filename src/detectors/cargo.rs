@@ -124,15 +124,30 @@ pub(crate) fn resolve_trusted_toolchain(home: &Path) -> ToolchainPin {
     // do — this is a long-running process (daemon-like usage), not a
     // one-shot CLI invocation, so "cache the first failure forever" is a
     // real availability regression, not merely a cosmetic one.
-    if !rustup_is_present() {
-        // No rustup proxy at all (e.g. a Homebrew-installed `cargo` with
-        // no rustup in front of it) means there is no `rust-toolchain.toml`
-        // steering risk to pin against in the first place — the whole
-        // concern this function exists for is moot. `NoProxy` tells the
-        // caller to proceed WITHOUT setting `RUSTUP_TOOLCHAIN` at all,
-        // never to fail closed over a risk that structurally cannot
-        // apply on this machine.
-        return ToolchainPin::NoProxy;
+    match rustup_presence() {
+        RustupPresence::Absent => {
+            // No rustup proxy at all (e.g. a Homebrew-installed `cargo`
+            // with no rustup in front of it) means there is no
+            // `rust-toolchain.toml` steering risk to pin against in the
+            // first place — the whole concern this function exists for
+            // is moot. `NoProxy` tells the caller to proceed WITHOUT
+            // setting `RUSTUP_TOOLCHAIN` at all, never to fail closed
+            // over a risk that structurally cannot apply on this
+            // machine.
+            return ToolchainPin::NoProxy;
+        }
+        RustupPresence::Unresolved => {
+            // Second availability fix (flagged by independent review):
+            // the presence check ITSELF can fail transiently (timeout,
+            // spawn failure under load/sandboxing) without that meaning
+            // "rustup isn't installed." Treating that the same as
+            // `Absent` would silently and permanently disable pinning
+            // (see `rustup_presence`'s own doc comment — this case is
+            // deliberately never cached). Fail THIS probe closed
+            // instead of falling back to `NoProxy`.
+            return ToolchainPin::Unresolved;
+        }
+        RustupPresence::Present => {}
     }
 
     // This tool has to be asked: `rustup show active-toolchain` is the
@@ -182,26 +197,98 @@ pub(crate) enum ToolchainPin {
     Unresolved,
 }
 
-/// Whether the `rustup` binary exists at all, cached for the life of the
-/// process — a stable machine fact, never expected to flip mid-run.
-/// Checked via a bare presence probe (`rustup --version`), separately
-/// from [`resolve_trusted_toolchain`]'s own per-call `show
-/// active-toolchain`, so a transient failure of THAT specific call is
-/// never confused with "rustup isn't installed".
-fn rustup_is_present() -> bool {
-    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *PRESENT.get_or_init(|| {
-        // This tool has to be asked: there is no documented file or env
-        // var that says whether `rustup` is installed short of trying
-        // to run it. `--version` is read-only and the cheapest possible
-        // call.
-        let mut command = Command::new(RUSTUP_PROGRAM);
-        command.arg("--version");
-        matches!(
-            run_with_timeout(command, RUSTUP_TOOLCHAIN_TIMEOUT),
-            CommandOutcome::Completed(output) if output.status.success()
-        )
-    })
+/// Resolution of whether the `rustup` binary exists at all — see
+/// [`rustup_presence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RustupPresence {
+    /// Confirmed present (a `--version` call completed successfully).
+    /// Cached permanently — a stable machine fact.
+    Present,
+    /// Confirmed absent (`ErrorKind::NotFound` on spawn — there is no
+    /// such binary on `PATH`). Cached permanently — equally a stable
+    /// machine fact, and the only case the ORIGINAL `rustup_is_present`
+    /// legitimately meant to mean "not installed."
+    Absent,
+    /// This specific presence CHECK failed ambiguously — the process
+    /// timed out, or spawning/waiting on it failed for some reason
+    /// other than "binary not found" (system load, flaky sandboxing,
+    /// a transient fork/exec error). This does NOT mean rustup is
+    /// absent, and must never be cached as such: see `rustup_presence`'s
+    /// doc comment for the bug this closes.
+    Unresolved,
+}
+
+/// Whether the `rustup` binary exists at all.
+///
+/// Second availability fix (flagged by independent review, closing the
+/// same bug class commit `36d66ad` already fixed for the toolchain
+/// LOOKUP itself): the ORIGINAL version of this check cached
+/// `matches!(outcome, Completed(output) if success)` into a single
+/// `OnceLock<bool>` — which silently and PERMANENTLY folds
+/// `CommandOutcome::TimedOut` and `CommandOutcome::SpawnFailed` (genuine
+/// transient failures of THIS call) into the same `false` as
+/// `CommandOutcome::NotFound` (the only outcome that legitimately means
+/// "rustup isn't installed"). `resolve_trusted_toolchain` reads a cached
+/// `false` as `NoProxy` — "no steering risk, proceed without a pin." One
+/// slow/flaky `rustup --version` call anywhere in this process's
+/// lifetime would therefore have permanently and silently disabled the
+/// `RUSTUP_TOOLCHAIN` pin for every subsequent probe against every
+/// untrusted root, for the rest of the process's life.
+///
+/// Fixed by only ever writing to the cache on a DECISIVE outcome
+/// (`Present` from a successful completion, `Absent` from `NotFound`).
+/// `TimedOut`/`SpawnFailed` leave the cache untouched and return
+/// `Unresolved`, so the next call retries the probe from scratch —
+/// exactly the same "don't cache a transient failure forever" shape
+/// already applied to the toolchain lookup above.
+fn rustup_presence() -> RustupPresence {
+    static CACHE: std::sync::OnceLock<std::sync::RwLock<Option<bool>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::RwLock::new(None));
+
+    if let Some(known_present) = *cache.read().expect("rustup presence cache lock poisoned") {
+        return if known_present {
+            RustupPresence::Present
+        } else {
+            RustupPresence::Absent
+        };
+    }
+
+    // This tool has to be asked: there is no documented file or env var
+    // that says whether `rustup` is installed short of trying to run
+    // it. `--version` is read-only and the cheapest possible call.
+    let mut command = Command::new(RUSTUP_PROGRAM);
+    command.arg("--version");
+    let outcome = run_with_timeout(command, RUSTUP_TOOLCHAIN_TIMEOUT);
+    match cacheable_presence(&outcome) {
+        Some(true) => {
+            *cache.write().expect("rustup presence cache lock poisoned") = Some(true);
+            RustupPresence::Present
+        }
+        Some(false) => {
+            *cache.write().expect("rustup presence cache lock poisoned") = Some(false);
+            RustupPresence::Absent
+        }
+        // Completed-but-nonzero-exit, TimedOut, SpawnFailed: ambiguous,
+        // never "not installed" — deliberately NOT written to the
+        // cache, so the next call tries again.
+        None => RustupPresence::Unresolved,
+    }
+}
+
+/// Pure decision logic for [`rustup_presence`]'s caching, split out so
+/// the exact rule — which `CommandOutcome`s are decisive enough to
+/// cache, and which are merely transient — can be unit-tested directly
+/// against every variant without spawning a real process or forcing a
+/// real timeout. `Some(true)`/`Some(false)` are the only two cacheable
+/// answers; `None` means "don't cache, this call was ambiguous."
+fn cacheable_presence(outcome: &CommandOutcome) -> Option<bool> {
+    match outcome {
+        CommandOutcome::Completed(output) if output.status.success() => Some(true),
+        CommandOutcome::NotFound => Some(false),
+        CommandOutcome::Completed(_) | CommandOutcome::TimedOut | CommandOutcome::SpawnFailed => {
+            None
+        }
+    }
 }
 
 /// Raw fields read out of `cargo metadata --format-version 1 --no-deps
@@ -392,6 +479,14 @@ fn resolve_cargo_fields(
         || workspace_root.starts_with(&resolved_target)
         || resolved_target.join("Cargo.toml").is_file()
         || has_rust_source(&resolved_target.join("src"))
+        // Independent review finding: the check above only catches a
+        // `resolved_target` that IS a project root (its own nested
+        // `src/` holds the source). It misses a `resolved_target` that
+        // is itself a bare source directory — `.rs` files sitting
+        // directly inside it, no nested `src/`, no `Cargo.toml` at all
+        // (e.g. a crafted/misconfigured `target-dir` pointed straight at
+        // someone's source tree). Check the directory itself too.
+        || has_rust_source(&resolved_target)
     {
         return ProbeOutcome::Unavailable(ProbeReason::Failed);
     }
@@ -904,6 +999,57 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::SystemTime;
 
+    /// Independent-review adversarial fixture for the second must-fix:
+    /// `rustup_presence`'s caching decision must treat `TimedOut` and
+    /// `SpawnFailed` as ambiguous (never cacheable), not as "confirmed
+    /// absent" the way `NotFound` is. Exercises every `CommandOutcome`
+    /// variant directly against the pure decision function, so this is
+    /// deterministic and needs no real subprocess or real timeout.
+    #[test]
+    fn cacheable_presence_only_caches_decisive_outcomes() {
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{ExitStatus, Output};
+
+        let success = Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let failure = Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+
+        assert_eq!(
+            cacheable_presence(&CommandOutcome::Completed(success)),
+            Some(true),
+            "a successful completion is the only decisive 'present' answer"
+        );
+        assert_eq!(
+            cacheable_presence(&CommandOutcome::NotFound),
+            Some(false),
+            "NotFound is the only decisive 'absent' answer"
+        );
+        assert_eq!(
+            cacheable_presence(&CommandOutcome::Completed(failure)),
+            None,
+            "a completed-but-nonzero-exit call is ambiguous, not 'absent'"
+        );
+        assert_eq!(
+            cacheable_presence(&CommandOutcome::TimedOut),
+            None,
+            "a transient timeout must never be cached as 'absent' — \
+             the exact bug flagged by independent review: caching this \
+             as false permanently disables RUSTUP_TOOLCHAIN pinning"
+        );
+        assert_eq!(
+            cacheable_presence(&CommandOutcome::SpawnFailed),
+            None,
+            "a transient spawn failure must never be cached as 'absent'"
+        );
+    }
+
     fn make_temp_dir(prefix: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = SystemTime::now()
@@ -1262,6 +1408,50 @@ mod tests {
             outcome,
             ProbeOutcome::Unavailable(ProbeReason::Failed),
             "a resolved target directory holding a nested Cargo.toml/src/*.rs must be rejected"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&decoy_source).ok();
+    }
+
+    /// Independent-review adversarial fixture: a `resolved_target` that
+    /// is itself a bare source directory — `.rs` files sitting directly
+    /// inside it, no nested `src/`, no `Cargo.toml` anywhere. The
+    /// existing `..._rejects_target_dir_containing_real_source` test
+    /// above always builds its decoy via `write_manifest()`, which
+    /// creates a nested `src/lib.rs` and a `Cargo.toml` — so it never
+    /// actually exercised the direct `has_rust_source(&resolved_target)`
+    /// check, only the `Cargo.toml`/`src/` nested-root checks. This
+    /// fixture isolates that gap.
+    #[test]
+    fn resolve_cargo_target_scope_rejects_a_redirect_to_a_bare_source_directory() {
+        let root = make_temp_dir("scope-implausible-bare-source-root");
+        write_manifest(&root);
+        let decoy_source = make_temp_dir("scope-implausible-bare-source-decoy");
+        // Deliberately NOT a project: no Cargo.toml, no nested `src/` —
+        // just a `.rs` file sitting directly inside the decoy directory
+        // itself, the shape a crafted/misconfigured `target-dir` could
+        // point straight at.
+        fs::write(decoy_source.join("important_code.rs"), "fn main() {}\n").unwrap();
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = \"{}\"\n",
+                decoy_source.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let locator = root.join("target");
+        fs::create_dir_all(&locator).unwrap();
+        let outcome = resolve_cargo_target_scope(&root, &locator, None, Path::new("/tmp"));
+        assert_eq!(
+            outcome,
+            ProbeOutcome::Unavailable(ProbeReason::Failed),
+            "a resolved target directory that IS a bare source directory \
+             (no nested src/, no Cargo.toml, just .rs files at its own \
+             top level) must be rejected, not scoped Orphan/Local"
         );
 
         fs::remove_dir_all(&root).ok();
