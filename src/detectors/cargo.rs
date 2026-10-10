@@ -32,9 +32,14 @@
 //! finishes (a truthful lower bound, never a precision guarantee).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
+use crate::evidence::correlate::timeout::{run_with_timeout, CommandOutcome};
+use crate::evidence::probe::{ProbeOutcome, ProbeReason};
 use crate::evidence::{
-    NativeCleanup, Recoverability, Regenerability, ResourceId, ResourceKind, ResourceLocator,
+    CargoTargetScope, NativeCleanup, Recoverability, Regenerability, ResourceId, ResourceKind,
+    ResourceLocator, TargetScope,
 };
 
 use super::{
@@ -42,6 +47,339 @@ use super::{
     size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence,
     ToolEnvVar,
 };
+
+/// The program this module's `cargo metadata` resolver runs. Named here
+/// rather than inline so [`super::SPAWNED_PROGRAMS`] can be built from the
+/// detectors' own declarations instead of a second list that could drift
+/// from them (HORO-1560).
+pub(super) const CARGO_PROGRAM: &str = "cargo";
+
+/// The program [`resolve_trusted_toolchain`] runs to pin a trusted
+/// toolchain before any `cargo metadata` call against an untrusted
+/// `project_root` cwd. Named here for the same reason as
+/// [`CARGO_PROGRAM`] (HORO-1560).
+pub(super) const RUSTUP_PROGRAM: &str = "rustup";
+
+/// Wall-clock budget for one `cargo metadata` resolution (HORO-1824 §4.2).
+/// Run under the crate's existing timeout runner, same pattern as every
+/// other real-subprocess probe (`lsof`, `git`).
+const CARGO_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Wall-clock budget for resolving the trusted toolchain pin (below). Kept
+/// short and separate from [`CARGO_METADATA_TIMEOUT`] — this runs `rustup`,
+/// not `cargo`, and from a neutral cwd, so it should never be slow.
+const RUSTUP_TOOLCHAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Resolves and caches the toolchain Glomeris's OWN process would
+/// ordinarily use, from a NEUTRAL current directory (`$HOME`) — never from
+/// `project_root`.
+///
+/// # Why this exists (security)
+///
+/// `cargo` on a rustup-managed machine is rustup's proxy binary, not the
+/// real `cargo` — and rustup's proxy inspects the CURRENT DIRECTORY AND
+/// ITS ANCESTORS for a `rust-toolchain`/`rust-toolchain.toml` override
+/// *before* invoking the real toolchain. [`run_cargo_metadata`] is run
+/// with `current_dir(project_root)`, and `project_root` is a Glomeris
+/// *configured* root — not necessarily something Glomeris's own user
+/// trusts the CONTENTS of (it could be a cloned repo, a vendored
+/// dependency checkout, anything pointed at by configuration). Without
+/// this pin, a crafted `rust-toolchain.toml` sitting in or above
+/// `project_root` could make a read-only evidence probe silently select —
+/// and on some rustup versions/override shapes, install or otherwise
+/// execute — an attacker-chosen toolchain, which is a real
+/// code-execution-via-untrusted-config risk, not merely a correctness one.
+///
+/// `RUSTUP_TOOLCHAIN=<this value>` set on the `cargo metadata` subprocess
+/// (see [`run_cargo_metadata`]) makes rustup use exactly this toolchain
+/// and ignore any override file under `project_root`, while still
+/// resolving `cargo metadata`'s real config-resolved answer — the whole
+/// point of this probe. `RUSTUP_AUTO_INSTALL=0` (already set) is kept as
+/// defense in depth, not relied on alone: it stops auto-install on
+/// versions that still read the override file, but this pin stops the
+/// override file from being read for its *toolchain selection* at all.
+///
+/// Resolved ONCE per process (via `rustup show active-toolchain`, which
+/// itself is run from `$HOME` so it cannot be influenced by any
+/// `project_root`'s own `rust-toolchain.toml` either) and cached — this is
+/// deliberately not a per-probe subprocess. `None` means no trusted pin
+/// could be established (rustup absent, timed out, or failed); every
+/// caller MUST fail closed in that case rather than running `cargo
+/// metadata` against an untrusted cwd with no toolchain pin at all.
+///
+/// `home` is injected, never read from the ambient process environment
+/// here (HORO-1543: a detector that reads `$HOME` itself answers from the
+/// real host machine even under a fixture [`DiscoveryContext`]) — callers
+/// pass [`DiscoveryContext::home_dir`] in production and a fixture
+/// directory in tests.
+fn resolve_trusted_toolchain(home: &Path) -> Option<String> {
+    static TOOLCHAIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    TOOLCHAIN
+        .get_or_init(|| {
+            // This tool has to be asked: `rustup show active-toolchain`
+            // is the only documented way to learn which toolchain this
+            // process would ordinarily select — there is no config file
+            // Glomeris can read instead, and reading `rustup`'s own
+            // internal override-resolution state file directly would be
+            // exactly the fragile, version-coupled reimplementation
+            // ADR-0001 §10 alternative 8 rejects for Cargo's own config.
+            // Run from `$HOME` (never `project_root`) specifically so
+            // THIS probe cannot itself be steered by an untrusted
+            // `rust-toolchain.toml`.
+            let mut command = Command::new(RUSTUP_PROGRAM);
+            command
+                .arg("show")
+                .arg("active-toolchain")
+                .current_dir(home);
+            let output = match run_with_timeout(command, RUSTUP_TOOLCHAIN_TIMEOUT) {
+                CommandOutcome::Completed(output) if output.status.success() => output,
+                _ => return None,
+            };
+            let stdout = String::from_utf8(output.stdout).ok()?;
+            // Real format observed: "stable-aarch64-apple-darwin (default)\n"
+            // — the toolchain name is the first whitespace-delimited token.
+            let name = stdout.split_whitespace().next()?;
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .clone()
+}
+
+/// Raw fields read out of `cargo metadata --format-version 1 --no-deps
+/// --offline`'s JSON. Intentionally narrow — this never attempts to
+/// deserialize the (enormous, version-sensitive) full metadata shape,
+/// only the three fields ADR-0001 §4.2 names.
+struct CargoMetadataFields {
+    target_directory: PathBuf,
+    /// `None` when the field is absent (older cargo) OR equal to
+    /// `target_directory` (the common case) — report-only either way,
+    /// per the ADR.
+    build_directory: Option<PathBuf>,
+    workspace_root: PathBuf,
+}
+
+/// Runs `cargo metadata --format-version 1 --no-deps --offline` with
+/// `current_dir = project_root`, per ADR-0001 §4.2.
+///
+/// Environment: `RUSTUP_AUTO_INSTALL=0`, and `CARGO_TARGET_DIR`/
+/// `CARGO_BUILD_TARGET_DIR` stripped so this reports Cargo's
+/// CONFIG-resolved answer, never Glomeris's own (possibly different)
+/// process environment. `cargo_home_override` — when `Some`, from
+/// [`DiscoveryContext::tool_env`]`(ToolEnvVar::CargoHome)` — lets a
+/// hermetic test or an explicit `CARGO_HOME` override reach the
+/// subprocess the same way [`super::cargo_registry_dir`] already reaches
+/// `CargoRegistryCacheDetector`; `None` means inherit whatever
+/// `CARGO_HOME` Glomeris's own process already has (production default).
+///
+/// Returns `None` on ANY failure — absent binary, timeout, non-zero
+/// exit, unparseable JSON, or a required field missing from the JSON.
+/// Never guesses a default: an empty/synthetic answer here would let a
+/// probe failure silently resolve to `Local`, exactly the fail-open
+/// pattern ADR-0001's non-negotiable section forbids.
+fn run_cargo_metadata(
+    project_root: &Path,
+    cargo_home_override: Option<&str>,
+    home: &Path,
+) -> Option<CargoMetadataFields> {
+    // Security (flagged by independent review): `cargo` here is rustup's
+    // proxy, and rustup resolves a `rust-toolchain`/`rust-toolchain.toml`
+    // override from `current_dir` and its ANCESTORS before invoking the
+    // real toolchain. `project_root` is a Glomeris-configured root, not
+    // necessarily a root whose CONTENTS are trusted — a crafted override
+    // file there could otherwise steer this probe into selecting (and on
+    // some rustup versions/override shapes, installing or executing) an
+    // attacker-chosen toolchain. `RUSTUP_TOOLCHAIN` pinned to a toolchain
+    // resolved from a NEUTRAL cwd makes rustup ignore any override under
+    // `project_root` entirely. A pin that cannot be established is not a
+    // reason to proceed without one.
+    let trusted_toolchain = resolve_trusted_toolchain(home)?;
+
+    // This tool has to be asked: no documented config file or env var
+    // exposes Cargo's fully-merged, precedence-resolved target directory
+    // (global config, nested config, `--config`, `CARGO_TARGET_DIR`, a
+    // workspace override) — only `cargo metadata` itself applies Cargo's
+    // own merge rules, which is exactly ADR-0001 §10 alternative 8's
+    // rationale for not hand-parsing `.cargo/config.toml`. When asked, it
+    // only reads config/manifest files and prints JSON describing them —
+    // `--offline`/`--no-deps` keep it from touching the network or
+    // resolving the dependency graph, and it writes no file (verified
+    // empirically against a real fixture; see the PR body).
+    let mut command = Command::new(CARGO_PROGRAM);
+    command
+        .arg("metadata")
+        .arg("--format-version")
+        .arg("1")
+        .arg("--no-deps")
+        .arg("--offline")
+        .current_dir(project_root)
+        .env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR")
+        .env("RUSTUP_AUTO_INSTALL", "0")
+        .env("RUSTUP_TOOLCHAIN", &trusted_toolchain);
+    if let Some(home) = cargo_home_override {
+        command.env("CARGO_HOME", home);
+    }
+
+    let output = match run_with_timeout(command, CARGO_METADATA_TIMEOUT) {
+        CommandOutcome::Completed(output) if output.status.success() => output,
+        // NotFound (cargo absent), TimedOut, SpawnFailed, or a non-zero
+        // exit (e.g. no Cargo.toml at `project_root`, or a cargo safety
+        // refusal) all fail closed here — none of them may be read as
+        // "no target directory", only as "unknown".
+        _ => return None,
+    };
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let target_directory = json.get("target_directory")?.as_str()?;
+    let workspace_root = json.get("workspace_root")?.as_str()?;
+    let build_directory = json
+        .get("build_directory")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+
+    Some(CargoMetadataFields {
+        target_directory: PathBuf::from(target_directory),
+        build_directory,
+        workspace_root: PathBuf::from(workspace_root),
+    })
+}
+
+/// Resolves [`CargoTargetScope`] for one discovered Cargo target
+/// directory (HORO-1824 §4.2).
+///
+/// `locator` is the resource's own (already-canonicalized) path — the
+/// `<root>/target` the detector found, or the resolved target a
+/// discovery-widening pass is attaching scope to. Comparing it against
+/// cargo's own `target_directory` is what distinguishes `Local` from
+/// `Orphan`: both have `resolved_target` under `workspace_root`, but
+/// `Orphan` means the root *searched* (`<root>/target`) is not the
+/// directory cargo would actually use.
+///
+/// Every path comparison here is canonicalized on both sides before
+/// comparing — never raw string equality, which on macOS would read
+/// `/var/...` and `/private/var/...` as different directories when they
+/// are the same one.
+///
+/// `home` is passed straight through to [`resolve_trusted_toolchain`] —
+/// see its doc comment for why it must be injected rather than read from
+/// the ambient environment here.
+pub(crate) fn resolve_cargo_target_scope(
+    project_root: &Path,
+    locator: &Path,
+    cargo_home_override: Option<&str>,
+    home: &Path,
+) -> ProbeOutcome<CargoTargetScope> {
+    let Some(fields) = run_cargo_metadata(project_root, cargo_home_override, home) else {
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    };
+
+    let Ok(resolved_target) = fields.target_directory.canonicalize() else {
+        // Cargo named a target_directory that cannot itself be
+        // canonicalized (e.g. a dangling component) — not observable,
+        // fail closed rather than compare against a raw, unverified path.
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    };
+    let Ok(workspace_root) = fields.workspace_root.canonicalize() else {
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    };
+    let resolved_build_dir = fields
+        .build_directory
+        .and_then(|b| b.canonicalize().ok())
+        .filter(|b| *b != resolved_target);
+    let locator_canonical = locator
+        .canonicalize()
+        .unwrap_or_else(|_| locator.to_path_buf());
+
+    // Security (flagged by independent review): `target_directory` comes
+    // from `cargo metadata`, which applies WHATEVER `.cargo/config.toml`
+    // the configured root (or a config above it) carries — a root
+    // Glomeris was told to look at, not necessarily one whose config
+    // Glomeris's user authored or reviewed. A misconfigured or crafted
+    // `build.target-dir` (`".."`, `"."`, an absolute path at the
+    // workspace root or an ancestor of it) can make `resolved_target`
+    // equal or contain the workspace root — or any other directory that
+    // demonstrably holds real source. The only Cargo mutation this
+    // crate ever runs is `cargo clean --target-dir <resolved_target>`,
+    // which treats that whole directory as disposable build output; a
+    // misresolved answer here must never reach a scope that could become
+    // AUTO_SAFE or be pre-authorized; it must be reported as UNKNOWN
+    // (fail-closed `TargetOwnershipUnknown`, not any flavor of "safe"),
+    // never silently narrowed by picking the "least bad" scope value.
+    if resolved_target == workspace_root
+        || workspace_root.starts_with(&resolved_target)
+        || resolved_target.join("Cargo.toml").is_file()
+        || has_rust_source(&resolved_target.join("src"))
+    {
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    }
+
+    let scope = if resolved_target.starts_with(&workspace_root) {
+        if locator_canonical == resolved_target {
+            TargetScope::Local
+        } else {
+            // Under the workspace root, but not the directory actually
+            // searched — a pre-shared-config leftover.
+            TargetScope::Orphan
+        }
+    } else {
+        TargetScope::Redirected
+    };
+
+    // Security (flagged by independent review): computed fresh from
+    // `locator`/`project_root` on EVERY call — discovery AND revalidation
+    // alike — rather than carried forward as remembered state. A resource
+    // surfaced by discovery widening always has `locator == resolved_target`
+    // by construction (that is what widening means), which makes `scope`
+    // alone an unsafe signal for it: re-resolving from the SAME
+    // `project_root` at execution time would trivially recompute `Local`
+    // whenever `resolved_target` happens to sit under that root's
+    // workspace, silently erasing the `Orphan`/`Redirected` judgment
+    // discovery made. `is_direct_locator` cannot erode the same way: a
+    // widened resource's `locator` is NEVER `<project_root>/target`
+    // (widening only fires when it differs — see `CargoDetector::discover`),
+    // so this is `false` for it on every call, forever, independent of
+    // `scope`'s own value at that moment. See `classify()`'s own use of
+    // this field for the resulting policy rule.
+    // Canonicalized on both sides, same reasoning as every other
+    // comparison in this function: `project_root` itself may be a
+    // non-canonical path (e.g. `/tmp/...` where the real filesystem
+    // entry is `/private/tmp/...` on macOS), and comparing a canonical
+    // `locator_canonical` against a non-canonical `project_root.join(...)`
+    // would read the same directory as two different ones.
+    let project_root_canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let is_direct_locator = locator_canonical == project_root_canonical.join("target");
+
+    ProbeOutcome::Observed(CargoTargetScope {
+        resolved_target,
+        resolved_build_dir,
+        workspace_root,
+        scope,
+        is_direct_locator,
+    })
+}
+
+/// Whether `src_dir` contains at least one `*.rs` file directly inside it
+/// — the cheap, bounded signal that a candidate "target directory" is
+/// actually a source tree (part of the implausible-target guard above).
+/// Deliberately shallow (one `read_dir`, no recursion): this exists only
+/// to catch the gross misconfiguration case, not to re-implement a
+/// project-root detector.
+fn has_rust_source(src_dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(src_dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+    })
+}
 
 pub struct CargoDetector;
 
@@ -63,6 +401,20 @@ impl Detector for CargoDetector {
         if ctx.known_project_roots.is_empty() {
             return DetectorStatus::NotConfigured;
         }
+
+        // Same hermeticity rule `cargo_registry_dir` already applies: fall
+        // back to `<home_dir>/.cargo`, never silently inherit whatever
+        // CARGO_HOME this Glomeris process happens to have ambiently. A
+        // hermetic `DiscoveryContext::new(fixture_home)` test must not
+        // reach the developer's real `~/.cargo/config.toml` — a
+        // nonexistent `<fixture_home>/.cargo` is a normal, safe override
+        // (verified: cargo tolerates a CARGO_HOME that doesn't exist and
+        // falls back to its own built-in defaults, creating nothing).
+        let cargo_home_override_owned = ctx
+            .tool_env(ToolEnvVar::CargoHome)
+            .map(str::to_string)
+            .unwrap_or_else(|| ctx.home_dir.join(".cargo").to_string_lossy().into_owned());
+        let cargo_home_override = Some(cargo_home_override_owned.as_str());
 
         let mut evidence = Vec::new();
         let mut saw_permission_error = false;
@@ -93,6 +445,15 @@ impl Detector for CargoDetector {
                     if let Some(note) = estimate.lower_bound_note() {
                         ev.push_source(note);
                     }
+
+                    let scope_outcome = resolve_cargo_target_scope(
+                        root,
+                        &canonical,
+                        cargo_home_override,
+                        &ctx.home_dir,
+                    );
+                    ev.cargo_target_scope = Some(scope_outcome);
+
                     evidence.push(ev);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -220,6 +581,326 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    /// Minimal real Cargo project at `root`, so `cargo metadata` has a
+    /// manifest to answer about.
+    fn write_manifest(root: &Path) {
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-cargo-scope-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+    }
+
+    /// Pins `cargo metadata`'s target-dir resolution to `root`'s own
+    /// `target/`, overriding any machine-wide `~/.cargo/config.toml`.
+    /// Project-local config always wins over the user-level one.
+    fn pin_locally(root: &Path) {
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"target\"\n",
+        )
+        .unwrap();
+    }
+
+    // ---- HORO-1824 §4.2 resolver tests ----
+
+    /// The ordinary case: a real Cargo project with no override anywhere
+    /// resolves `Local`.
+    #[test]
+    fn resolve_cargo_target_scope_is_local_for_an_ordinary_project() {
+        let root = make_temp_dir("scope-local");
+        pin_locally(&root);
+        write_manifest(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &target_dir, None, Path::new("/tmp"));
+        match outcome {
+            ProbeOutcome::Observed(scope) => {
+                assert_eq!(scope.scope, TargetScope::Local);
+                assert_eq!(scope.resolved_target, target_dir.canonicalize().unwrap());
+                assert_eq!(scope.workspace_root, root.canonicalize().unwrap());
+            }
+            other => panic!("expected Observed(Local), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// No manifest at all: `cargo metadata` fails (non-zero exit, no
+    /// Cargo.toml) and the resolver must fail closed to `Unavailable`,
+    /// never guess `Local`.
+    #[test]
+    fn resolve_cargo_target_scope_is_unavailable_with_no_manifest() {
+        let root = make_temp_dir("scope-no-manifest");
+        pin_locally(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &target_dir, None, Path::new("/tmp"));
+        assert_eq!(outcome, ProbeOutcome::Unavailable(ProbeReason::Failed));
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// `target_override` fixture (AC list): a project-local
+    /// `.cargo/config.toml` redirecting `target-dir` OUTSIDE the
+    /// workspace root resolves `Redirected` — the shared/global-config
+    /// shape this ticket exists to catch, reproduced locally so the test
+    /// never depends on the developer's real `~/.cargo/config.toml`.
+    #[test]
+    fn resolve_cargo_target_scope_is_redirected_when_config_points_outside_workspace() {
+        let root = make_temp_dir("scope-redirected-root");
+        write_manifest(&root);
+        let shared = make_temp_dir("scope-redirected-shared");
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = \"{}\"\n",
+                shared.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let locator = root.join("target"); // never created — Redirected means Cargo never put anything here
+        let outcome = resolve_cargo_target_scope(&root, &locator, None, Path::new("/tmp"));
+        match outcome {
+            ProbeOutcome::Observed(scope) => {
+                assert_eq!(scope.scope, TargetScope::Redirected);
+                assert_eq!(scope.resolved_target, shared.canonicalize().unwrap());
+            }
+            other => panic!("expected Observed(Redirected), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&shared).ok();
+    }
+
+    /// `parent_repo` / stale-leftover fixture: the locator (`<root>/target`)
+    /// is a real, pre-existing directory, but the root's OWN config
+    /// redirects elsewhere — the configured root no longer shares the
+    /// directory sitting at the locator. `Orphan`, not `Local`.
+    #[test]
+    fn resolve_cargo_target_scope_is_orphan_when_root_no_longer_shares_the_locator() {
+        let root = make_temp_dir("scope-orphan-root");
+        write_manifest(&root);
+        // A NESTED config redirects to a different directory NAME, but
+        // one that is still under the SAME workspace root — e.g. a
+        // project that switched its local target-dir from `target` to
+        // `build`. `resolved_target` (`<root>/build`) stays under
+        // `workspace_root` (`<root>`), which is what distinguishes this
+        // from `Redirected` (resolved_target OUTSIDE workspace_root).
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"build\"\n",
+        )
+        .unwrap();
+        // A leftover `target/` directory still sits under `root` even
+        // though cargo itself now resolves to `<root>/build`.
+        let stale_locator = root.join("target");
+        fs::create_dir_all(&stale_locator).unwrap();
+        fs::create_dir_all(root.join("build")).unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &stale_locator, None, Path::new("/tmp"));
+        match outcome {
+            ProbeOutcome::Observed(scope) => {
+                assert_eq!(scope.scope, TargetScope::Orphan);
+                // Even though `scope` is the "safe" Orphan value, this
+                // locator is NOT the plain `<root>/target` cargo would
+                // actually use — wait, it literally IS `<root>/target`
+                // here, so it IS the direct locator; the point of this
+                // fixture is Orphan, not widening. `is_direct_locator`
+                // is about whether the EVIDENCE's own locator equals
+                // `<project_root>/target`, which is true here regardless
+                // of where cargo itself resolved to.
+                assert!(scope.is_direct_locator);
+            }
+            other => panic!("expected Observed(Orphan), got {other:?}"),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Security regression (independent review finding): a `project_root`
+    /// whose contents are not trusted could carry a crafted
+    /// `rust-toolchain.toml` naming a toolchain that is not installed.
+    /// `current_dir(project_root)` alone would let rustup's `cargo` proxy
+    /// read that override; the resolver must pin `RUSTUP_TOOLCHAIN` from
+    /// a neutral cwd so the bogus override is never consulted, and the
+    /// probe must still resolve correctly rather than hang, error, or
+    /// attempt to install the bogus toolchain.
+    #[test]
+    fn resolve_cargo_target_scope_ignores_a_bogus_rust_toolchain_override() {
+        let root = make_temp_dir("scope-bogus-toolchain");
+        pin_locally(&root);
+        write_manifest(&root);
+        fs::write(
+            root.join("rust-toolchain.toml"),
+            "[toolchain]\nchannel = \"nightly-1970-01-01-bogus-nonexistent\"\n",
+        )
+        .unwrap();
+        let target_dir = root.join("target");
+        fs::create_dir_all(&target_dir).unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &target_dir, None, Path::new("/tmp"));
+
+        match outcome {
+            ProbeOutcome::Observed(scope) => assert_eq!(scope.scope, TargetScope::Local),
+            other => panic!(
+                "expected Observed(Local) despite the bogus toolchain override, got {other:?} \
+                 — the RUSTUP_TOOLCHAIN pin did not take effect"
+            ),
+        }
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Security regression (independent review finding #2): a misconfigured
+    /// or crafted `target-dir` pointing at the workspace root ITSELF must
+    /// never resolve to any scope at all — `Local` would make it
+    /// `AUTO_SAFE`-eligible, and the only mutation this crate ever runs
+    /// against a Cargo target dir (`cargo clean --target-dir <resolved>`)
+    /// would then be pointed at a directory holding real, unpushed source.
+    #[test]
+    fn resolve_cargo_target_scope_rejects_target_dir_equal_to_workspace_root() {
+        let root = make_temp_dir("scope-implausible-root-itself");
+        write_manifest(&root);
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \".\"\n",
+        )
+        .unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &root, None, Path::new("/tmp"));
+        assert_eq!(
+            outcome,
+            ProbeOutcome::Unavailable(ProbeReason::Failed),
+            "target-dir resolving to the workspace root itself must be rejected, never scoped"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Security regression (independent review finding #2), second shape: a
+    /// `target-dir` resolving to a directory that itself holds a nested
+    /// `Cargo.toml` and real `.rs` source — implausible as build output,
+    /// must also be rejected outright rather than scoped `Local`/`Orphan`.
+    #[test]
+    fn resolve_cargo_target_scope_rejects_target_dir_containing_real_source() {
+        let root = make_temp_dir("scope-implausible-source-root");
+        write_manifest(&root);
+        let decoy_source = make_temp_dir("scope-implausible-source-decoy");
+        write_manifest(&decoy_source);
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            format!(
+                "[build]\ntarget-dir = \"{}\"\n",
+                decoy_source.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let locator = root.join("target");
+        let outcome = resolve_cargo_target_scope(&root, &locator, None, Path::new("/tmp"));
+        assert_eq!(
+            outcome,
+            ProbeOutcome::Unavailable(ProbeReason::Failed),
+            "a resolved target directory holding a nested Cargo.toml/src/*.rs must be rejected"
+        );
+
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&decoy_source).ok();
+    }
+
+    /// End-to-end proof that the rejection above actually reaches a
+    /// non-preauthorizable, non-AUTO_SAFE classification — not merely a
+    /// scope-field assertion. `Unavailable` makes `TargetOwnership`
+    /// missing, which `classify()` maps to `Ask{TargetOwnershipUnknown}`
+    /// (never the generic `EvidenceIncomplete`, see `classify`'s own
+    /// comment), and `TargetOwnershipUnknown` can never be
+    /// pre-authorized.
+    #[test]
+    fn an_implausible_target_dir_never_reaches_auto_safe_or_preauthorization() {
+        use crate::evidence::{Completeness, EvidenceField};
+        use crate::policy::{classify, PolicyClass, PolicyConfig, ReasonCode};
+
+        let root = make_temp_dir("scope-implausible-end-to-end");
+        write_manifest(&root);
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \".\"\n",
+        )
+        .unwrap();
+
+        let outcome = resolve_cargo_target_scope(&root, &root, None, Path::new("/tmp"));
+        assert_eq!(outcome, ProbeOutcome::Unavailable(ProbeReason::Failed));
+
+        // Build otherwise-complete evidence (every other required field
+        // Observed) so the ONLY missing field is `TargetOwnership` —
+        // isolating exactly the behavior this regression is about.
+        use crate::evidence::{
+            Evidence, NativeCleanup, Recoverability, ResourceFingerprint, ResourceId,
+            ResourceLocator,
+        };
+        let now = SystemTime::now();
+        let ev = Evidence {
+            resource: ResourceId::new(
+                ResourceKind::CargoTargetDir,
+                ResourceLocator::Path(root.clone()),
+            ),
+            fingerprint: ResourceFingerprint {
+                dev_ino: None,
+                mtime: None,
+                tool_revision: None,
+            },
+            detector: super::DetectorId("test"),
+            logical_bytes: ProbeOutcome::Observed(0),
+            physical_bytes: None,
+            reclaimable_bytes: ProbeOutcome::Observed(0),
+            reclaimable_bytes_is_lower_bound: false,
+            last_modified: ProbeOutcome::Observed(now),
+            last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            regenerability: ResourceKind::CargoTargetDir.regenerability(),
+            recoverability: Recoverability::RegenerableByRebuild,
+            native_cleanup: NativeCleanup::Unsupported,
+            open_by_process: ProbeOutcome::Observed(Vec::new()),
+            process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+            git_state: ProbeOutcome::Observed(None),
+            tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            docker_lifecycle: None,
+            executable_dependency: ProbeOutcome::Observed(
+                crate::evidence::ExecutableDependencyReport::empty(),
+            ),
+            cargo_target_scope: Some(outcome),
+            collected_at: now,
+            sources: Vec::new(),
+        };
+        assert_eq!(
+            ev.completeness(),
+            Completeness::Partial {
+                missing: vec![EvidenceField::TargetOwnership]
+            }
+        );
+
+        let decision = classify(&ev, &PolicyConfig::default(), ev.collected_at);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::TargetOwnershipUnknown]);
+        assert!(
+            !crate::autopilot::envelope::is_preauthorizable(ReasonCode::TargetOwnershipUnknown),
+            "TargetOwnershipUnknown must never be pre-authorizable"
+        );
+
+        fs::remove_dir_all(&root).ok();
     }
 
     /// With nothing configured, nothing was examined — and that is a

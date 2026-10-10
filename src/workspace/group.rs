@@ -419,6 +419,7 @@ mod tests {
             tool_liveness: ProbeOutcome::Observed(false),
             docker_lifecycle: None,
             executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            cargo_target_scope: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

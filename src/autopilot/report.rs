@@ -185,7 +185,11 @@ fn is_refusal_reason(reason: ReasonCode) -> bool {
         | ReasonCode::DockerActivityUnknown
         | ReasonCode::ProtectedExecutableDependency
         | ReasonCode::ExecutableRunningFromResource
-        | ReasonCode::ExecutableDependencyUnknown => true,
+        | ReasonCode::ExecutableDependencyUnknown
+        // HORO-1824: both new Ask reasons are refusals, not AUTO_SAFE
+        // justifications.
+        | ReasonCode::SharedBuildCacheBlastRadius
+        | ReasonCode::TargetOwnershipUnknown => true,
     }
 }
 

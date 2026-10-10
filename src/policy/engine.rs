@@ -3,7 +3,8 @@
 use std::time::SystemTime;
 
 use crate::evidence::{
-    Completeness, DockerActivity, Evidence, Recoverability, Regenerability, ResourceKind,
+    Completeness, DockerActivity, Evidence, ProbeOutcome, Recoverability, Regenerability,
+    ResourceKind, TargetScope,
 };
 
 use super::class::{PolicyClass, ReasonCode};
@@ -27,7 +28,14 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         reasons,
         evidence_collected_at: ev.collected_at,
         evaluated_at: now,
-        policy_version: 2,
+        // HORO-1824 §15: bumped 2 -> 3 for the step 6 `Redirected` ->
+        // `SharedBuildCacheBlastRadius` extension and the
+        // `Partial{missing: [TargetOwnership]}` -> `TargetOwnershipUnknown`
+        // completeness mapping. An outstanding explain->execute consent
+        // now meets new reasons, and the executor aborts with
+        // `PolicyReasonsWidened` (safe) rather than silently applying old
+        // consent to a decision shaped by rules it never saw.
+        policy_version: 3,
     };
 
     // 1. Unknown resource kind is an unconditional, fail-closed Protected
@@ -74,6 +82,21 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
     match ev.completeness() {
         Completeness::Failed => {
             return decision(PolicyClass::Ask, vec![ReasonCode::EvidenceProbeFailed]);
+        }
+        // HORO-1824 §5: a Partial whose ONLY gap is `TargetOwnership`
+        // (`cargo metadata` absent/timed out/failed, §8) gets its own
+        // specific reason rather than the generic `EvidenceIncomplete`,
+        // so `UNKNOWN_INCOMPLETE` reporting and
+        // `executor::completeness_rank_from_decision` can name the actual
+        // gap. A Partial with other missing fields too (mixed) still maps
+        // to the generic code — both are `Ask`, both are
+        // evidence-quality, both rank the same in
+        // `completeness_rank_from_decision`, so this is purely a
+        // reporting-precision distinction, never a safety one.
+        Completeness::Partial { missing }
+            if missing == [crate::evidence::EvidenceField::TargetOwnership] =>
+        {
+            return decision(PolicyClass::Ask, vec![ReasonCode::TargetOwnershipUnknown]);
         }
         Completeness::Partial { .. } => {
             return decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]);
@@ -131,6 +154,31 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         }
         if !report.unresolved.is_empty() && ev.resource.kind.is_executable_bearing() {
             active_use_reasons.push(ReasonCode::ExecutableDependencyUnknown);
+        }
+    }
+
+    // HORO-1824 §5 step 6.3: a Redirected Cargo target is shared by an
+    // unbounded, unenumerable set of other workspaces — see
+    // `TargetScope::Redirected`'s own doc comment. For the ORDINARY case
+    // (`is_direct_locator`, i.e. this evidence is about a project's own
+    // plain `<root>/target`), `Local`/`Orphan` add no reason: `Orphan`
+    // means the configured root does NOT share this target (it resolves
+    // elsewhere), so the directory this evidence is about is not itself
+    // shared by anything this probe can see.
+    //
+    // Security (flagged by independent review): a resource reached via
+    // discovery widening (`!is_direct_locator`) ALWAYS vetoes here,
+    // regardless of its own recomputed `scope` — see
+    // `CargoTargetScope::is_direct_locator`'s own doc comment for why
+    // `scope` alone is not a safe signal for such a resource (it can
+    // recompute `Local` at revalidation purely because its locator
+    // trivially equals the resolved target it was discovered at). A
+    // widened resource is, structurally, always a shared-cache candidate;
+    // it never gets to present as AUTO_SAFE-eligible on the strength of
+    // its own internal structure alone.
+    if let Some(ProbeOutcome::Observed(scope)) = &ev.cargo_target_scope {
+        if scope.scope == TargetScope::Redirected || !scope.is_direct_locator {
+            active_use_reasons.push(ReasonCode::SharedBuildCacheBlastRadius);
         }
     }
 
@@ -235,6 +283,22 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            // HORO-1824: same "clean default" rationale as
+            // `executable_dependency` above — a Local-scope positive
+            // result for CargoTargetDir, so every existing fixture built
+            // on it stays Complete unless a test explicitly overrides
+            // this field to exercise Redirected/Orphan/Unavailable.
+            cargo_target_scope: if kind == ResourceKind::CargoTargetDir {
+                Some(ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
+                    resolved_target: PathBuf::from("/tmp/x"),
+                    resolved_build_dir: None,
+                    workspace_root: PathBuf::from("/tmp"),
+                    scope: crate::evidence::TargetScope::Local,
+                    is_direct_locator: true,
+                }))
+            } else {
+                None
+            },
             collected_at,
             sources: Vec::new(),
         }
@@ -349,6 +413,9 @@ mod tests {
         // Unavailable too for the test to keep asserting what its name
         // says.
         ev.executable_dependency = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        // HORO-1824: CargoTargetDir now has an 8th required field
+        // (`TargetOwnership`) — same reasoning as the comment above.
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::NotAttempted));
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::EvidenceProbeFailed]);
@@ -895,15 +962,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_version_is_two() {
-        // HORO-1825 §15: bumped 1 -> 2 for the new step 2b / step 6
-        // extensions. An outstanding explain->execute consent now meets
-        // new reasons, and the executor aborts with `PolicyReasonsWidened`
-        // (safe) rather than silently applying old consent to a decision
-        // shaped by rules it never saw.
+    fn policy_version_is_three() {
+        // HORO-1824 §15: bumped 2 -> 3. See the `classify()` comment at
+        // the `policy_version` literal for what changed.
         let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         let decision = classify(&ev, &cfg(), NOW);
-        assert_eq!(decision.policy_version, 2);
+        assert_eq!(decision.policy_version, 3);
     }
 
     // ---- HORO-1825 §13 anti-vacuity + AC tests ----
@@ -1075,5 +1139,117 @@ mod tests {
             decision.reasons,
             vec![ReasonCode::ProtectedExecutableDependency]
         );
+    }
+
+    // ---- HORO-1824 §13 anti-vacuity + AC tests ----
+
+    /// §13 item 6 ("Map Redirected to no veto -> the shared-target
+    /// test"): a `Redirected` Cargo target must be ASK, never AUTO_SAFE —
+    /// the exact assertion a mutation deleting the `Redirected` arm in
+    /// `classify`'s step 6 extension would falsify.
+    #[test]
+    fn redirected_cargo_target_scope_is_ask_shared_build_cache_not_auto_safe() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.cargo_target_scope = Some(ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
+            resolved_target: PathBuf::from("/Users/x/.cargo/shared-target"),
+            resolved_build_dir: None,
+            workspace_root: PathBuf::from("/tmp/x"),
+            scope: crate::evidence::TargetScope::Redirected,
+            is_direct_locator: true,
+        }));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::SharedBuildCacheBlastRadius]
+        );
+    }
+
+    /// The negative control for the test above: `Local` scope on the
+    /// project's own direct locator adds no reason and reaches
+    /// `AutoSafe` — proving the veto above comes from `Redirected`
+    /// specifically, not from the mere presence of `cargo_target_scope`.
+    #[test]
+    fn local_direct_cargo_target_scope_is_auto_safe_eligible() {
+        let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+        assert!(!decision
+            .reasons
+            .contains(&ReasonCode::SharedBuildCacheBlastRadius));
+    }
+
+    /// Security regression (independent review): a resource reached via
+    /// discovery widening (`is_direct_locator: false`) must ALWAYS veto,
+    /// even when its own recomputed `scope` is `Local` — this is the
+    /// exact gap a widened resource's own re-resolution at revalidation
+    /// time could otherwise fall into (see `CargoTargetScope::
+    /// is_direct_locator`'s doc comment).
+    #[test]
+    fn a_widened_resource_vetoes_even_when_its_own_scope_recomputes_local() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.cargo_target_scope = Some(ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
+            resolved_target: PathBuf::from("/tmp/shared/target"),
+            resolved_build_dir: None,
+            workspace_root: PathBuf::from("/tmp/shared"),
+            scope: crate::evidence::TargetScope::Local,
+            is_direct_locator: false,
+        }));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::SharedBuildCacheBlastRadius]
+        );
+    }
+
+    /// §13 item 5, for this ticket's two new reason codes: `is_preauthorizable`
+    /// must refuse both.
+    #[test]
+    fn neither_new_cargo_ownership_reason_can_be_preauthorized() {
+        for reason in [
+            ReasonCode::SharedBuildCacheBlastRadius,
+            ReasonCode::TargetOwnershipUnknown,
+        ] {
+            assert!(
+                !crate::autopilot::envelope::is_preauthorizable(reason),
+                "{} must never be pre-authorizable",
+                reason.as_str()
+            );
+        }
+    }
+
+    /// §8 / §5: `cargo metadata` absent/timeout/failure (`Unavailable`)
+    /// maps to the SPECIFIC `TargetOwnershipUnknown` reason, not the
+    /// generic `EvidenceIncomplete` — the ticket's own completeness
+    /// addendum (ADR-0001 §5 step 6.4).
+    #[test]
+    fn unavailable_cargo_target_scope_is_ask_target_ownership_unknown() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::TargetOwnershipUnknown]);
+    }
+
+    /// A missing `cargo_target_scope` mixed with another missing field
+    /// must still fall back to the generic `EvidenceIncomplete` — the
+    /// specific code is reserved for the isolated, single-field gap.
+    #[test]
+    fn target_ownership_unknown_mixed_with_another_missing_field_is_generic_incomplete() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+        ev.git_state = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::EvidenceIncomplete]);
     }
 }

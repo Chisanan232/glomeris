@@ -75,6 +75,20 @@ pub enum ReasonCode {
     /// in/out verdict for an executable-bearing kind — fail-closed, never
     /// a clean negative.
     ExecutableDependencyUnknown,
+    /// HORO-1824 §5 step 6.3: this resource's resolved target is
+    /// `Redirected` — Cargo's own config resolves it outside the
+    /// workspace root (a global/nested config, or a symlinked-out
+    /// `target/`), so an unbounded, unenumerable set of other workspaces
+    /// may share it. Permanently non-preauthorizable (ADR-0001 §16.2,
+    /// founder-settled).
+    SharedBuildCacheBlastRadius,
+    /// HORO-1824 §5 step 6.4 / §8: `cargo metadata` was absent, timed
+    /// out, or failed, so Cargo target ownership could not be
+    /// established — mapped from `Completeness::Partial{missing:
+    /// [TargetOwnership]}` specifically, rather than the generic
+    /// `EvidenceIncomplete`, so `UNKNOWN_INCOMPLETE` reporting and
+    /// `completeness_rank_from_decision` can name the actual gap.
+    TargetOwnershipUnknown,
     // -> AutoSafe
     EvidenceFreshAndComplete,
     RegenerableByTool,
@@ -108,6 +122,8 @@ impl ReasonCode {
             ReasonCode::DockerActivityUnknown => "docker_activity_unknown",
             ReasonCode::ExecutableRunningFromResource => "executable_running_from_resource",
             ReasonCode::ExecutableDependencyUnknown => "executable_dependency_unknown",
+            ReasonCode::SharedBuildCacheBlastRadius => "shared_build_cache_blast_radius",
+            ReasonCode::TargetOwnershipUnknown => "target_ownership_unknown",
             ReasonCode::EvidenceFreshAndComplete => "evidence_fresh_and_complete",
             ReasonCode::RegenerableByTool => "regenerable_by_tool",
             ReasonCode::NoActiveUseObserved => "no_active_use_observed",
@@ -140,6 +156,8 @@ impl ReasonCode {
         ReasonCode::DockerActivityUnknown,
         ReasonCode::ExecutableRunningFromResource,
         ReasonCode::ExecutableDependencyUnknown,
+        ReasonCode::SharedBuildCacheBlastRadius,
+        ReasonCode::TargetOwnershipUnknown,
         ReasonCode::EvidenceFreshAndComplete,
         ReasonCode::RegenerableByTool,
         ReasonCode::NoActiveUseObserved,
@@ -210,9 +228,11 @@ mod tests {
                 ReasonCode::DockerActivityUnknown => 19,
                 ReasonCode::ExecutableRunningFromResource => 20,
                 ReasonCode::ExecutableDependencyUnknown => 21,
-                ReasonCode::EvidenceFreshAndComplete => 22,
-                ReasonCode::RegenerableByTool => 23,
-                ReasonCode::NoActiveUseObserved => 24,
+                ReasonCode::SharedBuildCacheBlastRadius => 22,
+                ReasonCode::TargetOwnershipUnknown => 23,
+                ReasonCode::EvidenceFreshAndComplete => 24,
+                ReasonCode::RegenerableByTool => 25,
+                ReasonCode::NoActiveUseObserved => 26,
             };
             assert_eq!(
                 index,
@@ -223,7 +243,7 @@ mod tests {
         }
         assert_eq!(
             ReasonCode::ALL.len(),
-            25,
+            27,
             "ReasonCode::ALL has gained, lost, or duplicated an entry"
         );
     }

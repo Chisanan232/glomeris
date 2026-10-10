@@ -146,6 +146,21 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         // the check off.
         ReasonCode::ExecutableDependencyUnknown => false,
 
+        // HORO-1824 ADR-0001 §16.2 (founder-settled): a Redirected Cargo
+        // target's sharer set is unbounded and unenumerable, so this stays
+        // non-preauthorizable PERMANENTLY — not a temporary gap waiting on
+        // more evidence, unlike most of the other `false` arms here. No
+        // future loosening path exists in this codebase; the ADR is
+        // explicit that any such widening would need its own founder
+        // decision and its own ticket, not a quiet exhaustive-match edit.
+        ReasonCode::SharedBuildCacheBlastRadius => false,
+
+        // HORO-1824. Absence of knowledge about Cargo target ownership —
+        // the same rationale as `ExecutableDependencyUnknown` above:
+        // pre-authorizing ignorance is indistinguishable from switching
+        // the ownership check off.
+        ReasonCode::TargetOwnershipUnknown => false,
+
         // Protected reasons. `authorize` refuses these unconditionally, so
         // an envelope entry naming one could never do anything except
         // mislead whoever read the envelope.

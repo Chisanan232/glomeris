@@ -351,6 +351,7 @@ fn container_evidence(entry: &Value, id: &str, detector: DetectorId) -> Evidence
             references: ProbeOutcome::Observed(DockerReferences::none()),
         }),
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: SystemTime::now(),
         sources: vec![SOURCE.to_string()],
     }
@@ -575,6 +576,7 @@ fn image_evidence(
             references,
         }),
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: SystemTime::now(),
         sources: vec![SOURCE.to_string()],
     }
@@ -762,6 +764,7 @@ fn volume_evidence(
             references,
         }),
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: SystemTime::now(),
         sources: vec![SOURCE.to_string()],
     }

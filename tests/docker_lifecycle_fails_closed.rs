@@ -94,6 +94,7 @@ fn docker_evidence(kind: ResourceKind, lifecycle: DockerLifecycle) -> Evidence {
         tool_liveness: ProbeOutcome::Observed(true),
         docker_lifecycle: Some(lifecycle),
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: NOW,
         sources: Vec::new(),
     }
@@ -280,6 +281,19 @@ fn auto_safe_control(target: &Path) -> Evidence {
     // HORO-1825: CargoTargetDir now requires this field too.
     ev.executable_dependency =
         ProbeOutcome::Observed(glomeris::evidence::ExecutableDependencyReport::empty());
+    // HORO-1824: CargoTargetDir now also requires `cargo_target_scope`.
+    ev.cargo_target_scope = Some(ProbeOutcome::Observed(
+        glomeris::evidence::CargoTargetScope {
+            resolved_target: target.to_path_buf(),
+            resolved_build_dir: None,
+            workspace_root: target
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| target.to_path_buf()),
+            scope: glomeris::evidence::TargetScope::Local,
+            is_direct_locator: true,
+        },
+    ));
     ev
 }
 

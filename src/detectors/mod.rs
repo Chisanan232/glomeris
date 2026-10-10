@@ -8,7 +8,7 @@
 //! (HORO-1016; see `estimate_logical_bytes`). A detector's tool being
 //! absent from the machine is normal, expected state, never an error.
 
-mod cargo;
+pub(crate) mod cargo;
 mod docker;
 mod docker_objects;
 mod go;
@@ -396,6 +396,24 @@ impl SizeEstimate {
 /// descended into, matching `executor::total_size_best_effort`'s existing
 /// convention. A directory entry contributes 0 bytes itself (only its
 /// contents count), also matching that convention.
+/// Bound on how many (dev, ino) pairs [`estimate_logical_bytes`] tracks for
+/// hardlink deduplication (HORO-1824 §4.4) before it stops deduplicating
+/// and simply counts every further hardlinked entry's bytes again. This
+/// keeps the walk's own memory bounded; past this bound the estimate is
+/// still a truthful UPPER bound (it never undercounts), just a less tight
+/// one — the same "never silently wrong, only less precise" contract
+/// [`SizeEstimate::is_lower_bound`] already documents for the
+/// entry/time budget.
+const HARDLINK_DEDUP_MAX_TRACKED: usize = 200_000;
+
+/// Bounded, recursive logical-byte estimate for `path` (HORO-1016), with
+/// hardlink deduplication (HORO-1824 §4.4): Cargo hardlinks build
+/// artifacts (e.g. identical `rlib`/binary outputs shared across a
+/// workspace's targets), so without this a single physical block of
+/// bytes could be counted once per hardlink and inflate both the
+/// estimate and `--target-dir`'s claimed cold-rebuild cost. Each (dev,
+/// ino) pair with `st_nlink > 1` is counted at most once, tracked in a
+/// bounded set (see [`HARDLINK_DEDUP_MAX_TRACKED`]).
 pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEstimate {
     let root_meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -431,6 +449,11 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
     let mut unreadable_entries: u64 = 0;
     let mut stop_reason = StopReason::Exhausted;
     let mut tracker = budget.tracker();
+    // HORO-1824 §4.4: bounded hardlink dedup. Only entries whose
+    // `st_nlink > 1` are tracked at all — the overwhelmingly common case
+    // (nlink == 1) never touches this set, so the hot path stays cheap.
+    let mut seen_hardlinks: std::collections::HashSet<(u64, u64)> =
+        std::collections::HashSet::new();
     // Explicit stack, never real recursion — a deep `target/`-style tree
     // must not risk a stack overflow.
     let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
@@ -493,7 +516,35 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             if meta.is_dir() {
                 stack.push(entry.path());
             } else {
-                total = total.saturating_add(meta.len());
+                #[cfg(unix)]
+                let already_counted = {
+                    use std::os::unix::fs::MetadataExt;
+                    if meta.nlink() > 1 {
+                        let key = (meta.dev(), meta.ino());
+                        if seen_hardlinks.contains(&key) {
+                            true
+                        } else {
+                            // Only insert while under the bound — past it,
+                            // every further hardlinked entry is counted
+                            // again rather than tracked, which keeps this
+                            // set's memory bounded and keeps the estimate
+                            // a truthful (if looser) upper bound. See
+                            // `HARDLINK_DEDUP_MAX_TRACKED`'s doc comment.
+                            if seen_hardlinks.len() < HARDLINK_DEDUP_MAX_TRACKED {
+                                seen_hardlinks.insert(key);
+                            }
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+                #[cfg(not(unix))]
+                let already_counted = false;
+
+                if !already_counted {
+                    total = total.saturating_add(meta.len());
+                }
             }
         }
     }
@@ -568,6 +619,7 @@ pub(crate) fn discovery_evidence(
         // `crate::evidence::correlate` (not this discovery stage) is
         // responsible for actually attempting this probe.
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }
@@ -679,6 +731,8 @@ pub(crate) const WORST_CASE_SPAWN_WAIT: Duration =
 /// direction: a new spawn site must name its program through such a constant,
 /// and that constant's value must appear here.
 pub const SPAWNED_PROGRAMS: &[&str] = &[
+    cargo::CARGO_PROGRAM,
+    cargo::RUSTUP_PROGRAM,
     homebrew::BREW_PROGRAM,
     docker::DOCKER_PROGRAM,
     go::GO_PROGRAM,
@@ -1308,6 +1362,46 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HORO-1824 §4.4: before/after fixture proving hardlink dedup. Two
+    /// hardlinks to the same physical 4096-byte file must be counted ONCE,
+    /// not twice — this is the exact shape Cargo produces when it uplifts
+    /// an identical build artifact across targets.
+    #[test]
+    fn hardlinked_entries_are_counted_once_not_per_link() {
+        let root = test_support::make_temp_dir("hardlink-dedup");
+        let original = root.join("original.bin");
+        std::fs::write(&original, vec![0u8; 4096]).unwrap();
+        let linked = root.join("linked.bin");
+        std::fs::hard_link(&original, &linked).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+
+        assert_eq!(
+            estimate.bytes,
+            ProbeOutcome::Observed(4096),
+            "two hardlinks to the same 4096-byte file must count as 4096, not 8192"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The negative control: two DISTINCT files of the same size (no
+    /// hardlink, `st_nlink == 1` each) must both be counted — dedup must
+    /// key on (dev, ino), never merely on size or on `nlink > 1` alone for
+    /// files that happen not to share one.
+    #[test]
+    fn distinct_same_size_files_are_both_counted() {
+        let root = test_support::make_temp_dir("hardlink-dedup-negative");
+        std::fs::write(root.join("a.bin"), vec![0u8; 4096]).unwrap();
+        std::fs::write(root.join("b.bin"), vec![0u8; 4096]).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(8192));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// The `ToolAbsent` claim's only honest basis: the tool's own home is
     /// not there either (HORO-1575).
@@ -2691,6 +2785,7 @@ mod spawned_program_tests {
         assert_eq!(
             files_with_sites,
             [
+                "src/detectors/cargo.rs",
                 "src/detectors/docker.rs",
                 "src/detectors/docker_objects.rs",
                 "src/detectors/go.rs",

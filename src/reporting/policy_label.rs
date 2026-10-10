@@ -83,6 +83,14 @@ pub fn label_for(decision: &PolicyDecision) -> PolicyLabel {
                 // executable-dependency reference is an evidence-quality
                 // gap, not a real judgment about this specific resource.
                 | ReasonCode::ExecutableDependencyUnknown
+                // HORO-1824 §5: `cargo metadata` absent/timed out/failed is
+                // also an evidence-quality gap, not a judgment about the
+                // resource. NOTE: `SharedBuildCacheBlastRadius` is
+                // deliberately NOT included here — a Redirected scope is a
+                // real, positively-established fact about the resource
+                // (it IS shared), not a gap in what was measured, so it
+                // stays plain `ASK`.
+                | ReasonCode::TargetOwnershipUnknown
         )
     });
 
