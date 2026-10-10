@@ -446,6 +446,26 @@ fn as_absolute_or_home(raw: &str) -> Option<PathBuf> {
     }
 }
 
+/// Only these `io::Error` kinds mean "this path genuinely does not exist
+/// (or could never exist as specified)" — safe to treat as definitive
+/// absence (declare a symlink target `Dangling`, or climb past an
+/// ancestor in [`canonical_hop`]). Every OTHER kind — permission denied
+/// (an operator `chmod`'d a directory; macOS TCC/Full-Disk-Access
+/// denying Glomeris a path the hook runtime itself can read), an I/O
+/// error, or anything else — means containment could not be determined
+/// AT ALL, which must never collapse into "doesn't exist" or "no
+/// match". ADR-0001 §4.3: an unresolvable reference is ASK, labelled
+/// UNKNOWN_INCOMPLETE, never a clean negative. `NotADirectory` (ENOTDIR
+/// — a path treats a non-directory component as if it were one) is
+/// included alongside `NotFound` because it is just as definitively "this
+/// exact path cannot exist", not an access restriction.
+fn is_definitive_absence(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 /// Result of walking a path's symlink chain up to [`MAX_SYMLINK_HOPS`].
 enum ChainResolution {
     /// Ended on a real, non-symlink file. `hops` includes every path in
@@ -455,8 +475,22 @@ enum ChainResolution {
         hops: Vec<PathBuf>,
     },
     /// The chain ended on a path that does not exist (a stale symlink, or
-    /// the start itself missing).
+    /// the start itself missing) — confirmed via [`is_definitive_absence`],
+    /// never merely assumed from any I/O failure.
     Dangling { hops: Vec<PathBuf> },
+    /// A `symlink_metadata`/`read_link` call failed with something other
+    /// than definitive absence (permission denied, I/O error, ...) —
+    /// containment could not be determined at all. Must never be treated
+    /// the same as `Dangling`: unlike a confirmed-absent target, this
+    /// case must surface as unresolved unconditionally, regardless of
+    /// whether any earlier hop happened to match the resource.
+    // `hops` is intentionally carried but not read by any match arm:
+    // `Unresolvable` is handled unconditionally (never gated on whether
+    // an earlier hop matched), but keeping the partial chain here
+    // documents what was actually walked before the failure and costs
+    // nothing a debugger wouldn't already want.
+    #[allow(dead_code)]
+    Unresolvable { hops: Vec<PathBuf> },
     /// Looped or exceeded [`MAX_SYMLINK_HOPS`].
     TooDeepOrLoop,
 }
@@ -475,20 +509,26 @@ fn resolve_symlink_chain(start: &Path) -> ChainResolution {
         }
         hops.push(current.clone());
         match fs::symlink_metadata(&current) {
-            Err(_) => return ChainResolution::Dangling { hops },
+            Err(e) if is_definitive_absence(&e) => return ChainResolution::Dangling { hops },
+            Err(_) => return ChainResolution::Unresolvable { hops },
             Ok(meta) => {
                 if meta.file_type().is_symlink() {
-                    let Ok(target) = fs::read_link(&current) else {
-                        return ChainResolution::Dangling { hops };
-                    };
-                    current = if target.is_absolute() {
-                        target
-                    } else {
-                        match current.parent() {
-                            Some(parent) => parent.join(target),
-                            None => return ChainResolution::Dangling { hops },
+                    match fs::read_link(&current) {
+                        Ok(target) => {
+                            current = if target.is_absolute() {
+                                target
+                            } else {
+                                match current.parent() {
+                                    Some(parent) => parent.join(target),
+                                    None => return ChainResolution::Dangling { hops },
+                                }
+                            };
                         }
-                    };
+                        Err(e) if is_definitive_absence(&e) => {
+                            return ChainResolution::Dangling { hops };
+                        }
+                        Err(_) => return ChainResolution::Unresolvable { hops },
+                    }
                 } else {
                     return ChainResolution::Resolved {
                         final_path: current.clone(),
@@ -573,6 +613,12 @@ fn canonical_hop(hop: &Path) -> Option<PathBuf> {
                 if !seen.insert(ancestor.clone()) {
                     return None; // symlink cycle among ancestors
                 }
+                // A `read_link` failure here is never "doesn't exist" —
+                // `symlink_metadata` just confirmed this entry exists and
+                // IS a symlink. Any failure to read where it points means
+                // containment can't be determined; propagate that as
+                // `None` (-> `ChainMatch::Indeterminate` at every call
+                // site), never silently treat the symlink as absent.
                 let target = fs::read_link(&ancestor).ok()?;
                 ancestor = if target.is_absolute() {
                     target
@@ -580,14 +626,25 @@ fn canonical_hop(hop: &Path) -> Option<PathBuf> {
                     ancestor.parent()?.join(target)
                 };
             }
-            // Genuinely absent (ENOENT), or some other stat failure on a
-            // non-symlink entry: safe to climb past — nothing here
-            // points anywhere else that needs following.
-            _ => {
+            // The ancestor exists and is NOT a symlink, yet
+            // `fs::canonicalize` still failed above — e.g. a permission
+            // issue on some component further up its own path. It
+            // demonstrably exists, so climbing past it as "absent" would
+            // be wrong; containment can't be determined.
+            Ok(_) => return None,
+            // Genuinely absent (ENOENT/ENOTDIR) — confirmed, not merely
+            // assumed from any I/O failure: safe to climb past.
+            Err(e) if is_definitive_absence(&e) => {
                 let name = ancestor.file_name()?.to_os_string();
                 missing.push(name);
                 ancestor = ancestor.parent()?.to_path_buf();
             }
+            // Any other stat failure (EACCES/EPERM via a `chmod`'d
+            // directory or a macOS TCC/Full-Disk-Access denial, an I/O
+            // error, ...) — containment could not be determined at all.
+            // Never silently climb past this as if the ancestor simply
+            // weren't there: that is exactly the fail-open this fixes.
+            Err(_) => return None,
         }
     }
     None
@@ -825,6 +882,18 @@ fn resolve_command(
                     }
                 }
             }
+            // A `symlink_metadata`/`read_link` call failed with something
+            // other than definitive absence (permission denied, I/O
+            // error, ...) — containment could not be determined at all.
+            // Unconditional, unlike the `Dangling` arms above: never
+            // gated on whether an earlier hop happened to match the
+            // resource, since the whole point is that we don't know.
+            ChainResolution::Unresolvable { .. } => {
+                unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                    source: source.clone(),
+                    pointer: raw.pointer.clone(),
+                });
+            }
             ChainResolution::TooDeepOrLoop => {
                 unresolved.push(UnresolvedRef::SymlinkLoopOrTooDeep {
                     source: source.clone(),
@@ -900,9 +969,17 @@ enum LaunchAgentListing {
     /// permission-denied or vanished-mid-iteration entry) must not be
     /// silently dropped by a `filter_map(|e| e.ok())`-style skip, the
     /// finer-grained sibling of the whole-directory-failure case.
+    ///
+    /// `truncated` is true when more than [`MAX_LAUNCH_AGENTS`] `.plist`
+    /// files were actually present and some were cut off by the bound —
+    /// an extreme-edge-case fail-open of its own kind: silently dropping
+    /// plists past the cap with no record at all would let a hook
+    /// defined only in a truncated-away plist vanish from the probe with
+    /// no trace, never surfacing as unresolved.
     Plists {
         plists: Vec<PathBuf>,
         partially_unreadable: bool,
+        truncated: bool,
     },
     DirectoryAbsent,
     Unreadable,
@@ -934,10 +1011,12 @@ fn launch_agent_plists(home: &Path) -> LaunchAgentListing {
         }
     }
     plists.sort();
+    let truncated = plists.len() > MAX_LAUNCH_AGENTS;
     plists.truncate(MAX_LAUNCH_AGENTS);
     LaunchAgentListing::Plists {
         plists,
         partially_unreadable,
+        truncated,
     }
 }
 
@@ -1045,6 +1124,7 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
             LaunchAgentListing::Plists {
                 plists,
                 partially_unreadable,
+                truncated,
             } => {
                 // A per-entry `read_dir` failure among otherwise-readable
                 // siblings — fail closed on the directory as a whole, same
@@ -1054,6 +1134,18 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                     let tag = SourceTag::LaunchAgent("directory".to_string());
                     sources_examined.push(tag.clone());
                     unresolved.push(UnresolvedRef::SourceUnreadable { source: tag });
+                }
+                // More than MAX_LAUNCH_AGENTS `.plist` files were present
+                // and some were cut off by the bound — record that a
+                // hook defined only in a truncated-away plist might
+                // exist, rather than silently dropping it with no trace.
+                if truncated {
+                    let tag = SourceTag::LaunchAgent("directory".to_string());
+                    sources_examined.push(tag.clone());
+                    unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                        source: tag,
+                        pointer: "LaunchAgents[>MAX_LAUNCH_AGENTS]".to_string(),
+                    });
                 }
                 plists
             }
@@ -1198,6 +1290,16 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                             });
                         }
                     }
+                }
+                // Same unconditional treatment as the hook-command
+                // candidate loop above: containment could not be
+                // determined at all, never gated on an earlier hop's
+                // match.
+                ChainResolution::Unresolvable { .. } => {
+                    unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                        source: SourceTag::PathEntry,
+                        pointer: "PATH".to_string(),
+                    });
                 }
                 ChainResolution::TooDeepOrLoop => {
                     unresolved.push(UnresolvedRef::SymlinkLoopOrTooDeep {
@@ -1623,12 +1725,37 @@ mod tests {
             .cloned()
             .expect("probe should observe");
 
+        // Tightened per round-4 re-review: a bare `!report.is_clean()`
+        // would also pass vacuously on an unrelated lsof failure or any
+        // other incidental unresolved finding, without actually proving
+        // the symlink-ancestor chain was followed through to the
+        // resource. Pin the exact outcome: the chain is dangling (the
+        // final `libra-governor` component never exists) but its hops
+        // DO match the resource once the symlink ancestor is followed,
+        // which `resolve_command`'s Dangling+Yes branch records as
+        // `SymlinkLoopOrTooDeep` — never `PathResolutionIndeterminate`
+        // (which would mean the fix gave up instead of resolving through
+        // the symlink) and never a silently-empty `unresolved`.
+        assert!(report.references_inside.is_empty());
         assert!(
-            !report.is_clean(),
-            "a hook reached only through an on-host symlink whose target sits inside the \
-             resource must not be a clean negative just because the target is currently \
-             unbuilt — got references_inside={:?} unresolved={:?}",
-            report.references_inside,
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SymlinkLoopOrTooDeep {
+                    source: SourceTag::ClaudeUserSettings,
+                    ..
+                }
+            )),
+            "expected SymlinkLoopOrTooDeep(ClaudeUserSettings) — proving the dangling symlink \
+             ancestor was followed through to a match inside the resource — got {:?}",
+            report.unresolved
+        );
+        assert!(
+            !report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::PathResolutionIndeterminate { .. })),
+            "the symlink ancestor's target is known (it points at the resource) — this must \
+             resolve definitively, not fall back to Indeterminate; got {:?}",
             report.unresolved
         );
 
@@ -1680,6 +1807,153 @@ mod tests {
              be a confirmed DependencyRef, not merely unresolved; got unresolved={:?}",
             report.unresolved
         );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Round-4 re-review MUST-FIX repro 1: a permission-denied ancestor
+    /// (EACCES — an operator `chmod`'d a directory, or macOS TCC/Full-
+    /// Disk-Access denying Glomeris a path the hook runtime itself can
+    /// read) must never be treated the same as "genuinely doesn't exist"
+    /// (ENOENT). Same symlink-ancestor-with-dangling-target shape as
+    /// `symlink_ancestor_with_dangling_target_still_resolves_through_to_the_resource`,
+    /// but with `~/bin` itself made unreadable/unsearchable instead of
+    /// the symlink's target being merely unbuilt. Before this fix, the
+    /// catch-all error arms in both `resolve_symlink_chain` and
+    /// `canonical_hop` treated any `io::Error` (EACCES included) as
+    /// definitive absence, silently climbing/declaring `Dangling`+`No`
+    /// instead of surfacing the permission denial as unresolved.
+    #[test]
+    fn permission_denied_ancestor_is_unresolved_not_clean() {
+        let home = unique_temp_dir("home-eacces-ancestor");
+        let resource = unique_temp_dir("target-eacces-ancestor");
+        fs::create_dir_all(&resource).unwrap();
+        // Deliberately NOT created: `release/` is unbuilt (same dangling
+        // shape as the round-3 fix this is a sibling of).
+        let release_hooks = resource.join("release").join("hooks");
+
+        let bin_dir = home.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let symlinked_ancestor = bin_dir.join("hooks");
+        symlink(&release_hooks, &symlinked_ancestor).unwrap();
+        let hook_command = symlinked_ancestor.join("libra-governor");
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+                hook_command.display()
+            ),
+        )
+        .unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let original = fs::metadata(&bin_dir).unwrap().permissions();
+        fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let outcome = probe.probe(&resource, Duration::from_secs(5));
+
+        // Check whether this process is actually denied BEFORE restoring
+        // permissions — checking after restore would always see it as
+        // readable again and silently turn this into a no-op skip.
+        let unreadable_by_this_process = fs::symlink_metadata(&symlinked_ancestor)
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+
+        fs::set_permissions(&bin_dir, original).ok();
+
+        if unreadable_by_this_process {
+            let report = outcome
+                .observed()
+                .cloned()
+                .expect("probe should still observe overall");
+            assert!(
+                !report.is_clean(),
+                "a permission-denied ancestor above a hook's target must not be a clean \
+                 negative — got references_inside={:?} unresolved={:?}",
+                report.references_inside,
+                report.unresolved
+            );
+            assert!(
+                report
+                    .unresolved
+                    .iter()
+                    .any(|u| matches!(u, UnresolvedRef::PathResolutionIndeterminate { .. })),
+                "expected PathResolutionIndeterminate — containment could not be determined \
+                 due to a permission error, never read as a confirmed non-match; got {:?}",
+                report.unresolved
+            );
+        }
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Round-4 re-review MUST-FIX repro 2 — the discriminating case: a
+    /// permission-denied ancestor above a PATH-entry symlink whose
+    /// target EXISTS (nothing dangling). This specifically exercises
+    /// `resolve_symlink_chain`'s error-kind handling as reused by the
+    /// PATH-entry probe (round-3's `path_entry_symlinked_straight_at_the_resource_is_protected_not_clean`
+    /// fix) — a fix that only touched `canonical_hop` would fix repro 1
+    /// above and leave this one broken, since this path never reaches
+    /// `canonical_hop` at all.
+    #[test]
+    fn permission_denied_ancestor_of_path_entry_symlink_is_unresolved_not_clean() {
+        let home = unique_temp_dir("home-eacces-path-entry");
+        let resource = unique_temp_dir("target-eacces-path-entry");
+        let release_dir = resource.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+
+        let bin_dir = home.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let symlinked_path_entry = bin_dir.join("rt");
+        // `~/bin/rt -> <resource>/release`, and `release/` EXISTS —
+        // nothing dangling here, unlike repro 1.
+        symlink(&release_dir, &symlinked_path_entry).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let original = fs::metadata(&bin_dir).unwrap().permissions();
+        fs::set_permissions(&bin_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let mut roots = roots_for(&home);
+        roots.path_dirs = vec![symlinked_path_entry.clone()];
+        let probe = LiveHostDependencyProbe::new(roots);
+        let outcome = probe.probe(&resource, Duration::from_secs(5));
+
+        let unreadable_by_this_process = fs::symlink_metadata(&symlinked_path_entry)
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+
+        fs::set_permissions(&bin_dir, original).ok();
+
+        if unreadable_by_this_process {
+            let report = outcome
+                .observed()
+                .cloned()
+                .expect("probe should still observe overall");
+            assert!(
+                !report.is_clean(),
+                "a permission-denied ancestor above a PATH-entry symlink whose target exists \
+                 must not be a clean negative — got references_inside={:?} unresolved={:?}",
+                report.references_inside,
+                report.unresolved
+            );
+            assert!(
+                report.unresolved.iter().any(|u| matches!(
+                    u,
+                    UnresolvedRef::PathResolutionIndeterminate {
+                        source: SourceTag::PathEntry,
+                        ..
+                    }
+                )),
+                "expected PathResolutionIndeterminate(PathEntry) — containment could not be \
+                 determined due to a permission error, never read as a confirmed non-match; \
+                 got {:?}",
+                report.unresolved
+            );
+        }
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&resource).ok();
@@ -2078,6 +2352,50 @@ mod tests {
                 report.unresolved
             );
         }
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Round-4 should-address: more than `MAX_LAUNCH_AGENTS` `.plist`
+    /// files present must not silently drop the ones past the cap with
+    /// no trace — a hook defined only in a truncated-away plist must not
+    /// vanish from the probe invisibly.
+    #[test]
+    fn launch_agents_past_the_cap_are_unresolved_not_silently_dropped() {
+        let home = unique_temp_dir("home-la-truncated");
+        let resource = unique_temp_dir("target-la-truncated");
+        fs::create_dir_all(&resource).unwrap();
+        let launch_agents = home.join("Library").join("LaunchAgents");
+        fs::create_dir_all(&launch_agents).unwrap();
+        for i in 0..(MAX_LAUNCH_AGENTS + 1) {
+            fs::write(
+                launch_agents.join(format!("com.example.agent{i:04}.plist")),
+                "not actually read in this test — only the listing/truncation matters",
+            )
+            .unwrap();
+        }
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::PathResolutionIndeterminate {
+                    source: SourceTag::LaunchAgent(label),
+                    ..
+                } if label == "directory"
+            )),
+            "expected a PathResolutionIndeterminate(LaunchAgent(\"directory\")) finding \
+             recording that some plists were truncated, got {:?}",
+            report.unresolved
+        );
 
         fs::remove_dir_all(&home).ok();
         fs::remove_dir_all(&resource).ok();
