@@ -4767,6 +4767,7 @@ mod execute_tests {
                 outcome,
                 expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
                 actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+                host_integrity: None,
             }
         }
 

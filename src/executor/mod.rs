@@ -23,8 +23,13 @@ use crate::actions::{Action, ActionError, ActionId, ActionPlan, ActionStep};
 use crate::detectors::{
     discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, DetectorId,
 };
-use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
-use crate::evidence::model::{Completeness, Evidence, NativeCleanup, ResourceId, ResourceLocator};
+use crate::evidence::correlate::{
+    compare_host_integrity, merge_into, EvidenceCollector, ProbeBudget,
+};
+use crate::evidence::model::{
+    Completeness, Evidence, ExecutableDependencyReport, HostIntegrityReport, NativeCleanup,
+    ResourceId, ResourceLocator,
+};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
 use crate::policy::{classify, Approval, PolicyClass, PolicyConfig, PolicyDecision, ReasonCode};
 
@@ -42,6 +47,13 @@ pub struct ExecutionReport {
     /// Re-measured AFTER execution — never assumed equal to
     /// `expected_reclaimed_bytes`.
     pub actual_reclaimed_bytes: ProbeOutcome<u64>,
+    /// Pre/post host-dependency integrity (ADR-0001 §4.4, HORO-1826).
+    /// `None` when nothing was mutated (`DryRun`/`AbortedByRevalidation`),
+    /// or when the pre-action probe cleanly found nothing to verify — see
+    /// [`compute_host_integrity`]. `Some` is never a placeholder "all
+    /// OK": its own [`HostIntegrityReport::status`] fails closed to
+    /// `Degraded`/`Unverified` on any probe failure.
+    pub host_integrity: Option<HostIntegrityReport>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -172,7 +184,71 @@ pub fn execute(
         }
     };
 
-    execute_plan(plan, identity_snapshot)
+    let pre_dependency = fresh_evidence.executable_dependency.clone();
+    let mut report = execute_plan(plan, identity_snapshot);
+
+    // HORO-1826 §4.4: a pre/post host-dependency integrity check, taken
+    // AFTER whatever `execute_plan` just did (successfully or not — a
+    // step that fails partway through may still have mutated something,
+    // and that is exactly when this check matters most). Overwrites
+    // whichever `host_integrity: None` default `execute_plan`'s own
+    // constructors set, rather than threading the pre-snapshot and
+    // collector through every one of its internal return sites.
+    report.host_integrity =
+        compute_host_integrity(&pre_dependency, &resource, collector, &report.outcome);
+
+    report
+}
+
+/// Decides whether a post-action host-dependency probe is worth running
+/// at all, and if so, runs it and compares against `pre` (HORO-1826 §4.4).
+///
+/// Only runs the post-probe when the pre-action snapshot was NOT a clean,
+/// fully-resolved negative — i.e. when it found at least one reference to
+/// verify, or could not already confirm there wasn't one
+/// (`unresolved` non-empty, or the probe itself failed). A resource the
+/// pre-action probe cleanly found nothing on has nothing this check can
+/// usefully verify, so probing it again would be pure overhead, not a
+/// safety gap — see the ticket's own framing. `None` is returned for that
+/// case and for any outcome that never attempted a mutation.
+fn compute_host_integrity(
+    pre: &ProbeOutcome<ExecutableDependencyReport>,
+    resource: &ResourceId,
+    collector: &dyn EvidenceCollector,
+    outcome: &ExecutionOutcome,
+) -> Option<HostIntegrityReport> {
+    // Nothing was mutated (or attempted) — there is no run to verify.
+    if matches!(
+        outcome,
+        ExecutionOutcome::DryRun | ExecutionOutcome::AbortedByRevalidation(_)
+    ) {
+        return None;
+    }
+
+    let needs_verification = match pre.observed() {
+        Some(report) => !report.references_inside.is_empty() || !report.unresolved.is_empty(),
+        // The pre-action probe itself failed: we cannot confirm there was
+        // nothing to protect, so fail closed and verify anyway rather
+        // than silently skipping.
+        None => true,
+    };
+    if !needs_verification {
+        return None;
+    }
+
+    // Reuses the SAME bounded, budgeted correlation pass `execute()`
+    // already uses for revalidation — no new timeout discipline, no
+    // unbounded invocation (ADR-0001 §14 "Bounds").
+    let post = collector
+        .collect(
+            resource,
+            ProbeBudget {
+                timeout: REVALIDATION_TIMEOUT,
+            },
+        )
+        .executable_dependency;
+
+    Some(compare_host_integrity(pre, &post))
 }
 
 /// `Ask` is a heterogeneous bucket: a reason present in `fresh` but not
@@ -360,6 +436,8 @@ fn aborted_report(action: ActionId, resource: ResourceId, reason: AbortReason) -
         outcome: ExecutionOutcome::AbortedByRevalidation(reason),
         expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        // Nothing was mutated — there is no run to verify integrity for.
+        host_integrity: None,
     }
 }
 
@@ -375,6 +453,12 @@ fn failed_report(
         outcome: ExecutionOutcome::Failed(message),
         expected_reclaimed_bytes,
         actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        // These structural refusals fire before any step runs (see
+        // `structural_refusal`/`execute_plan`'s early return sites),
+        // before a mutation that would make host integrity meaningful to
+        // check. `execute()` itself fills this in for failures that DO
+        // reach a mutating step (see its own post-`execute_plan` step).
+        host_integrity: None,
     }
 }
 
@@ -684,6 +768,10 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
         outcome: ExecutionOutcome::Succeeded,
         expected_reclaimed_bytes: plan.expected_reclaimed_bytes,
         actual_reclaimed_bytes,
+        // Filled in by `execute()` immediately after this call returns —
+        // see `compute_host_integrity`. `execute_plan` itself has no
+        // pre-action snapshot or collector to compare against.
+        host_integrity: None,
     }
 }
 
@@ -1331,6 +1419,207 @@ mod tests {
             "a refused cargo clean must leave the directory untouched"
         );
         assert!(target_dir.join("debug/build_output.bin").exists());
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A collector whose `executable_dependency` answer changes between
+    /// calls — the first call stands in for `execute()`'s pre-action
+    /// revalidation (inside `build_fresh_evidence`), the second for
+    /// HORO-1826's post-action probe (`compute_host_integrity`). Every
+    /// OTHER correlation field is held fixed and clean, so this isolates
+    /// the host-integrity wiring from everything else `execute()` checks.
+    struct StatefulDependencyCollector {
+        calls: std::cell::Cell<u32>,
+        pre: crate::evidence::ExecutableDependencyReport,
+        post: crate::evidence::ExecutableDependencyReport,
+    }
+
+    impl EvidenceCollector for StatefulDependencyCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            let report = if call == 0 {
+                self.pre.clone()
+            } else {
+                self.post.clone()
+            };
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::<ProcessRef>::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(report),
+            }
+        }
+    }
+
+    /// AC: a pre-action probe that could not fully resolve every
+    /// recognized source (`unresolved` non-empty, `ExecutableDependencyUnknown`
+    /// — real enough to reach `execute()` under explicit `Ask` consent,
+    /// unlike `references_inside`, which is unconditionally `PROTECTED`
+    /// and therefore refused before `execute()` ever mutates anything)
+    /// must surface a real `Some(HostIntegrityReport)` on the returned
+    /// `ExecutionReport`, and that report's status must be `Unverified` —
+    /// never silently `None`, and never a bare `Ok`.
+    #[test]
+    fn execute_reports_unverified_host_integrity_when_pre_action_probe_is_incomplete() {
+        let root = make_temp_dir("execute-host-integrity-unverified");
+        pin_cargo_target_dir_locally(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        fs::write(
+            target_dir.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target_dir.clone()),
+        );
+        let fingerprint = fingerprint_of(&target_dir);
+        let now = SystemTime::now();
+        // `Ask`, not `AutoSafe`: `ExecutableDependencyUnknown` is a real
+        // veto (ADR-0001 §5 step 6.2), so the approved decision must
+        // already carry it for the fresh revalidation's reasons to not
+        // "widen" beyond what was consented to.
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![crate::policy::ReasonCode::ExecutableDependencyUnknown],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("Ask decision with matching consent must authorize");
+
+        let collector = StatefulDependencyCollector {
+            calls: std::cell::Cell::new(0),
+            pre: crate::evidence::ExecutableDependencyReport {
+                references_inside: Vec::new(),
+                running_inside: Vec::new(),
+                unresolved: vec![crate::evidence::model::UnresolvedRef::SourceUnreadable {
+                    source: crate::evidence::model::SourceTag::CodexHooks,
+                }],
+                sources_examined: vec![crate::evidence::model::SourceTag::CodexHooks],
+            },
+            post: crate::evidence::ExecutableDependencyReport::empty(),
+        };
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        let host_integrity = report
+            .host_integrity
+            .as_ref()
+            .expect("an incomplete pre-action probe must produce Some(_), never None");
+        assert_eq!(
+            host_integrity.status,
+            crate::evidence::model::IntegrityStatus::Unverified,
+            "an incomplete pre-action sweep must never read as all-clear"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// AC: a resource whose pre-action probe cleanly found nothing to
+    /// protect (empty `references_inside`, empty `unresolved`) must skip
+    /// the post-action probe entirely — `host_integrity` is `None`, not a
+    /// computed-but-trivial `Ok`. This is the "don't probe for an action
+    /// with no dependencies at all" cost rule, confirmed by the collector
+    /// never being called a second time.
+    #[test]
+    fn execute_skips_host_integrity_when_pre_action_probe_is_clean_and_empty() {
+        let root = make_temp_dir("execute-host-integrity-skipped");
+        pin_cargo_target_dir_locally(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        fs::write(
+            target_dir.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target_dir.clone()),
+        );
+        let fingerprint = fingerprint_of(&target_dir);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        let collector = StatefulDependencyCollector {
+            calls: std::cell::Cell::new(0),
+            pre: crate::evidence::ExecutableDependencyReport::empty(),
+            // If this were ever consulted it would prove a wasted
+            // post-probe ran; the assertion on `calls` below is the real
+            // guard that it never is.
+            post: crate::evidence::ExecutableDependencyReport {
+                references_inside: Vec::new(),
+                running_inside: Vec::new(),
+                unresolved: vec![crate::evidence::model::UnresolvedRef::SourceUnreadable {
+                    source: crate::evidence::model::SourceTag::CodexHooks,
+                }],
+                sources_examined: Vec::new(),
+            },
+        };
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &collector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        assert!(
+            report.host_integrity.is_none(),
+            "nothing to protect pre-action must skip the check entirely, not report a trivial Ok"
+        );
+        assert_eq!(
+            collector.calls.get(),
+            1,
+            "the post-action probe must never run when pre-action found nothing to verify"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
