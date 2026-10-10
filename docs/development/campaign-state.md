@@ -6,7 +6,7 @@
 
 - **Owning Epic:** HORO-1043 — Glomeris MVP 2.0 — Interactive Daily Driver / Trustworthy Recovery UX
 - **Active ticket:** HORO-1822 — [Glomeris][Post-Incident] Reconstruct full-disk rescue and approve process-aware recovery architecture (Story, To Do)
-- **Last session state:** ADR-0001 (`docs/development/adr/0001-process-aware-recovery.md`) drafted by opus-architect, saved on branch `v0.1.0/HORO-1822/recovery_arch_adr`. Next step: independent adversarial review by a FRESH agent (not the one that drafted it), then founder approval, before any HORO-1823+ implementation starts.
+- **Last session state:** ADR-0001 drafted, independently reviewed (fresh agent, cold read against `main` @ 23e08dc — no invariant breach, no inaccurate code claim; 2 must-fix + 3 should-address + 1 nitpick findings, all incorporated into the ADR), and pushed on PR #156 / branch `v0.1.0/HORO-1822/recovery_arch_adr`. **Remaining before HORO-1823+ implementation can start: founder approval of ADR-0001 §16's three open decisions.** No implementation has started.
 
 Jira tickets, raw per-ticket content, and the full dependency DAG were written this
 session to the scratchpad at:
@@ -120,9 +120,13 @@ not duplicate"). The only formal link HORO-1629 carries is `blocks HORO-1829`.
 
 ## Status line
 
-> ADR-0001 drafted on branch `v0.1.0/HORO-1822/recovery_arch_adr`
-> (`docs/development/adr/0001-process-aware-recovery.md`). Not yet reviewed,
-> not yet approved. No HORO-1823+ implementation has started. A secret
-> (local test-DB credential) was found exposed in this session's incident-
-> evidence scratchpad file — flagged to the operator for rotation, not
-> committed anywhere, not reproduced in this file or the ADR.
+> ADR-0001 drafted + independently reviewed, on branch
+> `v0.1.0/HORO-1822/recovery_arch_adr` / PR #156
+> (`docs/development/adr/0001-process-aware-recovery.md`). Review found no
+> breach of the hard safety invariants and no inaccurate code claim against
+> `main` @ 23e08dc; all 6 findings incorporated into the ADR. **Blocked on
+> founder approval of §16 before any HORO-1823+ implementation starts.**
+> No implementation has started. A secret (local test-DB credential) was
+> found exposed in this session's incident-evidence scratchpad file —
+> flagged to the operator for rotation, not committed anywhere, not
+> reproduced in this file or the ADR.
