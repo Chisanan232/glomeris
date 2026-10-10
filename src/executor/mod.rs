@@ -584,7 +584,46 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                         plan.expected_reclaimed_bytes,
                     );
                 }
-                match Command::new(tool.program()).args(args).output() {
+                let mut command = Command::new(tool.program());
+                command.args(args);
+                // Security (flagged by independent review, same finding as
+                // HORO-1824's resolver): when the real tool is Cargo via
+                // rustup's proxy, the command inherits GLOMERIS'S OWN
+                // process cwd, which is not necessarily the fixed,
+                // untrusted `project_root` the resolver worries about, but
+                // is still whatever directory the user happened to launch
+                // this CLI from — pin the same way for defense in depth,
+                // so a `rust-toolchain.toml` anywhere above THAT cwd
+                // cannot steer which toolchain actually runs `cargo
+                // clean`. A pin that cannot be established is not applied
+                // (the command still runs under the ambient default
+                // rather than being blocked here — this spawn, unlike the
+                // read-only resolver, has independent authorization via
+                // `authorize()`/`verify_identity_unchanged` already
+                // passed above, so failing the real cleanup action closed
+                // on a transient `rustup` hiccup would be its own
+                // availability regression).
+                if matches!(tool, crate::actions::ToolBinary::Cargo) {
+                    command.env("RUSTUP_AUTO_INSTALL", "0");
+                    if let Some(home) = std::env::var_os("HOME") {
+                        // Unlike the read-only resolver (which fails
+                        // closed on `Unresolved`), this spawn proceeds
+                        // without a pin either way: the action already
+                        // passed `authorize()`/`verify_identity_unchanged`
+                        // above and runs with EXACT `--manifest-path`/
+                        // `--target-dir` args rather than relying on cwd
+                        // for identity, so blocking an already-authorized
+                        // cleanup over a transient `rustup` resolution
+                        // hiccup would be its own availability
+                        // regression for no corresponding safety gain.
+                        if let crate::detectors::cargo::ToolchainPin::Pinned(toolchain) =
+                            crate::detectors::cargo::resolve_trusted_toolchain(Path::new(&home))
+                        {
+                            command.env("RUSTUP_TOOLCHAIN", toolchain);
+                        }
+                    }
+                }
+                match command.output() {
                     Ok(output) if output.status.success() => {}
                     Ok(output) => {
                         return failed_report(
@@ -1225,6 +1264,73 @@ mod tests {
             report.actual_reclaimed_bytes,
             ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1824 ticket fixture: a target dir missing `CACHEDIR.TAG`.
+    /// Real `cargo clean --target-dir <path>` refuses to touch a
+    /// directory that does not carry this marker (it errors rather than
+    /// deleting), because without it cargo cannot tell the directory is
+    /// actually a build output directory and not, say, a user's real
+    /// `target/` source folder that happens to share the name. Glomeris
+    /// must surface this as a real execution failure — never silently
+    /// succeed, never fall back to a broader delete — and the directory
+    /// must survive untouched.
+    #[test]
+    fn execute_real_run_tool_fails_closed_when_cachedir_tag_is_missing() {
+        let root = make_temp_dir("execute-real-cargo-no-cachedir-tag");
+        pin_cargo_target_dir_locally(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        // Deliberately no CACHEDIR.TAG written here.
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target_dir.clone()),
+        );
+        let fingerprint = fingerprint_of(&target_dir);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        match report.outcome {
+            ExecutionOutcome::Failed(_) => {}
+            other => panic!("expected Failed(_) when CACHEDIR.TAG is missing, got {other:?}"),
+        }
+        assert!(
+            target_dir.exists(),
+            "a refused cargo clean must leave the directory untouched"
+        );
+        assert!(target_dir.join("debug/build_output.bin").exists());
 
         fs::remove_dir_all(&root).ok();
     }
