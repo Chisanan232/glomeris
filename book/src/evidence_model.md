@@ -25,6 +25,7 @@ pub struct Evidence {
     pub process_cwd_match: ProbeOutcome<Vec<ProcessRef>>,
     pub git_state: ProbeOutcome<Option<GitState>>,
     pub tool_liveness: ProbeOutcome<bool>,
+    pub executable_dependency: ProbeOutcome<ExecutableDependencyReport>,
     pub collected_at: SystemTime,
     pub sources: Vec<String>,
 }
@@ -145,3 +146,50 @@ run `tool_liveness` for a `Tool`-locator resource; `open_by_process`,
 for it. Since `required_evidence()` still requires all three, Docker build
 cache cannot reach `Completeness::Complete` today — see
 [Known Limitations](known_limitations.md).
+
+## Executable dependency (HORO-1825)
+
+`executable_dependency: ProbeOutcome<ExecutableDependencyReport>` answers a
+question `open_by_process` cannot: not "is something using this resource
+right now", but "is something configured to exec a file inside this
+resource on its *next* invocation" — a hook or daemon binary that happens
+to live inside a disposable build cache survives every liveness check
+until the moment it's gone and the next hook event fails.
+
+```rust
+pub struct ExecutableDependencyReport {
+    pub references_inside: Vec<DependencyRef>,  // non-empty => PROTECTED
+    pub running_inside: Vec<ProcessRef>,         // non-empty => ASK
+    pub unresolved: Vec<UnresolvedRef>,          // non-empty => ASK (executable-bearing kinds)
+    pub sources_examined: Vec<SourceTag>,        // display only, never policy input
+}
+```
+
+Populated for every `ResourceLocator::Path` resource by
+`evidence::correlate::host_dependency::LiveHostDependencyProbe`, which reads
+a closed, recognized set of configs read-only — Claude Code's
+`settings.json`/`settings.local.json`/managed settings, each
+`~/Library/LaunchAgents/*.plist` (via `plutil -convert json -o -`), plus a
+PATH-entry check against Glomeris's own `PATH` — tokenizes each command per
+the simple-form rule `[NAME=VALUE ...] head [arg ...]`, walks up to 40
+symlink hops, and matches by canonical path + device/inode, never by name.
+It never executes anything it finds, never writes to host config, and never
+collects argv — see `scripts/check-host-dependency-probe-is-read-only.sh`.
+
+Two PATH-shadowing / tokenization rules are load-bearing, both added after
+independent review:
+
+- A bare command name that resolves against *Glomeris's own* `PATH` is
+  never read as a clean negative (`UnresolvedRef::PathResolutionDivergent`)
+  — the hook runtime's actual `PATH` may diverge and resolve the same name
+  into the resource while Glomeris's own `PATH` resolves it elsewhere.
+- A relative, non-absolute, non-`~/`-prefixed path argument (`./target/debug/hook`)
+  has no defined resolution cwd at probe time, so it becomes
+  `UnresolvedRef::NonInspectable` rather than being silently ignored.
+
+Deliberately out of scope for HORO-1825 (see that PR's description): the
+per-configured-project `claude_project(<root>)` source, Codex
+`~/.codex/hooks.json` (schema unconfirmed) and `~/.codex/config.toml`'s
+`notify` key (no `toml` dependency added) — a present Codex config file is
+reported `unresolved` rather than parsed speculatively, per the fail-closed
+contract above.

@@ -32,6 +32,12 @@ part of the safety guarantee:
    *before* any freshness/completeness logic. A `Protected` classification
    never depends on evidence freshness — a stale-but-protected resource is
    still `Protected`, never "upgraded" by fresher evidence.
+2b. **Installed executable dependency (HORO-1825)** — `executable_dependency`
+   observed with a non-empty `references_inside` → unconditionally
+   `Protected` + `ProtectedExecutableDependency`, same rationale and same
+   staleness-immunity as step 2: a hook/daemon/LaunchAgent config or a PATH
+   entry references a file inside this resource, so it is an installed
+   runtime dependency regardless of how old that observation is.
 3. **Staleness** — evidence older than `PolicyConfig::max_evidence_age`
    (default 5 minutes), or whose `collected_at` is somehow in the future →
    `Ask` + `EvidenceStale`.
@@ -40,11 +46,27 @@ part of the safety guarantee:
 5. **Active-use signals** (most-significant first) — an open file handle or
    matching process cwd → `ResourceInActiveUse`; a dirty or linked git
    worktree → `GitWorktreeDirty`; a live owning-tool daemon →
-   `OwningToolLive`. Any of these → `Ask`.
+   `OwningToolLive`; a running process's executable mapping inside the
+   resource (HORO-1825) → `ExecutableRunningFromResource`; an unresolved
+   executable-dependency reference on an executable-bearing kind
+   (`CargoTargetDir`/`NodeModules`/`SwiftPackageManagerBuildDir`/
+   `XcodeDerivedData`) (HORO-1825) → `ExecutableDependencyUnknown`. Any of
+   these → `Ask`.
 6. **Per-instance regenerability** — `NotRegenerable` → `Ask` +
    `RebuildCostHigh`, regardless of how clean the rest of the evidence looks.
 7. Otherwise → `AutoSafe`, with reasons `EvidenceFreshAndComplete` (+
    `RegenerableByTool` if applicable) + `NoActiveUseObserved`.
+
+`policy_version` is `2` as of HORO-1825 (was `1`) — an outstanding
+`explain`→`execute` consent now meets these new reasons, and the executor
+aborts with `PolicyReasonsWidened` (safe) rather than silently applying old
+consent to a decision shaped by rules it never saw.
+
+Neither new `Ask` reason (`ExecutableRunningFromResource`,
+`ExecutableDependencyUnknown`) nor the new `Protected` reason can be
+pre-authorized by Autopilot — `autopilot::envelope::is_preauthorizable`
+refuses all three unconditionally, same as every other live-use/absence-of-
+knowledge reason on this page.
 
 ## The `PROTECTED` matcher
 
