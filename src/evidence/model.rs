@@ -798,6 +798,11 @@ pub enum SourceTag {
     /// reverse-DNS-shaped string already safe to show.
     LaunchAgent(String),
     PathEntry,
+    /// Not a config file — the `lsof`-backed running-process check itself
+    /// (`running_inside`). Carried as a `SourceTag` so its own failure can
+    /// be recorded as an ordinary `UnresolvedRef`, the same vocabulary
+    /// every other sub-probe's failure uses, rather than a special case.
+    RunningProcesses,
 }
 
 impl SourceTag {
@@ -811,6 +816,7 @@ impl SourceTag {
             SourceTag::CodexNotify => "codex_notify",
             SourceTag::LaunchAgent(_) => "launch_agent",
             SourceTag::PathEntry => "path_entry",
+            SourceTag::RunningProcesses => "running_processes",
         }
     }
 }
@@ -875,6 +881,13 @@ pub enum UnresolvedRef {
     /// inside the resource. Never read as "not inside" — that would be a
     /// clean negative built on a gap, not an observation.
     PathResolutionIndeterminate { source: SourceTag, pointer: String },
+    /// A recognized source's file was read successfully, but one entry
+    /// inside it doesn't match the expected schema at this structural
+    /// pointer (e.g. a hook entry with no string `command`, or a
+    /// LaunchAgent's `ProgramArguments` present but not an array) — a
+    /// malformed-but-present entry, never silently skipped as if it
+    /// simply didn't exist.
+    MalformedSchema { source: SourceTag, pointer: String },
 }
 
 impl UnresolvedRef {
@@ -885,7 +898,8 @@ impl UnresolvedRef {
             | UnresolvedRef::PathResolutionDivergent { source, .. }
             | UnresolvedRef::SourceUnreadable { source }
             | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. }
-            | UnresolvedRef::PathResolutionIndeterminate { source, .. } => source,
+            | UnresolvedRef::PathResolutionIndeterminate { source, .. }
+            | UnresolvedRef::MalformedSchema { source, .. } => source,
         }
     }
 }

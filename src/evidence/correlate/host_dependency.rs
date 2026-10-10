@@ -174,41 +174,82 @@ struct RawCommandRef {
     command: String,
 }
 
+/// Result of walking the Claude Code settings schema: the commands it
+/// found, plus the structural pointer of every entry that was PRESENT
+/// but did not match the expected shape — never silently skipped as if
+/// it simply weren't there.
+struct ExtractedCommands {
+    commands: Vec<RawCommandRef>,
+    /// Structural pointers of malformed-but-present entries.
+    malformed: Vec<String>,
+}
+
 /// Walks the Claude Code settings schema: `hooks.*[].hooks[].command` and
-/// `statusLine.command`.
-fn extract_claude_commands(json: &serde_json::Value) -> Vec<RawCommandRef> {
-    let mut out = Vec::new();
-    if let Some(hooks) = json.get("hooks").and_then(|v| v.as_object()) {
-        for (event, entries) in hooks {
-            let Some(entries) = entries.as_array() else {
-                continue;
-            };
-            for (i, entry) in entries.iter().enumerate() {
-                let Some(inner_hooks) = entry.get("hooks").and_then(|v| v.as_array()) else {
-                    continue;
-                };
-                for (j, hook) in inner_hooks.iter().enumerate() {
-                    if let Some(command) = hook.get("command").and_then(|v| v.as_str()) {
-                        out.push(RawCommandRef {
-                            pointer: format!("hooks.{event}[{i}].hooks[{j}]"),
-                            command: command.to_string(),
-                        });
+/// `statusLine.command`. A present `hooks` that isn't an object, a
+/// present event list that isn't an array, a present hook entry whose
+/// `hooks` field isn't an array, and a present hook with no string
+/// `command` are all recorded in `malformed` rather than silently
+/// skipped — the same fail-open family as every other probe failure in
+/// this module. `statusLine` existing with no `command` key at all is
+/// NOT malformed (a legitimate configuration with nothing set there);
+/// `statusLine.command` existing but not a string IS.
+fn extract_claude_commands(json: &serde_json::Value) -> ExtractedCommands {
+    let mut commands = Vec::new();
+    let mut malformed = Vec::new();
+
+    if let Some(hooks_val) = json.get("hooks") {
+        match hooks_val.as_object() {
+            None => malformed.push("hooks".to_string()),
+            Some(hooks) => {
+                for (event, entries_val) in hooks {
+                    let Some(entries) = entries_val.as_array() else {
+                        malformed.push(format!("hooks.{event}"));
+                        continue;
+                    };
+                    for (i, entry) in entries.iter().enumerate() {
+                        let Some(inner_hooks_val) = entry.get("hooks") else {
+                            malformed.push(format!("hooks.{event}[{i}].hooks"));
+                            continue;
+                        };
+                        let Some(inner_hooks) = inner_hooks_val.as_array() else {
+                            malformed.push(format!("hooks.{event}[{i}].hooks"));
+                            continue;
+                        };
+                        for (j, hook) in inner_hooks.iter().enumerate() {
+                            let pointer = format!("hooks.{event}[{i}].hooks[{j}]");
+                            match hook.get("command") {
+                                Some(v) => match v.as_str() {
+                                    Some(command) => commands.push(RawCommandRef {
+                                        pointer,
+                                        command: command.to_string(),
+                                    }),
+                                    None => malformed.push(format!("{pointer}.command")),
+                                },
+                                None => malformed.push(pointer),
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    if let Some(command) = json
-        .get("statusLine")
-        .and_then(|v| v.get("command"))
-        .and_then(|v| v.as_str())
-    {
-        out.push(RawCommandRef {
-            pointer: "statusLine.command".to_string(),
-            command: command.to_string(),
-        });
+
+    if let Some(status_line) = json.get("statusLine") {
+        if let Some(command_val) = status_line.get("command") {
+            match command_val.as_str() {
+                Some(command) => commands.push(RawCommandRef {
+                    pointer: "statusLine.command".to_string(),
+                    command: command.to_string(),
+                }),
+                None => malformed.push("statusLine.command".to_string()),
+            }
+        }
     }
-    out
+
+    ExtractedCommands {
+        commands,
+        malformed,
+    }
 }
 
 /// A single simple-form token, after tokenization (§4.3). Only `Head` and
@@ -224,6 +265,11 @@ enum Token {
     /// `~/`-prefixed — the independent-review amendment: no defined
     /// resolution cwd, so it is `NonInspectable`, never silently dropped.
     RelativeNonInspectable,
+    /// A bare-name argument that is the TARGET of a recognized exec
+    /// wrapper (`env NAME`, `sh -c NAME`, `bash -c NAME`) — subject to
+    /// the exact same PATH-divergence check a bare-name HEAD gets, never
+    /// silently dropped as `Opaque`.
+    WrapperTargetBareName(String),
     /// Anything else: not a path, not a dependency, not flagged.
     Opaque,
 }
@@ -284,8 +330,64 @@ fn tokenize_command(raw: &str) -> Tokenized {
         return Tokenized::NonInspectable;
     };
     let head = classify_head(head_raw);
-    let args = rest.iter().map(|a| classify_token(a)).collect();
+    // Exec-wrapper amendment: `env my-hook`, `/bin/sh -c my-hook` and
+    // similar run a bare-name ARGUMENT, not the head — the PATH-shadowing
+    // amendment above only inspects the head, so a bare name one argument
+    // position to the right was invisible to it. Mark the wrapper's own
+    // target argument (if it's a bare name) so the args loop below routes
+    // it through the exact same PATH-divergence check as a bare-name
+    // head, instead of silently dropping it as an opaque, non-path
+    // argument.
+    let wrapper_target_idx =
+        head_basename(&head).and_then(|basename| wrapper_target_index(basename, rest));
+    let args = rest
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let token = classify_token(a);
+            if Some(i) == wrapper_target_idx && matches!(token, Token::Opaque) {
+                Token::WrapperTargetBareName(a.to_string())
+            } else {
+                token
+            }
+        })
+        .collect();
     Tokenized::Simple { head, args }
+}
+
+/// The basename a wrapper is recognized by: the bare name itself, or the
+/// final path component of an absolute/`~/`-marked head. `None` for
+/// `RelativeNonInspectable`, which is already flagged `NonInspectable`
+/// independently.
+fn head_basename(head: &HeadToken) -> Option<&str> {
+    match head {
+        HeadToken::BareName(name) => Some(name.as_str()),
+        HeadToken::AbsoluteOrHome(p) => p.file_name().and_then(|f| f.to_str()),
+        HeadToken::RelativeNonInspectable => None,
+    }
+}
+
+/// Known exec-wrapper basenames and where each one's target argument
+/// lives (§4.3 PATH-shadowing amendment, extended to wrapper-passed
+/// targets). Closed, deliberately small list — an unrecognized wrapper
+/// is not detected, matching this module's closed-recognized-source
+/// philosophy rather than guessing at arbitrary wrapper semantics.
+fn wrapper_target_index(head_basename: &str, rest: &[&str]) -> Option<usize> {
+    match head_basename {
+        // `env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]`: skip
+        // flags and leading NAME=VALUE assignments; the first remaining
+        // token is the real command.
+        "env" => rest
+            .iter()
+            .position(|a| !a.starts_with('-') && !is_env_assignment(a)),
+        // `sh -c COMMAND` / `bash -c COMMAND`: the token immediately
+        // after `-c` is the command.
+        "sh" | "bash" => rest.iter().position(|a| *a == "-c").and_then(|i| {
+            let target = i + 1;
+            (target < rest.len()).then_some(target)
+        }),
+        _ => None,
+    }
 }
 
 fn is_env_assignment(token: &str) -> bool {
@@ -395,11 +497,51 @@ fn resolve_symlink_chain(start: &Path) -> ChainResolution {
 /// tempdir aliasing (`/var` -> `/private/var`) inconsistently hop to hop,
 /// which is exactly the trap that would make a stale-symlink or a tempdir
 /// fixture resolve wrong. See the module header.
+/// Canonicalizes as much of `hop`'s ancestry as actually exists, then
+/// re-appends whatever trailing components don't — so a hop several
+/// directories deep into a path that was never created (or no longer
+/// exists) still produces a definitive, comparable canonical path
+/// instead of simply failing.
+///
+/// A naive "canonicalize the immediate parent" approach only handles the
+/// single-level-missing case (the final file absent, its directory
+/// present). When the *whole* parent chain is missing — e.g. a stale
+/// `$PATH` entry pointing at a directory tree that was never installed,
+/// or a hook target several un-built directories deep inside a resource
+/// — that approach fails outright, and the caller was previously forced
+/// to treat the comparison as unresolvable. That is wrong in both
+/// directions: it silently clears genuinely-contained references (the
+/// missing chain was inside the resource) and, more commonly, it floods
+/// `unresolved` with "indeterminate" findings for ordinary stale PATH
+/// entries that are nowhere near the resource and were never ambiguous
+/// at all.
+///
+/// Walking upward until an ancestor canonicalizes (this always
+/// terminates — `/` exists) and rebuilding the path from there makes the
+/// comparison resolvable in every realistic case: a missing chain whose
+/// nearest existing ancestor is the resource itself reconstructs to a
+/// path inside the resource (matching `path_matches_resource`'s own
+/// `Err(_) => true` treatment of a single missing leaf); a missing chain
+/// whose nearest existing ancestor is unrelated to the resource
+/// reconstructs to a path that plainly isn't. `None` remains possible
+/// only for a degenerate input with no file name at all, which none of
+/// this module's real candidate paths produce.
 fn canonical_hop(hop: &Path) -> Option<PathBuf> {
-    let parent = hop.parent()?;
     let file_name = hop.file_name()?;
-    let canon_parent = fs::canonicalize(parent).ok()?;
-    Some(canon_parent.join(file_name))
+    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut ancestor = hop.parent()?;
+    loop {
+        if let Ok(canon_ancestor) = fs::canonicalize(ancestor) {
+            let mut result = canon_ancestor;
+            for component in missing.iter().rev() {
+                result = result.join(component);
+            }
+            return Some(result.join(file_name));
+        }
+        let name = ancestor.file_name()?;
+        missing.push(name);
+        ancestor = ancestor.parent()?;
+    }
 }
 
 /// Result of [`chain_matches_resource`] — tri-state rather than `bool`,
@@ -409,16 +551,15 @@ fn canonical_hop(hop: &Path) -> Option<PathBuf> {
 enum ChainMatch {
     Yes,
     No,
-    /// At least one hop could not be canonicalized — e.g. an intermediate
-    /// directory in its path does not exist (a target whose whole parent
-    /// chain was never created, not merely the final file). `canonical_hop`
-    /// returning `None` for every hop that mattered means this chain's
-    /// relationship to the resource genuinely cannot be established, which
-    /// is a different fact from "established, and it's outside" — see
-    /// `path_matches_resource`'s own doc comment for the matching case
-    /// where a MISSING FILE (but resolvable parent) still proves same-
-    /// filesystem containment by prefix alone. This variant is for when
-    /// even the parent can't be resolved.
+    /// `canonical_hop` returned `None` for every hop that mattered — a
+    /// degenerate case (no file name component at all) that none of
+    /// this module's real candidate paths actually produce, since
+    /// `canonical_hop` now climbs to the nearest existing ancestor and
+    /// reconstructs the rest rather than failing on a merely-missing
+    /// intermediate directory (see its doc comment). Kept as a distinct,
+    /// fail-closed variant rather than folded into `No`, so that if a
+    /// future change to path construction ever does produce such an
+    /// input, it still cannot silently read as "not inside".
     Indeterminate,
 }
 
@@ -459,11 +600,23 @@ fn chain_matches_resource(
 /// directory. Only fall back to requiring a successful `stat` match when
 /// the path DOES exist, to still catch a same-named file on a different
 /// device reached through some other canonicalization quirk.
+///
+/// Uses `symlink_metadata`, never `metadata`: `canon` is
+/// `canonical_hop`'s output, which canonicalizes only the hop's PARENT
+/// and re-appends the file name — the final component itself is NOT
+/// resolved, so `canon` can legitimately still be a symlink. A hop that
+/// is itself a symlink living inside the resource (e.g.
+/// `<resource>/link -> /usr/bin/true`) is a reference the resource's
+/// deletion would break, regardless of where that symlink points;
+/// `fs::metadata` would follow it and stat the TARGET's device instead
+/// of the hop's own, turning a same-device, inside-the-resource symlink
+/// into a false device mismatch whenever its target happens to live on
+/// a different volume (common on macOS's sealed-System-volume layout).
 fn path_matches_resource(canon: &Path, resource_canonical: &Path, resource_dev: u64) -> bool {
     if !canon.starts_with(resource_canonical) {
         return false;
     }
-    match fs::metadata(canon) {
+    match fs::symlink_metadata(canon) {
         Ok(meta) => meta.dev() == resource_dev,
         Err(_) => true,
     }
@@ -540,6 +693,19 @@ fn resolve_command(
                     pointer: raw.pointer.clone(),
                 });
             }
+            // Exec-wrapper amendment: the same PATH-shadowing check a
+            // bare-name HEAD gets (§4.3), applied to a wrapper's target
+            // argument instead — never a clean negative either way.
+            Token::WrapperTargetBareName(name) => match resolve_on_path(&name, &roots.path_dirs) {
+                Some(_resolved) => unresolved.push(UnresolvedRef::PathResolutionDivergent {
+                    source: source.clone(),
+                    pointer: raw.pointer.clone(),
+                }),
+                None => unresolved.push(UnresolvedRef::NotOnPath {
+                    source: source.clone(),
+                    pointer: raw.pointer.clone(),
+                }),
+            },
             Token::Opaque => {}
         }
     }
@@ -622,11 +788,23 @@ fn resolve_command(
     (deps, unresolved)
 }
 
-fn is_inside_resource(path: &Path, resource_canonical: &Path, resource_dev: u64) -> bool {
-    let Some(canon) = canonical_hop(path) else {
-        return false;
-    };
-    path_matches_resource(&canon, resource_canonical, resource_dev)
+/// Same tri-state treatment as [`chain_matches_resource`], for the
+/// single-path PATH-entry check: when `path`'s entire parent chain is
+/// absent (not merely a one-level-missing directory), `canonical_hop`
+/// returns `None` and this must surface as [`ChainMatch::Indeterminate`],
+/// never a silent `false`/`No` — the same fail-open shape the review
+/// found here after it was already fixed in `chain_matches_resource`.
+fn is_inside_resource(path: &Path, resource_canonical: &Path, resource_dev: u64) -> ChainMatch {
+    match canonical_hop(path) {
+        Some(canon) => {
+            if path_matches_resource(&canon, resource_canonical, resource_dev) {
+                ChainMatch::Yes
+            } else {
+                ChainMatch::No
+            }
+        }
+        None => ChainMatch::Indeterminate,
+    }
 }
 
 fn expand_home(marked: &Path, home: &Path) -> PathBuf {
@@ -775,7 +953,8 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                     sources_examined.push(config.tag.clone());
                     match serde_json::from_slice::<serde_json::Value>(&bytes) {
                         Ok(json) => {
-                            for raw in extract_claude_commands(&json) {
+                            let extracted = extract_claude_commands(&json);
+                            for raw in extracted.commands {
                                 let (mut d, mut u) = resolve_command(
                                     &raw,
                                     &config.tag,
@@ -785,6 +964,12 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                                 );
                                 references_inside.append(&mut d);
                                 unresolved.append(&mut u);
+                            }
+                            for pointer in extracted.malformed {
+                                unresolved.push(UnresolvedRef::MalformedSchema {
+                                    source: config.tag.clone(),
+                                    pointer,
+                                });
                             }
                         }
                         Err(_) => unresolved.push(UnresolvedRef::SourceUnreadable {
@@ -822,21 +1007,40 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                 Ok(json) => {
                     sources_examined.push(tag.clone());
                     let mut raw_commands = Vec::new();
-                    if let Some(program) = json.get("Program").and_then(|v| v.as_str()) {
-                        raw_commands.push(RawCommandRef {
-                            pointer: "Program".to_string(),
-                            command: program.to_string(),
-                        });
+                    let mut malformed = Vec::new();
+                    // `Program` absent entirely is normal — most real
+                    // LaunchAgents use `ProgramArguments` instead. Present
+                    // but not a string is malformed, never silently
+                    // skipped.
+                    if let Some(program_val) = json.get("Program") {
+                        match program_val.as_str() {
+                            Some(program) => raw_commands.push(RawCommandRef {
+                                pointer: "Program".to_string(),
+                                command: program.to_string(),
+                            }),
+                            None => malformed.push("Program".to_string()),
+                        }
                     }
-                    if let Some(first) = json
-                        .get("ProgramArguments")
-                        .and_then(|v| v.as_array())
-                        .and_then(|arr| arr.first())
-                        .and_then(|v| v.as_str())
-                    {
-                        raw_commands.push(RawCommandRef {
-                            pointer: "ProgramArguments[0]".to_string(),
-                            command: first.to_string(),
+                    // Same reasoning for `ProgramArguments`: absent
+                    // entirely is normal (when `Program` is used instead);
+                    // present but not an array, or present with no
+                    // string first element, is malformed.
+                    if let Some(pa_val) = json.get("ProgramArguments") {
+                        match pa_val.as_array() {
+                            Some(arr) => match arr.first().and_then(|v| v.as_str()) {
+                                Some(first) => raw_commands.push(RawCommandRef {
+                                    pointer: "ProgramArguments[0]".to_string(),
+                                    command: first.to_string(),
+                                }),
+                                None => malformed.push("ProgramArguments[0]".to_string()),
+                            },
+                            None => malformed.push("ProgramArguments".to_string()),
+                        }
+                    }
+                    for pointer in malformed {
+                        unresolved.push(UnresolvedRef::MalformedSchema {
+                            source: tag.clone(),
+                            pointer,
                         });
                     }
                     for raw in raw_commands {
@@ -861,23 +1065,34 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
         // PATH-entry source: a PATH directory that is itself inside the
         // resource makes the resource a PATH provider (§4.3).
         for dir in &self.roots.path_dirs {
-            if is_inside_resource(dir, &resource_canonical, resource_dev) {
-                if let Some(exe) = exe_identity_of(dir) {
-                    references_inside.push(DependencyRef {
+            match is_inside_resource(dir, &resource_canonical, resource_dev) {
+                ChainMatch::Yes => {
+                    if let Some(exe) = exe_identity_of(dir) {
+                        references_inside.push(DependencyRef {
+                            source: SourceTag::PathEntry,
+                            pointer: "PATH".to_string(),
+                            resolved: dir.clone(),
+                            exe,
+                            provenance: Provenance::Observed,
+                            next_invocation: true,
+                        });
+                    } else {
+                        // Matches a resource-inside path, but its identity
+                        // (dev/ino) couldn't be stat'd — fail closed, same
+                        // as `resolve_command`'s handling of the same
+                        // `exe_identity_of` failure, never a silent skip.
+                        unresolved.push(UnresolvedRef::SourceUnreadable {
+                            source: SourceTag::PathEntry,
+                        });
+                    }
+                }
+                ChainMatch::No => {}
+                // The PATH entry's whole parent chain is absent — its
+                // containment could not be established either way.
+                ChainMatch::Indeterminate => {
+                    unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
                         source: SourceTag::PathEntry,
                         pointer: "PATH".to_string(),
-                        resolved: dir.clone(),
-                        exe,
-                        provenance: Provenance::Observed,
-                        next_invocation: true,
-                    });
-                } else {
-                    // Matches a resource-inside path, but its identity
-                    // (dev/ino) couldn't be stat'd — fail closed, same as
-                    // `resolve_command`'s handling of the same
-                    // `exe_identity_of` failure, never a silent skip.
-                    unresolved.push(UnresolvedRef::SourceUnreadable {
-                        source: SourceTag::PathEntry,
                     });
                 }
             }
@@ -887,13 +1102,26 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
         // The running-process probe (`lsof`) is load-bearing evidence, not
         // an optional extra: a failure here (missing binary, timeout,
         // permission denial) must not be coerced into "nothing is running"
-        // — that would be exactly the fail-open ADR-0001 §8 forbids. An
-        // `Unavailable` here makes the WHOLE probe `Unavailable`, never a
-        // partially-successful `Observed` with an empty `running_inside`.
+        // — that would be exactly the fail-open ADR-0001 §8 forbids. It
+        // must ALSO never discard `references_inside`/`unresolved` already
+        // confirmed by the config/LaunchAgent/PATH-entry probes above —
+        // returning a bare `Unavailable` for the whole report on an lsof
+        // failure would do exactly that, silently losing a confirmed
+        // PROTECTED reference (step 2b reads `executable_dependency.
+        // observed()`, which a bare `Unavailable` makes `None`). Recorded
+        // as an ordinary `unresolved` finding instead, so "we don't know
+        // if something's running" survives alongside whatever else was
+        // already found, never silently read as a confirmed empty set.
+        sources_examined.push(SourceTag::RunningProcesses);
         let running_inside =
             match running_executables_under(&self.roots.lsof_bin, resource_path, timeout) {
                 ProbeOutcome::Observed(procs) => procs,
-                ProbeOutcome::Unavailable(reason) => return ProbeOutcome::Unavailable(reason),
+                ProbeOutcome::Unavailable(_) => {
+                    unresolved.push(UnresolvedRef::SourceUnreadable {
+                        source: SourceTag::RunningProcesses,
+                    });
+                    Vec::new()
+                }
             };
 
         ProbeOutcome::Observed(ExecutableDependencyReport {
@@ -1159,21 +1387,24 @@ mod tests {
     }
 
     /// Same AC case as above, but with the WHOLE parent chain absent —
-    /// not merely the final file. `canonical_hop` then cannot even
-    /// canonicalize the hop's parent directory, so the fix-up to
-    /// `chain_matches_resource`/`canonical_hop` is what this pins: before
-    /// that fix, `chain_matches_resource` read every `canonical_hop`
-    /// failure as "not inside" and returned a clean negative here, which
-    /// is a different (and worse) bug than the "parent exists, file
-    /// doesn't" case above — this is "we cannot tell", not "we checked
-    /// and it's outside".
+    /// not merely the final file. `canonical_hop` climbs to the nearest
+    /// existing ancestor (here, the resource directory itself) and
+    /// reconstructs the rest, so `chain_matches_resource` now resolves
+    /// this definitively as "inside the resource" (a dangling chain
+    /// whose hop matches — same `unresolved`/`SymlinkLoopOrTooDeep`
+    /// outcome as the single-missing-file case above, never a clean
+    /// negative) instead of "indeterminate". Before the climbing fix,
+    /// `canonical_hop` could not canonicalize the hop's parent at all
+    /// and `chain_matches_resource` read every such failure as "not
+    /// inside" — a clean negative built on an unresolvable comparison.
     #[test]
     fn missing_executable_with_absent_parent_chain_is_unresolved_not_clean() {
         let home = unique_temp_dir("home-missing-parent");
         let resource = unique_temp_dir("target-missing-parent");
         fs::create_dir_all(&resource).unwrap();
         // Deliberately NOT created: `release/` itself does not exist, so
-        // the hop's parent cannot be canonicalized either.
+        // the hop's immediate parent cannot be canonicalized — only the
+        // resource directory further up can.
         let missing = resource.join("release").join("hook-never-built");
 
         fs::create_dir_all(home.join(".claude")).unwrap();
@@ -1196,17 +1427,13 @@ mod tests {
 
         assert!(
             !report.is_clean(),
-            "a reference whose whole parent chain is absent must not be a clean negative \
-             just because its containment couldn't be determined"
+            "a reference several un-built directories deep inside the resource must not be \
+             read as a clean negative just because the intermediate directories don't exist yet"
         );
         assert!(report.references_inside.is_empty());
         assert!(
-            report
-                .unresolved
-                .iter()
-                .any(|u| matches!(u, UnresolvedRef::PathResolutionIndeterminate { .. })),
-            "expected PathResolutionIndeterminate, got {:?}",
-            report.unresolved
+            !report.unresolved.is_empty(),
+            "expected an unresolved finding for a dangling-but-matching chain, got none"
         );
 
         fs::remove_dir_all(&home).ok();
@@ -1452,18 +1679,17 @@ mod tests {
     /// The fail-open this test guards against (ADR-0001 §8: "lsof
     /// missing, timeout or stderr failure ... => `Unavailable` => Partial
     /// => ASK `EvidenceIncomplete`"): if the running-process probe's
-    /// `lsof` invocation cannot run at all, the OVERALL probe must come
-    /// back `Unavailable`, never a clean `Observed` report with an empty
-    /// `running_inside` — that would silently coerce "lsof failed" into
-    /// "nothing is running", exactly the ASK-worthy unknown this probe
-    /// must never swallow.
+    /// `lsof` invocation cannot run at all, that must surface as an
+    /// `unresolved` finding on the report, never be silently coerced into
+    /// "nothing is running" (an `Observed` report with a clean empty
+    /// `running_inside` and no corresponding `unresolved` entry).
     ///
     /// Injects the failure via `lsof_bin` pointed at a nonexistent path,
     /// which makes `Command::spawn` fail with `NotFound` — the same
     /// injectable-binary seam already used by `plutil_bin` in the
     /// `absent_plutil_is_unresolved_for_launch_agents` test above.
     #[test]
-    fn lsof_failure_makes_overall_probe_unavailable_not_clean() {
+    fn lsof_failure_is_unresolved_not_clean() {
         let home = unique_temp_dir("home-lsof-fail");
         let resource = unique_temp_dir("target-lsof-fail");
         fs::create_dir_all(&resource).unwrap();
@@ -1471,13 +1697,83 @@ mod tests {
         let mut roots = roots_for(&home);
         roots.lsof_bin = PathBuf::from("/definitely/not/a/real/lsof");
         let probe = LiveHostDependencyProbe::new(roots);
-        let outcome = probe.probe(&resource, Duration::from_secs(5));
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("lsof failing on its own must not make the whole probe Unavailable");
 
+        assert!(report.running_inside.is_empty());
         assert!(
-            matches!(outcome, ProbeOutcome::Unavailable(_)),
-            "an lsof failure on the running-process probe must make the whole \
-             executable_dependency probe Unavailable, not a clean Observed \
-             report with empty running_inside; got {outcome:?}"
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::RunningProcesses
+                }
+            )),
+            "expected SourceUnreadable(RunningProcesses), got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// The bug the review caught: the ORIGINAL fix for the lsof fail-open
+    /// made a failing `lsof` abort the WHOLE probe with a bare
+    /// `Unavailable`, which discarded any `references_inside`/`unresolved`
+    /// already confirmed by the config/LaunchAgent/PATH-entry probes
+    /// earlier in the same call — for the four executable-bearing kinds
+    /// that merely downgrades a `PROTECTED` candidate to a consentable
+    /// `ASK` (since step 2b reads `executable_dependency.observed()`,
+    /// which a bare `Unavailable` makes `None`); for every OTHER
+    /// Path-locator kind (not required to have this field complete), a
+    /// confirmed hook reference inside a download cache could reach
+    /// `AUTO_SAFE` outright if `lsof` merely timed out. A real config
+    /// reference combined with a failing `lsof` must survive in
+    /// `references_inside` regardless.
+    #[test]
+    fn confirmed_reference_survives_a_failing_lsof_probe() {
+        let home = unique_temp_dir("home-lsof-fail-with-ref");
+        let resource = unique_temp_dir("target-lsof-fail-with-ref");
+        let hook_bin = resource.join("debug").join("hook");
+        fs::create_dir_all(hook_bin.parent().unwrap()).unwrap();
+        fs::write(&hook_bin, b"#!/bin/sh\n").unwrap();
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+                hook_bin.display()
+            ),
+        )
+        .unwrap();
+
+        let mut roots = roots_for(&home);
+        roots.lsof_bin = PathBuf::from("/definitely/not/a/real/lsof");
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("a failing lsof must not erase an already-confirmed reference");
+
+        assert_eq!(
+            report.references_inside.len(),
+            1,
+            "the confirmed hook reference must survive the lsof probe's own failure, got {:?}",
+            report.references_inside
+        );
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::RunningProcesses
+                }
+            )),
+            "the lsof failure must still be recorded, got {:?}",
+            report.unresolved
         );
 
         fs::remove_dir_all(&home).ok();
@@ -1579,6 +1875,389 @@ mod tests {
                 }
             )),
             "expected SourceUnreadable(PathEntry), got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// The fail-open this pins: a PATH entry whose ENTIRE parent chain is
+    /// absent (two levels missing, not merely the final directory —
+    /// `path_entry_inside_resource_with_unreadable_identity_is_unresolved_not_silent`
+    /// above only covers the one-level case) made `is_inside_resource`
+    /// fall through to a flat `false` with no `DependencyRef` and no
+    /// `UnresolvedRef` at all — completely silent. With `canonical_hop`
+    /// now climbing to the nearest existing ancestor (the resource
+    /// directory itself, here) and reconstructing the rest,
+    /// `is_inside_resource` resolves this definitively to "inside the
+    /// resource", and the subsequent `exe_identity_of` stat failure on a
+    /// directory that doesn't actually exist surfaces as
+    /// `SourceUnreadable` — unresolved, not silent, same as the
+    /// single-level case above.
+    #[test]
+    fn path_entry_with_absent_parent_chain_is_unresolved_not_silent() {
+        let home = unique_temp_dir("home-path-ghost-deep");
+        let resource = unique_temp_dir("target-path-ghost-deep");
+        fs::create_dir_all(&resource).unwrap();
+        // Neither "missing-parent" nor "ghost-bin-dir" exists.
+        let ghost_path_dir = resource.join("missing-parent").join("ghost-bin-dir");
+
+        let mut roots = roots_for(&home);
+        roots.path_dirs = vec![ghost_path_dir];
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(report.references_inside.is_empty());
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::PathEntry,
+                }
+            )),
+            "expected SourceUnreadable(PathEntry), got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// The fail-open this pins: `path_matches_resource` used
+    /// `fs::metadata` (follows symlinks) rather than `fs::symlink_metadata`
+    /// on a hop that `canonical_hop` leaves unresolved (it canonicalizes
+    /// only the PARENT, never the final component). A symlink hop living
+    /// INSIDE the resource but pointing to a file on a DIFFERENT device
+    /// (routine on macOS's sealed-System-volume layout: `/usr/bin/true` is
+    /// commonly on a different volume than a `/private/tmp` fixture) was
+    /// stat'd through to its target's device, failing the same-device
+    /// check and producing a false `ChainMatch::No` for a hop that is, by
+    /// its own location, genuinely a reference inside the resource.
+    #[test]
+    fn symlink_hop_inside_resource_matches_regardless_of_cross_device_target() {
+        let home = unique_temp_dir("home-cross-device");
+        let resource = unique_temp_dir("target-cross-device");
+        fs::create_dir_all(&resource).unwrap();
+
+        let external_target = Path::new("/usr/bin/true");
+        if !external_target.exists() {
+            // Not present on this machine — nothing to point the symlink
+            // at; skip rather than fail on an environment this test
+            // cannot exercise.
+            fs::remove_dir_all(&home).ok();
+            fs::remove_dir_all(&resource).ok();
+            return;
+        }
+        let resource_dev = fs::metadata(&resource).unwrap().dev();
+        let target_dev = fs::metadata(external_target).unwrap().dev();
+        if resource_dev == target_dev {
+            // This machine's tempdir and /usr/bin happen to share a
+            // device (e.g. a single-volume layout) — the bug this test
+            // guards against cannot manifest here. Skip rather than
+            // assert something environment-dependent.
+            fs::remove_dir_all(&home).ok();
+            fs::remove_dir_all(&resource).ok();
+            return;
+        }
+
+        let link = resource.join("link-to-external");
+        symlink(external_target, &link).unwrap();
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+                link.display()
+            ),
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert_eq!(
+            report.references_inside.len(),
+            1,
+            "a symlink hop living inside the resource must match regardless of its \
+             cross-device target; unresolved: {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// The should-address #4 fix: `env my-hook` runs `my-hook`, not
+    /// `env` — before this fix, the bare name one argument to the right
+    /// of the head was classified `Opaque` and silently dropped, never
+    /// reaching the PATH-divergence check at all. `my-hook` resolves on
+    /// Glomeris's own PATH here, so the amendment's rule applies:
+    /// `unresolved`, never a clean negative.
+    #[test]
+    fn env_wrapper_target_bare_name_is_path_resolution_divergent() {
+        let home = unique_temp_dir("home-env-wrapper");
+        let resource = unique_temp_dir("target-env-wrapper");
+        let path_dir = unique_temp_dir("pathdir-env-wrapper");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(&path_dir).unwrap();
+        fs::write(path_dir.join("my-hook"), b"#!/bin/sh\n").unwrap();
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":"/usr/bin/env my-hook"}]}]}}"#,
+        )
+        .unwrap();
+
+        let mut roots = roots_for(&home);
+        roots.path_dirs = vec![path_dir.clone()];
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::PathResolutionDivergent { .. })),
+            "env's wrapped bare-name target must reach the PATH-divergence check, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+        fs::remove_dir_all(&path_dir).ok();
+    }
+
+    /// Same amendment, for `sh -c my-hook` / `bash -c my-hook`: the token
+    /// immediately after `-c` is the real command, not an opaque flag
+    /// argument to `sh`/`bash` themselves.
+    #[test]
+    fn shell_dash_c_wrapper_target_bare_name_is_not_on_path() {
+        let home = unique_temp_dir("home-sh-wrapper");
+        let resource = unique_temp_dir("target-sh-wrapper");
+        fs::create_dir_all(&resource).unwrap();
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":"/bin/sh -c totally-nonexistent-wrapped-hook-xyz"}]}]}}"#,
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::NotOnPath { .. })),
+            "sh -c's wrapped bare-name target must reach the PATH-divergence check, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Should-address #6: a hook entry whose `command` isn't a string
+    /// must not be silently skipped as if the entry didn't exist.
+    #[test]
+    fn hook_entry_with_non_string_command_is_malformed_schema() {
+        let home = unique_temp_dir("home-malformed-command");
+        let resource = unique_temp_dir("target-malformed-command");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":42}]}]}}"#,
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::MalformedSchema { .. })),
+            "a non-string command must be flagged, not silently skipped, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Should-address #6: a hook entry missing the `command` key entirely
+    /// is the same fail-open shape — zero findings before this fix.
+    #[test]
+    fn hook_entry_with_missing_command_key_is_malformed_schema() {
+        let home = unique_temp_dir("home-missing-command-key");
+        let resource = unique_temp_dir("target-missing-command-key");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"timeout":5}]}]}}"#,
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::MalformedSchema { .. })),
+            "a hook entry with no command key must be flagged, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Should-address #6: `hooks.<event>` present but not an array.
+    #[test]
+    fn hooks_event_value_not_an_array_is_malformed_schema() {
+        let home = unique_temp_dir("home-malformed-event");
+        let resource = unique_temp_dir("target-malformed-event");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":"not-an-array"}}"#,
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::MalformedSchema { .. })),
+            "expected MalformedSchema, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Should-address #6, LaunchAgent half: `ProgramArguments` present
+    /// but not an array must be flagged, not silently skipped.
+    #[test]
+    fn launch_agent_program_arguments_not_an_array_is_malformed_schema() {
+        let home = unique_temp_dir("home-la-malformed");
+        let resource = unique_temp_dir("target-la-malformed");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(home.join("Library").join("LaunchAgents")).unwrap();
+        fs::write(
+            home.join("Library")
+                .join("LaunchAgents")
+                .join("com.example.malformed.plist"),
+            r#"{"Label":"com.example.malformed","ProgramArguments":"not-an-array"}"#,
+        )
+        .unwrap();
+
+        // `plutil_bin` here needs to actually convert — reuse `/bin/cat`
+        // is not valid plutil behaviour, so point at the real `plutil`
+        // (this fixture file is already valid JSON, which `plutil
+        // -convert json -o -` passes through unchanged).
+        let mut roots = roots_for(&home);
+        roots.plutil_bin = PathBuf::from("/usr/bin/plutil");
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::MalformedSchema { .. })),
+            "expected MalformedSchema for a non-array ProgramArguments, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Item 5 follow-up (test-coverage gap the review named explicitly):
+    /// the real `serde_json` parse-error branch for a non-Codex config,
+    /// exercised end to end rather than only asserted indirectly.
+    #[test]
+    fn unparseable_claude_settings_json_is_source_unreadable() {
+        let home = unique_temp_dir("home-bad-json");
+        let resource = unique_temp_dir("target-bad-json");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            b"{ this is not valid json .. ",
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::ClaudeUserSettings
+                }
+            )),
+            "expected SourceUnreadable(ClaudeUserSettings) from the serde_json parse-error \
+             branch, got {:?}",
             report.unresolved
         );
 
