@@ -90,6 +90,9 @@ impl EvidenceCollector for CleanFakeEvidenceCollector {
             ),
             git_state: self.state_of(path_of(id).unwrap_or_else(|| Path::new("")), budget.timeout),
             tool_liveness: self.is_running(id.kind.owning_tool(), budget.timeout),
+            executable_dependency: ProbeOutcome::Observed(
+                glomeris::evidence::ExecutableDependencyReport::empty(),
+            ),
         }
     }
 }

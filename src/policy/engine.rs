@@ -203,6 +203,13 @@ mod tests {
             git_state: ProbeOutcome::Observed(None),
             tool_liveness: ProbeOutcome::Observed(false),
             docker_lifecycle: None,
+            // HORO-1825: a clean-negative report by default, so every
+            // existing AutoSafe/Ask fixture built on an executable-bearing
+            // kind (CargoTargetDir etc.) stays Complete unless a test
+            // explicitly overrides this field.
+            executable_dependency: ProbeOutcome::Observed(
+                crate::evidence::ExecutableDependencyReport::empty(),
+            ),
             collected_at,
             sources: Vec::new(),
         }
@@ -311,6 +318,12 @@ mod tests {
         ev.open_by_process = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         ev.process_cwd_match = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         ev.git_state = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        // HORO-1825: CargoTargetDir now has a 7th required field. Leaving
+        // it Observed here would drop `missing.len()` from 6-of-6 to
+        // 6-of-7, turning `Failed` into `Partial` — this must stay
+        // Unavailable too for the test to keep asserting what its name
+        // says.
+        ev.executable_dependency = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::EvidenceProbeFailed]);

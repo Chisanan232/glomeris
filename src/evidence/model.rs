@@ -173,7 +173,23 @@ impl ResourceKind {
             EvidenceField::ProcessCwdMatch,
             EvidenceField::GitState,
         ];
-        const WITH_TOOL_LIVENESS: &[EvidenceField] = &[
+        // HORO-1825 §5: `ExecutableDependency` is required for the four
+        // kinds whose disposable cache can hide a next-invocation
+        // executable dependency (the HORO-1822 incident's own shape).
+        // Every other Path-locator kind still runs the probe (a positive
+        // match is PROTECTED regardless), but its failure does not block
+        // their completeness — they are download caches, documented as
+        // INFERRED risk only.
+        const WITHOUT_TOOL_LIVENESS_EXEC_DEP: &[EvidenceField] = &[
+            EvidenceField::LogicalBytes,
+            EvidenceField::ReclaimableBytes,
+            EvidenceField::LastModified,
+            EvidenceField::OpenByProcess,
+            EvidenceField::ProcessCwdMatch,
+            EvidenceField::GitState,
+            EvidenceField::ExecutableDependency,
+        ];
+        const WITH_TOOL_LIVENESS_EXEC_DEP: &[EvidenceField] = &[
             EvidenceField::LogicalBytes,
             EvidenceField::ReclaimableBytes,
             EvidenceField::LastModified,
@@ -181,6 +197,7 @@ impl ResourceKind {
             EvidenceField::ProcessCwdMatch,
             EvidenceField::GitState,
             EvidenceField::ToolLiveness,
+            EvidenceField::ExecutableDependency,
         ];
         /// The three path probes are *inapplicable* to a Docker object, not
         /// merely unobserved: a [`ResourceLocator::Tool`] resource has no
@@ -201,15 +218,16 @@ impl ResourceKind {
             EvidenceField::ToolLiveness,
         ];
         match self {
-            ResourceKind::XcodeDerivedData => WITH_TOOL_LIVENESS,
+            ResourceKind::XcodeDerivedData => WITH_TOOL_LIVENESS_EXEC_DEP,
             ResourceKind::DockerBuildCache
             | ResourceKind::DockerImage
             | ResourceKind::DockerContainer
             | ResourceKind::DockerVolume => DOCKER_OBJECT,
-            ResourceKind::HomebrewCache
-            | ResourceKind::CargoTargetDir
-            | ResourceKind::CargoRegistryCache
+            ResourceKind::CargoTargetDir
             | ResourceKind::NodeModules
+            | ResourceKind::SwiftPackageManagerBuildDir => WITHOUT_TOOL_LIVENESS_EXEC_DEP,
+            ResourceKind::HomebrewCache
+            | ResourceKind::CargoRegistryCache
             | ResourceKind::NodePackageManagerCache
             | ResourceKind::PipCache
             | ResourceKind::UvCache
@@ -218,9 +236,23 @@ impl ResourceKind {
             | ResourceKind::GradleCache
             | ResourceKind::MavenLocalRepository
             | ResourceKind::SwiftPackageManagerCache
-            | ResourceKind::SwiftPackageManagerBuildDir
             | ResourceKind::Unknown => WITHOUT_TOOL_LIVENESS,
         }
+    }
+
+    /// The four kinds for which [`EvidenceField::ExecutableDependency`] is
+    /// *required* (HORO-1825 §5) — i.e. an executable-bearing disposable
+    /// build/dependency cache. Every other `Path`-locator kind still runs
+    /// the probe (a positive match is PROTECTED regardless, via `classify`
+    /// step 2b), but `unresolved` findings on it never veto.
+    pub fn is_executable_bearing(&self) -> bool {
+        matches!(
+            self,
+            ResourceKind::CargoTargetDir
+                | ResourceKind::NodeModules
+                | ResourceKind::SwiftPackageManagerBuildDir
+                | ResourceKind::XcodeDerivedData
+        )
     }
 
     /// Stable, snake_case tag for this kind — the single source of truth
@@ -701,6 +733,9 @@ pub enum EvidenceField {
     ProcessCwdMatch,
     GitState,
     ToolLiveness,
+    /// HORO-1825: whether a recognized hook/daemon/LaunchAgent config or a
+    /// running process references a file inside this resource.
+    ExecutableDependency,
 }
 
 /// What each field *is*, in the words a user would use for it.
@@ -719,6 +754,9 @@ impl fmt::Display for EvidenceField {
             Self::ProcessCwdMatch => "whether a running process is working inside it",
             Self::GitState => "the state of its git repository",
             Self::ToolLiveness => "whether the tool that owns it is running",
+            Self::ExecutableDependency => {
+                "whether a configured hook or daemon depends on a file inside it"
+            }
         };
         write!(f, "{described}")
     }
@@ -730,6 +768,159 @@ impl fmt::Display for EvidenceField {
 pub struct ProcessRef {
     pub pid: u32,
     pub command: String,
+}
+
+/// Canonical filesystem identity of a resolved executable (HORO-1825
+/// §4.3). Path + device + inode only — never a name, version or content
+/// digest, which policy must not match on (§6 "naming spoofing" threat).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExeIdentity {
+    /// Canonical path of the final, non-symlink target.
+    pub path: PathBuf,
+    pub dev: u64,
+    pub ino: u64,
+}
+
+/// A closed, stable vocabulary naming which recognized config this
+/// reference came from (HORO-1825 §4.3). Never carries raw file content —
+/// only a structural pointer (see [`DependencyRef::pointer`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceTag {
+    ClaudeUserSettings,
+    ClaudeUserLocal,
+    ClaudeManaged,
+    /// `alias` is a display-safe label for the configured root this came
+    /// from (e.g. an index like `"root-0"`), never the real path.
+    ClaudeProject(String),
+    CodexHooks,
+    CodexNotify,
+    /// `alias` is the LaunchAgent's label, which is itself just a
+    /// reverse-DNS-shaped string already safe to show.
+    LaunchAgent(String),
+    PathEntry,
+}
+
+impl SourceTag {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceTag::ClaudeUserSettings => "claude_user_settings",
+            SourceTag::ClaudeUserLocal => "claude_user_local",
+            SourceTag::ClaudeManaged => "claude_managed",
+            SourceTag::ClaudeProject(_) => "claude_project",
+            SourceTag::CodexHooks => "codex_hooks",
+            SourceTag::CodexNotify => "codex_notify",
+            SourceTag::LaunchAgent(_) => "launch_agent",
+            SourceTag::PathEntry => "path_entry",
+        }
+    }
+}
+
+/// Whether a [`DependencyRef`]'s resolution came from reading an absolute
+/// (or `~/`-prefixed) path directly out of a recognized config
+/// (`Observed`), or from resolving a bare command name against Glomeris's
+/// own `PATH` (`Inferred`) — which §4.3's independent-review amendment
+/// says is NEVER sufficient on its own to conclude a clean negative,
+/// because the hook runtime's actual PATH may diverge from Glomeris's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    Observed,
+    Inferred,
+}
+
+/// One confirmed reference from a recognized source into a resource
+/// (HORO-1825 §4.3). A non-empty `Vec<DependencyRef>` on
+/// [`ExecutableDependencyReport::references_inside`] makes a resource
+/// unconditionally `PROTECTED` — see `classify` step 2b.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyRef {
+    pub source: SourceTag,
+    /// Structural location only, e.g. `"hooks.PostToolUse[0].hooks[1]"` —
+    /// never the raw command string (§4.3 "never captured").
+    pub pointer: String,
+    /// Canonical path of the final resolved target.
+    pub resolved: PathBuf,
+    pub exe: ExeIdentity,
+    pub provenance: Provenance,
+    /// `true` for a reference read from a config file (will run on the
+    /// *next* invocation of that hook/daemon); `false` for a reference
+    /// that only came from an already-running process.
+    pub next_invocation: bool,
+}
+
+/// A reference Glomeris could not resolve to a confirmed in/out verdict —
+/// the catch-all fail-closed bucket. A non-empty
+/// `Vec<UnresolvedRef>` on an executable-bearing kind's
+/// [`ExecutableDependencyReport::unresolved`] is `ASK
+/// ExecutableDependencyUnknown`, never a clean negative (§4.3, §8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnresolvedRef {
+    /// The command contained a shell metacharacter, an unbalanced quote,
+    /// or a relative (non-`~/`, non-absolute) path argument with no
+    /// defined resolution cwd.
+    NonInspectable { source: SourceTag, pointer: String },
+    /// A bare-name head did not resolve against Glomeris's own `PATH`.
+    NotOnPath { source: SourceTag, pointer: String },
+    /// A bare-name head DID resolve against Glomeris's own `PATH`, but
+    /// that is not sufficient to conclude a clean negative (PATH-shadowing
+    /// amendment, §4.3): the hook runtime's actual PATH may differ.
+    PathResolutionDivergent { source: SourceTag, pointer: String },
+    /// A recognized source file exists but could not be read, parsed, or
+    /// matched a known schema.
+    SourceUnreadable { source: SourceTag },
+    /// The symlink chain looped or exceeded the 40-hop bound.
+    SymlinkLoopOrTooDeep { source: SourceTag, pointer: String },
+}
+
+impl UnresolvedRef {
+    pub fn source(&self) -> &SourceTag {
+        match self {
+            UnresolvedRef::NonInspectable { source, .. }
+            | UnresolvedRef::NotOnPath { source, .. }
+            | UnresolvedRef::PathResolutionDivergent { source, .. }
+            | UnresolvedRef::SourceUnreadable { source }
+            | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. } => source,
+        }
+    }
+}
+
+/// Result of the HORO-1825 §4.3 executable-dependency correlation probe,
+/// run for every [`ResourceLocator::Path`] resource.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutableDependencyReport {
+    /// Non-empty => the resource is an installed executable dependency =>
+    /// `classify` step 2b sends it unconditionally to `PROTECTED`.
+    pub references_inside: Vec<DependencyRef>,
+    /// A currently-running process whose executable mapping (lsof `txt`)
+    /// resolves inside the resource. Non-empty => `ASK
+    /// ExecutableRunningFromResource` (`classify` step 6).
+    pub running_inside: Vec<ProcessRef>,
+    /// Non-empty => `ASK ExecutableDependencyUnknown` for an
+    /// executable-bearing kind (`classify` step 6) — a fail-closed catch
+    /// for every reference Glomeris could not clear.
+    pub unresolved: Vec<UnresolvedRef>,
+    /// Which recognized sources were actually examined, for display only
+    /// — never policy input.
+    pub sources_examined: Vec<SourceTag>,
+}
+
+impl ExecutableDependencyReport {
+    /// The clean-negative report: every recognized source was examined,
+    /// absent (ENOENT), and nothing in it or any running process pointed
+    /// inside the resource.
+    pub fn empty() -> Self {
+        Self {
+            references_inside: Vec::new(),
+            running_inside: Vec::new(),
+            unresolved: Vec::new(),
+            sources_examined: Vec::new(),
+        }
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.references_inside.is_empty()
+            && self.running_inside.is_empty()
+            && self.unresolved.is_empty()
+    }
 }
 
 /// Git repository state for a resource's containing directory, as
@@ -837,6 +1028,13 @@ pub struct Evidence {
     /// answers a question about the daemon rather than about the object.
     /// Whether *this* container is running is not derivable from it.
     pub docker_lifecycle: Option<DockerLifecycle>,
+    /// HORO-1825 §4.3: whether a recognized hook/daemon/LaunchAgent config
+    /// or a running process references a file inside this resource.
+    /// Populated for every [`ResourceLocator::Path`] resource;
+    /// `Unavailable(ProbeReason::NotAttempted)` for a
+    /// [`ResourceLocator::Tool`] resource, which has no path for the
+    /// probe to examine.
+    pub executable_dependency: ProbeOutcome<ExecutableDependencyReport>,
     pub collected_at: SystemTime,
     /// Bounded provenance notes (capped at `MAX_SOURCES` entries).
     pub sources: Vec<String>,
@@ -867,6 +1065,7 @@ impl Evidence {
                 EvidenceField::ProcessCwdMatch => self.process_cwd_match.is_observed(),
                 EvidenceField::GitState => self.git_state.is_observed(),
                 EvidenceField::ToolLiveness => self.tool_liveness.is_observed(),
+                EvidenceField::ExecutableDependency => self.executable_dependency.is_observed(),
             };
             if !observed {
                 missing.push(*field);
@@ -1020,6 +1219,7 @@ mod tests {
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             docker_lifecycle: None,
+            executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
@@ -1105,6 +1305,8 @@ mod tests {
         // fully-observed answer, not a missing one.
         evidence.git_state = ProbeOutcome::Observed(None);
         evidence.tool_liveness = ProbeOutcome::Observed(true);
+        evidence.executable_dependency =
+            ProbeOutcome::Observed(ExecutableDependencyReport::empty());
 
         assert_eq!(evidence.completeness(), Completeness::Complete);
         assert_eq!(evidence.confidence(), Confidence::High);
@@ -1132,6 +1334,8 @@ mod tests {
             evidence.process_cwd_match = ProbeOutcome::Observed(Vec::new());
             evidence.git_state = ProbeOutcome::Observed(None);
             evidence.tool_liveness = ProbeOutcome::Unavailable(ProbeReason::ToolNotRunning);
+            evidence.executable_dependency =
+                ProbeOutcome::Observed(ExecutableDependencyReport::empty());
 
             assert_eq!(
                 evidence.completeness(),

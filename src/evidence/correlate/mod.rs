@@ -10,6 +10,7 @@
 
 mod default;
 mod git;
+pub mod host_dependency;
 mod open_files;
 mod process;
 pub(crate) mod timeout;
@@ -17,12 +18,13 @@ mod tool_liveness;
 
 use std::time::Duration;
 
-use super::model::{Evidence, ResourceId};
+use super::model::{Evidence, ExecutableDependencyReport, ResourceId};
 use super::probe::ProbeOutcome;
 
 pub use super::model::{GitState, ProcessRef};
 pub use default::DefaultEvidenceCollector;
 pub use git::{GitCliProbe, GitProbe};
+pub use host_dependency::{HostDependencyProbe, HostDependencyRoots, LiveHostDependencyProbe};
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
 pub use tool_liveness::{SystemToolLivenessProbe, ToolLivenessProbe};
@@ -45,6 +47,10 @@ pub struct CorrelationResult {
     pub process_cwd_match: ProbeOutcome<Vec<ProcessRef>>,
     pub git_state: ProbeOutcome<Option<GitState>>,
     pub tool_liveness: ProbeOutcome<bool>,
+    /// HORO-1825 §4.3. `Unavailable(NotAttempted)` for a
+    /// [`crate::evidence::ResourceLocator::Tool`] resource, same as the
+    /// three path-based fields above.
+    pub executable_dependency: ProbeOutcome<ExecutableDependencyReport>,
 }
 
 /// A single-resource correlation collector. See the module docs for why
@@ -65,6 +71,7 @@ pub fn merge_into(evidence: &mut Evidence, result: CorrelationResult) {
     evidence.process_cwd_match = result.process_cwd_match;
     evidence.git_state = result.git_state;
     evidence.tool_liveness = result.tool_liveness;
+    evidence.executable_dependency = result.executable_dependency;
 }
 
 #[cfg(test)]
@@ -105,6 +112,7 @@ mod tests {
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             docker_lifecycle: None,
+            executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
@@ -121,6 +129,9 @@ mod tests {
             process_cwd_match: ProbeOutcome::Observed(Vec::new()),
             git_state: ProbeOutcome::Observed(None),
             tool_liveness: ProbeOutcome::Observed(false),
+            executable_dependency: ProbeOutcome::Observed(
+                crate::evidence::ExecutableDependencyReport::empty(),
+            ),
         };
 
         merge_into(&mut evidence, result);
@@ -157,6 +168,7 @@ mod tests {
             process_cwd_match: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
             git_state: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
+            executable_dependency: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
         };
 
         merge_into(&mut evidence, result);

@@ -204,6 +204,9 @@ fn candidate(target: &Path, repo_root: &Path, local: &Local) -> (Evidence, Polic
         })),
         tool_liveness: ProbeOutcome::Observed(false),
         docker_lifecycle: None,
+        executable_dependency: ProbeOutcome::Observed(
+            glomeris::evidence::ExecutableDependencyReport::empty(),
+        ),
         collected_at: collected_at(),
         sources: Vec::new(),
     };

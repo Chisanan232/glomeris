@@ -350,6 +350,7 @@ fn container_evidence(entry: &Value, id: &str, detector: DetectorId) -> Evidence
             // is the one distinction `DockerReferences` exists to keep.
             references: ProbeOutcome::Observed(DockerReferences::none()),
         }),
+        executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         collected_at: SystemTime::now(),
         sources: vec![SOURCE.to_string()],
     }
@@ -573,6 +574,7 @@ fn image_evidence(
             persistence: DockerPersistence::Unknown,
             references,
         }),
+        executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         collected_at: SystemTime::now(),
         sources: vec![SOURCE.to_string()],
     }
@@ -759,6 +761,7 @@ fn volume_evidence(
             },
             references,
         }),
+        executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         collected_at: SystemTime::now(),
         sources: vec![SOURCE.to_string()],
     }

@@ -59,7 +59,7 @@
 
 use glomeris::actions::ActionRegistry;
 use glomeris::evidence::{
-    Evidence, GitState, NativeCleanup, ProbeOutcome, ProcessRef, Recoverability,
+    Evidence, GitState, NativeCleanup, ProbeOutcome, ProbeReason, ProcessRef, Recoverability,
     ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
 };
 use glomeris::planner::GraphProjection;
@@ -172,6 +172,7 @@ fn candidate_for(target: &Path, in_use: bool) -> (Evidence, PolicyDecision) {
         })),
         tool_liveness: ProbeOutcome::Observed(false),
         docker_lifecycle: None,
+        executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         collected_at: collected_at(),
         sources: Vec::new(),
     };

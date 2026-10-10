@@ -1140,6 +1140,13 @@ mod tests {
             git_state: ProbeOutcome::Observed(None),
             tool_liveness: ProbeOutcome::Observed(false),
             docker_lifecycle: None,
+            // HORO-1825: CargoTargetDir (and the other executable-bearing
+            // kinds) now require this field for `Completeness::Complete`
+            // — a clean negative, matching this helper's otherwise-clean
+            // correlation fields above.
+            executable_dependency: ProbeOutcome::Observed(
+                crate::evidence::ExecutableDependencyReport::empty(),
+            ),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
