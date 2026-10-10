@@ -29,8 +29,8 @@ pub use host_dependency::{HostDependencyProbe, HostDependencyRoots, LiveHostDepe
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
 pub use process_identity::{
-    build_lock_holder, identity_tuple_matches, LiveProcessIdentityProbe, ProcessIdentityProbe,
-    ProcessIdentityRoots,
+    build_lock_holder, derive_claim, identity_tuple_matches, LiveProcessIdentityProbe,
+    ProcessIdentityProbe, ProcessIdentityRoots,
 };
 pub use tool_liveness::{SystemToolLivenessProbe, ToolLivenessProbe};
 

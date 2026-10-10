@@ -23,7 +23,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use super::timeout::{run_with_timeout, CommandOutcome};
-use crate::evidence::model::{ExeIdentity, ProcessIdentity, Supervisor};
+use crate::evidence::model::{ExeIdentity, ProcessClaim, ProcessIdentity, Supervisor};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
 
 /// Injectable binary paths for the identity probes. Defaults to bare
@@ -330,6 +330,38 @@ fn parse_lstart(raw: &str, date_bin: &Path, timeout: Duration) -> Option<SystemT
     }
 }
 
+/// Evidence-only explanation of why a holder looks the way it does
+/// (ADR-0001 §4.1 / §5, HORO-1823). **Pure, and deliberately accepts no
+/// external or remote state** (no Jira status, no branch-merged flag, no
+/// clock) — that is the structural proof that a claim can never be C6
+/// "remote-state contradiction" material, and the structural proof this
+/// ticket's AC asks for that a claim can never act as authority: nothing
+/// upstream of `classify`/`is_preauthorizable` calls this function at
+/// all, and this function itself has nothing to read that `classify`
+/// doesn't already see independently.
+///
+/// A single evidence-collection pass has no second sample to compare CPU
+/// time against, so this only ever returns [`ProcessClaim::IdleButValid`]
+/// (supervised by `launchd`, successfully identified, not a zombie) or
+/// [`ProcessClaim::Unknown`] (everything else: probe failure, zombie,
+/// unsupervised/unknown supervisor). [`ProcessClaim::Active`],
+/// [`ProcessClaim::Stalled`] and [`ProcessClaim::AbandonedCandidate`] are
+/// reserved for a future multi-sample caller (HORO-1827's observation
+/// history) that can establish a CPU-progress dimension this function
+/// does not have.
+pub fn derive_claim(identity: &ProbeOutcome<ProcessIdentity>) -> ProcessClaim {
+    let Some(identity) = identity.observed() else {
+        return ProcessClaim::Unknown;
+    };
+    if identity.state_zombie {
+        return ProcessClaim::Unknown;
+    }
+    match identity.supervisor {
+        Supervisor::LaunchdJob => ProcessClaim::IdleButValid,
+        Supervisor::None | Supervisor::Unknown => ProcessClaim::Unknown,
+    }
+}
+
 /// The identity key for any cross-sample comparison (ADR-0001 §4.1):
 /// `(pid, start_time, uid, exe.dev, exe.ino)`. Both identities must have
 /// an `Observed` `exe` for the tuple to be comparable at all — an
@@ -414,6 +446,103 @@ pub fn build_lock_holder(
         CommandOutcome::NotFound => ProbeOutcome::Unavailable(ProbeReason::ToolAbsent),
         CommandOutcome::TimedOut => ProbeOutcome::Unavailable(ProbeReason::TimedOut),
         CommandOutcome::SpawnFailed => ProbeOutcome::Unavailable(ProbeReason::Failed),
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+    use crate::evidence::model::ProcessClaim;
+
+    fn identity(supervisor: Supervisor, state_zombie: bool) -> ProcessIdentity {
+        ProcessIdentity {
+            start_time: SystemTime::UNIX_EPOCH,
+            uid: 501,
+            ppid: 1,
+            pgid: 1,
+            state_zombie,
+            exe: ProbeOutcome::Unavailable(ProbeReason::Failed),
+            supervisor,
+        }
+    }
+
+    /// Any probe failure (`Unavailable`) is `Unknown`, never defaulted to
+    /// any other claim — covers "failed lsof"/"failed ps" from the AC's
+    /// "remain uncertain" list by construction (there is no way for a
+    /// probe failure to reach any branch other than this one).
+    #[test]
+    fn unavailable_identity_is_unknown() {
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Unavailable(ProbeReason::Failed)),
+            ProcessClaim::Unknown
+        );
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Unavailable(ProbeReason::TimedOut)),
+            ProcessClaim::Unknown
+        );
+    }
+
+    /// A zombie is never read as a legitimate idle daemon, regardless of
+    /// what `launchctl` says about it.
+    #[test]
+    fn zombie_is_unknown_even_if_supervised() {
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Observed(identity(
+                Supervisor::LaunchdJob,
+                true
+            ))),
+            ProcessClaim::Unknown
+        );
+    }
+
+    /// Unknown supervisor (launchctl failed, or PPID==1 with no positive
+    /// match) is Unknown, never silently resolved to "safe".
+    #[test]
+    fn unknown_supervisor_is_unknown() {
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Observed(identity(
+                Supervisor::Unknown,
+                false
+            ))),
+            ProcessClaim::Unknown
+        );
+    }
+
+    /// A positively-confirmed non-launchd process (e.g. a plain
+    /// interactive shell build) is also Unknown from a single pass — it
+    /// is explicitly NOT read as "abandoned", since that claim requires
+    /// multi-sample progress history this probe does not have.
+    #[test]
+    fn unsupervised_process_is_unknown_not_abandoned_from_one_pass() {
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Observed(identity(Supervisor::None, false))),
+            ProcessClaim::Unknown
+        );
+    }
+
+    /// The one positive claim a single pass can make: a live,
+    /// non-zombie process that `launchctl` positively confirms as a
+    /// supervised job.
+    #[test]
+    fn launchd_supervised_process_is_idle_but_valid() {
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Observed(identity(
+                Supervisor::LaunchdJob,
+                false
+            ))),
+            ProcessClaim::IdleButValid
+        );
+    }
+
+    /// Structural proof of C6: `derive_claim`'s signature has exactly one
+    /// parameter, and it is this process's own identity — there is no
+    /// place to pass a Jira status, a branch-merged flag, or any other
+    /// external fact into this function. (If this function's signature
+    /// ever grows such a parameter, this test's call site breaks loudly
+    /// at the call, not silently at runtime.)
+    #[test]
+    fn derive_claim_takes_no_external_state() {
+        let _: fn(&ProbeOutcome<ProcessIdentity>) -> ProcessClaim = derive_claim;
     }
 }
 

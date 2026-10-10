@@ -387,6 +387,90 @@ mod tests {
         assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
     }
 
+    /// HORO-1823 ADR-0001 §13 item 2 ("detached still-active build"): a
+    /// cargo build detached from its launching terminal — PPID == 1,
+    /// supervisor `Unknown` (not a launchd job, not reparented to
+    /// anything `launchctl` recognizes), zombie `false` — must still
+    /// veto. The holder's mere presence is what protects it; nothing
+    /// about its identity (orphaned-looking PPID, unknown supervision)
+    /// is read as "therefore safe". Manually verified during review: with
+    /// the `process_active` check (the two lines above step 6's first
+    /// `if`) deleted, this test fails RED — see the PR body for the
+    /// captured failing output.
+    #[test]
+    fn detached_still_active_build_is_protected_regardless_of_identity() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let detached = crate::evidence::ProcessRef::new(4242, "cargo".to_string()).with_identity(
+            ProbeOutcome::Observed(crate::evidence::ProcessIdentity {
+                start_time: NOW,
+                uid: 501,
+                ppid: 1,
+                pgid: 4242,
+                state_zombie: false,
+                exe: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                supervisor: crate::evidence::Supervisor::Unknown,
+            }),
+        );
+        ev.open_by_process = ProbeOutcome::Observed(vec![detached]);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+    }
+
+    /// Identity-invariance: with the holder set fixed, varying only the
+    /// `identity` field across Observed / Unavailable / zombie / a
+    /// different (mismatched) identity tuple must never change
+    /// `classify`'s decision. This is the structural proof that identity
+    /// and (by extension) any derived claim never act as authority —
+    /// `classify` doesn't read `identity` at all, and this test would
+    /// catch a regression that made it start to.
+    #[test]
+    fn classify_decision_is_invariant_to_process_identity_variations() {
+        fn decision_with(identity: ProbeOutcome<crate::evidence::ProcessIdentity>) -> PolicyClass {
+            let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+            ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+                7,
+                "cargo".to_string(),
+            )
+            .with_identity(identity)]);
+            classify(&ev, &cfg(), NOW).class
+        }
+
+        let healthy = crate::evidence::ProcessIdentity {
+            start_time: NOW,
+            uid: 501,
+            ppid: 1,
+            pgid: 7,
+            state_zombie: false,
+            exe: ProbeOutcome::Observed(crate::evidence::ExeIdentity {
+                path: PathBuf::from("/usr/bin/cargo"),
+                dev: 1,
+                ino: 1,
+            }),
+            supervisor: crate::evidence::Supervisor::LaunchdJob,
+        };
+        let zombie = crate::evidence::ProcessIdentity {
+            state_zombie: true,
+            ..healthy.clone()
+        };
+        let mismatched_tuple = crate::evidence::ProcessIdentity {
+            uid: 999,
+            ..healthy.clone()
+        };
+
+        let baseline = decision_with(ProbeOutcome::Observed(healthy));
+        assert_eq!(baseline, PolicyClass::Ask);
+        assert_eq!(
+            decision_with(ProbeOutcome::Unavailable(ProbeReason::Failed)),
+            baseline
+        );
+        assert_eq!(decision_with(ProbeOutcome::Observed(zombie)), baseline);
+        assert_eq!(
+            decision_with(ProbeOutcome::Observed(mismatched_tuple)),
+            baseline
+        );
+    }
+
     #[test]
     fn dirty_git_worktree_is_ask() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);

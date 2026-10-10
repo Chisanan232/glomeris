@@ -229,19 +229,13 @@ pub fn active_use_signals(ev: &Evidence) -> Vec<String> {
 
     if let Some(procs) = ev.open_by_process.observed() {
         if !procs.is_empty() {
-            let names: Vec<String> = procs
-                .iter()
-                .map(|p| format!("{}(pid {})", p.command, p.pid))
-                .collect();
+            let names: Vec<String> = procs.iter().map(describe_process_with_claim).collect();
             signals.push(format!("open by process: {}", names.join(", ")));
         }
     }
     if let Some(procs) = ev.process_cwd_match.observed() {
         if !procs.is_empty() {
-            let names: Vec<String> = procs
-                .iter()
-                .map(|p| format!("{}(pid {})", p.command, p.pid))
-                .collect();
+            let names: Vec<String> = procs.iter().map(describe_process_with_claim).collect();
             signals.push(format!("process cwd match: {}", names.join(", ")));
         }
     }
@@ -258,6 +252,34 @@ pub fn active_use_signals(ev: &Evidence) -> Vec<String> {
     }
 
     signals
+}
+
+/// Human-readable `"<command>(pid <pid>) [claim: <claim>]"` for one
+/// holder, local-report only (never the LLM-facing surface — see
+/// `src/planner/dto.rs`, which never carries a pid or a claim). The claim
+/// (HORO-1823 §4.1/§5) is explanation only: it is computed here, purely
+/// from this one `ProcessRef`'s own `identity`, and is never read by
+/// `classify` or `is_preauthorizable` — it cannot change whether this
+/// holder vetoes, only how the veto is explained.
+fn describe_process_with_claim(p: &crate::evidence::ProcessRef) -> String {
+    let claim = crate::evidence::derive_claim(&p.identity);
+    format!(
+        "{}(pid {}) [claim: {}]",
+        p.command,
+        p.pid,
+        process_claim_label(claim)
+    )
+}
+
+fn process_claim_label(claim: crate::evidence::ProcessClaim) -> &'static str {
+    use crate::evidence::ProcessClaim;
+    match claim {
+        ProcessClaim::Active => "active",
+        ProcessClaim::IdleButValid => "idle_but_valid",
+        ProcessClaim::Stalled => "stalled",
+        ProcessClaim::AbandonedCandidate => "abandoned_candidate",
+        ProcessClaim::Unknown => "unknown",
+    }
 }
 
 /// `glomeris status` report.
