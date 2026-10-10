@@ -5,8 +5,8 @@
 > Chat context will be lost across sessions; this file will not.
 
 - **Owning Epic:** HORO-1043 — Glomeris MVP 2.0 — Interactive Daily Driver / Trustworthy Recovery UX
-- **Active tickets:** HORO-1823 (In Progress — implementation running). HORO-1824 intentionally not started in parallel (file-overlap risk with 1823 on `evidence/model.rs`/`policy/engine.rs`; run sequentially).
-- **Last session state (2026-10-11):** HORO-1822 (ADR-0001, PR #156), HORO-1825 (PR #157, 4 independent-review rounds, mutation-tested), and HORO-1827 (PR #158) are all merged to `main` and Jira-Done. Founder approved all 3 of ADR-0001 §16's open decisions on 2026-10-10 — recorded in ADR-0001 §16 directly. HORO-1823 implementation is now running per the ADR's Phase 2 ordering (after 1825, since both touch `ProcessRef`).
+- **Active ticket:** HORO-1826 (Phase 3, implementation starting — now unblocked, all of 1823/1824/1825 merged).
+- **Last session state (2026-10-11):** Phase 1 + Phase 2 of the campaign are fully complete and merged: HORO-1822 (ADR-0001, PR #156), HORO-1825 (PR #157, 4 review rounds), HORO-1827 (PR #158), HORO-1823 (PR #160, 1 review round + 1 found/fixed timeout-budget bug), HORO-1824 (PR #161, 2 review rounds — round 1 caught a real untrusted-`rust-toolchain.toml` code-execution risk in `cargo metadata` invocation plus a workspace/source-overlap scope bug; round 2 caught 2 more real gaps in those same two fixes). All Jira-Done. Founder approved all 3 of ADR-0001 §16's open decisions on 2026-10-10 — recorded in ADR-0001 §16 directly.
 
 Jira tickets, raw per-ticket content, and the full dependency DAG were written this
 session to the scratchpad at:
@@ -24,10 +24,10 @@ below so this file is self-contained.
 | HVDL-26 | Idea (Polaris) | Researching | - | Glomeris — evidence-first, policy-constrained developer storage autopilot |
 | HORO-1043 | Epic | (not independently re-fetched) | - | Glomeris MVP 2.0 — Interactive Daily Driver / Trustworthy Recovery UX |
 | HORO-1822 | Story | **Done** | High | [Post-Incident] Reconstruct full-disk rescue and approve process-aware recovery architecture — ADR-0001, PR #156 |
-| HORO-1823 | Story | **In Progress** | High | [Process Evidence] Distinguish abandoned builds from valid idle daemons without automatic kill authority — **ACTIVE** |
-| HORO-1824 | Story | To Do | High | [Cargo] Reconcile target-dir ownership and safe scoped cleanup across shared and local builds |
+| HORO-1823 | Story | **Done** | High | [Process Evidence] Distinguish abandoned builds from valid idle daemons without automatic kill authority — PR #160, `main`@d3b155d |
+| HORO-1824 | Story | **Done** | High | [Cargo] Reconcile target-dir ownership and safe scoped cleanup across shared and local builds — PR #161, `main`@7b747ea |
 | HORO-1825 | Story | **Done** | **Highest** | [Executable Safety] Protect configured agent-hook binaries residing in disposable build caches — PR #157, `main`@07cffa5 |
-| HORO-1826 | Story | To Do | High | [Recovery Integrity] Verify post-cleanup function and honest degradation beyond free bytes |
+| HORO-1826 | Story | **In Progress** | High | [Recovery Integrity] Verify post-cleanup function and honest degradation beyond free bytes — **ACTIVE** |
 | HORO-1827 | Story | **Done** | Medium | [Pressure History] Observe 12h stability and honestly plan safe recovery toward 1 TiB free — PR #158, `main`@1b41814 |
 | HORO-1828 | Story | To Do | Medium | [Operator UX] Explain uncertain process ownership, blocked cleanup and rebuild blast radius |
 | HORO-1829 | Story | To Do | High | [Independent QA] Prove process-aware recovery and no hook regressions on real multi-agent macOS |
@@ -124,14 +124,13 @@ HORO-1825 took 4 independent review rounds; each of rounds 1-3 found a real fail
 
 ## Status line
 
-> HORO-1822, HORO-1825, HORO-1827 merged and Done. HORO-1823 implementation
-> running (branch `v0.1.0/HORO-1823/feat/process_liveness_evidence`).
-> HORO-1824 deliberately not started in parallel — same-file overlap risk
-> with 1823 on `src/evidence/model.rs`/`src/policy/engine.rs`; run next,
-> sequentially, once 1823 merges. HORO-1826/1828/1829/1629/1073 not yet
-> started. A secret (local test-DB credential, unrelated horologium repo,
-> disposable/localhost-only) was found exposed in an earlier session's
-> incident-evidence scratchpad file — flagged for rotation, deliberately
-> not rotated by the agent (would have disrupted other concurrent sessions'
-> test runs for no safety gain since it was never reachable off localhost),
-> not committed anywhere, not reproduced in this file or the ADR.
+> Phase 1 (1822/1825/1827) and Phase 2 (1823/1824) complete, merged, Done.
+> HORO-1826 implementation starting (Phase 3). HORO-1828/1829/1629/1073
+> not yet started. Every merged ticket went through at least one
+> independent review round that found and fixed a real issue — none
+> merged clean on the first pass. A secret (local test-DB credential,
+> unrelated horologium repo, disposable/localhost-only) was found exposed
+> in an earlier session's incident-evidence scratchpad file — flagged for
+> rotation, deliberately not rotated (would have disrupted other
+> concurrent sessions' test runs for no safety gain since it was never
+> reachable off localhost), not committed anywhere, not reproduced here.
