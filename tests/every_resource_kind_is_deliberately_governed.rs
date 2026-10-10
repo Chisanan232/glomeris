@@ -156,6 +156,18 @@ fn cleanest_evidence(kind: ResourceKind) -> Evidence {
         } else {
             ProbeOutcome::Observed(glomeris::evidence::ExecutableDependencyReport::empty())
         },
+        // HORO-1824: same "clean default" shape as `executable_dependency`
+        // above — only CargoTargetDir carries the concept at all, and a
+        // Local scope is its cleanest honest answer.
+        cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
+            ProbeOutcome::Observed(glomeris::evidence::CargoTargetScope {
+                resolved_target: unprotected_path(kind),
+                resolved_build_dir: None,
+                workspace_root: PathBuf::from("/tmp/glomeris-governance-gate"),
+                scope: glomeris::evidence::TargetScope::Local,
+                is_direct_locator: true,
+            })
+        }),
         collected_at: NOW,
         sources: Vec::new(),
     }
@@ -307,6 +319,11 @@ fn a_wholly_failed_probe_set_denies_auto_safe_to_every_kind() {
             // instead of `EvidenceProbeFailed`, which is what this test
             // pins.
             evidence.executable_dependency = ProbeOutcome::Unavailable(ProbeReason::Failed);
+        }
+        // HORO-1824: same reasoning as `executable_dependency` above, for
+        // CargoTargetDir's 8th required field.
+        if *kind == ResourceKind::CargoTargetDir {
+            evidence.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
         }
 
         let decision = classify(&evidence, &cfg(), NOW);

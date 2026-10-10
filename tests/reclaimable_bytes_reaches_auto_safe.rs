@@ -119,6 +119,27 @@ fn real_cargo_detector_evidence_reaches_auto_safe_with_clean_correlation() {
     let target_dir = project_root.join("target");
     fs::create_dir_all(&target_dir).expect("create target dir");
 
+    // HORO-1824: a real manifest (so `cargo metadata` can resolve
+    // `cargo_target_scope`, now a required field for CargoTargetDir
+    // completeness) plus a project-local `.cargo/config.toml` pinning
+    // `target-dir` locally — overriding any machine-wide
+    // `~/.cargo/config.toml` redirect the developer running this test
+    // happens to have (see `~/.claude/CLAUDE.md`'s own documented
+    // incident on this exact machine).
+    fs::write(
+        project_root.join("Cargo.toml"),
+        "[package]\nname = \"glomeris-reclaimable-proof-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .expect("write fixture manifest");
+    fs::create_dir_all(project_root.join("src")).expect("create fixture src dir");
+    fs::write(project_root.join("src/lib.rs"), "").expect("write fixture lib.rs");
+    fs::create_dir_all(project_root.join(".cargo")).expect("create fixture .cargo dir");
+    fs::write(
+        project_root.join(".cargo/config.toml"),
+        "[build]\ntarget-dir = \"target\"\n",
+    )
+    .expect("write fixture cargo config");
+
     // Two files directly at the top level of `target/`, plus one nested
     // two levels down (HORO-1016): `estimate_logical_bytes` is bounded but
     // recursive, so all three must be counted, not just the top-level

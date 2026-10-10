@@ -870,6 +870,16 @@ enum GlomerisVocabulary {
             return prose(token, reasonAxis, "Could not confirm no dependency",
                          "A hook, daemon or LaunchAgent reference could not be fully "
                              + "checked, so Glomeris will not assume it is safe.")
+        case "shared_build_cache_blast_radius":
+            return prose(token, reasonAxis, "Shared by other projects",
+                         "Cargo's own configuration resolves this build cache outside "
+                             + "this project, so an unknown number of other projects may "
+                             + "share it. Cleaning it would force a cold rebuild for all "
+                             + "of them.")
+        case "target_ownership_unknown":
+            return prose(token, reasonAxis, "Could not confirm ownership",
+                         "Cargo's own configuration could not be read, so Glomeris could "
+                             + "not confirm whether this build cache is local or shared.")
         default:
             return unrecognised(
                 token, reasonAxis, "Unrecognised reason",

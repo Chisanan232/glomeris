@@ -16,10 +16,10 @@ pub use docker::{
     daemon_unreachable, DockerActivity, DockerLifecycle, DockerPersistence, DockerReferences,
 };
 pub use model::{
-    decode_fingerprint_token, encode_fingerprint_token, ActionId, Completeness, Confidence,
-    DependencyRef, Evidence, EvidenceField, ExeIdentity, ExecutableDependencyReport,
+    decode_fingerprint_token, encode_fingerprint_token, ActionId, CargoTargetScope, Completeness,
+    Confidence, DependencyRef, Evidence, EvidenceField, ExeIdentity, ExecutableDependencyReport,
     FingerprintTokenError, GitState, NativeCleanup, OwningTool, ProcessClaim, ProcessIdentity,
     ProcessRef, Provenance, Recoverability, Regenerability, ResourceFingerprint, ResourceId,
-    ResourceKind, ResourceLocator, SourceTag, Supervisor, UnresolvedRef,
+    ResourceKind, ResourceLocator, SourceTag, Supervisor, TargetScope, UnresolvedRef,
 };
 pub use probe::{ProbeOutcome, ProbeReason};

@@ -199,6 +199,20 @@ impl ResourceKind {
             EvidenceField::ToolLiveness,
             EvidenceField::ExecutableDependency,
         ];
+        // HORO-1824 §5: the one kind (CargoTargetDir) that also requires
+        // `TargetOwnership` — split out from `WITHOUT_TOOL_LIVENESS_EXEC_DEP`
+        // so NodeModules/SwiftPackageManagerBuildDir, which have no Cargo
+        // target-dir concept, are not forced to resolve one.
+        const CARGO_TARGET_DIR_FIELDS: &[EvidenceField] = &[
+            EvidenceField::LogicalBytes,
+            EvidenceField::ReclaimableBytes,
+            EvidenceField::LastModified,
+            EvidenceField::OpenByProcess,
+            EvidenceField::ProcessCwdMatch,
+            EvidenceField::GitState,
+            EvidenceField::ExecutableDependency,
+            EvidenceField::TargetOwnership,
+        ];
         /// The three path probes are *inapplicable* to a Docker object, not
         /// merely unobserved: a [`ResourceLocator::Tool`] resource has no
         /// path for `lsof` or `git` to be pointed at, so
@@ -223,9 +237,10 @@ impl ResourceKind {
             | ResourceKind::DockerImage
             | ResourceKind::DockerContainer
             | ResourceKind::DockerVolume => DOCKER_OBJECT,
-            ResourceKind::CargoTargetDir
-            | ResourceKind::NodeModules
-            | ResourceKind::SwiftPackageManagerBuildDir => WITHOUT_TOOL_LIVENESS_EXEC_DEP,
+            ResourceKind::CargoTargetDir => CARGO_TARGET_DIR_FIELDS,
+            ResourceKind::NodeModules | ResourceKind::SwiftPackageManagerBuildDir => {
+                WITHOUT_TOOL_LIVENESS_EXEC_DEP
+            }
             ResourceKind::HomebrewCache
             | ResourceKind::CargoRegistryCache
             | ResourceKind::NodePackageManagerCache
@@ -736,6 +751,10 @@ pub enum EvidenceField {
     /// HORO-1825: whether a recognized hook/daemon/LaunchAgent config or a
     /// running process references a file inside this resource.
     ExecutableDependency,
+    /// HORO-1824 §5: whether Cargo's own config-resolved target-dir
+    /// identity/scope was established. Required for
+    /// [`ResourceKind::CargoTargetDir`] only.
+    TargetOwnership,
 }
 
 /// What each field *is*, in the words a user would use for it.
@@ -756,6 +775,9 @@ impl fmt::Display for EvidenceField {
             Self::ToolLiveness => "whether the tool that owns it is running",
             Self::ExecutableDependency => {
                 "whether a configured hook or daemon depends on a file inside it"
+            }
+            Self::TargetOwnership => {
+                "whether Cargo's own config resolves this target directory locally or shares it"
             }
         };
         write!(f, "{described}")
@@ -1019,6 +1041,64 @@ impl UnresolvedRef {
     }
 }
 
+/// Cargo's ownership relationship to its own config-resolved target
+/// directory, relative to the workspace root a detector discovered it
+/// under (HORO-1824 §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetScope {
+    /// `canonical(resolved_target)` is under `canonical(workspace_root)`,
+    /// and the discovered locator equals it — the ordinary, single-owner
+    /// case.
+    Local,
+    /// The locator is `<root>/target`, but the root's own `cargo
+    /// metadata` resolution lands elsewhere (pre-shared-config
+    /// leftovers: a directory nothing points at any more).
+    Orphan,
+    /// `canonical(resolved_target)` is outside `workspace_root` — a
+    /// global config, a nested config, or a symlinked-out `target/`.
+    /// Fan-out is unbounded: any workspace on the machine may share it.
+    /// **Permanently non-preauthorizable** (ADR-0001 §16.2, founder-
+    /// settled) — see `crate::policy::ReasonCode::SharedBuildCacheBlastRadius`.
+    Redirected,
+}
+
+/// Cargo target ownership, as resolved by `cargo metadata
+/// --format-version 1 --no-deps --offline` (HORO-1824 §4.2). Every path
+/// here is canonicalized before comparison; never derived by raw string
+/// equality (macOS `/var` vs `/private/var` makes that method lie).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CargoTargetScope {
+    /// Canonical `target_directory` cargo itself reports.
+    pub resolved_target: PathBuf,
+    /// Canonical `build_directory`, when cargo reports one distinct from
+    /// `resolved_target` — report-only, never a policy input.
+    pub resolved_build_dir: Option<PathBuf>,
+    /// Canonical `workspace_root` cargo itself reports.
+    pub workspace_root: PathBuf,
+    pub scope: TargetScope,
+    /// Whether the resource THIS evidence is about is literally
+    /// `<project_root>/target` for the SAME project root cargo metadata
+    /// was just run against — `false` for a resource surfaced via
+    /// discovery widening (HORO-1824 §4.2), or for any resource whose
+    /// locator does not match its own project root's plain target dir.
+    ///
+    /// Security-critical (flagged by independent review): this field,
+    /// NOT `scope` alone, is what `classify()` uses to decide whether
+    /// `Orphan`/`Local` may pass without a veto. The naive "compare
+    /// `scope` alone" design has a real gap — a widened resource's own
+    /// `locator` always trivially equals the `resolved_target` it was
+    /// discovered at, so re-resolving scope against it at REVALIDATION
+    /// time (a different call than discovery, with no memory of why this
+    /// resource was ever surfaced) can recompute `Local` even though
+    /// discovery-time correctly saw `Orphan`/`Redirected` from a
+    /// contributing root's perspective. Keying the veto on
+    /// `is_direct_locator` instead closes that gap: it is recomputed the
+    /// same way at every call (`canonical(locator) ==
+    /// canonical(project_root.join("target"))`), so it cannot silently
+    /// flip permissive between discovery and execution.
+    pub is_direct_locator: bool,
+}
+
 /// Result of the HORO-1825 §4.3 executable-dependency correlation probe,
 /// run for every [`ResourceLocator::Path`] resource.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1171,6 +1251,14 @@ pub struct Evidence {
     /// [`ResourceLocator::Tool`] resource, which has no path for the
     /// probe to examine.
     pub executable_dependency: ProbeOutcome<ExecutableDependencyReport>,
+    /// HORO-1824 §4.2: Cargo's own config-resolved target-dir identity and
+    /// ownership scope. `Some(_)` only for [`ResourceKind::CargoTargetDir`]
+    /// — `None` for every other kind, meaning "the concept does not
+    /// apply" (same convention as [`Self::docker_lifecycle`]), never
+    /// "unknown". `Some(Unavailable(_))` is the fail-closed shape for a
+    /// `cargo metadata` resolver that is absent, timed out, or failed —
+    /// see [`crate::detectors::cargo::resolve_cargo_target_scope`].
+    pub cargo_target_scope: Option<ProbeOutcome<CargoTargetScope>>,
     pub collected_at: SystemTime,
     /// Bounded provenance notes (capped at `MAX_SOURCES` entries).
     pub sources: Vec<String>,
@@ -1202,6 +1290,18 @@ impl Evidence {
                 EvidenceField::GitState => self.git_state.is_observed(),
                 EvidenceField::ToolLiveness => self.tool_liveness.is_observed(),
                 EvidenceField::ExecutableDependency => self.executable_dependency.is_observed(),
+                // `None` (the "does not apply" shape for a non-Cargo kind)
+                // is never reached here because `TargetOwnership` is only
+                // ever in `required_evidence()` for `CargoTargetDir`,
+                // which always populates `Some(_)` — see
+                // `crate::detectors::cargo::CargoDetector` and
+                // `crate::executor::build_fresh_evidence`. Treat a `None`
+                // defensively as NOT observed (fail closed) rather than
+                // panicking or silently passing.
+                EvidenceField::TargetOwnership => matches!(
+                    &self.cargo_target_scope,
+                    Some(outcome) if outcome.is_observed()
+                ),
             };
             if !observed {
                 missing.push(*field);
@@ -1356,6 +1456,7 @@ mod tests {
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             docker_lifecycle: None,
             executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            cargo_target_scope: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
@@ -1443,9 +1544,42 @@ mod tests {
         evidence.tool_liveness = ProbeOutcome::Observed(true);
         evidence.executable_dependency =
             ProbeOutcome::Observed(ExecutableDependencyReport::empty());
+        evidence.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+            resolved_target: PathBuf::from("/tmp/x"),
+            resolved_build_dir: None,
+            workspace_root: PathBuf::from("/tmp"),
+            scope: TargetScope::Local,
+            is_direct_locator: true,
+        }));
 
         assert_eq!(evidence.completeness(), Completeness::Complete);
         assert_eq!(evidence.confidence(), Confidence::High);
+    }
+
+    /// HORO-1824 §5: `TargetOwnership` is required for `CargoTargetDir`
+    /// specifically. A `None` (the "kind does not apply" shape) must be
+    /// read as NOT observed, never silently skipped — otherwise a
+    /// detector bug that forgot to populate the field on a Cargo resource
+    /// would be invisible to `completeness()`.
+    #[test]
+    fn missing_cargo_target_scope_on_cargo_kind_is_not_observed() {
+        let mut evidence = base_evidence(ResourceKind::CargoTargetDir);
+        evidence.logical_bytes = ProbeOutcome::Observed(1024);
+        evidence.reclaimable_bytes = ProbeOutcome::Observed(1024);
+        evidence.last_modified = ProbeOutcome::Observed(SystemTime::UNIX_EPOCH);
+        evidence.open_by_process = ProbeOutcome::Observed(Vec::new());
+        evidence.process_cwd_match = ProbeOutcome::Observed(Vec::new());
+        evidence.git_state = ProbeOutcome::Observed(None);
+        evidence.executable_dependency =
+            ProbeOutcome::Observed(ExecutableDependencyReport::empty());
+        assert!(evidence.cargo_target_scope.is_none());
+
+        match evidence.completeness() {
+            Completeness::Partial { missing } => {
+                assert_eq!(missing, vec![EvidenceField::TargetOwnership]);
+            }
+            other => panic!("expected Partial{{[TargetOwnership]}}, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1472,6 +1606,15 @@ mod tests {
             evidence.tool_liveness = ProbeOutcome::Unavailable(ProbeReason::ToolNotRunning);
             evidence.executable_dependency =
                 ProbeOutcome::Observed(ExecutableDependencyReport::empty());
+            if kind == ResourceKind::CargoTargetDir {
+                evidence.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+                    resolved_target: PathBuf::from("/tmp/x"),
+                    resolved_build_dir: None,
+                    workspace_root: PathBuf::from("/tmp"),
+                    scope: TargetScope::Local,
+                    is_direct_locator: true,
+                }));
+            }
 
             assert_eq!(
                 evidence.completeness(),

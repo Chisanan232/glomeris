@@ -207,6 +207,21 @@ fn candidate(target: &Path, repo_root: &Path, local: &Local) -> (Evidence, Polic
         executable_dependency: ProbeOutcome::Observed(
             glomeris::evidence::ExecutableDependencyReport::empty(),
         ),
+        // HORO-1824: CargoTargetDir carries this concept — a Local
+        // scope is this fixture's clean default, matching every other
+        // field's "nothing wrong" baseline above.
+        cargo_target_scope: Some(ProbeOutcome::Observed(
+            glomeris::evidence::CargoTargetScope {
+                resolved_target: target.to_path_buf(),
+                resolved_build_dir: None,
+                workspace_root: target
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| target.to_path_buf()),
+                scope: glomeris::evidence::TargetScope::Local,
+                is_direct_locator: true,
+            },
+        )),
         collected_at: collected_at(),
         sources: Vec::new(),
     };

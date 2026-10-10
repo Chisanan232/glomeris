@@ -27,8 +27,8 @@ use glomeris::evidence::correlate::{
 };
 use glomeris::evidence::{Evidence, GitState, OwningTool, ProbeOutcome, ProcessRef, ResourceId};
 use glomeris::executor::{execute, ExecutionOutcome};
-use glomeris::policy::approval::authorize;
-use glomeris::policy::{classify, PolicyClass, PolicyConfig};
+use glomeris::policy::approval::{authorize, UserConsent};
+use glomeris::policy::{classify, PolicyClass, PolicyConfig, ReasonCode};
 
 fn make_temp_dir(prefix: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -179,16 +179,29 @@ fn symlinked_target_with_decoy_neighbor_executes_against_the_real_manifest() {
     let now = SystemTime::now();
     let cfg = PolicyConfig::default();
     let decision = classify(&evidence, &cfg, now);
+    // HORO-1824: `target/` being a symlink to a directory OUTSIDE
+    // `real_root` is exactly ADR-0001 §4.2's "symlinked-out target/" case
+    // — `cargo_target_scope` resolves `Redirected`, so this is
+    // `Ask{SharedBuildCacheBlastRadius}`, not `AutoSafe`. The HORO-1017
+    // manifest-binding fix this test exists to prove is independent of
+    // that: it is about which manifest a correctly-authorized clean
+    // targets, not about whether this specific shape is AUTO_SAFE-eligible
+    // (per this ticket's own ADR, it correctly no longer is).
     assert_eq!(
         decision.class,
-        PolicyClass::AutoSafe,
-        "expected AutoSafe, got {:?} with reasons {:?}",
+        PolicyClass::Ask,
+        "expected Ask, got {:?} with reasons {:?}",
         decision.class,
         decision.reasons
     );
+    assert_eq!(
+        decision.reasons,
+        vec![ReasonCode::SharedBuildCacheBlastRadius]
+    );
 
-    let approval = authorize(decision, evidence.fingerprint.clone(), None)
-        .expect("AutoSafe must always authorize");
+    let consent = UserConsent::new(evidence.resource.clone(), evidence.fingerprint.clone(), now);
+    let approval = authorize(decision, evidence.fingerprint.clone(), Some(&consent))
+        .expect("Ask decision with matching consent must authorize");
 
     let actions = ActionRegistry::builtin();
     let action = actions

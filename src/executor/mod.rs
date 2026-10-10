@@ -15,7 +15,7 @@ pub mod lock;
 pub mod recovery_loop;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime};
 
@@ -213,10 +213,23 @@ fn completeness_rank_from_decision(decision: &PolicyDecision) -> u8 {
     // on every execution of an executable-bearing kind whose dependency
     // probe is unresolved. Fails closed either way; this just keeps that
     // class executable once it legitimately clears.
+    // HORO-1824 §14 (the explicit addendum the ADR carries forward from
+    // HORO-1823's own reviewer finding on HORO-1825): `TargetOwnershipUnknown`
+    // is a degraded-completeness reason too, same shape as
+    // `ExecutableDependencyUnknown` above. Without this, a plan consented
+    // to under `TargetOwnershipUnknown` would compute `planned_rank = 0`
+    // while fresh revalidation correctly computes a higher rank, tripping
+    // a spurious `EvidenceDegraded` abort on every execution of a Cargo
+    // target dir whose ownership probe is unresolved. Fails closed either
+    // way; this just keeps that class executable once it legitimately
+    // clears.
     if decision.reasons.contains(&ReasonCode::EvidenceIncomplete)
         || decision
             .reasons
             .contains(&ReasonCode::ExecutableDependencyUnknown)
+        || decision
+            .reasons
+            .contains(&ReasonCode::TargetOwnershipUnknown)
     {
         return 1;
     }
@@ -279,6 +292,49 @@ fn build_fresh_evidence(
         action.recoverability(),
         NativeCleanup::Unsupported,
     );
+
+    // HORO-1824 §13 item 4 (the HORO-994 trap, for this ticket's half):
+    // `cargo_target_scope` must be re-resolved HERE, at revalidation time,
+    // not merely carried over from discovery — dropping this population
+    // would make `TargetOwnership` permanently `Unavailable` on every
+    // revalidation, which `Evidence::completeness()` reads as missing,
+    // which aborts EVERY real cleanup of a Cargo target dir unconditionally
+    // (the exact trap HORO-994 fixed for `reclaimable_bytes` above).
+    if resource.kind == crate::evidence::ResourceKind::CargoTargetDir {
+        if let Some(target_path) = path {
+            // Same fallback the action itself uses (see
+            // `crate::actions::cargo::manifest_path_for`): the discovered
+            // project root when known, else the target dir's own parent.
+            let project_root = resource
+                .source_project_root
+                .clone()
+                .or_else(|| target_path.parent().map(Path::to_path_buf));
+            if let Some(project_root) = project_root {
+                let cargo_home_override = std::env::var("CARGO_HOME").ok();
+                // `executor` is outside `src/detectors`, so reading the
+                // real ambient `$HOME` here (unlike inside
+                // `detectors::cargo`) is the intended production
+                // behavior: revalidation wants Cargo's REAL current
+                // answer, exactly as if the user ran `cargo clean`
+                // themselves right now.
+                let home = std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                evidence.cargo_target_scope =
+                    Some(crate::detectors::cargo::resolve_cargo_target_scope(
+                        &project_root,
+                        target_path,
+                        cargo_home_override.as_deref(),
+                        &home,
+                    ));
+            } else {
+                evidence.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+            }
+        } else {
+            evidence.cargo_target_scope =
+                Some(ProbeOutcome::Unavailable(ProbeReason::NotAttempted));
+        }
+    }
 
     let correlation = collector.collect(
         resource,
@@ -528,7 +584,46 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
                         plan.expected_reclaimed_bytes,
                     );
                 }
-                match Command::new(tool.program()).args(args).output() {
+                let mut command = Command::new(tool.program());
+                command.args(args);
+                // Security (flagged by independent review, same finding as
+                // HORO-1824's resolver): when the real tool is Cargo via
+                // rustup's proxy, the command inherits GLOMERIS'S OWN
+                // process cwd, which is not necessarily the fixed,
+                // untrusted `project_root` the resolver worries about, but
+                // is still whatever directory the user happened to launch
+                // this CLI from — pin the same way for defense in depth,
+                // so a `rust-toolchain.toml` anywhere above THAT cwd
+                // cannot steer which toolchain actually runs `cargo
+                // clean`. A pin that cannot be established is not applied
+                // (the command still runs under the ambient default
+                // rather than being blocked here — this spawn, unlike the
+                // read-only resolver, has independent authorization via
+                // `authorize()`/`verify_identity_unchanged` already
+                // passed above, so failing the real cleanup action closed
+                // on a transient `rustup` hiccup would be its own
+                // availability regression).
+                if matches!(tool, crate::actions::ToolBinary::Cargo) {
+                    command.env("RUSTUP_AUTO_INSTALL", "0");
+                    if let Some(home) = std::env::var_os("HOME") {
+                        // Unlike the read-only resolver (which fails
+                        // closed on `Unresolved`), this spawn proceeds
+                        // without a pin either way: the action already
+                        // passed `authorize()`/`verify_identity_unchanged`
+                        // above and runs with EXACT `--manifest-path`/
+                        // `--target-dir` args rather than relying on cwd
+                        // for identity, so blocking an already-authorized
+                        // cleanup over a transient `rustup` resolution
+                        // hiccup would be its own availability
+                        // regression for no corresponding safety gain.
+                        if let crate::detectors::cargo::ToolchainPin::Pinned(toolchain) =
+                            crate::detectors::cargo::resolve_trusted_toolchain(Path::new(&home))
+                        {
+                            command.env("RUSTUP_TOOLCHAIN", toolchain);
+                        }
+                    }
+                }
+                match command.output() {
                     Ok(output) if output.status.success() => {}
                     Ok(output) => {
                         return failed_report(
@@ -777,7 +872,41 @@ mod tests {
         dir
     }
 
+    /// HORO-1824: pins `cargo metadata`'s target-dir resolution to the
+    /// fixture's own local `target/`, overriding any machine-wide
+    /// `~/.cargo/config.toml` the developer running this test happens to
+    /// have (e.g. a shared `target-dir` redirect — see
+    /// `~/.claude/CLAUDE.md`'s own documented incident on this very
+    /// machine). Without this, a real-fixture test's `resolve_cargo_target_scope`
+    /// call at revalidation time would resolve against the DEVELOPER'S
+    /// real global config rather than the fixture's own intent, and could
+    /// legitimately observe `Redirected` purely as an artifact of the
+    /// machine it runs on — not a reflection of anything this test means
+    /// to exercise. A project-local config always wins over the user-level
+    /// one, which is exactly the override a real project wanting a local
+    /// target dir would also write.
+    fn pin_cargo_target_dir_locally(root: &Path) {
+        fs::create_dir_all(root.join(".cargo")).unwrap();
+        fs::write(
+            root.join(".cargo/config.toml"),
+            "[build]\ntarget-dir = \"target\"\n",
+        )
+        .unwrap();
+    }
+
     fn evidence_for(resource_path: PathBuf, kind: ResourceKind) -> Evidence {
+        let cargo_target_scope = (kind == ResourceKind::CargoTargetDir).then(|| {
+            ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
+                resolved_target: resource_path.clone(),
+                resolved_build_dir: None,
+                workspace_root: resource_path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| resource_path.clone()),
+                scope: crate::evidence::TargetScope::Local,
+                is_direct_locator: true,
+            })
+        });
         Evidence {
             resource: ResourceId::new(kind, ResourceLocator::Path(resource_path)),
             fingerprint: ResourceFingerprint {
@@ -803,9 +932,39 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            cargo_target_scope,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
+    }
+
+    /// HORO-1824 §14 addendum: `TargetOwnershipUnknown` must rank as
+    /// degraded completeness (1), same as `EvidenceIncomplete` and
+    /// `ExecutableDependencyUnknown` — not 0. Without this, a plan
+    /// consented to under `TargetOwnershipUnknown` computes
+    /// `planned_rank = 0` while fresh revalidation (which re-resolves
+    /// `cargo_target_scope` and may legitimately still be `Unavailable`)
+    /// computes `fresh_rank = 1`, tripping a spurious
+    /// `AbortReason::EvidenceDegraded` on every execution of that class —
+    /// the exact bug class HORO-1823's reviewer found in HORO-1825's own
+    /// `ExecutableDependencyUnknown` handling, reproduced proactively here
+    /// rather than waiting for a reviewer to find it again.
+    #[test]
+    fn target_ownership_unknown_ranks_as_degraded_completeness_not_zero() {
+        let now = SystemTime::now();
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(PathBuf::from("/tmp/x/target")),
+        );
+        let decision = PolicyDecision {
+            resource,
+            class: PolicyClass::Ask,
+            reasons: vec![crate::policy::ReasonCode::TargetOwnershipUnknown],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 3,
+        };
+        assert_eq!(completeness_rank_from_decision(&decision), 1);
     }
 
     #[test]
@@ -1053,6 +1212,7 @@ mod tests {
     #[test]
     fn execute_real_run_tool_cleans_cargo_target_dir() {
         let root = make_temp_dir("execute-real-cargo");
+        pin_cargo_target_dir_locally(&root);
         let target_dir = root.join("target");
         fs::create_dir_all(target_dir.join("debug")).unwrap();
         fs::write(
@@ -1104,6 +1264,73 @@ mod tests {
             report.actual_reclaimed_bytes,
             ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1824 ticket fixture: a target dir missing `CACHEDIR.TAG`.
+    /// Real `cargo clean --target-dir <path>` refuses to touch a
+    /// directory that does not carry this marker (it errors rather than
+    /// deleting), because without it cargo cannot tell the directory is
+    /// actually a build output directory and not, say, a user's real
+    /// `target/` source folder that happens to share the name. Glomeris
+    /// must surface this as a real execution failure — never silently
+    /// succeed, never fall back to a broader delete — and the directory
+    /// must survive untouched.
+    #[test]
+    fn execute_real_run_tool_fails_closed_when_cachedir_tag_is_missing() {
+        let root = make_temp_dir("execute-real-cargo-no-cachedir-tag");
+        pin_cargo_target_dir_locally(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        // Deliberately no CACHEDIR.TAG written here.
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target_dir.clone()),
+        );
+        let fingerprint = fingerprint_of(&target_dir);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+        );
+
+        match report.outcome {
+            ExecutionOutcome::Failed(_) => {}
+            other => panic!("expected Failed(_) when CACHEDIR.TAG is missing, got {other:?}"),
+        }
+        assert!(
+            target_dir.exists(),
+            "a refused cargo clean must leave the directory untouched"
+        );
+        assert!(target_dir.join("debug/build_output.bin").exists());
 
         fs::remove_dir_all(&root).ok();
     }
@@ -1335,6 +1562,7 @@ mod tests {
         );
 
         let approver_root = make_temp_dir("cargoguard-approver");
+        pin_cargo_target_dir_locally(&approver_root);
         fs::write(
             approver_root.join("Cargo.toml"),
             "[package]\nname = \"approver-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
@@ -1353,27 +1581,28 @@ mod tests {
         );
         let fingerprint = fingerprint_of(&approver_target);
         let now = SystemTime::now();
-        // AutoSafe, matching what a real detector + classify() compute for
-        // this clean, complete, regenerable-by-rebuild `CargoTargetDir`
-        // resource — post-HORO-994 the fresh revalidation below also
-        // reproduces AutoSafe (evidence is read through the pre-existing
-        // symlink either way; nothing changes it mid-flight in this test),
-        // so classify/reasons-widening pass and control reaches the plan +
-        // pre-spawn identity guard this test exists to exercise.
+        // HORO-1824: a `target/` that is itself a symlink to a
+        // DIFFERENT project's target dir resolves `cargo_target_scope`
+        // to `Redirected` (`canonical(resolved_target)` lands outside
+        // `approver_root`, exactly ADR-0001 §4.2's "symlinked-out
+        // target/" case) — `Ask{SharedBuildCacheBlastRadius}`, matching
+        // what a real detector + classify() compute for this fixture,
+        // not `AutoSafe`. The fresh revalidation below reproduces the
+        // SAME decision (nothing about the symlink changes mid-flight in
+        // this test), so reasons-widening still passes and control still
+        // reaches the plan + pre-spawn identity guard this test exists to
+        // exercise — just via `Ask`+consent rather than `AutoSafe`.
         let decision = PolicyDecision {
             resource: resource.clone(),
-            class: PolicyClass::AutoSafe,
-            reasons: vec![
-                ReasonCode::EvidenceFreshAndComplete,
-                ReasonCode::NoActiveUseObserved,
-            ],
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::SharedBuildCacheBlastRadius],
             evidence_collected_at: now,
             evaluated_at: now,
-            policy_version: 1,
+            policy_version: 3,
         };
         let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
         let approval = authorize(decision, fingerprint, Some(&consent))
-            .expect("AutoSafe decision must always authorize");
+            .expect("Ask decision with matching consent must authorize");
 
         let report = execute(
             &CargoCleanTargetDir,
@@ -1593,6 +1822,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            cargo_target_scope: None,
             collected_at: now,
             sources: Vec::new(),
         };
@@ -1687,6 +1917,14 @@ mod tests {
     #[test]
     fn execute_refuses_run_tool_step_when_scoped_path_is_absent_from_args() {
         let root = make_temp_dir("execute-scoped-path-args-mismatch");
+        pin_cargo_target_dir_locally(&root);
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
         let decoy_path = root.join("target");
         fs::create_dir_all(&decoy_path).unwrap();
         fs::write(decoy_path.join("marker.txt"), b"do not touch").unwrap();

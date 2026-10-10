@@ -87,6 +87,21 @@ fn auto_safe_evidence(kind: ResourceKind, path: &Path, reclaimable: u64) -> Evid
         executable_dependency: ProbeOutcome::Observed(
             glomeris::evidence::ExecutableDependencyReport::empty(),
         ),
+        // HORO-1824: same "clean default" rationale as
+        // `executable_dependency` above — only CargoTargetDir carries
+        // the concept at all.
+        cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
+            ProbeOutcome::Observed(glomeris::evidence::CargoTargetScope {
+                resolved_target: path.to_path_buf(),
+                resolved_build_dir: None,
+                workspace_root: path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.to_path_buf()),
+                scope: glomeris::evidence::TargetScope::Local,
+                is_direct_locator: true,
+            })
+        }),
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }

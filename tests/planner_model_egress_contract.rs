@@ -161,6 +161,7 @@ fn candidate(
         tool_liveness: ProbeOutcome::Observed(false),
         docker_lifecycle: None,
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: collected_at(),
         sources: Vec::new(),
     };
@@ -214,6 +215,7 @@ fn docker_candidate(lifecycle: DockerLifecycle) -> (Evidence, PolicyDecision) {
         tool_liveness: ProbeOutcome::Observed(true),
         docker_lifecycle: Some(lifecycle),
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        cargo_target_scope: None,
         collected_at: collected_at(),
         sources: Vec::new(),
     };

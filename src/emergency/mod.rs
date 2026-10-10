@@ -791,6 +791,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            cargo_target_scope: None,
             collected_at,
             sources: Vec::new(),
         }
