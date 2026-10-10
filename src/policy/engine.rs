@@ -426,14 +426,17 @@ mod tests {
     /// catch a regression that made it start to.
     #[test]
     fn classify_decision_is_invariant_to_process_identity_variations() {
-        fn decision_with(identity: ProbeOutcome<crate::evidence::ProcessIdentity>) -> PolicyClass {
+        fn decision_with(
+            identity: ProbeOutcome<crate::evidence::ProcessIdentity>,
+        ) -> (PolicyClass, Vec<ReasonCode>) {
             let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
             ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
                 7,
                 "cargo".to_string(),
             )
             .with_identity(identity)]);
-            classify(&ev, &cfg(), NOW).class
+            let decision = classify(&ev, &cfg(), NOW);
+            (decision.class, decision.reasons)
         }
 
         let healthy = crate::evidence::ProcessIdentity {
@@ -459,7 +462,14 @@ mod tests {
         };
 
         let baseline = decision_with(ProbeOutcome::Observed(healthy));
-        assert_eq!(baseline, PolicyClass::Ask);
+        assert_eq!(baseline.0, PolicyClass::Ask);
+        assert!(baseline.1.contains(&ReasonCode::ResourceInActiveUse));
+        // Not just the class — the exact reason set too. A regression
+        // that added or removed an identity-derived reason under `Ask`
+        // (e.g. an `UNKNOWN_INCOMPLETE`-shaped addition) would pass a
+        // class-only comparison but must fail this one, since the
+        // executor aborts on `PolicyReasonsWidened` whenever the reason
+        // set itself changes between a consented plan and revalidation.
         assert_eq!(
             decision_with(ProbeOutcome::Unavailable(ProbeReason::Failed)),
             baseline
@@ -469,6 +479,64 @@ mod tests {
             decision_with(ProbeOutcome::Observed(mismatched_tuple)),
             baseline
         );
+    }
+
+    /// HORO-1823 AC: "a verified inactive disposable target can lose one
+    /// active-use veto only after a fresh evidence pass" — never from
+    /// identity or a claim alone. Starts with a holder (ResourceInActiveUse)
+    /// plus an unrelated, independent veto (a dirty git worktree), then
+    /// simulates a fresh `merge_into` that re-probes and finds the holder
+    /// genuinely gone. Only `ResourceInActiveUse` drops; the unrelated
+    /// veto survives untouched, proving the loss came from fresh evidence
+    /// re-observing an empty holder set, not from any identity/claim
+    /// mechanism silently clearing reasons.
+    #[test]
+    fn a_holder_veto_is_lost_only_via_a_fresh_empty_observation_not_via_identity() {
+        use crate::evidence::correlate::{merge_into, CorrelationResult};
+        use crate::evidence::{ExecutableDependencyReport, GitState};
+
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            7,
+            "cargo".to_string(),
+        )]);
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp/x"),
+            common_dir: PathBuf::from("/tmp/x/.git"),
+            dirty: true,
+            untracked: false,
+            worktree: false,
+        }));
+
+        let before = classify(&ev, &cfg(), NOW);
+        assert_eq!(before.class, PolicyClass::Ask);
+        assert!(before.reasons.contains(&ReasonCode::ResourceInActiveUse));
+        assert!(before.reasons.contains(&ReasonCode::GitWorktreeDirty));
+
+        // A fresh revalidation pass genuinely re-observes an empty holder
+        // set (the only way this veto may ever drop) while the git state
+        // is re-observed unchanged.
+        merge_into(
+            &mut ev,
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(Some(GitState {
+                    repo_root: PathBuf::from("/tmp/x"),
+                    common_dir: PathBuf::from("/tmp/x/.git"),
+                    dirty: true,
+                    untracked: false,
+                    worktree: false,
+                })),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(ExecutableDependencyReport::empty()),
+            },
+        );
+
+        let after = classify(&ev, &cfg(), NOW);
+        assert_eq!(after.class, PolicyClass::Ask);
+        assert!(!after.reasons.contains(&ReasonCode::ResourceInActiveUse));
+        assert!(after.reasons.contains(&ReasonCode::GitWorktreeDirty));
     }
 
     #[test]

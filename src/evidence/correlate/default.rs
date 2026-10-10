@@ -99,10 +99,14 @@ impl Default for DefaultEvidenceCollector {
 
 /// Fills in `identity` for every [`ProcessRef`] in `refs`, in place, via
 /// one batched [`ProcessIdentityProbe`] call across every pid in `refs`
-/// combined. A pid the identity probe has no entry for (exited, or a
-/// transient gap) is left with its existing `Unavailable` identity — the
-/// holder itself is NEVER removed or filtered by this step; only its
-/// `identity` field changes.
+/// combined. The holder itself is NEVER removed or filtered by this
+/// step; only its `identity` field changes, and it always changes to
+/// SOME `Unavailable`/`Observed` value — enrichment was attempted for
+/// every pid in `refs`, so a pid missing from the probe's result map
+/// (exited, a transient gap, or the whole probe call failing) is set to
+/// `Unavailable(Failed)` here rather than left at its prior
+/// `Unavailable(NotAttempted)` default, which would misreport "never
+/// even tried".
 fn enrich_identities(
     refs: &mut [ProcessRef],
     probe: &dyn ProcessIdentityProbe,
@@ -115,9 +119,10 @@ fn enrich_identities(
     let identities: HashMap<u32, ProbeOutcome<ProcessIdentity>> =
         probe.identities_for(&pids, timeout);
     for r in refs.iter_mut() {
-        if let Some(identity) = identities.get(&r.pid) {
-            r.identity = identity.clone();
-        }
+        r.identity = identities
+            .get(&r.pid)
+            .cloned()
+            .unwrap_or(ProbeOutcome::Unavailable(ProbeReason::Failed));
     }
 }
 
@@ -282,13 +287,18 @@ mod tests {
             },
         );
 
+        // `NoOpProcessIdentity` returns an empty map, so identity
+        // enrichment (which still runs) sets `Unavailable(Failed)` for
+        // both holders — "attempted, unresolved", never `NotAttempted`.
         assert_eq!(
             result.open_by_process,
-            ProbeOutcome::Observed(vec![ProcessRef::new(1, "open_files".to_string())])
+            ProbeOutcome::Observed(vec![ProcessRef::new(1, "open_files".to_string())
+                .with_identity(ProbeOutcome::Unavailable(ProbeReason::Failed))])
         );
         assert_eq!(
             result.process_cwd_match,
-            ProbeOutcome::Observed(vec![ProcessRef::new(2, "cwd".to_string())])
+            ProbeOutcome::Observed(vec![ProcessRef::new(2, "cwd".to_string())
+                .with_identity(ProbeOutcome::Unavailable(ProbeReason::Failed))])
         );
         assert!(matches!(result.git_state, ProbeOutcome::Observed(Some(_))));
         assert_eq!(result.tool_liveness, ProbeOutcome::Observed(true));
@@ -330,8 +340,10 @@ mod tests {
     /// the fake probe; pid 2 ("cwd") has no entry in the fake probe's map
     /// at all (simulating a pid that exited between discovery and
     /// enrichment, or a transient `ps` gap) and must still be present in
-    /// `process_cwd_match` with its original `Unavailable(NotAttempted)`
-    /// identity — never dropped, never defaulted to a synthesized value.
+    /// `process_cwd_match`, with its identity set to `Unavailable(Failed)`
+    /// — enrichment was attempted for it, so it is never left at (or
+    /// reported as) `NotAttempted`, and it is never dropped or defaulted
+    /// to a synthesized value.
     #[test]
     fn identity_enrichment_never_removes_a_holder_it_cannot_identify() {
         struct PartialProcessIdentity;
@@ -392,7 +404,7 @@ mod tests {
         assert_eq!(process_cwd_match[0].pid, 2);
         assert_eq!(
             process_cwd_match[0].identity,
-            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+            ProbeOutcome::Unavailable(ProbeReason::Failed)
         );
     }
 

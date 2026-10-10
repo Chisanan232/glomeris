@@ -128,3 +128,31 @@ fn process_identity_module_has_no_production_filesystem_write() {
     }
     let _ = Path::new(NEW_MODULE); // keep import used across edits
 }
+
+/// HORO-1823 §6 egress: `ProcessIdentity`/`ProcessClaim`/`Supervisor`/
+/// `ExeIdentity` must never reach the LLM-facing planner surface
+/// (`src/planner/dto.rs`, `src/planner/response.rs`) — identity and
+/// claims are local-report-only (`src/reporting/dto.rs`). This is a
+/// structural, name-level check: `tests/planner_model_egress_contract.rs`
+/// already pins the exact serialized field SET those two files can
+/// produce (and does not need updating by this ticket — neither file
+/// gained a field), so this test is the narrower, additional guarantee
+/// that this ticket's new type names were never even typed into those
+/// files in the first place.
+#[test]
+fn planner_facing_dtos_never_name_the_new_process_identity_types() {
+    for path in ["src/planner/dto.rs", "src/planner/response.rs"] {
+        let text = fs::read_to_string(path).unwrap_or_else(|_| panic!("{path} must exist"));
+        for needle in [
+            "ProcessIdentity",
+            "ProcessClaim",
+            "Supervisor",
+            "ExeIdentity",
+        ] {
+            assert!(
+                !text.contains(needle),
+                "{path} must never name {needle:?} — HORO-1823 process identity/claims are local-report-only"
+            );
+        }
+    }
+}

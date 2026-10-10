@@ -107,9 +107,18 @@ impl ProcessIdentityProbe for LiveProcessIdentityProbe {
 
         let exe_by_pid = run_lsof_txt(&self.roots.lsof_bin, pids, timeout);
 
+        // `lstart` text is frequently identical across pids started at
+        // the same wall-clock second (common for a build's worker
+        // processes) — cache by raw text so identical strings spawn
+        // `date` only once rather than once per holder.
+        let mut lstart_cache: HashMap<String, Option<SystemTime>> = HashMap::new();
+
         let mut out = HashMap::new();
         for row in ps_rows {
-            let start_time = match parse_lstart(&row.lstart_raw, &self.roots.date_bin, timeout) {
+            let start_time = *lstart_cache
+                .entry(row.lstart_raw.clone())
+                .or_insert_with(|| parse_lstart(&row.lstart_raw, &self.roots.date_bin, timeout));
+            let start_time = match start_time {
                 Some(t) => t,
                 None => {
                     out.insert(row.pid, ProbeOutcome::Unavailable(ProbeReason::Failed));
@@ -316,7 +325,15 @@ fn exe_identity_of(raw_path: &str) -> Option<ExeIdentity> {
 /// whole identity being `Unavailable` — never a zero/epoch default.
 fn parse_lstart(raw: &str, date_bin: &Path, timeout: Duration) -> Option<SystemTime> {
     let mut command = Command::new(date_bin);
-    command.args(["-j", "-f", "%a %b %e %T %Y", raw, "+%s"]);
+    // `ps` was run under `LC_ALL=C`, so its `lstart` text is always
+    // English month/weekday names — but `date -j -f` parses using the
+    // CALLING process's locale unless told otherwise. Without this, a
+    // non-English-locale host would fail to parse every `lstart` string
+    // (every identity falls closed to `Unavailable`, never a wrong
+    // answer — but the feature would be silently dead there).
+    command
+        .env("LC_ALL", "C")
+        .args(["-j", "-f", "%a %b %e %T %Y", raw, "+%s"]);
     match run_with_timeout(command, timeout) {
         CommandOutcome::Completed(output) if output.status.success() => {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -342,18 +359,29 @@ fn parse_lstart(raw: &str, date_bin: &Path, timeout: Duration) -> Option<SystemT
 ///
 /// A single evidence-collection pass has no second sample to compare CPU
 /// time against, so this only ever returns [`ProcessClaim::IdleButValid`]
-/// (supervised by `launchd`, successfully identified, not a zombie) or
-/// [`ProcessClaim::Unknown`] (everything else: probe failure, zombie,
+/// (identity fully resolved — including a successful `exe` probe — not a
+/// zombie, and positively supervised by `launchd`) or
+/// [`ProcessClaim::Unknown`] (everything else: any probe failure
+/// including a failed `exe`/`lsof` lookup, zombie,
 /// unsupervised/unknown supervisor). [`ProcessClaim::Active`],
 /// [`ProcessClaim::Stalled`] and [`ProcessClaim::AbandonedCandidate`] are
 /// reserved for a future multi-sample caller (HORO-1827's observation
 /// history) that can establish a CPU-progress dimension this function
 /// does not have.
+///
+/// A failed `exe` probe is treated the same as any other probe failure
+/// (`Unknown`), never silently ignored in favor of the supervisor check
+/// alone — "failed lsof" is explicitly one of the AC's cases that must
+/// remain uncertain, and `exe` is exactly what the `lsof -d txt` half of
+/// this module's identity probe can fail to resolve.
 pub fn derive_claim(identity: &ProbeOutcome<ProcessIdentity>) -> ProcessClaim {
     let Some(identity) = identity.observed() else {
         return ProcessClaim::Unknown;
     };
     if identity.state_zombie {
+        return ProcessClaim::Unknown;
+    }
+    if !identity.exe.is_observed() {
         return ProcessClaim::Unknown;
     }
     match identity.supervisor {
@@ -454,6 +482,10 @@ mod claim_tests {
     use super::*;
     use crate::evidence::model::ProcessClaim;
 
+    /// `exe` defaults to a successful probe — most of this suite is
+    /// about the OTHER fields, so a test that wants to exercise a failed
+    /// `exe` probe specifically overrides it rather than every other test
+    /// accidentally relying on a failed-exe default to reach `Unknown`.
     fn identity(supervisor: Supervisor, state_zombie: bool) -> ProcessIdentity {
         ProcessIdentity {
             start_time: SystemTime::UNIX_EPOCH,
@@ -461,7 +493,11 @@ mod claim_tests {
             ppid: 1,
             pgid: 1,
             state_zombie,
-            exe: ProbeOutcome::Unavailable(ProbeReason::Failed),
+            exe: ProbeOutcome::Observed(ExeIdentity {
+                path: PathBuf::from("/usr/bin/true"),
+                dev: 1,
+                ino: 1,
+            }),
             supervisor,
         }
     }
@@ -491,6 +527,21 @@ mod claim_tests {
                 Supervisor::LaunchdJob,
                 true
             ))),
+            ProcessClaim::Unknown
+        );
+    }
+
+    /// "Failed lsof" (the AC's own phrase): a positively-supervised
+    /// process whose `exe` probe nonetheless failed must stay `Unknown`.
+    /// A supervisor match alone is never sufficient — identity must be
+    /// FULLY resolved, not merely partially resolved and otherwise
+    /// favorable-looking.
+    #[test]
+    fn failed_exe_probe_is_unknown_even_if_supervised() {
+        let mut supervised_but_exe_failed = identity(Supervisor::LaunchdJob, false);
+        supervised_but_exe_failed.exe = ProbeOutcome::Unavailable(ProbeReason::Failed);
+        assert_eq!(
+            derive_claim(&ProbeOutcome::Observed(supervised_but_exe_failed)),
             ProcessClaim::Unknown
         );
     }
@@ -644,5 +695,33 @@ mod tests {
         let dir = std::env::temp_dir().join("glomeris-process-identity-nonexistent-dir-xyz");
         let result = build_lock_holder(&dir, Path::new("lsof"), Duration::from_secs(2));
         assert_eq!(result, ProbeOutcome::Unavailable(ProbeReason::Failed));
+    }
+
+    /// Verified against the real, installed cargo (1.98.0 on this
+    /// machine, manually confirmed during review — see the PR body): a
+    /// build holds its own open `File` on `<target>/<profile>/.cargo-lock`
+    /// for the build's duration, and this probe detects that holder. This
+    /// test reproduces the same shape without actually invoking `cargo`
+    /// (keeping the test fast and hermetic) by holding the lock file open
+    /// itself — the thing being tested is "does an open `.cargo-lock`
+    /// register as a holder", not "does cargo create one".
+    #[test]
+    fn build_lock_holder_observed_true_when_a_lock_file_is_held_open() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-process-identity-locktest-held-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("debug")).unwrap();
+        let lock_path = dir.join("debug/.cargo-lock");
+        let _held_open = std::fs::File::create(&lock_path).unwrap();
+
+        let result = build_lock_holder(&dir, Path::new("lsof"), Duration::from_secs(2));
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(result, ProbeOutcome::Observed(true));
     }
 }
