@@ -1689,6 +1689,14 @@ mod tests {
     ///   `target/` plus a decoy neighbor project, both under
     ///   `std::env::temp_dir()`) and only ever runs `cargo clean` against
     ///   that fixture's own real `target/` dir.
+    /// - `tests/cargo_discovery_widening_surfaces_shared_target.rs`
+    ///   (HORO-1824), which mirrors the same already-reviewed shape: both
+    ///   configured project roots, the "shared" target they redirect to,
+    ///   and the fixture `$HOME` the host-dependency probe reads are all
+    ///   disposable tempdir fixtures under `std::env::temp_dir()` — never
+    ///   the developer's real `$HOME`/`~/.cargo` — and nothing it
+    ///   discovers is ever routed into `authorize()`/`execute()`; it
+    ///   stops at `classify()`.
     ///
     /// Any new occurrence must be reviewed and added here explicitly —
     /// an un-reviewed new occurrence is exactly the failure mode this
@@ -1712,6 +1720,10 @@ mod tests {
             ("tests/reclaimable_bytes_reaches_auto_safe.rs", 1),
             ("tests/cli_project_root_wiring.rs", 2),
             ("tests/cargo_symlinked_target_manifest_round_trip.rs", 1),
+            (
+                "tests/cargo_discovery_widening_surfaces_shared_target.rs",
+                1,
+            ),
         ];
 
         for (rel_path, expected_count) in allowlist {

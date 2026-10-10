@@ -31,6 +31,7 @@
 //! own doc comment for what happens if that budget is hit before the walk
 //! finishes (a truthful lower bound, never a precision guarantee).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -38,8 +39,8 @@ use std::time::Duration;
 use crate::evidence::correlate::timeout::{run_with_timeout, CommandOutcome};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
 use crate::evidence::{
-    CargoTargetScope, NativeCleanup, Recoverability, Regenerability, ResourceId, ResourceKind,
-    ResourceLocator, TargetScope,
+    CargoTargetScope, Evidence, NativeCleanup, Recoverability, Regenerability, ResourceId,
+    ResourceKind, ResourceLocator, TargetScope,
 };
 
 use super::{
@@ -381,6 +382,85 @@ fn has_rust_source(src_dir: &Path) -> bool {
     })
 }
 
+/// Protectiveness ranking for [`TargetScope`] — higher is more protective.
+/// Used ONLY to pick which scope wins when discovery widening deduplicates
+/// multiple configured roots onto the same physical (dev, ino) (ADR-0001
+/// §4.2: "dedup takes the most-protective scope, not the first-discovered
+/// one"). Never a policy input on its own — `classify` reads
+/// `TargetScope` directly, not this ranking.
+fn scope_rank(scope: TargetScope) -> u8 {
+    match scope {
+        TargetScope::Local => 0,
+        TargetScope::Orphan => 1,
+        TargetScope::Redirected => 2,
+    }
+}
+
+/// Inserts or merges one discovery-widening candidate for the resolved
+/// target identified by `key` (its (dev, ino)).
+///
+/// First root to reach a given `key` builds the widened [`Evidence`] (its
+/// own estimate, its own `source_project_root` — "used only for
+/// `--manifest-path`", per the ADR, so the FIRST root's manifest lookup is
+/// the one that is actually used later). Every subsequent root that
+/// resolves to the same `key` only ever contributes its own scope
+/// comparison: if its OWN independent resolution outranks the
+/// already-merged scope, the merged entry's scope is raised. A root whose
+/// own resolution happens to be `Local` must never mask a second root
+/// that independently redirects into the same physical directory — this
+/// is the exact bug HORO-1822's own review round found and the ADR
+/// documents.
+fn merge_widened_scope(
+    widened: &mut HashMap<(u64, u64), Evidence>,
+    key: (u64, u64),
+    root: PathBuf,
+    resolved_target: PathBuf,
+    scope_outcome: ProbeOutcome<CargoTargetScope>,
+    detector_id: DetectorId,
+) {
+    let Some(incoming_scope) = scope_outcome.observed().map(|s| s.scope) else {
+        return;
+    };
+
+    if let Some(existing) = widened.get_mut(&key) {
+        let existing_scope = match &existing.cargo_target_scope {
+            Some(ProbeOutcome::Observed(s)) => s.scope,
+            _ => return,
+        };
+        if scope_rank(incoming_scope) > scope_rank(existing_scope) {
+            if let Some(ProbeOutcome::Observed(s)) = &mut existing.cargo_target_scope {
+                s.scope = incoming_scope;
+            }
+        }
+        return;
+    }
+
+    let estimate = estimate_logical_bytes(&resolved_target, size_estimate_budget());
+    let logical_bytes = estimate.bytes.clone();
+    let resource = ResourceId::new(
+        ResourceKind::CargoTargetDir,
+        ResourceLocator::Path(resolved_target.clone()),
+    )
+    .with_source_project_root(root);
+    let mut ev = discovery_evidence(
+        resource,
+        detector_id,
+        &resolved_target,
+        logical_bytes.clone(),
+        logical_bytes,
+        estimate.is_lower_bound(),
+        probe_mtime(&resolved_target),
+        Regenerability::RegenerableByRebuild,
+        Recoverability::RegenerableByRebuild,
+        NativeCleanup::Unsupported,
+    );
+    if let Some(note) = estimate.lower_bound_note() {
+        ev.push_source(note);
+    }
+    ev.cargo_target_scope = Some(scope_outcome);
+    widened.insert(key, ev);
+}
+
 pub struct CargoDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::CargoTargetDir];
@@ -418,6 +498,12 @@ impl Detector for CargoDetector {
 
         let mut evidence = Vec::new();
         let mut saw_permission_error = false;
+        // HORO-1824 §4.2 discovery widening: keyed by the resolved target's
+        // (dev, ino), so a second configured root resolving to the SAME
+        // physical directory (via a shared/global config) merges rather
+        // than double-counting. "Dedup takes the most-protective scope,
+        // not the first-discovered one" — see `merge_widened_scope` below.
+        let mut widened: HashMap<(u64, u64), Evidence> = HashMap::new();
 
         for root in &ctx.known_project_roots {
             let target_dir: PathBuf = root.join("target");
@@ -452,7 +538,33 @@ impl Detector for CargoDetector {
                         cargo_home_override,
                         &ctx.home_dir,
                     );
-                    ev.cargo_target_scope = Some(scope_outcome);
+                    ev.cargo_target_scope = Some(scope_outcome.clone());
+
+                    // Discovery widening: when cargo's own resolution lands
+                    // somewhere other than `<root>/target`, that somewhere
+                    // is a resource this detector would otherwise never
+                    // surface — most consequentially a shared/redirected
+                    // target holding a live installed executable
+                    // dependency (HORO-1825's guard only runs on resources
+                    // that are actually discovered). Skipped entirely when
+                    // the resolver itself failed: widening onto an
+                    // unresolved path would be a guess, not a discovery.
+                    if let ProbeOutcome::Observed(scope) = &scope_outcome {
+                        if scope.resolved_target != canonical {
+                            if let Ok(resolved_meta) = std::fs::metadata(&scope.resolved_target) {
+                                use std::os::unix::fs::MetadataExt;
+                                let key = (resolved_meta.dev(), resolved_meta.ino());
+                                merge_widened_scope(
+                                    &mut widened,
+                                    key,
+                                    root.clone(),
+                                    scope.resolved_target.clone(),
+                                    scope_outcome.clone(),
+                                    self.id(),
+                                );
+                            }
+                        }
+                    }
 
                     evidence.push(ev);
                 }
@@ -463,6 +575,8 @@ impl Detector for CargoDetector {
                 Err(_) => continue,
             }
         }
+
+        evidence.extend(widened.into_values());
 
         if evidence.is_empty() && saw_permission_error {
             return DetectorStatus::Failed(
