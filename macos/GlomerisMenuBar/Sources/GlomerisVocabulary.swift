@@ -781,7 +781,7 @@ enum GlomerisVocabulary {
 
     static let reasonAxis = "Reason"
 
-    /// The 20 `ReasonCode` values, as prose. These are the "why" behind a
+    /// The 25 `ReasonCode` values, as prose. These are the "why" behind a
     /// safety class and read best as a short list of sentences, so they
     /// carry no symbol and no tone of their own — the safety badge above
     /// them already carries the tone, and repeating it per reason would
@@ -859,6 +859,17 @@ enum GlomerisVocabulary {
         case "no_active_use_observed":
             return prose(token, reasonAxis, "No active use seen",
                          "Nothing was observed using this.")
+        case "protected_executable_dependency":
+            return prose(token, reasonAxis, "A hook or daemon depends on this",
+                         "A configured hook, daemon or LaunchAgent is set up to run a "
+                             + "file inside here. Removing it would break that.")
+        case "executable_running_from_resource":
+            return prose(token, reasonAxis, "Something is running from here",
+                         "A running process's program file is inside here right now.")
+        case "executable_dependency_unknown":
+            return prose(token, reasonAxis, "Could not confirm no dependency",
+                         "A hook, daemon or LaunchAgent reference could not be fully "
+                             + "checked, so Glomeris will not assume it is safe.")
         default:
             return unrecognised(
                 token, reasonAxis, "Unrecognised reason",

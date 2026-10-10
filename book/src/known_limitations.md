@@ -267,6 +267,48 @@ terminal — see [Menu Bar App](menu_bar_app.md#preferences--autopilot). The
 distinction the app keeps is between authorizing and acting, not between the
 terminal and the GUI.
 
+## Executable-dependency probe: closed source list, interim Codex scope (HORO-1825)
+
+The HORO-1825 executable-dependency probe (`evidence::correlate::host_dependency`)
+examines a **closed, documented list** of recognized sources — it does not
+attempt to discover every possible way a hook or daemon could be configured
+on a machine. Known, explicitly out-of-scope gaps, none of them silently
+widened to a false "no dependency":
+
+- **Per-configured-project `claude_project(<root>)` sources** are not
+  examined. Only the home-scoped Claude Code settings
+  (`~/.claude/settings.json`, `settings.local.json`, managed settings) are
+  read. Wiring each configured project root's own `.claude/settings.json`
+  into this probe would touch every `DefaultEvidenceCollector::default()`
+  call site across the CLI, which was judged a larger blast radius than this
+  ticket's scope — tracked as follow-up work, not silently dropped.
+- **Codex `~/.codex/hooks.json`** is reported `unresolved` (fail-closed) if
+  present. Its schema could not be confirmed from the Codex version
+  available while this probe was written, so it is never parsed
+  speculatively.
+- **Codex `~/.codex/config.toml`'s `notify` key** is reported `unresolved`
+  (fail-closed) if present. No already-vendored dependency can parse TOML,
+  and adding the `toml` crate for one field was not justified within this
+  ticket (see the HORO-1825 PR description for the full approval-sequence
+  check against ADR-0001 §16.3).
+- **MCP server `command` entries** (`~/.claude.json`, Codex `mcp_servers`)
+  and shell rc files are not examined at all. A *running* MCP server inside
+  a resource is still caught by the existing `running_inside`/`Executable`
+  relation; a next-invocation reference from one of these is not.
+
+Every one of these degrades to `unresolved`/`ASK` or is named in
+`sources_examined` for display — the probe never claims a source was
+checked when it wasn't, and an executable-bearing kind
+(`CargoTargetDir`/`NodeModules`/`SwiftPackageManagerBuildDir`/
+`XcodeDerivedData`) with any unresolved finding cannot reach `AUTO_SAFE`.
+
+A real-host consequence worth stating plainly: on a machine with Claude Code
+hooks configured via bare command names (resolved only through that
+machine's own shell `PATH`, which this probe cannot observe), essentially
+every executable-bearing resource becomes `ASK` rather than `AUTO_SAFE` —
+this is the intended, fail-closed behavior of the PATH-shadowing amendment
+(§4.3), not a bug to be "fixed" by loosening the match rule.
+
 ## What holds this book to the code
 
 Three mechanical checks, because the drift this page is about was found by

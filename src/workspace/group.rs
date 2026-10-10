@@ -418,6 +418,7 @@ mod tests {
             git_state: ProbeOutcome::Observed(Some(worktree.state())),
             tool_liveness: ProbeOutcome::Observed(false),
             docker_lifecycle: None,
+            executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

@@ -564,6 +564,10 @@ pub(crate) fn discovery_evidence(
         git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         docker_lifecycle: None,
+        // HORO-1825: same contract as the four correlation fields above —
+        // `crate::evidence::correlate` (not this discovery stage) is
+        // responsible for actually attempting this probe.
+        executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }

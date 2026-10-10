@@ -27,7 +27,7 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         reasons,
         evidence_collected_at: ev.collected_at,
         evaluated_at: now,
-        policy_version: 1,
+        policy_version: 2,
     };
 
     // 1. Unknown resource kind is an unconditional, fail-closed Protected
@@ -45,6 +45,20 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
     // still Protected, never "upgraded" by fresher evidence.
     if let Some(reason) = protected_reason(&ev.resource) {
         return decision(PolicyClass::Protected, vec![reason]);
+    }
+
+    // 2b (HORO-1825 §5). A recognized hook/daemon/LaunchAgent config or a
+    // PATH entry references a file inside this resource: it is an
+    // installed executable dependency. Unconditionally Protected, same
+    // rationale as step 2 — a stale positive is still Protected, never
+    // "upgraded" by fresher evidence that simply hasn't run yet.
+    if let Some(report) = ev.executable_dependency.observed() {
+        if !report.references_inside.is_empty() {
+            return decision(
+                PolicyClass::Protected,
+                vec![ReasonCode::ProtectedExecutableDependency],
+            );
+        }
     }
 
     // 3. Staleness: evidence older than cfg.max_evidence_age (or whose
@@ -106,6 +120,17 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         // run" would otherwise both arrive as an empty referrer set.
         if !lifecycle.references.is_observed() {
             active_use_reasons.push(ReasonCode::DockerActivityUnknown);
+        }
+    }
+
+    // HORO-1825 §5 step 6, in the specified order: a running dependency
+    // vetoes before an unresolved one, matching "most-significant first".
+    if let Some(report) = ev.executable_dependency.observed() {
+        if !report.running_inside.is_empty() {
+            active_use_reasons.push(ReasonCode::ExecutableRunningFromResource);
+        }
+        if !report.unresolved.is_empty() && ev.resource.kind.is_executable_bearing() {
+            active_use_reasons.push(ReasonCode::ExecutableDependencyUnknown);
         }
     }
 
@@ -203,6 +228,13 @@ mod tests {
             git_state: ProbeOutcome::Observed(None),
             tool_liveness: ProbeOutcome::Observed(false),
             docker_lifecycle: None,
+            // HORO-1825: a clean-negative report by default, so every
+            // existing AutoSafe/Ask fixture built on an executable-bearing
+            // kind (CargoTargetDir etc.) stays Complete unless a test
+            // explicitly overrides this field.
+            executable_dependency: ProbeOutcome::Observed(
+                crate::evidence::ExecutableDependencyReport::empty(),
+            ),
             collected_at,
             sources: Vec::new(),
         }
@@ -311,6 +343,12 @@ mod tests {
         ev.open_by_process = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         ev.process_cwd_match = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         ev.git_state = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        // HORO-1825: CargoTargetDir now has a 7th required field. Leaving
+        // it Observed here would drop `missing.len()` from 6-of-6 to
+        // 6-of-7, turning `Failed` into `Partial` — this must stay
+        // Unavailable too for the test to keep asserting what its name
+        // says.
+        ev.executable_dependency = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::EvidenceProbeFailed]);
@@ -705,9 +743,185 @@ mod tests {
     }
 
     #[test]
-    fn policy_version_is_one() {
+    fn policy_version_is_two() {
+        // HORO-1825 §15: bumped 1 -> 2 for the new step 2b / step 6
+        // extensions. An outstanding explain->execute consent now meets
+        // new reasons, and the executor aborts with `PolicyReasonsWidened`
+        // (safe) rather than silently applying old consent to a decision
+        // shaped by rules it never saw.
         let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         let decision = classify(&ev, &cfg(), NOW);
-        assert_eq!(decision.policy_version, 1);
+        assert_eq!(decision.policy_version, 2);
+    }
+
+    // ---- HORO-1825 §13 anti-vacuity + AC tests ----
+
+    use crate::evidence::{
+        DependencyRef, ExeIdentity, ExecutableDependencyReport, Provenance, SourceTag,
+        UnresolvedRef,
+    };
+
+    fn exe(path: &str) -> ExeIdentity {
+        ExeIdentity {
+            path: PathBuf::from(path),
+            dev: 1,
+            ino: 1,
+        }
+    }
+
+    fn report_with_reference(path: &str) -> ExecutableDependencyReport {
+        ExecutableDependencyReport {
+            references_inside: vec![DependencyRef {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+                resolved: PathBuf::from(path),
+                exe: exe(path),
+                provenance: Provenance::Observed,
+                next_invocation: true,
+            }],
+            running_inside: Vec::new(),
+            unresolved: Vec::new(),
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        }
+    }
+
+    /// AC: "Test-owned fake hook config pointing into target prevents
+    /// AUTO_SAFE". Anti-vacuity #1 (§13 item 1): deleting step 2b must
+    /// turn this RED.
+    #[test]
+    fn fake_hook_config_pointing_into_target_is_protected_not_auto_safe() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(report_with_reference("/tmp/x/debug/hook"));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedExecutableDependency]
+        );
+    }
+
+    /// AC: "unreferenced target can remain eligible" — the negative
+    /// control for the test above: a clean report must not, on its own,
+    /// prevent AUTO_SAFE.
+    #[test]
+    fn unreferenced_target_remains_auto_safe_eligible() {
+        let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        assert_eq!(
+            ev.executable_dependency.observed(),
+            Some(&ExecutableDependencyReport::empty())
+        );
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+    }
+
+    /// §13 item 3: a probe that collapses an unparseable config into
+    /// `Observed(empty)` on parse error (rather than an `unresolved`
+    /// finding) must turn RED here — this test pins the probe-level
+    /// contract via the `classify`-facing symptom: an `unresolved` entry
+    /// present on an executable-bearing kind must reach `Ask`, never slip
+    /// through as if it had been `Observed(empty)`.
+    #[test]
+    fn unresolved_reference_on_executable_bearing_kind_is_ask_not_auto_safe() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+            references_inside: Vec::new(),
+            running_inside: Vec::new(),
+            unresolved: vec![UnresolvedRef::NonInspectable {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            }],
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        });
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::ExecutableDependencyUnknown));
+    }
+
+    /// `unresolved` on a non-executable-bearing kind (a download cache)
+    /// must NOT veto — per §5: "Its failure does not block those kinds."
+    #[test]
+    fn unresolved_reference_on_non_executable_bearing_kind_does_not_veto() {
+        let mut ev = complete_evidence(ResourceKind::CargoRegistryCache, NOW);
+        ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+            references_inside: Vec::new(),
+            running_inside: Vec::new(),
+            unresolved: vec![UnresolvedRef::NotOnPath {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            }],
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        });
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::AutoSafe);
+    }
+
+    /// AC: "a currently-running process whose executable mapping resolves
+    /// inside the resource" => Ask, not a silent pass.
+    #[test]
+    fn running_executable_inside_resource_is_ask() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+            references_inside: Vec::new(),
+            running_inside: vec![crate::evidence::ProcessRef {
+                pid: 999,
+                command: "libra-governor".to_string(),
+            }],
+            unresolved: Vec::new(),
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        });
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::ExecutableRunningFromResource));
+    }
+
+    /// §13 item 5: `is_preauthorizable` must refuse both new `Ask` codes.
+    /// Mirrors `neither_new_ask_reason_can_be_preauthorized` above.
+    #[test]
+    fn neither_new_executable_dependency_ask_reason_can_be_preauthorized() {
+        for reason in [
+            ReasonCode::ExecutableRunningFromResource,
+            ReasonCode::ExecutableDependencyUnknown,
+        ] {
+            assert!(
+                !crate::autopilot::envelope::is_preauthorizable(reason),
+                "{} must never be pre-authorizable",
+                reason.as_str()
+            );
+        }
+    }
+
+    /// §13 item 4 (the HORO-994 trap, for this ticket's half): a stale
+    /// positive stays Protected even when evidence is otherwise
+    /// old/complete — step 2b runs before the staleness check, same as
+    /// step 2.
+    #[test]
+    fn stale_but_positive_executable_dependency_is_still_protected() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, SystemTime::UNIX_EPOCH);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(report_with_reference("/tmp/x/debug/hook"));
+        let far_future = NOW + Duration::from_secs(10_000);
+
+        let decision = classify(&ev, &cfg(), far_future);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedExecutableDependency]
+        );
     }
 }

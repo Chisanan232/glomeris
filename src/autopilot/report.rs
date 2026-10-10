@@ -182,7 +182,10 @@ fn is_refusal_reason(reason: ReasonCode) -> bool {
         | ReasonCode::RecoverabilityIrreversible
         | ReasonCode::OwningToolLive
         | ReasonCode::DockerObjectInUse
-        | ReasonCode::DockerActivityUnknown => true,
+        | ReasonCode::DockerActivityUnknown
+        | ReasonCode::ProtectedExecutableDependency
+        | ReasonCode::ExecutableRunningFromResource
+        | ReasonCode::ExecutableDependencyUnknown => true,
     }
 }
 

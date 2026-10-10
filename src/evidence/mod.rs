@@ -16,8 +16,9 @@ pub use docker::{
 };
 pub use model::{
     decode_fingerprint_token, encode_fingerprint_token, ActionId, Completeness, Confidence,
-    Evidence, EvidenceField, FingerprintTokenError, GitState, NativeCleanup, OwningTool,
-    ProcessRef, Recoverability, Regenerability, ResourceFingerprint, ResourceId, ResourceKind,
-    ResourceLocator,
+    DependencyRef, Evidence, EvidenceField, ExeIdentity, ExecutableDependencyReport,
+    FingerprintTokenError, GitState, NativeCleanup, OwningTool, ProcessRef, Provenance,
+    Recoverability, Regenerability, ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
+    SourceTag, UnresolvedRef,
 };
 pub use probe::{ProbeOutcome, ProbeReason};

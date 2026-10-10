@@ -147,6 +147,15 @@ fn cleanest_evidence(kind: ResourceKind) -> Evidence {
         },
         tool_liveness: ProbeOutcome::Observed(false),
         docker_lifecycle: is_docker(kind).then(idle_lifecycle),
+        // HORO-1825: a Docker object has no path to probe, same as the
+        // three path-shaped fields above; every other kind gets a clean
+        // negative, so the four required-for-four-kinds AC cases below
+        // aren't accidentally denied AUTO_SAFE by this field alone.
+        executable_dependency: if is_docker(kind) {
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        } else {
+            ProbeOutcome::Observed(glomeris::evidence::ExecutableDependencyReport::empty())
+        },
         collected_at: NOW,
         sources: Vec::new(),
     }
@@ -291,6 +300,13 @@ fn a_wholly_failed_probe_set_denies_auto_safe_to_every_kind() {
             evidence.open_by_process = ProbeOutcome::Unavailable(ProbeReason::Failed);
             evidence.process_cwd_match = ProbeOutcome::Unavailable(ProbeReason::Failed);
             evidence.git_state = ProbeOutcome::Unavailable(ProbeReason::Failed);
+            // HORO-1825: a *wholly* failed probe set must fail this field
+            // too, or an executable-bearing kind (which now requires it)
+            // only has 6 of 7 required fields missing — `Partial`, not
+            // `Failed` — and the reason below becomes `EvidenceIncomplete`
+            // instead of `EvidenceProbeFailed`, which is what this test
+            // pins.
+            evidence.executable_dependency = ProbeOutcome::Unavailable(ProbeReason::Failed);
         }
 
         let decision = classify(&evidence, &cfg(), NOW);

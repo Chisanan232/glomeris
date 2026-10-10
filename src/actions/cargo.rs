@@ -177,6 +177,7 @@ mod tests {
             git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             docker_lifecycle: None,
+            executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

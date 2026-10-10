@@ -80,6 +80,9 @@ fn auto_safe_evidence(kind: ResourceKind, path: &Path) -> Evidence {
         git_state: ProbeOutcome::Observed(None),
         tool_liveness: ProbeOutcome::Observed(false),
         docker_lifecycle: None,
+        executable_dependency: ProbeOutcome::Observed(
+            glomeris::evidence::ExecutableDependencyReport::empty(),
+        ),
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }

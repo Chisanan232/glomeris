@@ -295,6 +295,20 @@ jobs:
       - name: Check external context is read-only
         run: bash scripts/check-external-context-is-read-only.sh
 
+  host-dependency-probe-is-read-only:
+    # HORO-1825: the executable-dependency probe reads a developer's real
+    # Claude Code / Codex / LaunchAgent host config as supporting evidence for
+    # whether a disposable build cache is an installed runtime dependency. It
+    # must never execute anything it finds there, never write to host config,
+    # and never print a discovered command string or env value — the exact
+    # privacy failure the HORO-1822 incident flagged (ADR-0001 §1.1, §6). See
+    # the header of src/evidence/correlate/host_dependency.rs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the host-dependency probe is read-only
+        run: bash scripts/check-host-dependency-probe-is-read-only.sh
+
   recovery-progress-is-not-persisted:
     # HORO-1512 (verification items 11 and 12): nothing about a recovery run is
     # written down, which is what lets RecoveryRestartGateTests prove a relaunched

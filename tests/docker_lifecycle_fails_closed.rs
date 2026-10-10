@@ -93,6 +93,7 @@ fn docker_evidence(kind: ResourceKind, lifecycle: DockerLifecycle) -> Evidence {
         git_state: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         tool_liveness: ProbeOutcome::Observed(true),
         docker_lifecycle: Some(lifecycle),
+        executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         collected_at: NOW,
         sources: Vec::new(),
     }
@@ -276,6 +277,9 @@ fn auto_safe_control(target: &Path) -> Evidence {
     ev.git_state = ProbeOutcome::Observed(None);
     ev.tool_liveness = ProbeOutcome::Observed(false);
     ev.docker_lifecycle = None;
+    // HORO-1825: CargoTargetDir now requires this field too.
+    ev.executable_dependency =
+        ProbeOutcome::Observed(glomeris::evidence::ExecutableDependencyReport::empty());
     ev
 }
 

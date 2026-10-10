@@ -693,6 +693,9 @@ mod tests {
                 process_cwd_match: ProbeOutcome::Observed(Vec::new()),
                 git_state: ProbeOutcome::Observed(None::<GitState>),
                 tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(
+                    crate::evidence::ExecutableDependencyReport::empty(),
+                ),
             }
         }
     }
