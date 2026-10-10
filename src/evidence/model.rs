@@ -869,6 +869,12 @@ pub enum UnresolvedRef {
     SourceUnreadable { source: SourceTag },
     /// The symlink chain looped or exceeded the 40-hop bound.
     SymlinkLoopOrTooDeep { source: SourceTag, pointer: String },
+    /// A resolved (or dangling) path's relationship to the resource could
+    /// not be determined — an intermediate directory in its chain does not
+    /// exist, so it cannot be canonicalized to check whether it lands
+    /// inside the resource. Never read as "not inside" — that would be a
+    /// clean negative built on a gap, not an observation.
+    PathResolutionIndeterminate { source: SourceTag, pointer: String },
 }
 
 impl UnresolvedRef {
@@ -878,7 +884,8 @@ impl UnresolvedRef {
             | UnresolvedRef::NotOnPath { source, .. }
             | UnresolvedRef::PathResolutionDivergent { source, .. }
             | UnresolvedRef::SourceUnreadable { source }
-            | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. } => source,
+            | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. }
+            | UnresolvedRef::PathResolutionIndeterminate { source, .. } => source,
         }
     }
 }

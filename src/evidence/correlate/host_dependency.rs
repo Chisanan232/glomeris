@@ -402,16 +402,51 @@ fn canonical_hop(hop: &Path) -> Option<PathBuf> {
     Some(canon_parent.join(file_name))
 }
 
+/// Result of [`chain_matches_resource`] — tri-state rather than `bool`,
+/// because "could not determine" must never collapse into "does not
+/// match".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainMatch {
+    Yes,
+    No,
+    /// At least one hop could not be canonicalized — e.g. an intermediate
+    /// directory in its path does not exist (a target whose whole parent
+    /// chain was never created, not merely the final file). `canonical_hop`
+    /// returning `None` for every hop that mattered means this chain's
+    /// relationship to the resource genuinely cannot be established, which
+    /// is a different fact from "established, and it's outside" — see
+    /// `path_matches_resource`'s own doc comment for the matching case
+    /// where a MISSING FILE (but resolvable parent) still proves same-
+    /// filesystem containment by prefix alone. This variant is for when
+    /// even the parent can't be resolved.
+    Indeterminate,
+}
+
 /// §4.3's match rule: canonical(resolved), or any hop in its chain, is
 /// component-wise under the resource's canonical locator, AND same
-/// `st_dev`.
-fn chain_matches_resource(hops: &[PathBuf], resource_canonical: &Path, resource_dev: u64) -> bool {
-    hops.iter().any(|hop| {
-        let Some(canon) = canonical_hop(hop) else {
-            return false;
-        };
-        path_matches_resource(&canon, resource_canonical, resource_dev)
-    })
+/// `st_dev`. Returns [`ChainMatch::Indeterminate`] — never a silent `No`
+/// — when a hop's containment could not be established at all.
+fn chain_matches_resource(
+    hops: &[PathBuf],
+    resource_canonical: &Path,
+    resource_dev: u64,
+) -> ChainMatch {
+    let mut indeterminate = false;
+    for hop in hops {
+        match canonical_hop(hop) {
+            Some(canon) => {
+                if path_matches_resource(&canon, resource_canonical, resource_dev) {
+                    return ChainMatch::Yes;
+                }
+            }
+            None => indeterminate = true,
+        }
+    }
+    if indeterminate {
+        ChainMatch::Indeterminate
+    } else {
+        ChainMatch::No
+    }
 }
 
 /// Shared prefix + same-device check against the resource, given an
@@ -512,27 +547,40 @@ fn resolve_command(
     for (candidate, provenance) in candidates {
         match resolve_symlink_chain(&candidate) {
             ChainResolution::Resolved { final_path, hops } => {
-                if chain_matches_resource(&hops, resource_canonical, resource_dev) {
-                    if let Some(exe) = exe_identity_of(&final_path) {
-                        deps.push(DependencyRef {
+                match chain_matches_resource(&hops, resource_canonical, resource_dev) {
+                    ChainMatch::Yes => {
+                        if let Some(exe) = exe_identity_of(&final_path) {
+                            deps.push(DependencyRef {
+                                source: source.clone(),
+                                pointer: raw.pointer.clone(),
+                                resolved: final_path,
+                                exe,
+                                provenance,
+                                next_invocation: true,
+                            });
+                        } else {
+                            unresolved.push(UnresolvedRef::SourceUnreadable {
+                                source: source.clone(),
+                            });
+                        }
+                    }
+                    // A resolved chain that does NOT match the resource is
+                    // a clean negative for this candidate — nothing else
+                    // to record (§4.3: match is the only thing that
+                    // creates either a DependencyRef or an unresolved
+                    // finding for an inspectable, fully-resolved path).
+                    ChainMatch::No => {}
+                    // Containment genuinely could not be established (an
+                    // intermediate directory in the chain doesn't exist) —
+                    // never read as "outside", which would be a clean
+                    // negative built on a gap.
+                    ChainMatch::Indeterminate => {
+                        unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
                             source: source.clone(),
                             pointer: raw.pointer.clone(),
-                            resolved: final_path,
-                            exe,
-                            provenance,
-                            next_invocation: true,
-                        });
-                    } else {
-                        unresolved.push(UnresolvedRef::SourceUnreadable {
-                            source: source.clone(),
                         });
                     }
                 }
-                // A resolved chain that does NOT match the resource is a
-                // clean negative for this candidate — nothing else to
-                // record (§4.3: match is the only thing that creates
-                // either a DependencyRef or an unresolved finding for an
-                // inspectable, fully-resolved path).
             }
             ChainResolution::Dangling { hops } => {
                 // Stale symlink (AC case): if any hop along the way was
@@ -541,11 +589,25 @@ fn resolve_command(
                 // target is still a dependency the target cannot safely
                 // lose. Otherwise, a dangling reference outside the
                 // resource is simply not a reference to it.
-                if chain_matches_resource(&hops, resource_canonical, resource_dev) {
-                    unresolved.push(UnresolvedRef::SymlinkLoopOrTooDeep {
-                        source: source.clone(),
-                        pointer: raw.pointer.clone(),
-                    });
+                match chain_matches_resource(&hops, resource_canonical, resource_dev) {
+                    ChainMatch::Yes => {
+                        unresolved.push(UnresolvedRef::SymlinkLoopOrTooDeep {
+                            source: source.clone(),
+                            pointer: raw.pointer.clone(),
+                        });
+                    }
+                    ChainMatch::No => {}
+                    // The missing-executable AC case when the WHOLE parent
+                    // chain is absent (not merely the final file): no hop
+                    // could be canonicalized, so containment could not be
+                    // established either way — fail closed, never a
+                    // silent "not inside".
+                    ChainMatch::Indeterminate => {
+                        unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                            source: source.clone(),
+                            pointer: raw.pointer.clone(),
+                        });
+                    }
                 }
             }
             ChainResolution::TooDeepOrLoop => {
@@ -617,10 +679,26 @@ fn read_plist_as_json(
     }
 }
 
-fn launch_agent_plists(home: &Path) -> Vec<PathBuf> {
+/// Outcome of listing `~/Library/LaunchAgents`. Distinguishes "the
+/// directory doesn't exist" (ENOENT — a normal, fully-observed negative:
+/// no LaunchAgents configured at all, §4.3/C4) from any OTHER `read_dir`
+/// failure (permission denied, I/O error, ...), which must surface as
+/// unresolved rather than being silently read as the same clean "no
+/// LaunchAgents" outcome.
+enum LaunchAgentListing {
+    Plists(Vec<PathBuf>),
+    DirectoryAbsent,
+    Unreadable,
+}
+
+fn launch_agent_plists(home: &Path) -> LaunchAgentListing {
     let dir = home.join("Library").join("LaunchAgents");
-    let Ok(entries) = fs::read_dir(&dir) else {
-        return Vec::new();
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return LaunchAgentListing::DirectoryAbsent;
+        }
+        Err(_) => return LaunchAgentListing::Unreadable,
     };
     let mut plists: Vec<PathBuf> = entries
         .filter_map(|e| e.ok())
@@ -629,7 +707,7 @@ fn launch_agent_plists(home: &Path) -> Vec<PathBuf> {
         .collect();
     plists.sort();
     plists.truncate(MAX_LAUNCH_AGENTS);
-    plists
+    LaunchAgentListing::Plists(plists)
 }
 
 fn launch_agent_label(path: &Path) -> String {
@@ -725,7 +803,20 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
             }
         }
 
-        for plist in launch_agent_plists(&self.roots.home) {
+        let plists = match launch_agent_plists(&self.roots.home) {
+            LaunchAgentListing::Plists(plists) => plists,
+            // ENOENT: a normal, fully-observed negative.
+            LaunchAgentListing::DirectoryAbsent => Vec::new(),
+            // Present but unreadable (e.g. EACCES) — fail closed, not a
+            // silent "no LaunchAgents".
+            LaunchAgentListing::Unreadable => {
+                let tag = SourceTag::LaunchAgent("directory".to_string());
+                sources_examined.push(tag.clone());
+                unresolved.push(UnresolvedRef::SourceUnreadable { source: tag });
+                Vec::new()
+            }
+        };
+        for plist in plists {
             let tag = SourceTag::LaunchAgent(launch_agent_label(&plist));
             match read_plist_as_json(&self.roots.plutil_bin, &plist, timeout) {
                 Ok(json) => {
@@ -779,6 +870,14 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                         exe,
                         provenance: Provenance::Observed,
                         next_invocation: true,
+                    });
+                } else {
+                    // Matches a resource-inside path, but its identity
+                    // (dev/ino) couldn't be stat'd — fail closed, same as
+                    // `resolve_command`'s handling of the same
+                    // `exe_identity_of` failure, never a silent skip.
+                    unresolved.push(UnresolvedRef::SourceUnreadable {
+                        source: SourceTag::PathEntry,
                     });
                 }
             }
@@ -1059,6 +1158,61 @@ mod tests {
         fs::remove_dir_all(&resource).ok();
     }
 
+    /// Same AC case as above, but with the WHOLE parent chain absent —
+    /// not merely the final file. `canonical_hop` then cannot even
+    /// canonicalize the hop's parent directory, so the fix-up to
+    /// `chain_matches_resource`/`canonical_hop` is what this pins: before
+    /// that fix, `chain_matches_resource` read every `canonical_hop`
+    /// failure as "not inside" and returned a clean negative here, which
+    /// is a different (and worse) bug than the "parent exists, file
+    /// doesn't" case above — this is "we cannot tell", not "we checked
+    /// and it's outside".
+    #[test]
+    fn missing_executable_with_absent_parent_chain_is_unresolved_not_clean() {
+        let home = unique_temp_dir("home-missing-parent");
+        let resource = unique_temp_dir("target-missing-parent");
+        fs::create_dir_all(&resource).unwrap();
+        // Deliberately NOT created: `release/` itself does not exist, so
+        // the hop's parent cannot be canonicalized either.
+        let missing = resource.join("release").join("hook-never-built");
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+                missing.display()
+            ),
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            !report.is_clean(),
+            "a reference whose whole parent chain is absent must not be a clean negative \
+             just because its containment couldn't be determined"
+        );
+        assert!(report.references_inside.is_empty());
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::PathResolutionIndeterminate { .. })),
+            "expected PathResolutionIndeterminate, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
     #[test]
     fn stale_symlink_inside_resource_is_unresolved_not_clean() {
         let home = unique_temp_dir("home3");
@@ -1324,6 +1478,108 @@ mod tests {
             "an lsof failure on the running-process probe must make the whole \
              executable_dependency probe Unavailable, not a clean Observed \
              report with empty running_inside; got {outcome:?}"
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// The fail-open this pins: `launch_agent_plists` returning
+    /// `Vec::new()` for ANY `read_dir` error (not just ENOENT) made a
+    /// permission-denied `~/Library/LaunchAgents` read exactly like "no
+    /// LaunchAgents configured" — a clean negative built on a read
+    /// failure rather than an observation. `DirectoryAbsent` (the
+    /// legitimate case, covered by every other test here that doesn't
+    /// create a LaunchAgents directory at all) must stay a clean
+    /// negative; only `Unreadable` must surface as `unresolved`.
+    #[test]
+    fn unreadable_launch_agents_directory_is_unresolved_not_clean() {
+        let home = unique_temp_dir("home-la-eacces");
+        let resource = unique_temp_dir("target-la-eacces");
+        fs::create_dir_all(&resource).unwrap();
+        let launch_agents = home.join("Library").join("LaunchAgents");
+        fs::create_dir_all(&launch_agents).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let original = fs::metadata(&launch_agents).unwrap().permissions();
+        fs::set_permissions(&launch_agents, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let outcome = probe.probe(&resource, Duration::from_secs(5));
+
+        // Restore permissions before any cleanup/assert path can fail.
+        fs::set_permissions(&launch_agents, original).ok();
+
+        // Running as root (some sandboxes) bypasses the permission check
+        // entirely, in which case this test cannot exercise the failure
+        // path at all — skip rather than assert something environment-
+        // dependent.
+        let unreadable_by_this_process =
+            fs::read_dir(&launch_agents).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+        if unreadable_by_this_process {
+            let report = outcome
+                .observed()
+                .cloned()
+                .expect("probe should still observe overall — only the LaunchAgents source failed");
+            assert!(
+                !report.is_clean(),
+                "a permission-denied LaunchAgents directory must not be a clean negative"
+            );
+            assert!(
+                report.unresolved.iter().any(|u| matches!(
+                    u,
+                    UnresolvedRef::SourceUnreadable {
+                        source: SourceTag::LaunchAgent(label)
+                    } if label == "directory"
+                )),
+                "expected SourceUnreadable(LaunchAgent(\"directory\")), got {:?}",
+                report.unresolved
+            );
+        }
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// The fail-open this pins: a PATH directory that matches the resource
+    /// by prefix (so `is_inside_resource` returns `true`) but whose
+    /// identity cannot be `stat`-confirmed (it doesn't actually exist —
+    /// a dangling PATH entry) was silently skipped: no `DependencyRef`,
+    /// no `UnresolvedRef`, nothing — the same shape of gap
+    /// `resolve_command` already closes for its own `exe_identity_of`
+    /// call.
+    #[test]
+    fn path_entry_inside_resource_with_unreadable_identity_is_unresolved_not_silent() {
+        let home = unique_temp_dir("home-path-ghost");
+        let resource = unique_temp_dir("target-path-ghost");
+        fs::create_dir_all(&resource).unwrap();
+        // Deliberately not created: matches the resource by canonical
+        // prefix, but has no real identity to stat.
+        let ghost_path_dir = resource.join("ghost-bin-dir");
+
+        let mut roots = roots_for(&home);
+        roots.path_dirs = vec![ghost_path_dir];
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report.references_inside.is_empty(),
+            "a PATH entry with no confirmable identity must never become a DependencyRef"
+        );
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::PathEntry
+                }
+            )),
+            "expected SourceUnreadable(PathEntry), got {:?}",
+            report.unresolved
         );
 
         fs::remove_dir_all(&home).ok();
