@@ -1535,10 +1535,10 @@ mod tests {
     #[test]
     fn process_identities_stay_local_and_only_counts_are_projected() {
         let mut c = candidate("/w/a/target", in_repo("/w/a", "/w/.git"));
-        c.0.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
-            pid: 31337,
-            command: "/opt/acme/bin/acme-internal-builder".to_string(),
-        }]);
+        c.0.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            31337,
+            "/opt/acme/bin/acme-internal-builder".to_string(),
+        )]);
         let projection = project(&[c]);
         let body = json(&projection);
 

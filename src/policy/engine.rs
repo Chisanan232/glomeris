@@ -366,10 +366,10 @@ mod tests {
     #[test]
     fn open_by_process_is_ask_in_active_use() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
-        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
-            pid: 1,
-            command: "cargo".to_string(),
-        }]);
+        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            1,
+            "cargo".to_string(),
+        )]);
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
@@ -378,13 +378,165 @@ mod tests {
     #[test]
     fn process_cwd_match_is_ask_in_active_use() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
-        ev.process_cwd_match = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
-            pid: 1,
-            command: "cargo".to_string(),
-        }]);
+        ev.process_cwd_match = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            1,
+            "cargo".to_string(),
+        )]);
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+    }
+
+    /// HORO-1823 ADR-0001 §13 item 2 ("detached still-active build"): a
+    /// cargo build detached from its launching terminal — PPID == 1,
+    /// supervisor `Unknown` (not a launchd job, not reparented to
+    /// anything `launchctl` recognizes), zombie `false` — must still
+    /// veto. The holder's mere presence is what protects it; nothing
+    /// about its identity (orphaned-looking PPID, unknown supervision)
+    /// is read as "therefore safe". Manually verified during review: with
+    /// the `process_active` check (the two lines above step 6's first
+    /// `if`) deleted, this test fails RED — see the PR body for the
+    /// captured failing output.
+    #[test]
+    fn detached_still_active_build_is_protected_regardless_of_identity() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let detached = crate::evidence::ProcessRef::new(4242, "cargo".to_string()).with_identity(
+            ProbeOutcome::Observed(crate::evidence::ProcessIdentity {
+                start_time: NOW,
+                uid: 501,
+                ppid: 1,
+                pgid: 4242,
+                state_zombie: false,
+                exe: ProbeOutcome::Unavailable(ProbeReason::Failed),
+                supervisor: crate::evidence::Supervisor::Unknown,
+            }),
+        );
+        ev.open_by_process = ProbeOutcome::Observed(vec![detached]);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+    }
+
+    /// Identity-invariance: with the holder set fixed, varying only the
+    /// `identity` field across Observed / Unavailable / zombie / a
+    /// different (mismatched) identity tuple must never change
+    /// `classify`'s decision. This is the structural proof that identity
+    /// and (by extension) any derived claim never act as authority —
+    /// `classify` doesn't read `identity` at all, and this test would
+    /// catch a regression that made it start to.
+    #[test]
+    fn classify_decision_is_invariant_to_process_identity_variations() {
+        fn decision_with(
+            identity: ProbeOutcome<crate::evidence::ProcessIdentity>,
+        ) -> (PolicyClass, Vec<ReasonCode>) {
+            let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+            ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+                7,
+                "cargo".to_string(),
+            )
+            .with_identity(identity)]);
+            let decision = classify(&ev, &cfg(), NOW);
+            (decision.class, decision.reasons)
+        }
+
+        let healthy = crate::evidence::ProcessIdentity {
+            start_time: NOW,
+            uid: 501,
+            ppid: 1,
+            pgid: 7,
+            state_zombie: false,
+            exe: ProbeOutcome::Observed(crate::evidence::ExeIdentity {
+                path: PathBuf::from("/usr/bin/cargo"),
+                dev: 1,
+                ino: 1,
+            }),
+            supervisor: crate::evidence::Supervisor::LaunchdJob,
+        };
+        let zombie = crate::evidence::ProcessIdentity {
+            state_zombie: true,
+            ..healthy.clone()
+        };
+        let mismatched_tuple = crate::evidence::ProcessIdentity {
+            uid: 999,
+            ..healthy.clone()
+        };
+
+        let baseline = decision_with(ProbeOutcome::Observed(healthy));
+        assert_eq!(baseline.0, PolicyClass::Ask);
+        assert!(baseline.1.contains(&ReasonCode::ResourceInActiveUse));
+        // Not just the class — the exact reason set too. A regression
+        // that added or removed an identity-derived reason under `Ask`
+        // (e.g. an `UNKNOWN_INCOMPLETE`-shaped addition) would pass a
+        // class-only comparison but must fail this one, since the
+        // executor aborts on `PolicyReasonsWidened` whenever the reason
+        // set itself changes between a consented plan and revalidation.
+        assert_eq!(
+            decision_with(ProbeOutcome::Unavailable(ProbeReason::Failed)),
+            baseline
+        );
+        assert_eq!(decision_with(ProbeOutcome::Observed(zombie)), baseline);
+        assert_eq!(
+            decision_with(ProbeOutcome::Observed(mismatched_tuple)),
+            baseline
+        );
+    }
+
+    /// HORO-1823 AC: "a verified inactive disposable target can lose one
+    /// active-use veto only after a fresh evidence pass" — never from
+    /// identity or a claim alone. Starts with a holder (ResourceInActiveUse)
+    /// plus an unrelated, independent veto (a dirty git worktree), then
+    /// simulates a fresh `merge_into` that re-probes and finds the holder
+    /// genuinely gone. Only `ResourceInActiveUse` drops; the unrelated
+    /// veto survives untouched, proving the loss came from fresh evidence
+    /// re-observing an empty holder set, not from any identity/claim
+    /// mechanism silently clearing reasons.
+    #[test]
+    fn a_holder_veto_is_lost_only_via_a_fresh_empty_observation_not_via_identity() {
+        use crate::evidence::correlate::{merge_into, CorrelationResult};
+        use crate::evidence::{ExecutableDependencyReport, GitState};
+
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            7,
+            "cargo".to_string(),
+        )]);
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp/x"),
+            common_dir: PathBuf::from("/tmp/x/.git"),
+            dirty: true,
+            untracked: false,
+            worktree: false,
+        }));
+
+        let before = classify(&ev, &cfg(), NOW);
+        assert_eq!(before.class, PolicyClass::Ask);
+        assert!(before.reasons.contains(&ReasonCode::ResourceInActiveUse));
+        assert!(before.reasons.contains(&ReasonCode::GitWorktreeDirty));
+
+        // A fresh revalidation pass genuinely re-observes an empty holder
+        // set (the only way this veto may ever drop) while the git state
+        // is re-observed unchanged.
+        merge_into(
+            &mut ev,
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(Some(GitState {
+                    repo_root: PathBuf::from("/tmp/x"),
+                    common_dir: PathBuf::from("/tmp/x/.git"),
+                    dirty: true,
+                    untracked: false,
+                    worktree: false,
+                })),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(ExecutableDependencyReport::empty()),
+            },
+        );
+
+        let after = classify(&ev, &cfg(), NOW);
+        assert_eq!(after.class, PolicyClass::Ask);
+        assert!(!after.reasons.contains(&ReasonCode::ResourceInActiveUse));
+        assert!(after.reasons.contains(&ReasonCode::GitWorktreeDirty));
     }
 
     #[test]
@@ -873,10 +1025,10 @@ mod tests {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
             references_inside: Vec::new(),
-            running_inside: vec![crate::evidence::ProcessRef {
-                pid: 999,
-                command: "libra-governor".to_string(),
-            }],
+            running_inside: vec![crate::evidence::ProcessRef::new(
+                999,
+                "libra-governor".to_string(),
+            )],
             unresolved: Vec::new(),
             sources_examined: vec![SourceTag::ClaudeUserSettings],
         });

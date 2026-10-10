@@ -448,10 +448,8 @@ mod tests {
     }
 
     fn in_use(mut candidate: (Evidence, PolicyDecision)) -> (Evidence, PolicyDecision) {
-        candidate.0.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 42,
-            command: "cargo".to_string(),
-        }]);
+        candidate.0.open_by_process =
+            ProbeOutcome::Observed(vec![ProcessRef::new(42, "cargo".to_string())]);
         candidate
     }
 

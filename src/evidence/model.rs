@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use super::docker::DockerLifecycle;
-use super::probe::ProbeOutcome;
+use super::probe::{ProbeOutcome, ProbeReason};
 use crate::detectors::DetectorId;
 
 /// The kind of on-disk/tool-owned resource a detector found.
@@ -764,10 +764,125 @@ impl fmt::Display for EvidenceField {
 
 /// A single process discovered (via [`crate::evidence::correlate`]) to
 /// have a resource open, or to have it as its current working directory.
+///
+/// `identity` (HORO-1823 §4.1) is populated best-effort, after the holder
+/// itself has already been recorded: a failed or partial identity probe
+/// NEVER removes this `ProcessRef` from whatever list it lives in, and
+/// never downgrades `Unavailable` into an empty/default
+/// [`ProcessIdentity`] — the holder's mere presence is what `classify`'s
+/// `process_active` check (`src/policy/engine.rs`) keys on, and that check
+/// never reads `identity` at all. Identity only adds an EXPLANATION for
+/// reporting (see [`ProcessClaim`] / `derive_claim`); it can never remove a
+/// veto (ADR-0001 §4.1 "C1").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessRef {
     pub pid: u32,
     pub command: String,
+    pub identity: ProbeOutcome<ProcessIdentity>,
+}
+
+impl ProcessRef {
+    /// Convenience constructor for the common case (no identity probe run
+    /// yet) — used by every pre-HORO-1823 call site so adding this field
+    /// did not require threading a new argument through probes whose job
+    /// is "who holds this resource", not "who are they" (identity is
+    /// filled in by a later, separate enrichment pass; see
+    /// `crate::evidence::correlate::process_identity`).
+    pub fn new(pid: u32, command: String) -> Self {
+        Self {
+            pid,
+            command,
+            identity: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        }
+    }
+
+    pub fn with_identity(mut self, identity: ProbeOutcome<ProcessIdentity>) -> Self {
+        self.identity = identity;
+        self
+    }
+}
+
+/// How a process relates to `launchd` (HORO-1823 §4.1). `PPID == 1` alone
+/// is NEVER read as "orphan" — on macOS every reparented process's parent
+/// becomes `launchd` (pid 1), so that alone proves nothing about
+/// supervision. Only a positive `launchctl list` match proves
+/// `LaunchdJob`; a clean negative (not in the list, but able to run the
+/// query) proves `None`; any probe failure, or `PPID == 1` with no
+/// positive match, is `Unknown` — never upgraded to either definite value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supervisor {
+    LaunchdJob,
+    None,
+    Unknown,
+}
+
+/// Bounded, read-only process identity (HORO-1823 §4.1). Every field is
+/// OBSERVED (direct read), never inferred from naming or content.
+///
+/// The identity key for any cross-sample comparison is the full tuple
+/// `(pid, start_time, uid, exe.dev, exe.ino)` — see
+/// `crate::evidence::correlate::process_identity::identity_tuple_matches`.
+/// A tuple mismatch resets any derived claim to [`ProcessClaim::Unknown`];
+/// it is never read as "the process exited" (PID reuse is real and is
+/// explicitly in scope, ADR-0001 §4.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    /// `ps -o lstart=` under `LC_ALL=C`, 1s resolution.
+    pub start_time: SystemTime,
+    /// `ps -o uid=`.
+    pub uid: u32,
+    /// `ps -o ppid=`.
+    pub ppid: u32,
+    /// `ps -o pgid=`.
+    pub pgid: u32,
+    /// `ps -o stat=` contains `Z`.
+    pub state_zombie: bool,
+    /// `lsof -a -d txt -F n` for this pid, resolved to canonical
+    /// path/dev/ino. `Unavailable` on probe failure — never silently
+    /// treated as "no executable mapping" (that would hide a real
+    /// dependency).
+    pub exe: ProbeOutcome<ExeIdentity>,
+    pub supervisor: Supervisor,
+}
+
+/// Evidence-only explanation of why a process holder looks the way it
+/// does (HORO-1823 §4.1 / §5). **Never consumed by `classify` or
+/// `is_preauthorizable`** — attaching a claim can only add words to a
+/// report, never remove or add a policy veto. See
+/// `crate::evidence::correlate::process_identity::derive_claim`, whose
+/// signature deliberately accepts no external/remote state (Jira, branch
+/// merge status, etc. — ADR-0001 §4.1 "C6").
+///
+/// A single evidence-collection pass has no progress dimension (no two
+/// samples to compare CPU time across), so `derive_claim` only ever
+/// produces [`Self::IdleButValid`] or [`Self::Unknown`] today.
+/// [`Self::Active`], [`Self::Stalled`] and [`Self::AbandonedCandidate`]
+/// are defined now so a future multi-sample pass (HORO-1827's observation
+/// history) can populate them without another breaking change to this
+/// enum, but nothing in this ticket emits them — see the PR body for why
+/// that is a deliberate, flagged scope decision, not an oversight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessClaim {
+    /// Holds the build lock, or CPU time advanced between two same-tuple
+    /// samples. Not emitted by a single-pass probe (see above).
+    Active,
+    /// Alive, supervised by `launchd`, no CPU progress observed (or none
+    /// observable yet).
+    IdleButValid,
+    /// Same identity tuple across a sampling window, no CPU progress,
+    /// still holds the resource. Requires multi-sample history; not
+    /// emitted by a single-pass probe.
+    Stalled,
+    /// Same identity tuple, no progress, supervisor `None`/`Unknown`, no
+    /// build lock. Requires multi-sample history; not emitted by a
+    /// single-pass probe. Never removes a veto on its own (C1) — see
+    /// `ProcessRef` doc comment.
+    AbandonedCandidate,
+    /// Any probe failed, the identity tuple mismatched across samples,
+    /// the process is a zombie, or the identity could not be established
+    /// at all. The conservative default for a single-pass probe when
+    /// supervision is not positively confirmed.
+    Unknown,
 }
 
 /// Canonical filesystem identity of a resolved executable (HORO-1825

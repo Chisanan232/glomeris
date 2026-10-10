@@ -11,14 +11,15 @@ pub mod docker;
 pub mod model;
 pub mod probe;
 
+pub use correlate::derive_claim;
 pub use docker::{
     daemon_unreachable, DockerActivity, DockerLifecycle, DockerPersistence, DockerReferences,
 };
 pub use model::{
     decode_fingerprint_token, encode_fingerprint_token, ActionId, Completeness, Confidence,
     DependencyRef, Evidence, EvidenceField, ExeIdentity, ExecutableDependencyReport,
-    FingerprintTokenError, GitState, NativeCleanup, OwningTool, ProcessRef, Provenance,
-    Recoverability, Regenerability, ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator,
-    SourceTag, UnresolvedRef,
+    FingerprintTokenError, GitState, NativeCleanup, OwningTool, ProcessClaim, ProcessIdentity,
+    ProcessRef, Provenance, Recoverability, Regenerability, ResourceFingerprint, ResourceId,
+    ResourceKind, ResourceLocator, SourceTag, Supervisor, UnresolvedRef,
 };
 pub use probe::{ProbeOutcome, ProbeReason};
