@@ -218,16 +218,27 @@ impl SettingsRejection {
     }
 }
 
-/// The two user-configurable numbers, valid by construction.
+/// The two user-configurable numbers, valid by construction, plus one
+/// independent opt-in flag.
 ///
-/// Both fields are private and the only way to change either is
+/// Both numeric fields are private and the only way to change either is
 /// [`RecoverySettings::with_changes`], so a pair that breaks the cross-field
 /// rule cannot exist — not from a hand-edited file, not from the GUI, and not
 /// from a future call site that forgets to check.
+///
+/// `pressure_history_sampling_enabled` (HORO-1827) is deliberately **not**
+/// part of that cross-field machinery: it has no numeric bound and no
+/// relationship to the other two fields, so giving it its own setter
+/// ([`RecoverySettings::with_history_sampling_enabled`]) rather than a third
+/// `Option` parameter on `with_changes` keeps that method's contract
+/// ("validate this *pair*") honest — a boolean flip is never refused, so it
+/// never belongs in a function whose entire purpose is refusing invalid
+/// combinations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecoverySettings {
     notify_at_used_percent: f64,
     default_goal: RecoveryGoal,
+    pressure_history_sampling_enabled: bool,
 }
 
 impl Default for RecoverySettings {
@@ -237,6 +248,11 @@ impl Default for RecoverySettings {
         let settings = Self {
             notify_at_used_percent: DEFAULT_NOTIFY_AT_USED_PERCENT,
             default_goal,
+            // Off by default (ADR-0001 §15 rollback notes / this ticket's
+            // scope): a build that predates HORO-1827 sampled nothing, and
+            // an opt-in feature that silently turned itself on for every
+            // existing installation on upgrade would not be opt-in at all.
+            pressure_history_sampling_enabled: false,
         };
         // The defaults must satisfy the same cross-field rule every user
         // change does. Asserted rather than assumed, because the two
@@ -297,7 +313,24 @@ impl RecoverySettings {
         Ok(Self {
             notify_at_used_percent: notify_at,
             default_goal: goal,
+            pressure_history_sampling_enabled: self.pressure_history_sampling_enabled,
         })
+    }
+
+    /// Whether opt-in pressure-history sampling (HORO-1827) is turned on.
+    /// Off by default — see this struct's doc comment.
+    pub fn pressure_history_sampling_enabled(&self) -> bool {
+        self.pressure_history_sampling_enabled
+    }
+
+    /// Turns opt-in pressure-history sampling on or off. Unlike
+    /// [`Self::with_changes`], this can never be refused: there is no bound
+    /// to check and no cross-field rule a boolean could violate.
+    pub fn with_history_sampling_enabled(&self, enabled: bool) -> Self {
+        Self {
+            pressure_history_sampling_enabled: enabled,
+            ..*self
+        }
     }
 
     /// One-line unambiguous rendering of the alert threshold, e.g.
@@ -335,6 +368,26 @@ mod tests {
         let settings = RecoverySettings::default();
         assert_eq!(settings.notify_at_used_percent(), 75.0);
         assert_eq!(settings.default_goal().used_percent(), 70.0);
+        assert!(
+            !settings.pressure_history_sampling_enabled(),
+            "pressure-history sampling must be off by default (HORO-1827 is opt-in)"
+        );
+    }
+
+    #[test]
+    fn history_sampling_can_be_turned_on_and_off_independently_of_the_other_fields() {
+        let settings = RecoverySettings::default()
+            .with_changes(Some(90.0), Some(40.0))
+            .unwrap();
+
+        let enabled = settings.with_history_sampling_enabled(true);
+        assert!(enabled.pressure_history_sampling_enabled());
+        // The other two fields are untouched by the flag flip.
+        assert_eq!(enabled.notify_at_used_percent(), 90.0);
+        assert_eq!(enabled.default_goal().used_percent(), 40.0);
+
+        let disabled_again = enabled.with_history_sampling_enabled(false);
+        assert!(!disabled_again.pressure_history_sampling_enabled());
     }
 
     /// The default alert threshold is not merely 75; it is *the same* 75 as

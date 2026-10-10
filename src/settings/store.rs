@@ -225,6 +225,10 @@ struct RawSettings {
     version: Option<(usize, String)>,
     notify_at_used_percent: Option<(usize, f64)>,
     default_goal_used_percent: Option<(usize, f64)>,
+    /// HORO-1827's opt-in flag. Absent-means-default (`false`) rather than a
+    /// missing-key error, same reasoning as the two numeric fields: a file
+    /// written before this key existed must still load.
+    pressure_history_sampling_enabled: Option<(usize, bool)>,
 }
 
 /// Parses a settings file's contents.
@@ -248,8 +252,12 @@ fn parse_settings(contents: &str) -> Result<RecoverySettings, SettingsStoreError
 
     let notify_line = raw.notify_at_used_percent.map(|(line, _)| line);
     let goal_line = raw.default_goal_used_percent.map(|(line, _)| line);
+    let history_sampling_enabled = raw
+        .pressure_history_sampling_enabled
+        .map(|(_, value)| value)
+        .unwrap_or(false);
 
-    RecoverySettings::default()
+    let settings = RecoverySettings::default()
         .with_changes(
             raw.notify_at_used_percent.map(|(_, value)| value),
             raw.default_goal_used_percent.map(|(_, value)| value),
@@ -257,7 +265,9 @@ fn parse_settings(contents: &str) -> Result<RecoverySettings, SettingsStoreError
         .map_err(|source| SettingsStoreError::Refused {
             lines: implicated_lines(&source, notify_line, goal_line),
             source,
-        })
+        })?;
+
+    Ok(settings.with_history_sampling_enabled(history_sampling_enabled))
 }
 
 /// Which lines a rejection is about. A per-field rejection names its own
@@ -285,6 +295,7 @@ fn read_lines(contents: &str) -> Result<RawSettings, SettingsStoreError> {
         version: None,
         notify_at_used_percent: None,
         default_goal_used_percent: None,
+        pressure_history_sampling_enabled: None,
     };
 
     for (index, raw_line) in contents.lines().enumerate() {
@@ -312,6 +323,12 @@ fn read_lines(contents: &str) -> Result<RawSettings, SettingsStoreError> {
                 line,
                 key,
                 parse_percent(line, "default_goal_used_percent", value)?,
+            )?,
+            "pressure_history_sampling_enabled" => set_once(
+                &mut raw.pressure_history_sampling_enabled,
+                line,
+                key,
+                parse_bool(line, "pressure_history_sampling_enabled", value)?,
             )?,
             _ => {
                 return Err(SettingsStoreError::UnknownKey {
@@ -361,6 +378,24 @@ fn parse_percent(line: usize, key: &'static str, value: &str) -> Result<f64, Set
         })
 }
 
+/// Parses `true`/`false` for [`RawSettings::pressure_history_sampling_enabled`].
+/// Strict on purpose — unlike [`parse_percent`]'s tolerant `%`-suffix
+/// handling, a boolean has no natural "close enough" spelling, and
+/// accepting e.g. `1`/`0`/`yes`/`no` as well would just be more ways for a
+/// hand-edited file to mean something the next build might read
+/// differently.
+fn parse_bool(line: usize, key: &'static str, value: &str) -> Result<bool, SettingsStoreError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(SettingsStoreError::InvalidValue {
+            line,
+            key,
+            value: quote_value(value),
+        }),
+    }
+}
+
 /// Truncates an offending value for an error message. See
 /// [`MAX_QUOTED_VALUE`].
 fn quote_value(value: &str) -> String {
@@ -390,6 +425,10 @@ fn render_settings(settings: &RecoverySettings) -> String {
     out.push_str(&format!(
         "default_goal_used_percent = {}\n",
         settings.default_goal().used_percent()
+    ));
+    out.push_str(&format!(
+        "pressure_history_sampling_enabled = {}\n",
+        settings.pressure_history_sampling_enabled()
     ));
     out
 }
@@ -439,6 +478,47 @@ mod tests {
             .unwrap();
         let rendered = render_settings(&settings);
         assert_eq!(load(&rendered).unwrap(), settings);
+    }
+
+    #[test]
+    fn history_sampling_flag_round_trips_through_render_and_load() {
+        let settings = RecoverySettings::default().with_history_sampling_enabled(true);
+        let rendered = render_settings(&settings);
+        assert!(rendered.contains("pressure_history_sampling_enabled = true\n"));
+        assert_eq!(load(&rendered).unwrap(), settings);
+    }
+
+    /// A file written before HORO-1827 existed has no such key at all; it
+    /// must still load, landing on the opt-in default (off).
+    #[test]
+    fn a_file_without_the_history_sampling_key_loads_as_disabled() {
+        let settings = RecoverySettings::default()
+            .with_changes(Some(88.0), Some(55.0))
+            .unwrap();
+        let mut rendered = render_settings(&settings);
+        // Strip the key this ticket added, simulating an older file.
+        rendered = rendered
+            .lines()
+            .filter(|line| !line.starts_with("pressure_history_sampling_enabled"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let loaded = load(&rendered).unwrap();
+        assert!(!loaded.pressure_history_sampling_enabled());
+        // The two numeric fields are unaffected by the key's absence.
+        assert_eq!(loaded.notify_at_used_percent(), 88.0);
+    }
+
+    #[test]
+    fn an_invalid_history_sampling_value_is_refused() {
+        let settings = RecoverySettings::default();
+        let mut rendered = render_settings(&settings);
+        rendered = rendered.replace(
+            "pressure_history_sampling_enabled = false",
+            "pressure_history_sampling_enabled = yes",
+        );
+        let err = load(&rendered).unwrap_err();
+        assert_eq!(tag(&err), "invalid_value");
     }
 
     #[test]
