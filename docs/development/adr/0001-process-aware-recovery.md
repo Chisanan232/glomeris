@@ -1,6 +1,6 @@
 # ADR-0001: Process-aware, dependency-aware recovery (post-incident architecture gate)
 
-- Status: Proposed — gate for HORO-1823..1829; requires approval + independent security review before any implementation PR
+- Status: Proposed, independent adversarial review complete (2 must-fix findings resolved in this revision: §4.3 PATH-shadowing resolution, §4.3 relative-path tokenization; 3 should-address findings incorporated: §4.2 dedup scope, §4.3/§10 closed-source-list gap, §6 lsof cross-UID residual risk; 1 nitpick incorporated: §14 completeness-rank scope). No code-claim inaccuracies found against `main` @ 23e08dc. Reviewer found no break in the hard invariants (no new policy class, no kill capability, no LLM-reachable deletion authority, no automatic ASK/PROTECTED→AUTO_SAFE widening). **Still requires founder approval on §16 before any implementation PR.**
 - Ticket: HORO-1822 (Epic HORO-1043; discovery source HVDL-26)
 - Date: 2026-10-10
 - Deciders: founder (approval, HORO-1629 wording), independent security reviewer
@@ -199,6 +199,7 @@ CargoTargetScope {
   - **Orphan** — the locator is `<root>/target`, but the root resolves elsewhere (pre-shared-config leftovers).
   - **Redirected** — canonical(resolved_target) is outside workspace_root. That covers a global config, a nested config, or a symlinked-out `target/`. Fan-out is unbounded: any workspace on the machine may share it.
 - Fan-out count (n configured roots resolving to the same (dev, ino)) is computed in reporting for display only.
+- **Dedup takes the most-protective scope, not the first-discovered one.** When discovery widening (below) deduplicates multiple configured roots onto the same (dev, ino), the merged resource's `scope` is the most-protective value across every contributing root's independent `cargo metadata` resolution (`Redirected` > `Orphan` > `Local`), not simply the first root's answer. Otherwise a root whose own resolution happens to be `Local` could mask a second root that independently redirects into the same physical directory, hiding that second root's dependency from policy. (Flagged by independent review.)
 - **Not observable after the fact**, so permanently residual and never a reason to upgrade: per-invocation `--target-dir`/`--config`, other shells' environment, cwd-dependent nested configs. These are why Redirected is never AUTO_SAFE.
 - cargo absent, timeout or parse failure → `Unavailable` → (as a required field) Partial → ASK `TargetOwnershipUnknown`.
 - **Discovery widening:** CargoDetector additionally emits the resolved target when it differs from `<root>/target`. Results are deduped by (dev, ino); `source_project_root` = the first root, used only for `--manifest-path`. This newly surfaces the shared target. **It must not merge before §4.3 is on `main`.**
@@ -236,11 +237,13 @@ DependencyRef {
   - `notify` in `~/.codex/config.toml`. Parsing it **requires the `toml` crate; that dependency needs approval**. Until it is approved, a present `config.toml` is reported as an `unresolved` source (fail closed).
 - User LaunchAgents: `~/Library/LaunchAgents/*.plist`, keys `Program` / `ProgramArguments[0]`.
 - **Explicitly out of scope (known gap, shown in the UX):** MCP server `command` entries (`~/.claude.json`, Codex `mcp_servers`) and shell rc files. A *running* MCP server inside a resource is still caught by the `Executable` relation. Follow-up ticket recommended.
+- **The recognized-source list is closed, and an unlisted source degrades silently rather than failing closed.** An unrecognized hook mechanism (a third-party agent's own config, a shell profile sourcing a wrapper, an MCP entry per above) produces no `DependencyRef` and no `unresolved` entry — it simply isn't examined. `sources_examined` is exposed for display so the UX (HORO-1828) can show which sources were actually checked, but the design does not otherwise warn when that set is known to be incomplete for a given host. (Flagged by independent review; not fixed here — see §10 alternative 11.)
 
 **Command tokenization** applies only to simple forms: `[NAME=VALUE ...] head [arg ...]`, with leading environment assignments skipped and their values **discarded, never stored**.
 - Any `$`, `` ` ``, `|`, `;`, `&`, `>`, `<`, `(`, glob or unbalanced quote => the whole command is `UnresolvedRef::NonInspectable`.
 - The head and every argument that is an absolute or `~/` path are dependencies.
-- A bare-name head is resolved against Glomeris's PATH (INFERRED). Not found => `UnresolvedRef::NotOnPath`. The `HOOK_BIN_B` case lands here today, which honestly means its hook is already broken.
+- A bare-name head is resolved against Glomeris's PATH (INFERRED). Not found => `UnresolvedRef::NotOnPath`. Found => **still `UnresolvedRef::PathResolutionDivergent`, not a clean negative**, unless the recognized source itself records an absolute path or Glomeris can prove its resolution environment matches the hook runtime's (e.g. the same `~/.claude/settings.json` process reads its own PATH — not assumed). A bare-name match resolved only via Glomeris's own environment is not sufficient to conclude "no reference," because the hook runtime's actual PATH (different shell init, different launchd environment, or a PATH entry that is itself inside the resource) can diverge and resolve the same name into the target while Glomeris's own PATH resolves it elsewhere. The `HOOK_BIN_B` case (not found on the capturing shell's PATH) still lands in `NotOnPath`; a bare-name match found on Glomeris's PATH is a weaker finding that must stay `unresolved`/UNKNOWN, not a confirmed negative. (Flagged by independent review: this closes a PATH-shadowing bypass where a resource with a real executable dependency could otherwise reach AUTO_SAFE.)
+- A relative path argument that is neither absolute nor `~/`-prefixed (contains `/` but doesn't match either form, e.g. `./target/debug/my-hook`, `../shared-target/release/hook`) is **not silently dropped**. It has no defined resolution cwd at probe time, so it is `UnresolvedRef::NonInspectable` unless and until a defined cwd (the resource's own root, or the source config's own location) is established for that source type. (Flagged by independent review: the original tokenization rule had no classification for this case at all, which meant it was neither a `DependencyRef` nor an `unresolved` entry — a silent, unflagged gap rather than a fail-closed one.)
 - A PATH entry that is itself inside the resource => `DependencyRef{source: path_entry}` (PROTECTED), because the resource is then a PATH provider.
 
 **Match rule:** canonical(resolved), or any hop in its symlink chain, is component-wise under the resource's canonical locator. Same-device is checked against `st_dev`.
@@ -307,7 +310,7 @@ Other required edits:
 |---|---|---|---|
 | **TOCTOU (filesystem)**: resource replaced or symlink-swapped between plan and mutation | Early `symlink_metadata` (dev, ino) snapshot; fingerprint compare; `verify_identity_unchanged` before spawn or delete | Unchanged. New probes run inside `build_fresh_evidence`, *after* the snapshot and *before* the final verify | stat->spawn->cargo's own re-resolution of `--target-dir` (already documented in `executor/mod.rs`) |
 | **TOCTOU (dependency)**: a hook is added to config after planning | Not modelled | Dependency probe re-runs at revalidation. A new reference => PROTECTED => class change => abort | Config edited in the seconds between revalidation and spawn |
-| **TOCTOU (process)**: a build starts after planning | Holder re-probed at revalidation | Plus the build-lock probe. *Any* holder vetoes, regardless of identity | A build starting after revalidation and during `cargo clean`. Whether `cargo clean` takes the build lock is UNVERIFIED; HORO-1824 fixture must determine |
+| **TOCTOU (process)**: a build starts after planning | Holder re-probed at revalidation | Plus the build-lock probe. *Any* holder vetoes, regardless of identity | A build starting after revalidation and during `cargo clean`. Whether `cargo clean` takes the build lock is UNVERIFIED; HORO-1824 fixture must determine. **Additional residual, flagged by independent review:** "verified absence" (C1) relies on `lsof`, which cannot see another UID's processes without elevated privileges and cannot see a container bind-mount writer. This is a more plausible false-"verified-absent" path than process-identity spoofing (which the (pid,start_time,uid,exe) tuple correctly neutralizes by never letting identity alone remove a veto) — a cross-UID or containerized holder can be genuinely invisible to the probe, not merely unidentified. Documented as accepted residual risk, not fixed here. |
 | **PID reuse** | pid-only `ProcessRef` | Full tuple for every cross-sample derivation; mismatch => UNKNOWN; identity never removes a veto | 1 s `lstart` resolution; harmless by construction |
 | **Symlink races and chains** in hook resolution | n/a | Full chain (<=40 hops), every hop matched; a loop or overflow => NonInspectable => UNKNOWN | — |
 | **Shared-cache cross-worktree interference** | Invisible (a shared target is only found through a symlink) | `Redirected` => ASK, not pre-authorisable; blast radius displayed; native clean is whole-directory (§9) | User-consented clean still cold-rebuilds every sharer |
@@ -418,6 +421,9 @@ No path widens ASK or PROTECTED to AUTO_SAFE except a *later, independent* disco
    - Deferred, not rejected forever.
 10. **Workspace or Jira state as a policy input** ("ticket Done => target disposable").
     - Barred by `scripts/check-workspace-aggregation-has-no-authority.sh`; the brief bars destruction based on old Jira status.
+11. **Owner-declared additional protected sources/paths**, as a remediation for the closed recognized-source list (§4.3).
+    - Considered, **deferred not rejected**: a user- or config-declared "also treat this path/config as a dependency source" escape hatch would close the unlisted-source gap without widening the closed list itself.
+    - Deferred because it is itself a new trust surface (a declaration mechanism needs its own abuse analysis — e.g. can it be used to falsely mark something protected to block legitimate cleanup, which is a nuisance not a safety issue, versus falsely *un*-marking something, which the design doesn't allow since declarations could only ever add protection, never remove it). Worth its own ticket if the closed-list gap proves material in practice. (Added per independent review.)
 
 ## 11. HORO-1629 (independent bug, blocks HORO-1829)
 
@@ -551,7 +557,7 @@ Fixtures live under `tests/fixtures/` or temp directories. Never read the develo
   - `src/policy/{class.rs, engine.rs}`.
   - `src/autopilot/envelope.rs` — `is_preauthorizable`.
   - `src/reporting/{policy_label.rs, dto.rs}`.
-  - `src/executor/{mod.rs, recovery_loop.rs}`; `src/cli/recovery.rs`.
+  - `src/executor/{mod.rs, recovery_loop.rs}`; `src/cli/recovery.rs`. **Includes `completeness_rank_from_decision`** (flagged by independent review): it must recognize `TargetOwnershipUnknown` as a degraded-completeness reason alongside the existing `EvidenceProbeFailed`/`EvidenceIncomplete`, or a plan consented to under `TargetOwnershipUnknown` computes `planned_rank = 0` while fresh revalidation correctly computes a higher rank, tripping a spurious `EvidenceDegraded` abort on every execution of that class. Fails closed either way (nothing unsafe happens), but leaves a whole action class permanently unexecutable until fixed — a one-line addendum, not a design change.
   - `src/monitor/{poller.rs, persistence.rs, fs_stat.rs}`; `src/platform/macos/statfs.rs`.
   - `src/settings/` — the opt-in sampling flag only.
   - `macos/GlomerisMenuBar` — wording only.
