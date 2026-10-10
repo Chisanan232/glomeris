@@ -3283,6 +3283,23 @@ fn daemon_run() {
     let mut settings = glomeris::settings::RecoverySettings::default();
     let mut reported_settings_error = false;
 
+    // HORO-1827. Where opt-in capacity-history sampling is recorded, beside
+    // (not instead of) `history_path`'s pressure-transition log — same
+    // `Library/Application Support/Glomeris/` directory as every other
+    // best-effort store this daemon owns.
+    let volume_samples_path = std::env::var("HOME")
+        .map(|home| {
+            PathBuf::from(home).join("Library/Application Support/Glomeris/pressure_samples.json")
+        })
+        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-pressure-samples.json"));
+    // Counts completed poll cycles so sampling can run on every k-th tick
+    // of *this* loop (ADR-0001 §14: "no new scheduler/daemon ... sampling
+    // is statvfs only") instead of adding a second timer. In-memory only —
+    // restarting the daemon simply restarts the count at 0, which at worst
+    // shifts which ticks are sampled by a few minutes, never a correctness
+    // issue.
+    let mut sample_tick: u64 = 0;
+
     monitor::run(
         &config,
         &thresholds,
@@ -3326,8 +3343,55 @@ fn daemon_run() {
             }
 
             episode_step(state_path, &settings, &outcome);
+
+            sample_tick += 1;
+            if settings.pressure_history_sampling_enabled()
+                && sample_tick % monitor::SAMPLE_EVERY_N_TICKS == 0
+            {
+                pressure_history_step(&volume_samples_path, &fs_stat, &config.watch_path, &outcome);
+            }
         },
     );
+}
+
+/// One opt-in capacity sample, taken on every `monitor::SAMPLE_EVERY_N_TICKS`th
+/// poll cycle (HORO-1827). Reuses this cycle's already-made `statvfs` result
+/// (`outcome.free_bytes`/`outcome.total_bytes`) rather than taking a second
+/// one — the only *additional* I/O here is the one extra `stat(2)` call for
+/// `volume_dev`, needed to detect "this sample is against a different
+/// filesystem than the last one" (ADR-0001 §4.4).
+///
+/// Best-effort, matching every other store this daemon writes: a failure
+/// here is logged once and otherwise swallowed, never allowed to stop the
+/// monitor loop.
+#[cfg(target_os = "macos")]
+fn pressure_history_step(
+    samples_path: &std::path::Path,
+    fs_stat: &platform::macos::MacosFsStat,
+    watch_path: &std::path::Path,
+    outcome: &monitor::PollOutcome,
+) {
+    let volume_dev = match fs_stat.volume_dev(watch_path) {
+        Ok(dev) => dev,
+        Err(e) => {
+            eprintln!("glomeris monitor: pressure-history sample skipped (stat failed: {e})");
+            return;
+        }
+    };
+
+    let sample = monitor::VolumeSample::new(
+        monitor::persistence::unix_now_secs(),
+        volume_dev,
+        outcome.total_bytes,
+        outcome.free_bytes,
+    );
+
+    let mut ring =
+        monitor::VolumeSampleRing::from_samples(monitor::read_volume_samples(samples_path));
+    ring.push(sample);
+    if let Err(e) = monitor::write_volume_samples(samples_path, &ring) {
+        eprintln!("glomeris monitor: pressure-history sample write failed: {e}");
+    }
 }
 
 /// One poll's worth of episode bookkeeping (HORO-1508).
