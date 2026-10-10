@@ -13,6 +13,7 @@ mod git;
 pub mod host_dependency;
 mod open_files;
 mod process;
+pub mod process_identity;
 pub(crate) mod timeout;
 mod tool_liveness;
 
@@ -27,6 +28,10 @@ pub use git::{GitCliProbe, GitProbe};
 pub use host_dependency::{HostDependencyProbe, HostDependencyRoots, LiveHostDependencyProbe};
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
+pub use process_identity::{
+    build_lock_holder, identity_tuple_matches, LiveProcessIdentityProbe, ProcessIdentityProbe,
+    ProcessIdentityRoots,
+};
 pub use tool_liveness::{SystemToolLivenessProbe, ToolLivenessProbe};
 
 /// Time budget for one [`EvidenceCollector::collect`] call. Applied *per*
@@ -122,10 +127,7 @@ mod tests {
     fn merge_into_fills_all_four_correlation_fields() {
         let mut evidence = base_evidence();
         let result = CorrelationResult {
-            open_by_process: ProbeOutcome::Observed(vec![ProcessRef {
-                pid: 42,
-                command: "cargo".to_string(),
-            }]),
+            open_by_process: ProbeOutcome::Observed(vec![ProcessRef::new(42, "cargo".to_string())]),
             process_cwd_match: ProbeOutcome::Observed(Vec::new()),
             git_state: ProbeOutcome::Observed(None),
             tool_liveness: ProbeOutcome::Observed(false),
@@ -138,10 +140,7 @@ mod tests {
 
         assert_eq!(
             evidence.open_by_process,
-            ProbeOutcome::Observed(vec![ProcessRef {
-                pid: 42,
-                command: "cargo".to_string()
-            }])
+            ProbeOutcome::Observed(vec![ProcessRef::new(42, "cargo".to_string())])
         );
         assert_eq!(
             evidence.process_cwd_match,
@@ -158,10 +157,8 @@ mod tests {
         // CorrelationResult where that probe failed. The stale
         // `Observed` must not survive the merge.
         let mut evidence = base_evidence();
-        evidence.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 1,
-            command: "stale".to_string(),
-        }]);
+        evidence.open_by_process =
+            ProbeOutcome::Observed(vec![ProcessRef::new(1, "stale".to_string())]);
 
         let result = CorrelationResult {
             open_by_process: ProbeOutcome::Unavailable(ProbeReason::TimedOut),

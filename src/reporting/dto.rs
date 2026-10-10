@@ -2729,10 +2729,7 @@ mod tests {
     #[test]
     fn active_use_signals_reports_open_by_process() {
         let mut ev = base_evidence();
-        ev.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 42,
-            command: "cargo".to_string(),
-        }]);
+        ev.open_by_process = ProbeOutcome::Observed(vec![ProcessRef::new(42, "cargo".to_string())]);
         let signals = active_use_signals(&ev);
         assert_eq!(signals.len(), 1);
         assert!(signals[0].contains("cargo(pid 42)"));

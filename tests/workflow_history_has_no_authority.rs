@@ -155,10 +155,7 @@ fn candidate_for(target: &Path, in_use: bool) -> (Evidence, PolicyDecision) {
         recoverability: Recoverability::RegenerableByRebuild,
         native_cleanup: NativeCleanup::Unsupported,
         open_by_process: ProbeOutcome::Observed(if in_use {
-            vec![ProcessRef {
-                pid: 4242,
-                command: "cargo build".to_string(),
-            }]
+            vec![ProcessRef::new(4242, "cargo build".to_string())]
         } else {
             Vec::new()
         }),

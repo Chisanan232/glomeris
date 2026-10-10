@@ -1536,10 +1536,8 @@ mod tests {
             "/w/a/target",
             ProbeOutcome::Observed(Some(git("/w/a", "/w/.git", true, true))),
         );
-        c.0.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 4242,
-            command: "cargo".to_string(),
-        }]);
+        c.0.open_by_process =
+            ProbeOutcome::Observed(vec![ProcessRef::new(4242, "cargo".to_string())]);
 
         let merged_and_pushed = WorktreeBranchState {
             branch: Some("done".to_string()),
@@ -1721,10 +1719,7 @@ mod tests {
     /// something is demonstrably working in is `InUse`, not `Unknown`.
     #[test]
     fn an_observed_process_outranks_an_unanswered_probe() {
-        let seen = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 7,
-            command: "rustc".to_string(),
-        }]);
+        let seen = ProbeOutcome::Observed(vec![ProcessRef::new(7, "rustc".to_string())]);
         let failed = ProbeOutcome::Unavailable(ProbeReason::TimedOut);
         let facts = ActivityFacts::from_probes([&(seen, failed)]);
         assert_eq!(facts.state, ActivityState::InUse);
@@ -1764,10 +1759,10 @@ mod tests {
         assert_ne!(failed.state, ActivityState::Idle);
 
         // An observed process through the single-probe path is still InUse.
-        let seen = ActivityFacts::from_one_probe(&ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 11,
-            command: "cargo".to_string(),
-        }]));
+        let seen = ActivityFacts::from_one_probe(&ProbeOutcome::Observed(vec![ProcessRef::new(
+            11,
+            "cargo".to_string(),
+        )]));
         assert_eq!(seen.state, ActivityState::InUse);
         assert_eq!(seen.observed_processes.len(), 1);
     }
@@ -1777,10 +1772,7 @@ mod tests {
     /// counting directories.
     #[test]
     fn processes_are_deduplicated_by_pid_across_resources() {
-        let same = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 99,
-            command: "cargo".to_string(),
-        }]);
+        let same = ProbeOutcome::Observed(vec![ProcessRef::new(99, "cargo".to_string())]);
         let empty = ProbeOutcome::Observed(Vec::new());
         let pair = (same, empty);
         let facts = ActivityFacts::from_probes([&pair, &pair]);

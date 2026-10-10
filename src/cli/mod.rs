@@ -4329,10 +4329,10 @@ mod execute_tests {
     impl EvidenceCollector for ActiveUseCollector {
         fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
             CorrelationResult {
-                open_by_process: ProbeOutcome::Observed(vec![ProcessRef {
-                    pid: 1,
-                    command: "node".to_string(),
-                }]),
+                open_by_process: ProbeOutcome::Observed(vec![ProcessRef::new(
+                    1,
+                    "node".to_string(),
+                )]),
                 process_cwd_match: ProbeOutcome::Observed(Vec::new()),
                 git_state: ProbeOutcome::Observed(None::<GitState>),
                 tool_liveness: ProbeOutcome::Observed(false),

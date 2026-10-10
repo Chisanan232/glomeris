@@ -383,10 +383,7 @@ fn local_commits_made_after_a_merge_are_still_unique_work() {
 #[test]
 fn a_done_task_does_not_make_an_in_use_worktree_idle() {
     let local = Local {
-        processes: vec![ProcessRef {
-            pid: 4242,
-            command: "cargo build".to_string(),
-        }],
+        processes: vec![ProcessRef::new(4242, "cargo build".to_string())],
         ..Local::quiet()
     };
     let (mut graph, candidates) = graph_for("in-use", &local, settled_branch());
@@ -415,10 +412,7 @@ fn a_done_task_does_not_make_an_in_use_worktree_idle() {
 fn attaching_external_context_changes_nothing_but_the_external_field() {
     let local = Local {
         dirty: true,
-        processes: vec![ProcessRef {
-            pid: 909,
-            command: "rust-analyzer".to_string(),
-        }],
+        processes: vec![ProcessRef::new(909, "rust-analyzer".to_string())],
         ..Local::quiet()
     };
     let (mut answered, _candidates) = graph_for("answered", &local, settled_branch());

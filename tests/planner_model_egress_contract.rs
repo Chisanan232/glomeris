@@ -263,10 +263,7 @@ fn projection() -> GraphProjection {
                 untracked: true,
                 worktree: true,
             })),
-            vec![ProcessRef {
-                pid: PROCESS_PID,
-                command: PROCESS_COMMAND.to_string(),
-            }],
+            vec![ProcessRef::new(PROCESS_PID, PROCESS_COMMAND.to_string())],
         ),
         candidate(&global_target, ProbeOutcome::Observed(None), Vec::new()),
         candidate(

@@ -392,10 +392,8 @@ fn an_absent_tool_is_not_an_observation_of_an_idle_resource() {
 fn a_process_holding_the_resource_denies_auto_safe_to_every_kind() {
     for kind in ResourceKind::ALL {
         let mut evidence = cleanest_evidence(*kind);
-        evidence.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 4242,
-            command: "claude".to_string(),
-        }]);
+        evidence.open_by_process =
+            ProbeOutcome::Observed(vec![ProcessRef::new(4242, "claude".to_string())]);
 
         let decision = classify(&evidence, &cfg(), NOW);
         assert_ne!(
@@ -424,10 +422,8 @@ fn a_process_holding_the_resource_denies_auto_safe_to_every_kind() {
 fn an_agent_working_inside_the_resource_denies_auto_safe_to_every_kind() {
     for kind in ResourceKind::ALL {
         let mut evidence = cleanest_evidence(*kind);
-        evidence.process_cwd_match = ProbeOutcome::Observed(vec![ProcessRef {
-            pid: 9191,
-            command: "codex".to_string(),
-        }]);
+        evidence.process_cwd_match =
+            ProbeOutcome::Observed(vec![ProcessRef::new(9191, "codex".to_string())]);
 
         let decision = classify(&evidence, &cfg(), NOW);
         assert_ne!(

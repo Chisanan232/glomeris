@@ -366,10 +366,10 @@ mod tests {
     #[test]
     fn open_by_process_is_ask_in_active_use() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
-        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
-            pid: 1,
-            command: "cargo".to_string(),
-        }]);
+        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            1,
+            "cargo".to_string(),
+        )]);
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
@@ -378,10 +378,10 @@ mod tests {
     #[test]
     fn process_cwd_match_is_ask_in_active_use() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
-        ev.process_cwd_match = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef {
-            pid: 1,
-            command: "cargo".to_string(),
-        }]);
+        ev.process_cwd_match = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            1,
+            "cargo".to_string(),
+        )]);
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
@@ -873,10 +873,10 @@ mod tests {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
             references_inside: Vec::new(),
-            running_inside: vec![crate::evidence::ProcessRef {
-                pid: 999,
-                command: "libra-governor".to_string(),
-            }],
+            running_inside: vec![crate::evidence::ProcessRef::new(
+                999,
+                "libra-governor".to_string(),
+            )],
             unresolved: Vec::new(),
             sources_examined: vec![SourceTag::ClaudeUserSettings],
         });

@@ -78,10 +78,7 @@ fn parse_lsof_field_output(stdout: &[u8]) -> Vec<ProcessRef> {
         match tag {
             "p" => {
                 if let Some((pid, command)) = current.take() {
-                    processes.push(ProcessRef {
-                        pid,
-                        command: command.unwrap_or_default(),
-                    });
+                    processes.push(ProcessRef::new(pid, command.unwrap_or_default()));
                 }
                 if let Ok(pid) = value.parse::<u32>() {
                     current = Some((pid, None));
@@ -96,10 +93,7 @@ fn parse_lsof_field_output(stdout: &[u8]) -> Vec<ProcessRef> {
         }
     }
     if let Some((pid, command)) = current.take() {
-        processes.push(ProcessRef {
-            pid,
-            command: command.unwrap_or_default(),
-        });
+        processes.push(ProcessRef::new(pid, command.unwrap_or_default()));
     }
 
     processes
@@ -122,14 +116,8 @@ mod tests {
         assert_eq!(
             processes,
             vec![
-                ProcessRef {
-                    pid: 123,
-                    command: "someproc".to_string()
-                },
-                ProcessRef {
-                    pid: 456,
-                    command: "other".to_string()
-                },
+                ProcessRef::new(123, "someproc".to_string()),
+                ProcessRef::new(456, "other".to_string()),
             ]
         );
     }
@@ -138,13 +126,7 @@ mod tests {
     fn record_with_no_command_line_defaults_to_empty_string() {
         let stdout = b"p789\nfcwd\nn/some/path\n";
         let processes = parse_lsof_field_output(stdout);
-        assert_eq!(
-            processes,
-            vec![ProcessRef {
-                pid: 789,
-                command: String::new()
-            }]
-        );
+        assert_eq!(processes, vec![ProcessRef::new(789, String::new())]);
     }
 
     #[test]
@@ -161,10 +143,7 @@ mod tests {
         };
         assert_eq!(
             interpret_lsof_output(&output),
-            ProbeOutcome::Observed(vec![ProcessRef {
-                pid: 1,
-                command: "cmd".to_string()
-            }])
+            ProbeOutcome::Observed(vec![ProcessRef::new(1, "cmd".to_string())])
         );
     }
 
