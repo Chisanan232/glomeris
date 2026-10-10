@@ -3346,7 +3346,7 @@ fn daemon_run() {
 
             sample_tick += 1;
             if settings.pressure_history_sampling_enabled()
-                && sample_tick % monitor::SAMPLE_EVERY_N_TICKS == 0
+                && sample_tick.is_multiple_of(monitor::SAMPLE_EVERY_N_TICKS)
             {
                 pressure_history_step(&volume_samples_path, &fs_stat, &config.watch_path, &outcome);
             }
