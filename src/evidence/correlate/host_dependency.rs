@@ -372,6 +372,16 @@ fn head_basename(head: &HeadToken) -> Option<&str> {
 /// targets). Closed, deliberately small list — an unrecognized wrapper
 /// is not detected, matching this module's closed-recognized-source
 /// philosophy rather than guessing at arbitrary wrapper semantics.
+///
+/// NOT exhaustive, and deliberately not trying to be: round-2 re-review
+/// confirmed `nohup`, `setsid`, `xargs`, `/usr/bin/arch`, `timeout`,
+/// `nice`, and `caffeinate` still bypass this check via the same
+/// `Token::Opaque`-dropped mechanism the original gap used, since their
+/// target argument isn't in a fixed position the way `env`'s and
+/// `-c`'s are. `zsh -c` is added here because it's macOS's actual
+/// default interactive shell in some contexts; the others are a known,
+/// documented gap — see the module header and the PR description, never
+/// silently claimed closed.
 fn wrapper_target_index(head_basename: &str, rest: &[&str]) -> Option<usize> {
     match head_basename {
         // `env [OPTION]... [-] [NAME=VALUE]... [COMMAND [ARG]...]`: skip
@@ -380,9 +390,9 @@ fn wrapper_target_index(head_basename: &str, rest: &[&str]) -> Option<usize> {
         "env" => rest
             .iter()
             .position(|a| !a.starts_with('-') && !is_env_assignment(a)),
-        // `sh -c COMMAND` / `bash -c COMMAND`: the token immediately
-        // after `-c` is the command.
-        "sh" | "bash" => rest.iter().position(|a| *a == "-c").and_then(|i| {
+        // `sh -c COMMAND` / `bash -c COMMAND` / `zsh -c COMMAND`: the
+        // token immediately after `-c` is the command.
+        "sh" | "bash" | "zsh" => rest.iter().position(|a| *a == "-c").and_then(|i| {
             let target = i + 1;
             (target < rest.len()).then_some(target)
         }),
@@ -491,12 +501,6 @@ fn resolve_symlink_chain(start: &Path) -> ChainResolution {
     ChainResolution::TooDeepOrLoop
 }
 
-/// Canonicalizes one hop by canonicalizing its PARENT directory and
-/// re-appending the file name — never the whole path. Canonicalizing the
-/// whole path fails on a dangling symlink and normalizes away macOS
-/// tempdir aliasing (`/var` -> `/private/var`) inconsistently hop to hop,
-/// which is exactly the trap that would make a stale-symlink or a tempdir
-/// fixture resolve wrong. See the module header.
 /// Canonicalizes as much of `hop`'s ancestry as actually exists, then
 /// re-appends whatever trailing components don't — so a hop several
 /// directories deep into a path that was never created (or no longer
@@ -516,32 +520,77 @@ fn resolve_symlink_chain(start: &Path) -> ChainResolution {
 /// entries that are nowhere near the resource and were never ambiguous
 /// at all.
 ///
-/// Walking upward until an ancestor canonicalizes (this always
-/// terminates — `/` exists) and rebuilding the path from there makes the
-/// comparison resolvable in every realistic case: a missing chain whose
-/// nearest existing ancestor is the resource itself reconstructs to a
-/// path inside the resource (matching `path_matches_resource`'s own
-/// `Err(_) => true` treatment of a single missing leaf); a missing chain
-/// whose nearest existing ancestor is unrelated to the resource
-/// reconstructs to a path that plainly isn't. `None` remains possible
-/// only for a degenerate input with no file name at all, which none of
-/// this module's real candidate paths produce.
+/// `fs::canonicalize` failing on an ancestor has two structurally
+/// different causes that must NOT be handled the same way:
+///
+/// 1. The ancestor genuinely does not exist as a directory entry at all
+///    (ENOENT on a plain, non-symlink path) — safe to climb past: the
+///    caller's intent is "this directory was never created", and the
+///    nearest REAL ancestor further up is the right place to resume
+///    canonicalizing from.
+/// 2. The ancestor DOES exist as a directory entry, but it is a symlink
+///    whose own target doesn't resolve (dangling, or itself several
+///    hops into another dangling chain). Climbing past this as if it
+///    were case 1 silently discards the symlink's target entirely —
+///    e.g. `~/bin/hooks -> <resource>/release/hooks` where `release/`
+///    is simply unbuilt yet: climbing past `~/bin/hooks` up to `~/bin`
+///    and reconstructing the literal `~/bin/hooks/...` string never
+///    looks at `<resource>/release/hooks/...` at all, so a hook that
+///    genuinely depends on the resource (through an on-host symlink
+///    pointing straight at it) reads as a clean negative. This is
+///    exactly the incident class this probe exists to prevent.
+///
+/// So on a canonicalize failure, check `symlink_metadata` first: if the
+/// ancestor is a symlink, follow it (bounded, loop-guarded) and resume
+/// canonicalizing from its target instead of climbing past it; only
+/// climb to the parent when the ancestor is genuinely absent.
+///
+/// Walking upward/through-symlinks until an ancestor canonicalizes (this
+/// always terminates — `/` exists, and the hop/loop bound below rules
+/// out a symlink cycle) and rebuilding the path from there makes the
+/// comparison resolvable in every realistic case. `None` remains
+/// possible only for a degenerate input with no file name at all, or a
+/// symlink cycle among ancestors.
 fn canonical_hop(hop: &Path) -> Option<PathBuf> {
     let file_name = hop.file_name()?;
-    let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
-    let mut ancestor = hop.parent()?;
-    loop {
-        if let Ok(canon_ancestor) = fs::canonicalize(ancestor) {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = hop.parent()?.to_path_buf();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        if let Ok(canon_ancestor) = fs::canonicalize(&ancestor) {
             let mut result = canon_ancestor;
             for component in missing.iter().rev() {
                 result = result.join(component);
             }
             return Some(result.join(file_name));
         }
-        let name = ancestor.file_name()?;
-        missing.push(name);
-        ancestor = ancestor.parent()?;
+        match fs::symlink_metadata(&ancestor) {
+            // The ancestor exists as a directory entry but is a symlink
+            // whose chain doesn't (yet, or ever) resolve. Follow it
+            // rather than climbing past it — its target, not the literal
+            // on-disk path, is what this ancestor actually refers to.
+            Ok(meta) if meta.file_type().is_symlink() => {
+                if !seen.insert(ancestor.clone()) {
+                    return None; // symlink cycle among ancestors
+                }
+                let target = fs::read_link(&ancestor).ok()?;
+                ancestor = if target.is_absolute() {
+                    target
+                } else {
+                    ancestor.parent()?.join(target)
+                };
+            }
+            // Genuinely absent (ENOENT), or some other stat failure on a
+            // non-symlink entry: safe to climb past — nothing here
+            // points anywhere else that needs following.
+            _ => {
+                let name = ancestor.file_name()?.to_os_string();
+                missing.push(name);
+                ancestor = ancestor.parent()?.to_path_buf();
+            }
+        }
     }
+    None
 }
 
 /// Result of [`chain_matches_resource`] — tri-state rather than `bool`,
@@ -788,25 +837,6 @@ fn resolve_command(
     (deps, unresolved)
 }
 
-/// Same tri-state treatment as [`chain_matches_resource`], for the
-/// single-path PATH-entry check: when `path`'s entire parent chain is
-/// absent (not merely a one-level-missing directory), `canonical_hop`
-/// returns `None` and this must surface as [`ChainMatch::Indeterminate`],
-/// never a silent `false`/`No` — the same fail-open shape the review
-/// found here after it was already fixed in `chain_matches_resource`.
-fn is_inside_resource(path: &Path, resource_canonical: &Path, resource_dev: u64) -> ChainMatch {
-    match canonical_hop(path) {
-        Some(canon) => {
-            if path_matches_resource(&canon, resource_canonical, resource_dev) {
-                ChainMatch::Yes
-            } else {
-                ChainMatch::No
-            }
-        }
-        None => ChainMatch::Indeterminate,
-    }
-}
-
 fn expand_home(marked: &Path, home: &Path) -> PathBuf {
     let s = marked.to_string_lossy();
     if let Some(rest) = s.strip_prefix("~/") {
@@ -864,7 +894,16 @@ fn read_plist_as_json(
 /// unresolved rather than being silently read as the same clean "no
 /// LaunchAgents" outcome.
 enum LaunchAgentListing {
-    Plists(Vec<PathBuf>),
+    /// `partially_unreadable` is true when at least one directory ENTRY
+    /// (not the whole `read_dir` call — that's `Unreadable` below) failed
+    /// to read. A per-entry failure part-way through an iterator (e.g. a
+    /// permission-denied or vanished-mid-iteration entry) must not be
+    /// silently dropped by a `filter_map(|e| e.ok())`-style skip, the
+    /// finer-grained sibling of the whole-directory-failure case.
+    Plists {
+        plists: Vec<PathBuf>,
+        partially_unreadable: bool,
+    },
     DirectoryAbsent,
     Unreadable,
 }
@@ -878,14 +917,28 @@ fn launch_agent_plists(home: &Path) -> LaunchAgentListing {
         }
         Err(_) => return LaunchAgentListing::Unreadable,
     };
-    let mut plists: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("plist"))
-        .collect();
+    let mut plists: Vec<PathBuf> = Vec::new();
+    let mut partially_unreadable = false;
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("plist") {
+                    plists.push(path);
+                }
+            }
+            // A per-entry `read_dir` failure (EACCES on one entry,
+            // vanished mid-iteration, ...) — never silently dropped as
+            // if that entry simply weren't there.
+            Err(_) => partially_unreadable = true,
+        }
+    }
     plists.sort();
     plists.truncate(MAX_LAUNCH_AGENTS);
-    LaunchAgentListing::Plists(plists)
+    LaunchAgentListing::Plists {
+        plists,
+        partially_unreadable,
+    }
 }
 
 fn launch_agent_label(path: &Path) -> String {
@@ -989,7 +1042,21 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
         }
 
         let plists = match launch_agent_plists(&self.roots.home) {
-            LaunchAgentListing::Plists(plists) => plists,
+            LaunchAgentListing::Plists {
+                plists,
+                partially_unreadable,
+            } => {
+                // A per-entry `read_dir` failure among otherwise-readable
+                // siblings — fail closed on the directory as a whole, same
+                // vocabulary as the whole-directory-failure case below,
+                // never a silent drop of just that one entry.
+                if partially_unreadable {
+                    let tag = SourceTag::LaunchAgent("directory".to_string());
+                    sources_examined.push(tag.clone());
+                    unresolved.push(UnresolvedRef::SourceUnreadable { source: tag });
+                }
+                plists
+            }
             // ENOENT: a normal, fully-observed negative.
             LaunchAgentListing::DirectoryAbsent => Vec::new(),
             // Present but unreadable (e.g. EACCES) — fail closed, not a
@@ -1063,34 +1130,77 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
         }
 
         // PATH-entry source: a PATH directory that is itself inside the
-        // resource makes the resource a PATH provider (§4.3).
+        // resource makes the resource a PATH provider (§4.3). Resolves the
+        // PATH directory's own FULL symlink chain — never just one hop —
+        // exactly like a hook command's candidate path already does via
+        // `resolve_symlink_chain` + `chain_matches_resource` in
+        // `resolve_command` just above. §4.3 requires "a PATH entry that
+        // is itself inside the resource" to be PROTECTED, which includes
+        // a PATH entry reached only through an on-host symlink
+        // (`~/bin/rt -> <resource>/release`), not merely a PATH string
+        // that is itself already a literal subpath of the resource. The
+        // prior single-hop `canonical_hop(dir)` check never looked past
+        // `dir` at what it points to, so a PATH entry that is a symlink
+        // straight at the resource read as a clean negative.
         for dir in &self.roots.path_dirs {
-            match is_inside_resource(dir, &resource_canonical, resource_dev) {
-                ChainMatch::Yes => {
-                    if let Some(exe) = exe_identity_of(dir) {
-                        references_inside.push(DependencyRef {
-                            source: SourceTag::PathEntry,
-                            pointer: "PATH".to_string(),
-                            resolved: dir.clone(),
-                            exe,
-                            provenance: Provenance::Observed,
-                            next_invocation: true,
-                        });
-                    } else {
-                        // Matches a resource-inside path, but its identity
-                        // (dev/ino) couldn't be stat'd — fail closed, same
-                        // as `resolve_command`'s handling of the same
-                        // `exe_identity_of` failure, never a silent skip.
-                        unresolved.push(UnresolvedRef::SourceUnreadable {
-                            source: SourceTag::PathEntry,
-                        });
+            match resolve_symlink_chain(dir) {
+                ChainResolution::Resolved { final_path, hops } => {
+                    match chain_matches_resource(&hops, &resource_canonical, resource_dev) {
+                        ChainMatch::Yes => {
+                            if let Some(exe) = exe_identity_of(&final_path) {
+                                references_inside.push(DependencyRef {
+                                    source: SourceTag::PathEntry,
+                                    pointer: "PATH".to_string(),
+                                    resolved: final_path,
+                                    exe,
+                                    provenance: Provenance::Observed,
+                                    next_invocation: true,
+                                });
+                            } else {
+                                // Matches a resource-inside path, but its
+                                // identity (dev/ino) couldn't be stat'd —
+                                // fail closed, same as `resolve_command`'s
+                                // handling of the same `exe_identity_of`
+                                // failure, never a silent skip.
+                                unresolved.push(UnresolvedRef::SourceUnreadable {
+                                    source: SourceTag::PathEntry,
+                                });
+                            }
+                        }
+                        ChainMatch::No => {}
+                        // The chain's containment could not be established
+                        // either way — never read as "outside".
+                        ChainMatch::Indeterminate => {
+                            unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                                source: SourceTag::PathEntry,
+                                pointer: "PATH".to_string(),
+                            });
+                        }
                     }
                 }
-                ChainMatch::No => {}
-                // The PATH entry's whole parent chain is absent — its
-                // containment could not be established either way.
-                ChainMatch::Indeterminate => {
-                    unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                ChainResolution::Dangling { hops } => {
+                    // A PATH entry whose own symlink chain is dangling but
+                    // whose chain passed through the resource is still a
+                    // dependency (a now-broken on-host symlink that used
+                    // to — or is meant to — point into the resource).
+                    match chain_matches_resource(&hops, &resource_canonical, resource_dev) {
+                        ChainMatch::Yes => {
+                            unresolved.push(UnresolvedRef::SymlinkLoopOrTooDeep {
+                                source: SourceTag::PathEntry,
+                                pointer: "PATH".to_string(),
+                            });
+                        }
+                        ChainMatch::No => {}
+                        ChainMatch::Indeterminate => {
+                            unresolved.push(UnresolvedRef::PathResolutionIndeterminate {
+                                source: SourceTag::PathEntry,
+                                pointer: "PATH".to_string(),
+                            });
+                        }
+                    }
+                }
+                ChainResolution::TooDeepOrLoop => {
+                    unresolved.push(UnresolvedRef::SymlinkLoopOrTooDeep {
                         source: SourceTag::PathEntry,
                         pointer: "PATH".to_string(),
                     });
@@ -1431,9 +1541,144 @@ mod tests {
              read as a clean negative just because the intermediate directories don't exist yet"
         );
         assert!(report.references_inside.is_empty());
+        // Tightened per round-2 re-review: a vague "some unresolved finding
+        // exists" assertion would also pass if the reference were (wrongly)
+        // read as `PathResolutionIndeterminate` rather than genuinely
+        // matched-but-dangling. Pin the exact variant `canonical_hop`'s
+        // climb is meant to produce here: the chain IS resolved to "inside
+        // the resource" (climbing to the resource's own real directory and
+        // reconstructing the rest), and it's `SymlinkLoopOrTooDeep` —
+        // `resolve_command`'s vocabulary for "dangling, but matched" —
+        // never `PathResolutionIndeterminate`, which would mean the climb
+        // gave up instead of resolving the comparison.
         assert!(
-            !report.unresolved.is_empty(),
-            "expected an unresolved finding for a dangling-but-matching chain, got none"
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SymlinkLoopOrTooDeep {
+                    source: SourceTag::ClaudeUserSettings,
+                    ..
+                }
+            )),
+            "expected SymlinkLoopOrTooDeep(ClaudeUserSettings) — a definitively-matched but \
+             dangling chain — got {:?}",
+            report.unresolved
+        );
+        assert!(
+            !report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::PathResolutionIndeterminate { .. })),
+            "a multi-level-missing chain whose nearest real ancestor is the resource itself \
+             must resolve definitively, not fall back to Indeterminate; got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Round-2 re-review MUST-FIX 1's exact repro: a hook command
+    /// referencing a path through an on-host symlink whose OWN target is
+    /// missing (not merely the final file, and not the hop itself, but
+    /// an ancestor of the hop that sits behind a symlink). Before the
+    /// fix, `canonical_hop`'s ancestor-climb treated "canonicalize failed
+    /// on `~/bin/hooks`" as "this directory doesn't exist, climb past
+    /// it" and reconstructed the literal `~/bin/hooks/libra-governor`
+    /// string — which has nothing to do with the resource — instead of
+    /// following the symlink to see that it points AT
+    /// `<resource>/release/hooks`. That produced a clean negative
+    /// (`references_inside` empty, `unresolved` empty) for a hook that
+    /// genuinely depends on the resource, exactly the incident class
+    /// this probe exists to prevent.
+    #[test]
+    fn symlink_ancestor_with_dangling_target_still_resolves_through_to_the_resource() {
+        let home = unique_temp_dir("home-symlink-ancestor");
+        let resource = unique_temp_dir("target-symlink-ancestor");
+        fs::create_dir_all(&resource).unwrap();
+        // Deliberately NOT created: `release/` is unbuilt.
+        let release_hooks = resource.join("release").join("hooks");
+
+        fs::create_dir_all(home.join("bin")).unwrap();
+        let symlinked_ancestor = home.join("bin").join("hooks");
+        // `~/bin/hooks -> <resource>/release/hooks`, and `release/`
+        // doesn't exist yet, so the symlink's own target is dangling.
+        symlink(&release_hooks, &symlinked_ancestor).unwrap();
+        let hook_command = symlinked_ancestor.join("libra-governor");
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+                hook_command.display()
+            ),
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            !report.is_clean(),
+            "a hook reached only through an on-host symlink whose target sits inside the \
+             resource must not be a clean negative just because the target is currently \
+             unbuilt — got references_inside={:?} unresolved={:?}",
+            report.references_inside,
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Round-2 re-review MUST-FIX 2's exact repro: a `$PATH` directory
+    /// that is ITSELF a symlink straight at the resource (nothing
+    /// dangling — the target exists). §4.3 requires this to be PROTECTED
+    /// ("a PATH entry that is itself inside the resource"). Before the
+    /// fix, the PATH-entry probe only canonicalized a single hop of
+    /// `dir` via `canonical_hop` and never followed `dir`'s own symlink
+    /// chain the way `resolve_command` already does for hook-command
+    /// candidates — so a PATH entry that is a symlink pointing directly
+    /// into the resource read as a clean negative.
+    #[test]
+    fn path_entry_symlinked_straight_at_the_resource_is_protected_not_clean() {
+        let home = unique_temp_dir("home-path-symlink");
+        let resource = unique_temp_dir("target-path-symlink");
+        let release_dir = resource.join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+
+        fs::create_dir_all(home.join("bin")).unwrap();
+        let symlinked_path_entry = home.join("bin").join("rt");
+        // `~/bin/rt -> <resource>/release`, and `release/` exists.
+        symlink(&release_dir, &symlinked_path_entry).unwrap();
+
+        let mut roots = roots_for(&home);
+        roots.path_dirs = vec![symlinked_path_entry];
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            !report.is_clean(),
+            "a PATH entry that is itself a symlink straight into the resource must be \
+             recognized as a reference, not a clean negative — got references_inside={:?} \
+             unresolved={:?}",
+            report.references_inside,
+            report.unresolved
+        );
+        assert!(
+            !report.references_inside.is_empty(),
+            "the resolved target exists and is genuinely inside the resource — this should \
+             be a confirmed DependencyRef, not merely unresolved; got unresolved={:?}",
+            report.unresolved
         );
 
         fs::remove_dir_all(&home).ok();
@@ -1839,12 +2084,16 @@ mod tests {
     }
 
     /// The fail-open this pins: a PATH directory that matches the resource
-    /// by prefix (so `is_inside_resource` returns `true`) but whose
-    /// identity cannot be `stat`-confirmed (it doesn't actually exist —
-    /// a dangling PATH entry) was silently skipped: no `DependencyRef`,
-    /// no `UnresolvedRef`, nothing — the same shape of gap
-    /// `resolve_command` already closes for its own `exe_identity_of`
-    /// call.
+    /// by prefix but doesn't actually exist (a dangling PATH entry) was
+    /// silently skipped: no `DependencyRef`, no `UnresolvedRef`, nothing.
+    /// The PATH-entry probe now resolves the directory's full symlink
+    /// chain via `resolve_symlink_chain` (same as a hook command's
+    /// candidate path), and a non-existent PATH directory resolves to
+    /// `ChainResolution::Dangling` with a single hop; that hop still
+    /// matches the resource by prefix, so this surfaces as
+    /// `SymlinkLoopOrTooDeep` — the same vocabulary `resolve_command`
+    /// already uses for "dangling, but the chain passed through the
+    /// resource" — never a silent nothing.
     #[test]
     fn path_entry_inside_resource_with_unreadable_identity_is_unresolved_not_silent() {
         let home = unique_temp_dir("home-path-ghost");
@@ -1870,11 +2119,12 @@ mod tests {
         assert!(
             report.unresolved.iter().any(|u| matches!(
                 u,
-                UnresolvedRef::SourceUnreadable {
-                    source: SourceTag::PathEntry
+                UnresolvedRef::SymlinkLoopOrTooDeep {
+                    source: SourceTag::PathEntry,
+                    ..
                 }
             )),
-            "expected SourceUnreadable(PathEntry), got {:?}",
+            "expected SymlinkLoopOrTooDeep(PathEntry), got {:?}",
             report.unresolved
         );
 
@@ -1882,19 +2132,12 @@ mod tests {
         fs::remove_dir_all(&resource).ok();
     }
 
-    /// The fail-open this pins: a PATH entry whose ENTIRE parent chain is
-    /// absent (two levels missing, not merely the final directory —
-    /// `path_entry_inside_resource_with_unreadable_identity_is_unresolved_not_silent`
-    /// above only covers the one-level case) made `is_inside_resource`
-    /// fall through to a flat `false` with no `DependencyRef` and no
-    /// `UnresolvedRef` at all — completely silent. With `canonical_hop`
-    /// now climbing to the nearest existing ancestor (the resource
-    /// directory itself, here) and reconstructing the rest,
-    /// `is_inside_resource` resolves this definitively to "inside the
-    /// resource", and the subsequent `exe_identity_of` stat failure on a
-    /// directory that doesn't actually exist surfaces as
-    /// `SourceUnreadable` — unresolved, not silent, same as the
-    /// single-level case above.
+    /// Same AC case as above, but with the PATH entry's ENTIRE parent
+    /// chain absent (two levels missing, not merely the final
+    /// directory). `canonical_hop`'s ancestor-climb still resolves this
+    /// to "inside the resource" by reconstructing from the resource's
+    /// own (real) directory, so this surfaces the same way as the
+    /// single-level case above — never a silent nothing.
     #[test]
     fn path_entry_with_absent_parent_chain_is_unresolved_not_silent() {
         let home = unique_temp_dir("home-path-ghost-deep");
@@ -1916,11 +2159,12 @@ mod tests {
         assert!(
             report.unresolved.iter().any(|u| matches!(
                 u,
-                UnresolvedRef::SourceUnreadable {
+                UnresolvedRef::SymlinkLoopOrTooDeep {
                     source: SourceTag::PathEntry,
+                    ..
                 }
             )),
-            "expected SourceUnreadable(PathEntry), got {:?}",
+            "expected SymlinkLoopOrTooDeep(PathEntry), got {:?}",
             report.unresolved
         );
 
@@ -2073,6 +2317,44 @@ mod tests {
                 .iter()
                 .any(|u| matches!(u, UnresolvedRef::NotOnPath { .. })),
             "sh -c's wrapped bare-name target must reach the PATH-divergence check, got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// Round-2 re-review should-address #4: `zsh -c` must get the same
+    /// treatment as `sh -c`/`bash -c` — it's macOS's actual default
+    /// interactive shell in some contexts, so excluding it would leave a
+    /// common real-world case unprotected.
+    #[test]
+    fn zsh_dash_c_wrapper_target_bare_name_is_not_on_path() {
+        let home = unique_temp_dir("home-zsh-wrapper");
+        let resource = unique_temp_dir("target-zsh-wrapper");
+        fs::create_dir_all(&resource).unwrap();
+
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":"zsh -c totally-nonexistent-wrapped-hook-xyz"}]}]}}"#,
+        )
+        .unwrap();
+
+        let roots = roots_for(&home);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report
+                .unresolved
+                .iter()
+                .any(|u| matches!(u, UnresolvedRef::NotOnPath { .. })),
+            "zsh -c's wrapped bare-name target must reach the PATH-divergence check, got {:?}",
             report.unresolved
         );
 
