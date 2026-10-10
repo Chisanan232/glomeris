@@ -11,6 +11,7 @@
 mod default;
 mod git;
 pub mod host_dependency;
+pub mod host_integrity;
 mod open_files;
 mod process;
 pub mod process_identity;
@@ -26,6 +27,7 @@ pub use super::model::{GitState, ProcessRef};
 pub use default::DefaultEvidenceCollector;
 pub use git::{GitCliProbe, GitProbe};
 pub use host_dependency::{HostDependencyProbe, HostDependencyRoots, LiveHostDependencyProbe};
+pub use host_integrity::compare_host_integrity;
 pub use open_files::{LsofOpenFileProbe, OpenFileProbe};
 pub use process::{LsofProcessCwdProbe, ProcessCwdProbe};
 pub use process_identity::{

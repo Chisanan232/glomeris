@@ -1139,6 +1139,57 @@ impl ExecutableDependencyReport {
     }
 }
 
+/// Tri-state verdict for one dependency's pre/post comparison, or for a
+/// whole run (ADR-0001 §4.4, HORO-1826). `Degraded` and `Unverified` both
+/// withhold confidence; only `Ok` is a positive claim. There is
+/// deliberately no `Default` and no ordering that would let a fold over
+/// several statuses silently settle on `Ok` by omission — callers combine
+/// them explicitly (see
+/// [`crate::evidence::correlate::host_integrity::compare_host_integrity`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityStatus {
+    /// Same resolved path and same (dev, ino) as the pre-action snapshot.
+    Ok,
+    /// Was present pre-action; now missing or changed post-action.
+    Degraded,
+    /// Either probe failed (pre or post), the run crashed/aborted before
+    /// the post-probe could run, or sources_examined was incomplete on
+    /// either side. Never collapsed into `Ok` — a failed observation is
+    /// not a clean one.
+    Unverified,
+}
+
+/// One pre-action [`DependencyRef`] compared against its post-action
+/// counterpart (HORO-1826). Only file identity (`resolved`/`exe`) drives
+/// `status` — a process that was running pre-action and has since exited
+/// is NOT itself a degradation; see
+/// [`ExecutableDependencyReport::running_inside`], which this comparison
+/// never reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyIntegrityEntry {
+    pub source: SourceTag,
+    pub pointer: String,
+    pub pre_resolved: PathBuf,
+    pub pre_exe: ExeIdentity,
+    pub status: IntegrityStatus,
+}
+
+/// Whole-run host-integrity report (HORO-1826 §4.4): the HORO-1825 §4.3
+/// dependency report taken immediately before and after an action,
+/// compared per dependency. Produced only when there was something to
+/// verify — see [`crate::executor::execute`]'s gating — never a
+/// placeholder "all OK" for a run nothing was checked on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostIntegrityReport {
+    /// `Ok` only if every entry is `Ok` and both the pre- and post-action
+    /// probes were fully observed with nothing left unresolved. Any
+    /// `Degraded` entry makes this `Degraded`; otherwise any failed/
+    /// incomplete probe makes this `Unverified`. Never `Ok` by default or
+    /// omission (ADR-0001 §4.4).
+    pub status: IntegrityStatus,
+    pub entries: Vec<DependencyIntegrityEntry>,
+}
+
 /// Git repository state for a resource's containing directory, as
 /// determined by [`crate::evidence::correlate::GitProbe`].
 ///
