@@ -173,6 +173,28 @@ final class GlomerisVocabularyTests: XCTestCase {
         "per_commit_patch_id", "content_identical",
     ]
 
+    /// `src/actionability.rs` — `RefusalSource::as_str`. HORO-1828.
+    private static let refusalSourceTokens = [
+        "policy_protected", "no_registered_action", "action_cannot_plan",
+    ]
+
+    /// `src/reporting/dto.rs` — `process_claim_label`. HORO-1823/HORO-1828.
+    /// All five, including the two (`active`, `stalled`) no single-pass
+    /// probe emits yet — see `ProcessClaim`'s own doc comment.
+    private static let processClaimTokens = [
+        "active", "idle_but_valid", "stalled", "abandoned_candidate", "unknown",
+    ]
+
+    /// `src/reporting/dto.rs` — `target_scope_tag`. HORO-1824/HORO-1828.
+    /// Four, not three: `"unknown"` is the probe-failed case, deliberately
+    /// made a fourth real match arm of the same function rather than a
+    /// literal at the one call site that needed it — see that function's
+    /// own doc comment and this file's header on why a token outside its
+    /// sole producer is invisible to the mechanical vocabulary guard.
+    private static let targetScopeTokens = [
+        "local", "orphan", "redirected", "unknown",
+    ]
+
     /// The four developer-workspace axes that share a token (`unknown`)
     /// and must not share a reading of it.
     private static var worktreeAxes:
@@ -222,6 +244,9 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("episodeResponse", episodeResponseTokens, GlomerisVocabulary.episodeResponse),
             ("episodeRejection", episodeRejectionTokens, GlomerisVocabulary.episodeRejection),
             ("autopilotRefusal", autopilotRefusalTokens, GlomerisVocabulary.autopilotRefusal),
+            ("refusalSource", refusalSourceTokens, GlomerisVocabulary.refusalSource),
+            ("processClaim", processClaimTokens, GlomerisVocabulary.processClaim),
+            ("targetScope", targetScopeTokens, GlomerisVocabulary.targetScope),
         ] + worktreeProseAxes
     }
 
@@ -445,6 +470,9 @@ final class GlomerisVocabularyTests: XCTestCase {
             "worktreeMerged": GlomerisVocabulary.worktreeMergedAxis,
             "worktreeEquivalence": GlomerisVocabulary.worktreeEquivalenceAxis,
             "worktreeEquivalenceMethod": GlomerisVocabulary.worktreeEquivalenceMethodAxis,
+            "refusalSource": GlomerisVocabulary.refusalSourceAxis,
+            "processClaim": GlomerisVocabulary.processClaimAxis,
+            "targetScope": GlomerisVocabulary.targetScopeAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
