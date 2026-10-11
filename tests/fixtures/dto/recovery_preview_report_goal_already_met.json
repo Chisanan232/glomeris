@@ -136,5 +136,40 @@
       "offered_actions": [],
       "refusal_reason": "no registered cleanup action for this resource kind"
     }
-  ]
+  ],
+  "eligibility": "discovery_incomplete",
+  "guarded": [
+    {
+      "policy_label": "UNKNOWN_INCOMPLETE",
+      "reason": "evidence_incomplete",
+      "count": 1,
+      "estimated_bytes": 10737418240,
+      "estimated_human": "10.0 GB",
+      "bytes_unknown_count": 0,
+      "is_lower_bound": true
+    },
+    {
+      "policy_label": "ASK",
+      "reason": "rebuild_cost_high",
+      "count": 1,
+      "estimated_bytes": 5368709120,
+      "estimated_human": "5.0 GB",
+      "bytes_unknown_count": 0,
+      "is_lower_bound": true
+    },
+    {
+      "policy_label": "PROTECTED",
+      "reason": "active_process_using_path",
+      "count": 1,
+      "estimated_bytes": 1073741824,
+      "estimated_human": "1.0 GB",
+      "bytes_unknown_count": 0,
+      "is_lower_bound": false
+    }
+  ],
+  "feasibility": {
+    "verdict": "already_at_goal",
+    "regrowth_risk": false,
+    "snapshots_may_delay_recovery": false
+  }
 }

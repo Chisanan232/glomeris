@@ -29,12 +29,15 @@ use std::sync::Mutex;
 use crate::executor::recovery_loop::{
     target_met, FreeTarget, RecoveryObserver, RecoveryProgress, RecoveryReport, StopReason,
 };
+use crate::monitor::feasibility::{self, FeasibilityInputs};
+use crate::monitor::stability::StabilityVerdict;
 use crate::monitor::{FsUsage, ThresholdConfig};
 use crate::reporting::dto::{
-    stop_reason_tag, DetectCandidateReport, DetectReport, RecoveryGoalRejectionReport,
-    RecoveryGoalReport, RecoveryOpportunityReport, RecoveryPreviewReport, RecoveryProgressEvent,
-    RecoveryRemainingReport, RecoveryRunReport,
+    stop_reason_tag, DetectCandidateReport, DetectReport, FeasibilityReport, GuardedGroupReport,
+    RecoveryGoalRejectionReport, RecoveryGoalReport, RecoveryOpportunityReport,
+    RecoveryPreviewReport, RecoveryProgressEvent, RecoveryRemainingReport, RecoveryRunReport,
 };
+use crate::reporting::eligibility_verdict;
 use crate::reporting::human_bytes;
 use crate::reporting::used_percent::used_percent_text;
 
@@ -175,20 +178,131 @@ pub fn build_recovery_opportunity(
     out
 }
 
+/// Breaks down why bytes beyond `actionable_now_bytes` are still guarded
+/// (HORO-1828), grouped by `(policy_label, reason)`.
+///
+/// **No double counting.** Every candidate contributes to at most one
+/// group: a candidate that is `executable` with no confirmation required is
+/// skipped entirely (it belongs to the opportunity, not the guard — see
+/// [`build_recovery_opportunity`]), and every other candidate is keyed by
+/// its own `policy_label` and its *first* reason code only. A candidate
+/// carrying several reason codes (e.g. both `ResourceInActiveUse` and
+/// `EvidenceIncomplete`) is counted once, under its first reason, never
+/// once per reason it carries — summing `estimated_bytes` across the
+/// returned groups therefore never double-counts that candidate's bytes.
+///
+/// Sorted by `estimated_bytes` descending so a client that renders
+/// "largest first" (the Swift UI does) needs no sort of its own.
+pub fn build_guarded_breakdown(candidates: &[DetectCandidateReport]) -> Vec<GuardedGroupReport> {
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Acc {
+        policy_label: &'static str,
+        count: usize,
+        bytes: u64,
+        bytes_unknown_count: usize,
+        is_lower_bound: bool,
+    }
+
+    let mut groups: BTreeMap<(&'static str, &'static str), Acc> = BTreeMap::new();
+
+    for candidate in candidates {
+        // Actionable-without-confirmation candidates are the opportunity,
+        // never the guard — see this function's doc comment.
+        let actionable_without_confirmation = candidate.executable
+            && candidate
+                .offered_actions
+                .iter()
+                .any(|action| !action.requires_confirmation);
+        if actionable_without_confirmation {
+            continue;
+        }
+
+        let reason = candidate.reasons.first().copied().unwrap_or("unlabeled");
+        let key = (candidate.policy_label, reason);
+        let acc = groups.entry(key).or_insert_with(|| Acc {
+            policy_label: candidate.policy_label,
+            ..Default::default()
+        });
+        acc.count += 1;
+        match candidate.reclaimable_bytes {
+            Some(bytes) => {
+                acc.bytes = acc.bytes.saturating_add(bytes);
+                if candidate.reclaimable_bytes_is_lower_bound {
+                    acc.is_lower_bound = true;
+                }
+            }
+            None => acc.bytes_unknown_count += 1,
+        }
+    }
+
+    let mut out: Vec<GuardedGroupReport> = groups
+        .into_iter()
+        .map(|((_, reason), acc)| GuardedGroupReport {
+            policy_label: acc.policy_label,
+            reason,
+            count: acc.count,
+            estimated_bytes: acc.bytes,
+            estimated_human: human_bytes(acc.bytes),
+            bytes_unknown_count: acc.bytes_unknown_count,
+            is_lower_bound: acc.is_lower_bound,
+        })
+        .collect();
+    out.sort_by_key(|g| std::cmp::Reverse(g.estimated_bytes));
+    out
+}
+
 /// Build the pre-execution preview for `goal` against a real `usage`
 /// reading and an already-completed discovery pass.
 ///
 /// Pure: every input is passed in, nothing here touches the filesystem, so
 /// the whole surface is unit-testable without a disk in a particular state.
+///
+/// `stability` and `local_snapshots_present` (HORO-1828) are the two inputs
+/// [`crate::monitor::feasibility::assess`] needs beyond this report's own
+/// byte totals — both resolved by the caller (reading the samples ring and
+/// probing `tmutil`, respectively), keeping this function itself free of
+/// I/O as its own doc comment promises.
 pub fn build_recovery_preview_report(
     goal: &RecoveryGoal,
     usage: &FsUsage,
     thresholds: &ThresholdConfig,
     detect: DetectReport,
+    stability: &StabilityVerdict,
+    local_snapshots_present: bool,
 ) -> RecoveryPreviewReport {
     let required_free_bytes = goal.required_free_bytes(usage.total_bytes);
     let bytes_needed = required_free_bytes.saturating_sub(usage.free_bytes);
     let opportunity = build_recovery_opportunity(&detect.candidates);
+    let eligibility = eligibility_verdict(detect.discovery_complete, &detect.candidates).as_str();
+    let guarded = build_guarded_breakdown(&detect.candidates);
+    // A real, positively-established fact about the resource (ADR-0001 §4.2:
+    // it IS shared) — not an evidence-quality gap — so it is read straight
+    // off the already-computed reason codes rather than re-derived.
+    let shared_target_regrowth_risk = detect
+        .candidates
+        .iter()
+        .any(|c| c.reasons.contains(&"shared_build_cache_blast_radius"));
+    let feasibility = FeasibilityReport::from_verdict(&feasibility::assess(
+        stability,
+        FeasibilityInputs {
+            target_free_bytes: required_free_bytes,
+            current_free_bytes: usage.free_bytes,
+            auto_safe_estimate_bytes: opportunity.actionable_now_bytes,
+            // Deliberately `requires_confirmation_bytes`, never a sum that
+            // includes `protected_count` — see
+            // `FeasibilityInputs::consent_reachable_estimate_bytes`'s doc
+            // comment for why PROTECTED bytes must never reach this field.
+            consent_reachable_estimate_bytes: opportunity.requires_confirmation_bytes,
+            // This is a pre-execution preview: nothing has run yet, so there
+            // is no measured figure to report. `execute`/the recovery loop
+            // carry the real measured sum once a run has happened.
+            measured_actual_reclaimed_bytes: 0,
+            shared_target_regrowth_risk,
+            local_snapshots_present,
+        },
+    ));
 
     let mut caveats = vec![ESTIMATES_CAVEAT.to_string()];
     // A preview of an already-satisfied goal is a legitimate question to ask,
@@ -273,6 +387,9 @@ pub fn build_recovery_preview_report(
         caveats,
         detectors: detect.detectors,
         candidates: detect.candidates,
+        eligibility,
+        guarded,
+        feasibility,
     }
 }
 
@@ -543,6 +660,7 @@ impl<W: Write> RecoveryObserver for NdjsonProgressObserver<W> {
 
 /// Print the preview as prose, for a terminal user.
 pub fn print_recovery_preview_report(report: &RecoveryPreviewReport) {
+    println!("eligibility:            {}", report.eligibility);
     println!("recovery goal:          {}", report.goal.description);
     println!(
         "current usage:          {} ({} free of {})",
@@ -573,8 +691,92 @@ pub fn print_recovery_preview_report(report: &RecoveryPreviewReport) {
         report.goal_appears_reachable
     );
     println!("nothing was modified:   this is a preview");
+    if !report.guarded.is_empty() {
+        println!("guarded (largest first):");
+        for group in &report.guarded {
+            println!(
+                "  {:<18} {:<32} {} candidate(s), {}{}",
+                group.policy_label,
+                group.reason,
+                group.count,
+                group.estimated_human,
+                if group.is_lower_bound {
+                    " (lower bound)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    println!(
+        "feasibility:            {}",
+        feasibility_summary_line(&report.feasibility)
+    );
     for caveat in &report.caveats {
         println!("note: {caveat}");
+    }
+}
+
+/// One terminal-friendly sentence for a [`FeasibilityReport`], read straight
+/// off its already-computed fields — never re-derives anything policy or
+/// evidence already decided (HORO-1828).
+fn feasibility_summary_line(feasibility: &FeasibilityReport) -> String {
+    match feasibility.verdict {
+        "insufficient_observation" => "not enough stability history yet (sampling is opt-in; \
+             see `glomeris free --dry-run --help`)"
+            .to_string(),
+        "already_at_goal" => "goal already met; nothing to recover".to_string(),
+        "reachable_auto_safe" => format!(
+            "reachable without asking anything ({} estimated, gap {}){}{}",
+            feasibility
+                .auto_safe_estimate_human
+                .clone()
+                .unwrap_or_default(),
+            feasibility.gap_human.clone().unwrap_or_default(),
+            if feasibility.regrowth_risk {
+                "; shared target may regrow"
+            } else {
+                ""
+            },
+            if feasibility.snapshots_may_delay_recovery {
+                "; local snapshots may delay freed space showing up"
+            } else {
+                ""
+            }
+        ),
+        "reachable_requires_consent" => format!(
+            "reachable, but only with your confirmation on at least one candidate \
+             ({} auto + {} with consent, gap {}){}{}",
+            feasibility
+                .auto_safe_estimate_human
+                .clone()
+                .unwrap_or_default(),
+            feasibility
+                .consent_reachable_estimate_human
+                .clone()
+                .unwrap_or_default(),
+            feasibility.gap_human.clone().unwrap_or_default(),
+            if feasibility.regrowth_risk {
+                "; shared target may regrow"
+            } else {
+                ""
+            },
+            if feasibility.snapshots_may_delay_recovery {
+                "; local snapshots may delay freed space showing up"
+            } else {
+                ""
+            }
+        ),
+        "unreachable" => format!(
+            "not reachable by any means Glomeris knows about today ({} known, gap {})",
+            feasibility
+                .consent_reachable_estimate_human
+                .clone()
+                .or_else(|| feasibility.auto_safe_estimate_human.clone())
+                .unwrap_or_default(),
+            feasibility.gap_human.clone().unwrap_or_default()
+        ),
+        other => format!("unrecognized feasibility verdict: {other}"),
     }
 }
 
@@ -626,7 +828,101 @@ mod tests {
         }
     }
 
+    /// Like `candidate`, but with a configurable `reasons` list — needed for
+    /// `build_guarded_breakdown`'s grouping tests, where `candidate`'s
+    /// hardcoded empty `reasons` would make every candidate collapse into
+    /// one `(label, "unlabeled")` group and hide a double-count.
+    fn candidate_with_reasons(
+        id: &str,
+        label: &'static str,
+        reasons: Vec<&'static str>,
+        executable: bool,
+        requires_confirmation: bool,
+        bytes: Option<u64>,
+    ) -> DetectCandidateReport {
+        DetectCandidateReport {
+            reasons,
+            ..candidate(id, label, executable, requires_confirmation, bytes, false)
+        }
+    }
+
+    /// HORO-1828 anti-vacuity: summing `estimated_bytes` across every
+    /// returned group must equal the sum of the guarded candidates' own
+    /// bytes exactly once each — never twice for a candidate that carries
+    /// more than one reason code.
+    #[test]
+    fn guarded_breakdown_never_double_counts_a_multi_reason_candidate() {
+        let candidates = vec![candidate_with_reasons(
+            "multi",
+            "ASK",
+            vec!["resource_in_active_use", "rebuild_cost_high"],
+            true,
+            true,
+            Some(1_000),
+        )];
+        let guarded = build_guarded_breakdown(&candidates);
+        let total: u64 = guarded.iter().map(|g| g.estimated_bytes).sum();
+        assert_eq!(
+            total, 1_000,
+            "a candidate with two reason codes must be counted once, not once per reason: {guarded:?}"
+        );
+        assert_eq!(
+            guarded.len(),
+            1,
+            "one candidate must produce exactly one group: {guarded:?}"
+        );
+    }
+
+    /// The grouping half of the same guarantee: two different candidates in
+    /// two different groups must each keep their own bytes, with no group
+    /// absorbing the other's.
+    #[test]
+    fn guarded_breakdown_groups_separately_and_sums_correctly() {
+        let candidates = vec![
+            candidate_with_reasons("a", "ASK", vec!["rebuild_cost_high"], true, true, Some(100)),
+            candidate_with_reasons(
+                "b",
+                "PROTECTED",
+                vec!["active_process_using_path"],
+                false,
+                false,
+                Some(900),
+            ),
+        ];
+        let guarded = build_guarded_breakdown(&candidates);
+        assert_eq!(guarded.len(), 2, "{guarded:?}");
+        let total: u64 = guarded.iter().map(|g| g.estimated_bytes).sum();
+        assert_eq!(total, 1_000);
+    }
+
+    /// HORO-1828 anti-vacuity: an actionable-without-confirmation candidate
+    /// must never appear in `guarded` — it is the opportunity, not the
+    /// guard.
+    #[test]
+    fn guarded_breakdown_never_includes_an_actionable_without_confirmation_candidate() {
+        let candidates = vec![
+            candidate("auto", "AUTO_SAFE", true, false, Some(500), false),
+            candidate_with_reasons(
+                "ask",
+                "ASK",
+                vec!["rebuild_cost_high"],
+                true,
+                true,
+                Some(200),
+            ),
+        ];
+        let guarded = build_guarded_breakdown(&candidates);
+        assert_eq!(
+            guarded.len(),
+            1,
+            "the AUTO_SAFE, no-confirmation candidate must not appear in guarded: {guarded:?}"
+        );
+        assert_eq!(guarded[0].policy_label, "ASK");
+        assert_eq!(guarded[0].estimated_bytes, 200);
+    }
+
     fn detect_report(candidates: Vec<DetectCandidateReport>, complete: bool) -> DetectReport {
+        let eligibility = eligibility_verdict(complete, &candidates).as_str();
         DetectReport {
             candidates,
             detectors: vec![DetectorHealthReport {
@@ -641,7 +937,15 @@ mod tests {
             }],
             discovery_complete: complete,
             workspaces: Vec::new(),
+            eligibility,
         }
+    }
+
+    /// Stability input for tests that are not about feasibility itself —
+    /// `InsufficientObservation` is the honest default for a test that never
+    /// populated a samples ring.
+    fn no_observation() -> StabilityVerdict {
+        StabilityVerdict::insufficient(0)
     }
 
     #[test]
@@ -725,8 +1029,14 @@ mod tests {
             vec![candidate("a", "AUTO_SAFE", true, false, Some(500), false)],
             true,
         );
-        let preview =
-            build_recovery_preview_report(&goal, &usage, &ThresholdConfig::default(), detect);
+        let preview = build_recovery_preview_report(
+            &goal,
+            &usage,
+            &ThresholdConfig::default(),
+            detect,
+            &no_observation(),
+            false,
+        );
 
         assert_eq!(preview.required_free_bytes, 400);
         assert_eq!(preview.bytes_needed, 340);
@@ -750,8 +1060,14 @@ mod tests {
             vec![candidate("gated", "ASK", true, true, Some(10_000), false)],
             true,
         );
-        let preview =
-            build_recovery_preview_report(&goal, &usage, &ThresholdConfig::default(), detect);
+        let preview = build_recovery_preview_report(
+            &goal,
+            &usage,
+            &ThresholdConfig::default(),
+            detect,
+            &no_observation(),
+            false,
+        );
         assert!(!preview.goal_appears_reachable);
         assert!(
             preview
@@ -772,6 +1088,8 @@ mod tests {
             &usage,
             &ThresholdConfig::default(),
             detect_report(vec![], false),
+            &no_observation(),
+            false,
         );
         assert!(!preview.discovery_complete);
         assert!(
@@ -793,6 +1111,8 @@ mod tests {
             &FsUsage::new(1000, 500),
             &ThresholdConfig::default(),
             detect_report(vec![], true),
+            &no_observation(),
+            false,
         );
         assert_eq!(preview.bytes_needed, 0);
         assert!(preview.goal_appears_reachable);
@@ -818,6 +1138,8 @@ mod tests {
             &FsUsage::new(1000, 60),
             &ThresholdConfig::default(),
             detect_report(vec![], true),
+            &no_observation(),
+            false,
         );
         assert_eq!(preview.bytes_needed, 340);
         assert!(

@@ -809,6 +809,12 @@ pub struct DetectReport {
     /// joined on resource id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<WorkspaceFamilyReport>,
+    /// What, if anything, an operator can do right now (HORO-1828) — see
+    /// [`super::eligibility::eligibility_verdict`] for the exact precedence.
+    /// Always present, never `Option`: a report with no opinion here would
+    /// leave a client inferring it from an empty `candidates` list, which is
+    /// exactly the false-all-clear this field exists to prevent.
+    pub eligibility: &'static str,
 }
 
 /// `glomeris explain <resource>` report: the full evidence-and-policy
@@ -1735,6 +1741,201 @@ pub struct RecoveryOpportunityReport {
     pub is_lower_bound: bool,
 }
 
+/// One group of guarded (not-executable-without-confirmation) bytes
+/// (HORO-1828), grouped by policy label and the first/most-significant
+/// reason code a candidate in the group carries.
+///
+/// Deliberately named "guarded", never "opportunity" or "recoverable": a
+/// resource landing here is either `PROTECTED` (no override exists — see
+/// `crate::policy::approval::authorize`) or `ASK`/`UNKNOWN_INCOMPLETE`
+/// (reachable only with the user's explicit confirmation, surfaced
+/// separately by [`RecoveryOpportunityReport`]). This exists so "hundreds
+/// of GiB are still guarded" has a reason attached to every byte, instead
+/// of a single opaque "not executable" count.
+///
+/// Grouping is by `(policy_label, reason)`, and every contributing
+/// candidate appears in **exactly one** group — see
+/// [`crate::cli::recovery::build_guarded_breakdown`]'s doc comment for why
+/// that is load-bearing rather than incidental: summing across groups must
+/// never double-count a candidate's bytes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GuardedGroupReport {
+    pub policy_label: &'static str,
+    /// The first (most-significant) reason code this group's candidates
+    /// carry — see [`crate::cli::recovery::build_guarded_breakdown`].
+    pub reason: &'static str,
+    pub count: usize,
+    pub estimated_bytes: u64,
+    pub estimated_human: String,
+    /// Candidates in this group whose size could not be estimated at all —
+    /// counted separately rather than silently treated as zero bytes.
+    pub bytes_unknown_count: usize,
+    /// `true` when any candidate contributing `estimated_bytes` reported its
+    /// estimate as a lower bound, so the real figure may be larger.
+    pub is_lower_bound: bool,
+}
+
+/// What this module's doc comment and ADR-0001 §4.4/§8 call an honest
+/// answer to "is the user's target free-space goal reachable, and by what
+/// means" (HORO-1827/HORO-1828) — a direct projection of
+/// [`crate::monitor::feasibility::FeasibilityVerdict`].
+///
+/// Every byte field is `None` unless the verdict variant actually carries
+/// it — see that type's own doc comment for why measured and estimated
+/// bytes are never the same field and never summed into each other.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FeasibilityReport {
+    /// One of `insufficient_observation`, `already_at_goal`,
+    /// `reachable_auto_safe`, `reachable_requires_consent`, `unreachable` —
+    /// from [`crate::monitor::feasibility::FeasibilityVerdict::tag`].
+    pub verdict: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gap_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_safe_estimate_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_safe_estimate_human: Option<String>,
+    /// Estimated bytes reachable only with the user's consent (ASK,
+    /// never PROTECTED — see
+    /// [`crate::monitor::feasibility::FeasibilityInputs::consent_reachable_estimate_bytes`]'s
+    /// doc comment for why PROTECTED bytes must never appear here).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_reachable_estimate_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consent_reachable_estimate_human: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_actual_reclaimed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub measured_actual_reclaimed_human: Option<String>,
+    /// `true` when any part of the AUTO_SAFE estimate sits inside a shared
+    /// or redirected Cargo target with other active sharers. Always `false`
+    /// for `insufficient_observation`/`already_at_goal`, which carry no
+    /// byte totals to qualify.
+    pub regrowth_risk: bool,
+    /// `true` when at least one local Time Machine snapshot was observed,
+    /// so freed bytes may not return to `df` until macOS thins it.
+    pub snapshots_may_delay_recovery: bool,
+}
+
+impl FeasibilityReport {
+    /// Projects a [`crate::monitor::feasibility::FeasibilityVerdict`].
+    /// Never recomputes it — see that module's `assess`, the only producer.
+    pub fn from_verdict(verdict: &crate::monitor::feasibility::FeasibilityVerdict) -> Self {
+        use crate::monitor::feasibility::FeasibilityVerdict;
+
+        let tag = verdict.tag();
+        match verdict {
+            FeasibilityVerdict::InsufficientObservation {
+                elapsed_secs,
+                required_secs,
+            } => Self {
+                verdict: tag,
+                elapsed_secs: Some(*elapsed_secs),
+                required_secs: Some(*required_secs),
+                gap_bytes: None,
+                gap_human: None,
+                auto_safe_estimate_bytes: None,
+                auto_safe_estimate_human: None,
+                consent_reachable_estimate_bytes: None,
+                consent_reachable_estimate_human: None,
+                measured_actual_reclaimed_bytes: None,
+                measured_actual_reclaimed_human: None,
+                regrowth_risk: false,
+                snapshots_may_delay_recovery: false,
+            },
+            FeasibilityVerdict::AlreadyAtGoal => Self {
+                verdict: tag,
+                elapsed_secs: None,
+                required_secs: None,
+                gap_bytes: None,
+                gap_human: None,
+                auto_safe_estimate_bytes: None,
+                auto_safe_estimate_human: None,
+                consent_reachable_estimate_bytes: None,
+                consent_reachable_estimate_human: None,
+                measured_actual_reclaimed_bytes: None,
+                measured_actual_reclaimed_human: None,
+                regrowth_risk: false,
+                snapshots_may_delay_recovery: false,
+            },
+            FeasibilityVerdict::ReachableAutoSafe {
+                gap_bytes,
+                auto_safe_estimate_bytes,
+                regrowth_risk,
+                snapshots_may_delay_recovery,
+            } => Self {
+                verdict: tag,
+                elapsed_secs: None,
+                required_secs: None,
+                gap_bytes: Some(*gap_bytes),
+                gap_human: Some(human_bytes(*gap_bytes)),
+                auto_safe_estimate_bytes: Some(*auto_safe_estimate_bytes),
+                auto_safe_estimate_human: Some(human_bytes(*auto_safe_estimate_bytes)),
+                consent_reachable_estimate_bytes: None,
+                consent_reachable_estimate_human: None,
+                measured_actual_reclaimed_bytes: None,
+                measured_actual_reclaimed_human: None,
+                regrowth_risk: *regrowth_risk,
+                snapshots_may_delay_recovery: *snapshots_may_delay_recovery,
+            },
+            FeasibilityVerdict::ReachableRequiresConsent {
+                gap_bytes,
+                auto_safe_estimate_bytes,
+                ask_protected_unknown_estimate_bytes,
+                regrowth_risk,
+                snapshots_may_delay_recovery,
+            } => Self {
+                verdict: tag,
+                elapsed_secs: None,
+                required_secs: None,
+                gap_bytes: Some(*gap_bytes),
+                gap_human: Some(human_bytes(*gap_bytes)),
+                auto_safe_estimate_bytes: Some(*auto_safe_estimate_bytes),
+                auto_safe_estimate_human: Some(human_bytes(*auto_safe_estimate_bytes)),
+                consent_reachable_estimate_bytes: Some(*ask_protected_unknown_estimate_bytes),
+                consent_reachable_estimate_human: Some(human_bytes(
+                    *ask_protected_unknown_estimate_bytes,
+                )),
+                measured_actual_reclaimed_bytes: None,
+                measured_actual_reclaimed_human: None,
+                regrowth_risk: *regrowth_risk,
+                snapshots_may_delay_recovery: *snapshots_may_delay_recovery,
+            },
+            FeasibilityVerdict::Unreachable {
+                gap_bytes,
+                auto_safe_estimate_bytes,
+                ask_protected_unknown_estimate_bytes,
+                measured_actual_reclaimed_bytes,
+                regrowth_risk,
+            } => Self {
+                verdict: tag,
+                elapsed_secs: None,
+                required_secs: None,
+                gap_bytes: Some(*gap_bytes),
+                gap_human: Some(human_bytes(*gap_bytes)),
+                auto_safe_estimate_bytes: Some(*auto_safe_estimate_bytes),
+                auto_safe_estimate_human: Some(human_bytes(*auto_safe_estimate_bytes)),
+                consent_reachable_estimate_bytes: Some(*ask_protected_unknown_estimate_bytes),
+                consent_reachable_estimate_human: Some(human_bytes(
+                    *ask_protected_unknown_estimate_bytes,
+                )),
+                measured_actual_reclaimed_bytes: Some(*measured_actual_reclaimed_bytes),
+                measured_actual_reclaimed_human: Some(human_bytes(
+                    *measured_actual_reclaimed_bytes,
+                )),
+                regrowth_risk: *regrowth_risk,
+                snapshots_may_delay_recovery: false,
+            },
+        }
+    }
+}
+
 /// The pre-flight for a recovery goal: what the volume looks like now, what
 /// the goal requires, and what is estimated to be available toward it —
 /// before anything is mutated (HORO-1506).
@@ -1774,6 +1975,17 @@ pub struct RecoveryPreviewReport {
     pub caveats: Vec<String>,
     pub detectors: Vec<DetectorHealthReport>,
     pub candidates: Vec<DetectCandidateReport>,
+    /// What, if anything, an operator can do right now (HORO-1828) — see
+    /// [`super::eligibility::eligibility_verdict`]. Always present.
+    pub eligibility: &'static str,
+    /// Why bytes beyond `opportunity.actionable_now_bytes` are still
+    /// guarded, broken down by policy label and reason (HORO-1828). See
+    /// [`GuardedGroupReport`]'s doc comment for the grouping and
+    /// no-double-count guarantee.
+    pub guarded: Vec<GuardedGroupReport>,
+    /// Whether the goal is reachable, and by what means, honestly accounting
+    /// for observed stability (HORO-1827/HORO-1828). See [`FeasibilityReport`].
+    pub feasibility: FeasibilityReport,
 }
 
 /// One line of the `--progress-json` NDJSON stream a recovery run emits on

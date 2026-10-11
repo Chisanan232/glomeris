@@ -1,0 +1,81 @@
+{
+  "goal": {
+    "used_percent": 60.0,
+    "free_percent": 40.0,
+    "description": "60% used (40% free)"
+  },
+  "current": {
+    "total_bytes": 500000000000,
+    "free_bytes": 60000000000,
+    "used_percent": 88.0,
+    "free_human": "55.9 GB",
+    "total_human": "465.7 GB",
+    "pressure_state": "PRESSURED"
+  },
+  "required_free_bytes": 200000000000,
+  "required_free_human": "186.3 GB",
+  "bytes_needed": 140000000000,
+  "bytes_needed_human": "130.4 GB",
+  "opportunity": {
+    "actionable_now_count": 1,
+    "actionable_now_bytes": 2147483648,
+    "actionable_now_human": "2.0 GB",
+    "requires_confirmation_count": 0,
+    "requires_confirmation_bytes": 0,
+    "requires_confirmation_human": "0 B",
+    "not_executable_count": 0,
+    "protected_count": 0,
+    "is_lower_bound": false
+  },
+  "goal_appears_reachable": false,
+  "discovery_complete": false,
+  "caveats": [
+    "Reclaimable figures are detector estimates. Actual progress is measured from the filesystem after each action.",
+    "Discovery was incomplete: 1 detector(s) failed (homebrew_cache). The real opportunity may be larger than shown.",
+    "1 detector(s) had nothing configured to look at (node_modules), so nothing of theirs was examined. The real opportunity may be larger than shown."
+  ],
+  "detectors": [
+    {
+      "detector": "homebrew_cache",
+      "status": "failed",
+      "candidates_found": 0,
+      "reason": "brew --cache exited 1"
+    },
+    {
+      "detector": "node_modules",
+      "status": "not_configured",
+      "candidates_found": 0
+    }
+  ],
+  "candidates": [
+    {
+      "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+      "kind": "cargo_target_dir",
+      "reclaimable_bytes": 2147483648,
+      "reclaimable_human": "2.0 GB",
+      "reclaimable_bytes_is_lower_bound": false,
+      "impact_tier": "notable",
+      "policy_label": "AUTO_SAFE",
+      "reasons": [
+        "no_active_use_observed"
+      ],
+      "executable": true,
+      "offered_actions": [
+        {
+          "action_id": "cargo.clean.target_dir",
+          "requires_confirmation": false
+        }
+      ],
+      "refusal_reason": null
+    }
+  ],
+  "eligibility": "discovery_incomplete",
+  "guarded": [],
+  "feasibility": {
+    "verdict": "insufficient_observation",
+    "elapsed_secs": 0,
+    "required_secs": 43200,
+    "regrowth_risk": false,
+    "snapshots_may_delay_recovery": false
+  }
+}
