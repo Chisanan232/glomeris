@@ -30,7 +30,11 @@ final class CandidateDetailViewTests: XCTestCase {
         executable: Bool,
         policyLabel: String = "AUTO_SAFE",
         offeredActions: [OfferedActionDto] = [],
-        refusalReason: String? = nil
+        refusalReason: String? = nil,
+        holders: [HolderReportDto] = [],
+        holderProbes: [HolderProbeReportDto] = [],
+        executableDependency: DependencyExplainReportDto = .notReported,
+        git: GitExplainReportDto = .notReported
     ) -> ExplainReportDto {
         ExplainReportDto(
             resourceId: "/tmp/example/target",
@@ -53,8 +57,170 @@ final class CandidateDetailViewTests: XCTestCase {
             fingerprintToken: "opaque-token",
             executable: executable,
             offeredActions: offeredActions,
-            refusalReason: refusalReason
+            refusalReason: refusalReason,
+            holders: holders,
+            holderProbes: holderProbes,
+            executableDependency: executableDependency,
+            git: git
         )
+    }
+
+    // MARK: - HORO-1828: fail-closed "who is using this" / "hooks and daemons" wording
+
+    /// The exact HORO-1825 bug class, in the UI layer: an older CLI that
+    /// never reports `holderProbes` must never be worded the same as a
+    /// current CLI that checked all three relations and found nothing.
+    func testHoldersSummaryDistinguishesNotReportedFromACleanNegative() {
+        let notReported = CandidateDetailViewModel(explainReport(executable: true))
+        XCTAssertFalse(notReported.holderProbeWasReported)
+        XCTAssertTrue(notReported.holdersSummaryText.contains("not reported"))
+
+        let cleanNegative = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                holderProbes: [
+                    HolderProbeReportDto(relation: "open_file", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "cwd", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "executable", unavailableReason: nil),
+                ]
+            )
+        )
+        XCTAssertTrue(cleanNegative.holderProbeWasReported)
+        XCTAssertTrue(cleanNegative.holdersSummaryText.contains("none observed"))
+        XCTAssertNotEqual(notReported.holdersSummaryText, cleanNegative.holdersSummaryText)
+    }
+
+    /// A relation whose probe failed must never be absorbed into "none
+    /// observed" — it is unknown, not clean.
+    /// The visible `DisclosureGroup` label and the VoiceOver accessibility
+    /// label must never disagree about which of the three cases
+    /// (`not reported` / `partially failed` / `genuine answer`) is active
+    /// — a sighted user reading the label and a VoiceOver user hearing it
+    /// must be told the same thing. Mutation-test target: collapsing
+    /// `holdersSummaryText` back to a bare
+    /// `holders.isEmpty ? "... none observed" : "... \(count)"` (dropping
+    /// the not-reported/partially-failed branches that
+    /// `holdersSummaryAccessibilityLabel` still has) makes this go RED.
+    func testHoldersSummaryTextAndAccessibilityLabelAgreeOnWhichCaseIsActive() {
+        func activeCase(_ text: String) -> String {
+            let lowered = text.lowercased()
+            if lowered.contains("not reported") { return "not_reported" }
+            if lowered.contains("could not fully check") { return "partially_failed" }
+            return "genuine_answer"
+        }
+
+        let notReported = CandidateDetailViewModel(explainReport(executable: true))
+        XCTAssertEqual(
+            activeCase(notReported.holdersSummaryText),
+            activeCase(notReported.holdersSummaryAccessibilityLabel)
+        )
+        XCTAssertEqual(activeCase(notReported.holdersSummaryText), "not_reported")
+
+        let partiallyFailed = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                holderProbes: [
+                    HolderProbeReportDto(relation: "open_file", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "cwd", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "executable", unavailableReason: "timed_out"),
+                ]
+            )
+        )
+        XCTAssertEqual(
+            activeCase(partiallyFailed.holdersSummaryText),
+            activeCase(partiallyFailed.holdersSummaryAccessibilityLabel)
+        )
+        XCTAssertEqual(activeCase(partiallyFailed.holdersSummaryText), "partially_failed")
+
+        let cleanNegative = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                holderProbes: [
+                    HolderProbeReportDto(relation: "open_file", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "cwd", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "executable", unavailableReason: nil),
+                ]
+            )
+        )
+        XCTAssertEqual(
+            activeCase(cleanNegative.holdersSummaryText),
+            activeCase(cleanNegative.holdersSummaryAccessibilityLabel)
+        )
+        XCTAssertEqual(activeCase(cleanNegative.holdersSummaryText), "genuine_answer")
+    }
+
+    func testHoldersSummarySurfacesAFailedRelationRatherThanHidingIt() {
+        let viewModel = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                holderProbes: [
+                    HolderProbeReportDto(relation: "open_file", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "cwd", unavailableReason: nil),
+                    HolderProbeReportDto(relation: "executable", unavailableReason: "timed_out"),
+                ]
+            )
+        )
+        XCTAssertFalse(viewModel.holdersSummaryText.contains("none observed"))
+        XCTAssertTrue(viewModel.holdersSummaryText.contains("executable"))
+        XCTAssertEqual(viewModel.unavailableHolderProbes.count, 1)
+    }
+
+    /// Mutation-test target: if the "not reported" / "failed relation"
+    /// branches above are ever collapsed back into a bare
+    /// `holders.isEmpty ? "none observed" : ...`, this test goes RED
+    /// because an unreported probe would read exactly like a clean one.
+    func testHoldersSummaryNeverReadsAsCleanWhenTheProbeNeverRan() {
+        let viewModel = CandidateDetailViewModel(explainReport(executable: true))
+        XCTAssertFalse(
+            viewModel.holdersSummaryText.contains("none observed"),
+            "an unreported holder probe must never be worded the same as a genuine clean negative"
+        )
+    }
+
+    func testHooksAndDaemonsSummaryDistinguishesUncheckedFromClean() {
+        let unchecked = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                executableDependency: DependencyExplainReportDto(
+                    probe: "tool_absent", references: [], unresolved: [], sourcesExamined: [],
+                    note: "x"
+                )
+            )
+        )
+        XCTAssertFalse(unchecked.dependencyProbeWasObserved)
+        XCTAssertTrue(unchecked.hooksAndDaemonsSummaryText.contains("could not be checked"))
+
+        let clean = CandidateDetailViewModel(
+            explainReport(
+                executable: true,
+                executableDependency: DependencyExplainReportDto(
+                    probe: "observed", references: [], unresolved: [], sourcesExamined: [],
+                    note: "x"
+                )
+            )
+        )
+        XCTAssertTrue(clean.dependencyProbeWasObserved)
+        XCTAssertTrue(clean.hooksAndDaemonsSummaryText.contains("none confirmed"))
+        XCTAssertNotEqual(unchecked.hooksAndDaemonsSummaryText, clean.hooksAndDaemonsSummaryText)
+    }
+
+    /// An inline-JSON decode proof that `unavailable_reason` actually
+    /// reaches the view model — a `CodingKeys` typo there would decode
+    /// `nil` silently and this would still pass with the wrong meaning.
+    func testUnavailableHolderProbeReasonDecodesAndSurfaces() throws {
+        let json = """
+        {"resource_id":"a","kind":"cargo_target","detector":"cargo","sources":[],
+        "logical_bytes":1,"logical_human":"1 B","reclaimable_bytes":1,"reclaimable_human":"1 B",
+        "reclaimable_bytes_is_lower_bound":false,"completeness":"complete","confidence":"high",
+        "active_use_signals":[],"regenerability":"regenerable_by_rebuild","policy_label":"ASK",
+        "reasons":[],"native_cleanup_available":false,"native_cleanup_action_id":null,
+        "fingerprint_token":null,"executable":false,"offered_actions":[],"refusal_reason":null,
+        "holders":[],"holder_probes":[{"relation":"open_file","unavailable_reason":"timed_out"}]}
+        """
+        let dto = try JSONDecoder().decode(ExplainReportDto.self, from: Data(json.utf8))
+        let viewModel = CandidateDetailViewModel(dto)
+        XCTAssertEqual(viewModel.unavailableHolderProbes.first?.unavailableReason, "timed_out")
+        XCTAssertTrue(viewModel.holdersSummaryText.contains("could not fully check"))
     }
 
     // MARK: - `isCleanEnabled` is a field read of `executable`, never an
@@ -1055,5 +1221,48 @@ final class CandidateDetailViewTests: XCTestCase {
             .split(separator: "\n", omittingEmptySubsequences: false)
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
+    }
+
+
+    /// End-to-end proof that `CandidateDetailViewModel.reasonTerms` (not
+    /// just the vocabulary function in isolation) special-cases
+    /// `git_worktree_dirty` correctly. Mutation-test target: reverting
+    /// that special case back to a bare
+    /// `reasons.map(GlomerisVocabulary.reason)` makes this go RED, because
+    /// the generic fallback wording says "uncommitted" for every trigger.
+    func testReasonTermsWordsACleanLinkedWorktreeCorrectlyEndToEnd() {
+        let report = explainReport(
+            executable: false,
+            git: GitExplainReportDto(probe: "observed", dirty: false, linkedWorktree: true)
+        )
+        var withReason = report
+        withReason = ExplainReportDto(
+            resourceId: report.resourceId, kind: report.kind, detector: report.detector,
+            sources: report.sources, logicalBytes: report.logicalBytes,
+            logicalHuman: report.logicalHuman, reclaimableBytes: report.reclaimableBytes,
+            reclaimableHuman: report.reclaimableHuman,
+            reclaimableBytesIsLowerBound: report.reclaimableBytesIsLowerBound,
+            completeness: report.completeness, confidence: report.confidence,
+            activeUseSignals: report.activeUseSignals, regenerability: report.regenerability,
+            policyLabel: report.policyLabel, reasons: ["git_worktree_dirty"],
+            nativeCleanupAvailable: report.nativeCleanupAvailable,
+            nativeCleanupActionId: report.nativeCleanupActionId,
+            fingerprintToken: report.fingerprintToken, executable: report.executable,
+            offeredActions: report.offeredActions, refusalReason: report.refusalReason,
+            git: report.git
+        )
+        let viewModel = CandidateDetailViewModel(withReason)
+
+        XCTAssertEqual(viewModel.reasonTerms.count, 1)
+        let term = viewModel.reasonTerms[0]
+        XCTAssertFalse(
+            term.title.localizedCaseInsensitiveContains("ncommitted")
+                || term.explanation.localizedCaseInsensitiveContains("ncommitted"),
+            "a clean linked worktree must never be worded as having uncommitted work: \(term)"
+        )
+        XCTAssertTrue(
+            term.title.localizedCaseInsensitiveContains("worktree")
+                || term.explanation.localizedCaseInsensitiveContains("worktree")
+        )
     }
 }
