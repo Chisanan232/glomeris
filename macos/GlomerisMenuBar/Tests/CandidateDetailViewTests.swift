@@ -34,7 +34,8 @@ final class CandidateDetailViewTests: XCTestCase {
         holders: [HolderReportDto] = [],
         holderProbes: [HolderProbeReportDto] = [],
         executableDependency: DependencyExplainReportDto = .notReported,
-        git: GitExplainReportDto = .notReported
+        git: GitExplainReportDto? = nil,
+        gitWasReported: Bool = true
     ) -> ExplainReportDto {
         ExplainReportDto(
             resourceId: "/tmp/example/target",
@@ -61,7 +62,8 @@ final class CandidateDetailViewTests: XCTestCase {
             holders: holders,
             holderProbes: holderProbes,
             executableDependency: executableDependency,
-            git: git
+            git: git,
+            gitWasReported: gitWasReported
         )
     }
 
@@ -161,7 +163,12 @@ final class CandidateDetailViewTests: XCTestCase {
             )
         )
         XCTAssertFalse(viewModel.holdersSummaryText.contains("none observed"))
-        XCTAssertTrue(viewModel.holdersSummaryText.contains("executable"))
+        // The plain-language relation title ("Running from here"), never the
+        // raw snake_case token — VoiceOver would read the underscores.
+        XCTAssertTrue(
+            viewModel.holdersSummaryText.contains(GlomerisVocabulary.holderRelation("executable").title)
+        )
+        XCTAssertFalse(viewModel.holdersSummaryText.contains("_"), "no raw token should leak into the label")
         XCTAssertEqual(viewModel.unavailableHolderProbes.count, 1)
     }
 

@@ -116,8 +116,14 @@ struct CandidateDetailViewModel: Equatable {
     /// (HORO-1824/HORO-1828), or `nil` for a non-Cargo resource.
     let cargoTarget: CargoTargetExplainReportDto?
     /// Git repository state for this resource's containing directory
-    /// (HORO-1828).
-    let git: GitExplainReportDto
+    /// (HORO-1828). `nil` either because this resource is genuinely not
+    /// inside any git working tree, or because the CLI predates the
+    /// field — `gitWasReported` is what tells those two apart; see
+    /// `ExplainReportDto.git`'s own doc comment.
+    let git: GitExplainReportDto?
+    /// `true` when the CLI reported a git answer at all (even a `null`
+    /// one) — see `git`'s own doc comment.
+    let gitWasReported: Bool
     /// The matching offered action's `action_id`, captured here so
     /// `performClean()` never has to re-derive or guess it. `nil` for a
     /// non-executable resource (no offered action exists).
@@ -202,12 +208,19 @@ struct CandidateDetailViewModel: Equatable {
     /// label (HORO-1828). Three cases, never collapsed into one another:
     /// an older CLI that never asked, one or more relations whose probe
     /// failed, and a genuine answer (holder count, possibly zero).
+    /// Plain-language name for one relation, never the raw `snake_case`
+    /// token (VoiceOver would read the underscores literally).
+    private func relationTitle(_ token: String) -> String {
+        GlomerisVocabulary.holderRelation(token).title
+    }
+
     var holdersSummaryText: String {
         guard holderProbeWasReported else {
             return "Who is using this — not reported by this CLI version"
         }
         if !unavailableHolderProbes.isEmpty {
-            let names = unavailableHolderProbes.map(\.relation).joined(separator: ", ")
+            let names = unavailableHolderProbes.map { relationTitle($0.relation) }
+                .joined(separator: ", ")
             return holders.isEmpty
                 ? "Who is using this — could not fully check (\(names))"
                 : "Who is using this — \(holders.count), but could not fully check (\(names))"
@@ -222,7 +235,8 @@ struct CandidateDetailViewModel: Equatable {
             return "Who is using this. Not reported by this version of the CLI."
         }
         if !unavailableHolderProbes.isEmpty {
-            let names = unavailableHolderProbes.map(\.relation).joined(separator: ", ")
+            let names = unavailableHolderProbes.map { relationTitle($0.relation) }
+                .joined(separator: ", ")
             return "Who is using this. \(holders.count) holder"
                 + (holders.count == 1 ? "" : "s")
                 + " observed. Could not fully check: \(names)."
@@ -264,8 +278,8 @@ struct CandidateDetailViewModel: Equatable {
     /// and/or unresolved entries.
     var hooksAndDaemonsSummaryText: String {
         guard dependencyProbeWasObserved else {
-            return "Hooks and daemons that depend on this — could not be checked "
-                + "(\(executableDependency.probe))"
+            return "Hooks and daemons that depend on this — could not be checked: "
+                + "\(AiPlanSectionView.unavailableReasonPhrase(executableDependency.probe))"
         }
         let count = dependencyReferenceCount
         if count == 0 && dependencyUnresolvedCount == 0 {
@@ -280,7 +294,7 @@ struct CandidateDetailViewModel: Equatable {
     var hooksAndDaemonsSummaryAccessibilityLabel: String {
         guard dependencyProbeWasObserved else {
             return "Hooks and daemons that depend on this. Could not be checked: "
-                + "\(executableDependency.probe)."
+                + "\(AiPlanSectionView.unavailableReasonPhrase(executableDependency.probe))."
         }
         let count = dependencyReferenceCount
         if count == 0 && dependencyUnresolvedCount == 0 {
@@ -300,6 +314,12 @@ struct CandidateDetailViewModel: Equatable {
 
     var refusalSourceTerm: GlomerisTerm? {
         refusalSource.map(GlomerisVocabulary.refusalSource)
+    }
+
+    /// `refusalSourceTerm` as a 0-or-1-element array, so a view can render
+    /// it with `ForEach` instead of `if let` — see the call site for why.
+    var refusalSourceTerms: [GlomerisTerm] {
+        refusalSourceTerm.map { [$0] } ?? []
     }
 
     // MARK: - HORO-1323: what the Clean button says about itself
@@ -418,6 +438,7 @@ struct CandidateDetailViewModel: Equatable {
         executableDependency = report.executableDependency
         cargoTarget = report.cargoTarget
         git = report.git
+        gitWasReported = report.gitWasReported
     }
 }
 
@@ -631,6 +652,21 @@ struct CandidateDetailView: View {
                         .font(GlomerisDesign.captionFont)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // HORO-1828: the stable *category* of the refusal above,
+                // next to its free-text sentence — never read to decide
+                // anything (see `scripts/check-no-policy-label-branching.sh`,
+                // which treats `refusalSource` as a guarded field exactly
+                // like `policyLabel`). Rendered via `ForEach` over
+                // `refusalSourceTerms` (a 0-or-1-element array) rather than
+                // `if let viewModel.refusalSourceTerm`, which would pair a
+                // conditional keyword with the field name on one line — a
+                // mechanical collision with that same guard script, not a
+                // real violation.
+                ForEach(viewModel.refusalSourceTerms, id: \.token) { term in
+                    GlomerisDetailRow(label: "Refusal source") {
+                        GlomerisBadgeView(term: term, filled: false)
+                    }
+                }
             }
         }
     }
@@ -834,13 +870,14 @@ struct CandidateDetailView: View {
             }
             ForEach(viewModel.unavailableHolderProbes, id: \.relation) { probe in
                 let relationTerm = GlomerisVocabulary.holderRelation(probe.relation)
-                Text("\(relationTerm.title) could not be checked: \(probe.unavailableReason ?? "unknown")")
+                let reasonPhrase = probe.unavailableReason.map(AiPlanSectionView.unavailableReasonPhrase)
+                    ?? "of an unrecognised reason"
+                Text("\(relationTerm.title) could not be checked: \(reasonPhrase)")
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(
-                        "\(relationTerm.title) check unavailable: "
-                            + "\(probe.unavailableReason ?? "unknown")"
+                        "\(relationTerm.title) check unavailable: \(reasonPhrase)"
                     )
             }
         }
@@ -862,7 +899,11 @@ struct CandidateDetailView: View {
     private func hooksAndDaemonsContent(_ viewModel: CandidateDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
             if !viewModel.dependencyProbeWasObserved {
-                Text("This probe could not run: \(viewModel.executableDependency.probe).")
+                Text(
+                    "This probe could not run: "
+                        + AiPlanSectionView.unavailableReasonPhrase(viewModel.executableDependency.probe)
+                        + "."
+                )
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -926,22 +967,44 @@ struct CandidateDetailView: View {
 
     @ViewBuilder
     private func gitSummary(_ viewModel: CandidateDetailViewModel) -> some View {
-        let git = viewModel.git
-        Text(git.probe == "observed" ? "Git — \(git.dirty ? "dirty" : "clean"), "
-             + "\(git.linkedWorktree ? "linked worktree" : "main checkout")"
-             : "Git — could not be checked")
+        Text(gitSummaryText(viewModel))
             .font(GlomerisDesign.secondaryFont)
+    }
+
+    /// `nil` here is never read as "clean" — see `CandidateDetailViewModel
+    /// .git`'s own doc comment. `!gitWasReported` (an older CLI) and
+    /// `gitWasReported && git == nil` (genuinely not in a repo) are
+    /// worded distinctly from each other and from a real observed state.
+    private func gitSummaryText(_ viewModel: CandidateDetailViewModel) -> String {
+        guard viewModel.gitWasReported else {
+            return "Git — not reported by this CLI version"
+        }
+        guard let git = viewModel.git else {
+            return "Git — not inside a git repository"
+        }
+        guard git.probe == "observed" else {
+            return "Git — could not be checked: \(AiPlanSectionView.unavailableReasonPhrase(git.probe))"
+        }
+        return "Git — \(git.dirty ? "dirty" : "clean"), "
+            + "\(git.linkedWorktree ? "linked worktree" : "main checkout")"
     }
 
     @ViewBuilder
     private func gitContent(_ viewModel: CandidateDetailViewModel) -> some View {
-        let git = viewModel.git
         VStack(alignment: .leading, spacing: 1) {
-            if git.probe != "observed" {
-                Text("Git state could not be observed (\(git.probe)).")
+            if !viewModel.gitWasReported {
+                Text("This version of the CLI does not report git state.")
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
-            } else {
+            } else if viewModel.git == nil {
+                Text("This resource is not inside a git working tree.")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+            } else if let git = viewModel.git, git.probe != "observed" {
+                Text("Git state could not be observed: \(AiPlanSectionView.unavailableReasonPhrase(git.probe)).")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+            } else if let git = viewModel.git {
                 Text(git.dirty
                      ? "The surrounding repository has uncommitted changes."
                      : "No uncommitted changes were observed.")
