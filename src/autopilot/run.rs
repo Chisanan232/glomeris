@@ -610,6 +610,17 @@ pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
             requires_consent,
             model_rank,
             &outcome,
+            // HORO-1826: Autopilot is the unattended execution path — the
+            // audit log is the only durable record, nobody is reading
+            // stdout. `exec` (the `ExecutionReport` this very iteration
+            // produced) is still in scope here, before it gets reduced to
+            // `AutopilotItemOutcome` above, so this is sourced directly
+            // from it rather than left at `None` (round-1 review finding
+            // on PR #163, fixed in round 2).
+            exec.host_integrity
+                .as_ref()
+                .map(|integrity| integrity.status.as_str().to_string()),
+            exec.volume_free_delta.observed().copied(),
             audit_log_path,
             now,
         );
@@ -631,6 +642,14 @@ fn append_autopilot_audit_record(
     requires_consent: bool,
     model_rank: Option<u32>,
     outcome: &AutopilotItemOutcome,
+    // HORO-1826: sourced directly from the `ExecutionReport` the caller's
+    // `execute()` call just produced — see the call site's own comment.
+    // Two bare parameters rather than threading `&ExecutionReport`
+    // itself: every other parameter here is already a narrowed
+    // projection (`outcome`, not the raw `ExecutionOutcome`), and this
+    // keeps that same shape rather than mixing abstraction levels.
+    host_integrity_status: Option<String>,
+    volume_free_delta: Option<i64>,
     audit_log_path: &Path,
     now: SystemTime,
 ) {
@@ -662,15 +681,12 @@ fn append_autopilot_audit_record(
             ActionSource::AutopilotAutoSafe.to_string()
         },
         model_rank,
-        // HORO-1826: this function receives `AutopilotItemOutcome`, an
-        // already-digested projection of `ExecutionReport` that drops
-        // `host_integrity`/`volume_free_delta` before reaching here.
-        // Wiring those through would mean widening `AutopilotItemOutcome`
-        // and `AutopilotReport` -- deferred, and disclosed as a known gap
-        // in this ticket's PR rather than silently assumed done (the
-        // `execute`/`free`/`emergency` paths above all carry real values).
-        host_integrity_status: None,
-        volume_free_delta: None,
+        // HORO-1826: sourced directly from the caller's `ExecutionReport`
+        // (round-2 independent review of PR #163 — the raw report was
+        // still in scope at the call site, so this needed no widening of
+        // `AutopilotItemOutcome`/`AutopilotReport` at all).
+        host_integrity_status,
+        volume_free_delta,
     };
     let _ = append_audit_record(audit_log_path, &record);
 }
@@ -1309,8 +1325,70 @@ mod tests {
             "no model named it, so no rank is recorded"
         );
         assert!(audit[0].actual_reclaimed_bytes.is_some_and(|b| b > 0));
+        // HORO-1826 (round-2 independent review of PR #163): the field
+        // must be present (carried through, never omitted), even though
+        // `None` is the only value an `AutoSafe` candidate can honestly
+        // report here -- `classify()` only reaches `AutoSafe` from a
+        // COMPLETE, clean `executable_dependency` probe (empty
+        // `unresolved`, empty `references_inside`), which is exactly
+        // the "nothing to protect" case `compute_host_integrity` skips
+        // by design (see its own doc comment in `executor/mod.rs`). A
+        // non-`None` value is reachable through Autopilot only via the
+        // direct-unit-test below:
+        // `append_autopilot_audit_record_carries_host_integrity_and_volume_delta_from_the_execution_report`.
+        assert_eq!(audit[0].host_integrity_status, None);
 
         fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-1826 (round-2 independent review of PR #163): confirms the
+    /// wiring at `append_autopilot_audit_record`'s call site actually
+    /// reaches the persisted `AuditRecord`, end to end through the real
+    /// audit-log writer -- not just that the function signature accepts
+    /// the values.
+    ///
+    /// A real full `run()` cannot exercise a non-`None` host-integrity
+    /// verdict here: `classify()` only reaches `AutoSafe` from a clean,
+    /// complete dependency probe (the only `None`-producing case for
+    /// this field, by design), and `ExecutableDependencyUnknown` --
+    /// which WOULD drive a non-`None` verdict -- is explicitly NOT
+    /// preauthorizable (ADR-0001 §5), so Autopilot can never admit a
+    /// candidate that carries it. This test therefore exercises
+    /// `append_autopilot_audit_record` directly, the same way a unit
+    /// test of a pure function would, rather than threading a fake all
+    /// the way through `run_autopilot`'s real admission/execution path.
+    #[test]
+    fn append_autopilot_audit_record_carries_host_integrity_and_volume_delta_from_the_execution_report(
+    ) {
+        let audit_root = make_temp_dir("autopilot-audit-host-integrity");
+        let audit_log_path = audit_root.join("actions.jsonl");
+
+        append_autopilot_audit_record(
+            "node_modules:/tmp/does-not-matter",
+            "node.clean.node_modules",
+            "AUTO_SAFE",
+            false,
+            None,
+            &AutopilotItemOutcome::Succeeded {
+                reclaimed_bytes: Some(1_024),
+            },
+            Some("degraded".to_string()),
+            Some(-512),
+            &audit_log_path,
+            SystemTime::now(),
+        );
+
+        let audit = read_audit_tail(&audit_log_path, 8);
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].host_integrity_status.as_deref(),
+            Some("degraded"),
+            "a Degraded verdict sourced from the ExecutionReport must reach the \
+             persisted audit record"
+        );
+        assert_eq!(audit[0].volume_free_delta, Some(-512));
+
+        fs::remove_dir_all(&audit_root).ok();
     }
 
     #[test]
