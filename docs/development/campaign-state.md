@@ -5,8 +5,8 @@
 > Chat context will be lost across sessions; this file will not.
 
 - **Owning Epic:** HORO-1043 — Glomeris MVP 2.0 — Interactive Daily Driver / Trustworthy Recovery UX
-- **Active ticket:** HORO-1828 (Phase 4, operator UX — now unblocked, all of 1826/1827 merged).
-- **Last session state (2026-10-11):** Phase 1 + Phase 2 + Phase 3 of the campaign are fully complete and merged: HORO-1822 (ADR-0001, PR #156), HORO-1825 (PR #157, 4 review rounds), HORO-1827 (PR #158), HORO-1823 (PR #160, 1 review round + 1 found/fixed timeout-budget bug), HORO-1824 (PR #161, 2 review rounds — round 1 caught a real untrusted-`rust-toolchain.toml` code-execution risk in `cargo metadata` invocation plus a workspace/source-overlap scope bug; round 2 caught 2 more real gaps in those same two fixes), HORO-1826 (PR #163, `main`@fbb81c3, 4 review rounds — round 1: 3 of 4 `execute()` callers silently discarded computed `host_integrity`/`volume_free_delta`; round 2: per-dependency restat failures collapsed to a pointer-less unresolved variant, reintroducing sibling-masking, plus Autopilot audit-log wiring found directly fixable; round 3: `(source,pointer)` itself wasn't a unique dependency key, masking bug recurred one level deeper, plus a false "None is the only honest value" claim with zero real-path test coverage; round 4: both fixed and mutation-tested clean). All Jira-Done. Founder approved all 3 of ADR-0001 §16's open decisions on 2026-10-10 — recorded in ADR-0001 §16 directly.
+- **Active ticket:** HORO-1629 (project-root UX bug — founder wording already approved in ADR-0001 §16.1, no remaining dependency; next on the critical path toward HORO-1829).
+- **Last session state (2026-10-11):** Phase 1 through Phase 4 of the campaign are fully complete and merged: HORO-1822 (ADR-0001, PR #156), HORO-1825 (PR #157, 4 review rounds), HORO-1827 (PR #158), HORO-1823 (PR #160, 1 review round + 1 found/fixed timeout-budget bug), HORO-1824 (PR #161, 2 review rounds — round 1 caught a real untrusted-`rust-toolchain.toml` code-execution risk in `cargo metadata` invocation plus a workspace/source-overlap scope bug; round 2 caught 2 more real gaps in those same two fixes), HORO-1826 (PR #163, `main`@fbb81c3, 4 review rounds — round 1: 3 of 4 `execute()` callers silently discarded computed `host_integrity`/`volume_free_delta`; round 2: per-dependency restat failures collapsed to a pointer-less unresolved variant, reintroducing sibling-masking, plus Autopilot audit-log wiring found directly fixable; round 3: `(source,pointer)` itself wasn't a unique dependency key, masking bug recurred one level deeper, plus a false "None is the only honest value" claim with zero real-path test coverage; round 4: both fixed and mutation-tested clean), HORO-1828 (2 PRs — #165 `main`@422518d eligibility/guarded/feasibility, 1 review round PASS; #166 `main`@5ead5d9 explain structure, 1 review round PASS — reviewer independently re-verified every privacy/mutation claim rather than trusting the diff; an automated scanner also caught 2 real bugs mid-development, both fixed and reviewer-confirmed absent from committed code: a resolved-path leak in the dependency `pointer` field, and the visible holders label missing fail-closed branches its accessibility-label sibling already had). All Jira-Done. Founder approved all 3 of ADR-0001 §16's open decisions on 2026-10-10 — recorded in ADR-0001 §16 directly.
 
 Jira tickets, raw per-ticket content, and the full dependency DAG were written this
 session to the scratchpad at:
@@ -29,24 +29,19 @@ below so this file is self-contained.
 | HORO-1825 | Story | **Done** | **Highest** | [Executable Safety] Protect configured agent-hook binaries residing in disposable build caches — PR #157, `main`@07cffa5 |
 | HORO-1826 | Story | **Done** | High | [Recovery Integrity] Verify post-cleanup function and honest degradation beyond free bytes — PR #163, `main`@fbb81c3 |
 | HORO-1827 | Story | **Done** | Medium | [Pressure History] Observe 12h stability and honestly plan safe recovery toward 1 TiB free — PR #158, `main`@1b41814 |
-| HORO-1828 | Story | To Do | Medium | [Operator UX] Explain uncertain process ownership, blocked cleanup and rebuild blast radius — **ACTIVE** |
+| HORO-1828 | Story | **Done** | Medium | [Operator UX] Explain uncertain process ownership, blocked cleanup and rebuild blast radius — PR #165 `main`@422518d + PR #166 `main`@5ead5d9 |
 | HORO-1829 | Story | To Do | High | [Independent QA] Prove process-aware recovery and no hook regressions on real multi-agent macOS |
-| HORO-1629 | Bug | To Do | Medium (needs-founder-decision) | A configured project root that is a parent of projects yields a clean bill of health with nothing examined below it |
+| HORO-1629 | Bug | To Do | Medium (needs-founder-decision) | A configured project root that is a parent of projects yields a clean bill of health with nothing examined below it — **ACTIVE**, founder wording already approved |
 | HORO-1073 | Task | **In Progress** | High | MVP 2.0 founder dogfood pass #2 + release readiness record — **final release gate** |
 
-### HORO-1629 — founder-preference flag (NOT silently resolved)
+### HORO-1629 — AC5 now resolved; ready to implement
 
-HORO-1629 is explicitly labeled `needs-founder-decision`. Its three candidate fixes
-(validate at config time / report examined roots / expand one level) are described
-in the ticket itself as "a product judgement, not an engineering one," and AC 5
-requires founder review of the chosen wording before the ticket can be considered
-satisfied. **No founder-preference statement was found in Jira** (zero comments on
-the issue). The campaign brief separately states a founder preference (warn when a
-configured root looks like a parent-of-projects; report exactly which roots were
-examined; no automatic recursive discovery as a default). ADR-0001 §11 assesses that
-preference as compatible with AC1-4 but does **not** treat that as satisfying AC5 —
-AC5 still requires the founder to review and sign off on the exact chosen wording
-before HORO-1629 is mergeable, and before HORO-1829 can pass. This remains open.
+HORO-1629 was `needs-founder-decision`, with AC5 requiring founder review of the
+chosen wording before the ticket could be considered satisfied. **This is now
+resolved**: the founder approved the exact wording on 2026-10-10, recorded verbatim
+in ADR-0001 §16.1 — the settings warning and scan-coverage line strings are fixed,
+approved defaults, not to be reworded during implementation. No recursive discovery
+by default; implement within the existing HORO-1629 ticket, no duplicate.
 Acceptance criteria, quoted verbatim from Jira:
 
 > * AC 1: A configured root that holds no project marker and no build output does not contribute to a clean bill of health without the user being told, at some point, that the folder itself was what was examined.
@@ -124,13 +119,18 @@ HORO-1825 took 4 independent review rounds; each of rounds 1-3 found a real fail
 
 HORO-1826 confirmed the same lesson generalizes beyond "a probe result collapses to a default": a **key-uniqueness** assumption (`(source, pointer)` identifying one dependency) silently broke the same masking invariant twice, once at the source level (round 2) and again one level deeper once pointer was added but still not unique (round 3) — only fixed for real once `resolved` (the actual resolved path) was added to the key (round 4). When a fix narrows a bug by adding a field to a matching/dedup key, check whether the new key is actually unique for the real data shape, not just "more unique than before."
 
+HORO-1828 (both PRs) were the first tickets in this campaign to pass independent review on round 1 — but each still had at least one real bug caught mid-development by an automated scanner before the PR was finalized (a resolved-path privacy leak in PR B, a `Supervisor::None`/fail-open false alarm later confirmed as a transient uncommitted-state artifact rather than a real bug, and a visible-vs-accessibility-label inconsistency where the sighted-user string skipped a fail-closed branch its VoiceOver sibling already had). **Lesson: UI/wording layers get the same fail-open treatment as evidence/policy layers** — a visible string and its accessibility string must be checked for behavioral agreement, not just independently "look correct."
+
 ## Status line
 
-> Phase 1 (1822/1825/1827), Phase 2 (1823/1824), and Phase 3 (1826) complete,
-> merged, Done. HORO-1828 starting (Phase 4, operator UX — now unblocked).
-> HORO-1829/1629/1073 not yet started. Every merged ticket went through at
-> least one independent review round that found and fixed a real issue —
-> none merged clean on the first pass; HORO-1826 took 4 rounds, same as
+> Phase 1 (1822/1825/1827), Phase 2 (1823/1824), Phase 3 (1826), and Phase 4
+> (1828) complete, merged, Done. HORO-1629 starting next (wording already
+> founder-approved, ADR-0001 §16.1 — no remaining blocker). HORO-1829/1073
+> not yet started; HORO-1829 is blocked on HORO-1629. Every merged ticket
+> went through at least one independent review round that found and fixed
+> a real issue — none merged clean on the first pass until HORO-1828
+> (whose PRs still each had a real bug caught by an automated scanner
+> mid-development, fixed before review). HORO-1826 took 4 rounds, same as
 > HORO-1825. A secret (local test-DB credential, unrelated horologium repo,
 > disposable/localhost-only) was found exposed in an earlier session's
 > incident-evidence scratchpad file — flagged for rotation, deliberately
