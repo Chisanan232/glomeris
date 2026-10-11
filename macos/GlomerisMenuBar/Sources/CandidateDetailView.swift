@@ -101,6 +101,23 @@ struct CandidateDetailViewModel: Equatable {
     let policyLabel: String
     let reasons: [String]
     let refusalReason: String?
+    /// Stable token for *why* `refusalReason` is set (HORO-1828). `nil`
+    /// for a CLI that predates the field, or when there is no refusal.
+    let refusalSource: String?
+    /// Every holder observed for this resource (HORO-1828) — see
+    /// `GlomerisDtos.swift`'s `HolderReportDto`.
+    let holders: [HolderReportDto]
+    /// Per-relation probe availability, alongside `holders` (HORO-1828).
+    let holderProbes: [HolderProbeReportDto]
+    /// `explain`'s structural view of the executable-dependency probe
+    /// (HORO-1825/HORO-1828).
+    let executableDependency: DependencyExplainReportDto
+    /// Cargo's ownership relationship to its own target directory
+    /// (HORO-1824/HORO-1828), or `nil` for a non-Cargo resource.
+    let cargoTarget: CargoTargetExplainReportDto?
+    /// Git repository state for this resource's containing directory
+    /// (HORO-1828).
+    let git: GitExplainReportDto
     /// The matching offered action's `action_id`, captured here so
     /// `performClean()` never has to re-derive or guess it. `nil` for a
     /// non-executable resource (no offered action exists).
@@ -141,7 +158,50 @@ struct CandidateDetailViewModel: Equatable {
     /// The policy reason codes, in plain language. Rendered as prose rather
     /// than chips — they explain the verdict, they are not a fourth axis to
     /// scan.
-    var reasonTerms: [GlomerisTerm] { reasons.map(GlomerisVocabulary.reason) }
+    ///
+    /// `git_worktree_dirty` is special-cased to
+    /// `GlomerisVocabulary.gitWorktreeDirtyWording(git:)` rather than the
+    /// generic `reason(_:)` lookup (HORO-1828): this view model holds the
+    /// real `git` block, so it can word that one reason precisely instead
+    /// of the generic fallback the vocabulary table alone can offer.
+    var reasonTerms: [GlomerisTerm] {
+        reasons.map { token in
+            token == "git_worktree_dirty"
+                ? GlomerisVocabulary.gitWorktreeDirtyWording(git: git)
+                : GlomerisVocabulary.reason(token)
+        }
+    }
+
+    // MARK: - HORO-1828: explain structure (holders, dependency, cargo, git)
+
+    /// One row per holder, worded from `GlomerisVocabulary.processClaim`,
+    /// paired with its raw relation/command/pid for the detail list.
+    var holderRows: [(holder: HolderReportDto, claimTerm: GlomerisTerm)] {
+        holders.map { ($0, GlomerisVocabulary.processClaim($0.claim)) }
+    }
+
+    /// Relations whose own probe could not answer — must be shown
+    /// alongside `holderRows`, never silently dropped, so an empty
+    /// `holders` list is never misread as "nobody is using this".
+    var unavailableHolderProbes: [HolderProbeReportDto] {
+        holderProbes.filter { $0.unavailableReason != nil }
+    }
+
+    var dependencyReferenceCount: Int { executableDependency.references.count }
+    var dependencyUnresolvedCount: Int { executableDependency.unresolved.count }
+    var dependencySourcesExaminedText: String {
+        executableDependency.sourcesExamined.isEmpty
+            ? "none"
+            : executableDependency.sourcesExamined.joined(separator: ", ")
+    }
+
+    var cargoTargetScopeTerm: GlomerisTerm? {
+        cargoTarget.map { GlomerisVocabulary.targetScope($0.scope) }
+    }
+
+    var refusalSourceTerm: GlomerisTerm? {
+        refusalSource.map(GlomerisVocabulary.refusalSource)
+    }
 
     // MARK: - HORO-1323: what the Clean button says about itself
     //
@@ -253,6 +313,12 @@ struct CandidateDetailViewModel: Equatable {
         policyLabel = report.policyLabel
         reasons = report.reasons
         refusalReason = report.refusalReason
+        refusalSource = report.refusalSource
+        holders = report.holders
+        holderProbes = report.holderProbes
+        executableDependency = report.executableDependency
+        cargoTarget = report.cargoTarget
+        git = report.git
     }
 }
 
@@ -343,6 +409,7 @@ struct CandidateDetailView: View {
                         safetyCard(viewModel)
                         impactCard(viewModel)
                         evidenceCard(viewModel)
+                        explainStructureCard(viewModel)
                         rawValuesCard(viewModel)
                     }
                 }
@@ -583,6 +650,216 @@ struct CandidateDetailView: View {
         }
     }
 
+    /// The "explain structure" card (HORO-1828): who holds this resource,
+    /// what depends on it, whether its build cache is shared, and its git
+    /// state — each in its own `DisclosureGroup` so the card does not
+    /// dominate the sheet for a resource where none of this applies.
+    ///
+    /// Nothing here gates the Clean button: every field is projection only,
+    /// same rule as every other card in this file (see the standing
+    /// project rule in GlomerisMenuBarApp.swift).
+    @ViewBuilder
+    private func explainStructureCard(_ viewModel: CandidateDetailViewModel) -> some View {
+        GlomerisCard(title: "Explain structure") {
+            DisclosureGroup {
+                whoIsUsingThisContent(viewModel)
+                    .padding(.top, GlomerisDesign.inlineSpacing)
+            } label: {
+                whoIsUsingThisSummary(viewModel)
+            }
+
+            DisclosureGroup {
+                hooksAndDaemonsContent(viewModel)
+                    .padding(.top, GlomerisDesign.inlineSpacing)
+            } label: {
+                hooksAndDaemonsSummary(viewModel)
+            }
+
+            if let cargoTarget = viewModel.cargoTarget, let scopeTerm = viewModel.cargoTargetScopeTerm {
+                DisclosureGroup {
+                    sharedBuildCacheContent(cargoTarget, scopeTerm)
+                        .padding(.top, GlomerisDesign.inlineSpacing)
+                } label: {
+                    GlomerisBadgeView(term: scopeTerm, filled: false)
+                }
+            }
+
+            DisclosureGroup {
+                gitContent(viewModel)
+                    .padding(.top, GlomerisDesign.inlineSpacing)
+            } label: {
+                gitSummary(viewModel)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func whoIsUsingThisSummary(_ viewModel: CandidateDetailViewModel) -> some View {
+        Text(
+            viewModel.holders.isEmpty
+                ? "Who is using this — none observed"
+                : "Who is using this — \(viewModel.holders.count)"
+        )
+        .font(GlomerisDesign.secondaryFont)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(
+            viewModel.holders.isEmpty
+                ? "Who is using this. None observed."
+                : "Who is using this. \(viewModel.holders.count) holder"
+                    + (viewModel.holders.count == 1 ? "" : "s") + "."
+        )
+    }
+
+    @ViewBuilder
+    private func whoIsUsingThisContent(_ viewModel: CandidateDetailViewModel) -> some View {
+        VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
+            if viewModel.holders.isEmpty && viewModel.unavailableHolderProbes.isEmpty {
+                Text("No process was observed holding this open, as its current "
+                     + "directory, or running from inside it.")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(Array(viewModel.holderRows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(row.holder.command) (pid \(row.holder.pid)) · \(row.holder.relation)")
+                            .font(GlomerisDesign.secondaryFont)
+                        Text("\(row.claimTerm.title) — \(row.claimTerm.explanation)")
+                            .font(GlomerisDesign.captionFont)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    "\(row.holder.command), process \(row.holder.pid), "
+                        + "relation \(row.holder.relation). \(row.claimTerm.accessibilityLabel)"
+                )
+            }
+            ForEach(viewModel.unavailableHolderProbes, id: \.relation) { probe in
+                Text("\(probe.relation) could not be checked: \(probe.unavailableReason ?? "unknown")")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        "\(probe.relation) holder check unavailable: "
+                            + "\(probe.unavailableReason ?? "unknown")"
+                    )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func hooksAndDaemonsSummary(_ viewModel: CandidateDetailViewModel) -> some View {
+        let count = viewModel.dependencyReferenceCount
+        Text(count == 0
+             ? "Hooks and daemons that depend on this — none confirmed"
+             : "Hooks and daemons that depend on this — \(count)")
+            .font(GlomerisDesign.secondaryFont)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                count == 0
+                    ? "Hooks and daemons that depend on this. None confirmed."
+                    : "Hooks and daemons that depend on this. \(count) confirmed reference"
+                        + (count == 1 ? "" : "s") + "."
+            )
+    }
+
+    /// Never shows a resolved path or raw executable identity — there is
+    /// none in `DependencyExplainReportDto` to show. Only source tags,
+    /// structural pointers, and kind tags, matching the Rust type's own
+    /// PRIVACY-CRITICAL guarantee.
+    @ViewBuilder
+    private func hooksAndDaemonsContent(_ viewModel: CandidateDetailViewModel) -> some View {
+        VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
+            ForEach(Array(viewModel.executableDependency.references.enumerated()), id: \.offset) { _, ref in
+                Text("\(ref.source) · \(ref.pointer) (\(ref.provenance))")
+                    .font(GlomerisDesign.captionFont)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if viewModel.dependencyUnresolvedCount > 0 {
+                Text("\(viewModel.dependencyUnresolvedCount) unresolved reference"
+                     + (viewModel.dependencyUnresolvedCount == 1 ? "" : "s")
+                     + " could not be confirmed in or out — treated as unknown, never a "
+                     + "clean negative.")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(Array(viewModel.executableDependency.unresolved.enumerated()), id: \.offset) { _, u in
+                    Text("\(u.source) · \(u.kind)")
+                        .font(GlomerisDesign.captionFont)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text("Sources examined: \(viewModel.dependencySourcesExaminedText)")
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+            Text(viewModel.executableDependency.note)
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func sharedBuildCacheContent(
+        _ cargoTarget: CargoTargetExplainReportDto, _ scopeTerm: GlomerisTerm
+    ) -> some View {
+        VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
+            Text(scopeTerm.explanation)
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let note = cargoTarget.coldRebuildNote {
+                Text(note)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(scopeTerm.accessibilityLabel)"
+                + (cargoTarget.coldRebuildNote.map { " \($0)" } ?? "")
+        )
+    }
+
+    @ViewBuilder
+    private func gitSummary(_ viewModel: CandidateDetailViewModel) -> some View {
+        let git = viewModel.git
+        Text(git.probe == "observed" ? "Git — \(git.dirty ? "dirty" : "clean"), "
+             + "\(git.linkedWorktree ? "linked worktree" : "main checkout")"
+             : "Git — could not be checked")
+            .font(GlomerisDesign.secondaryFont)
+    }
+
+    @ViewBuilder
+    private func gitContent(_ viewModel: CandidateDetailViewModel) -> some View {
+        let git = viewModel.git
+        VStack(alignment: .leading, spacing: 1) {
+            if git.probe != "observed" {
+                Text("Git state could not be observed (\(git.probe)).")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(git.dirty
+                     ? "The surrounding repository has uncommitted changes."
+                     : "No uncommitted changes were observed.")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                Text(git.linkedWorktree
+                     ? "This is a linked worktree, not the main checkout."
+                     : "This is the main checkout, not a linked worktree.")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     /// The tokens exactly as `explain --json` emitted them.
     ///
     /// Collapsed by default, and deliberately kept rather than dropped:
@@ -602,6 +879,13 @@ struct CandidateDetailView: View {
                     rawValue("completeness", viewModel.completeness)
                     rawValue("confidence", viewModel.confidence)
                     rawValue("regenerability", viewModel.regenerability)
+                    // Rendered unconditionally (never behind `if let`, same
+                    // reasoning `check-no-policy-label-branching.sh` enforces
+                    // for `policyLabel`/`eligibility`): a nil refusal source
+                    // just prints the em dash `rawValue` already shows for an
+                    // empty string, so there is nothing to branch on here.
+                    rawValue("refusal_source", viewModel.refusalSource ?? "")
+                    rawValue("cargo_target.scope", viewModel.cargoTarget?.scope ?? "")
                 }
                 .padding(.top, 2)
             }

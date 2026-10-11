@@ -710,6 +710,33 @@ struct ExplainReportDto: Decodable, Equatable {
     /// confirmation sheet's visibility reads.
     let offeredActions: [OfferedActionDto]
     let refusalReason: String?
+    /// Stable token for *why* `refusalReason` is set (HORO-1828):
+    /// `"policy_protected"`, `"no_registered_action"`, or
+    /// `"action_cannot_plan"`. `nil` for a CLI that predates the field, or
+    /// when `refusalReason` itself is `nil`.
+    let refusalSource: String?
+    /// Every process observed holding this resource open, with cwd inside
+    /// it, or with its own executable mapping resolving inside it
+    /// (HORO-1828). Defaults to empty for a CLI that predates the field —
+    /// not evidence that nobody is using this resource; see `holderProbes`.
+    let holders: [HolderReportDto]
+    /// Per-relation availability for `holders` (HORO-1828) — a relation
+    /// absent here, or present with a non-nil `unavailableReason`, means
+    /// its own probe could not answer; its absence from `holders` must
+    /// never be read as "nothing holds this resource".
+    let holderProbes: [HolderProbeReportDto]
+    /// `explain`'s structural view of the HORO-1825 executable-dependency
+    /// probe (HORO-1828). Defaults to `.notReported` for a CLI that
+    /// predates the field.
+    let executableDependency: DependencyExplainReportDto
+    /// Cargo's ownership relationship to its own target directory
+    /// (HORO-1824/HORO-1828). `nil` for a non-Cargo-shaped resource, or for
+    /// a CLI that predates the field.
+    let cargoTarget: CargoTargetExplainReportDto?
+    /// Git repository state for this resource's containing directory
+    /// (HORO-1828). Defaults to `.notReported` for a CLI that predates the
+    /// field.
+    let git: GitExplainReportDto
 
     enum CodingKeys: String, CodingKey {
         case resourceId = "resource_id"
@@ -733,7 +760,232 @@ struct ExplainReportDto: Decodable, Equatable {
         case executable
         case offeredActions = "offered_actions"
         case refusalReason = "refusal_reason"
+        case refusalSource = "refusal_source"
+        case holders
+        case holderProbes = "holder_probes"
+        case executableDependency = "executable_dependency"
+        case cargoTarget = "cargo_target"
+        case git
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        resourceId = try container.decode(String.self, forKey: .resourceId)
+        kind = try container.decode(String.self, forKey: .kind)
+        detector = try container.decode(String.self, forKey: .detector)
+        sources = try container.decode([String].self, forKey: .sources)
+        logicalBytes = try container.decodeIfPresent(UInt64.self, forKey: .logicalBytes)
+        logicalHuman = try container.decodeIfPresent(String.self, forKey: .logicalHuman)
+        reclaimableBytes = try container.decodeIfPresent(UInt64.self, forKey: .reclaimableBytes)
+        reclaimableHuman = try container.decodeIfPresent(String.self, forKey: .reclaimableHuman)
+        reclaimableBytesIsLowerBound =
+            try container.decode(Bool.self, forKey: .reclaimableBytesIsLowerBound)
+        completeness = try container.decode(String.self, forKey: .completeness)
+        confidence = try container.decode(String.self, forKey: .confidence)
+        activeUseSignals = try container.decode([String].self, forKey: .activeUseSignals)
+        regenerability = try container.decode(String.self, forKey: .regenerability)
+        policyLabel = try container.decode(String.self, forKey: .policyLabel)
+        reasons = try container.decode([String].self, forKey: .reasons)
+        nativeCleanupAvailable = try container.decode(Bool.self, forKey: .nativeCleanupAvailable)
+        nativeCleanupActionId =
+            try container.decodeIfPresent(String.self, forKey: .nativeCleanupActionId)
+        fingerprintToken = try container.decodeIfPresent(String.self, forKey: .fingerprintToken)
+        executable = try container.decode(Bool.self, forKey: .executable)
+        offeredActions = try container.decode([OfferedActionDto].self, forKey: .offeredActions)
+        refusalReason = try container.decodeIfPresent(String.self, forKey: .refusalReason)
+        refusalSource = try container.decodeIfPresent(String.self, forKey: .refusalSource)
+        holders = try container.decodeIfPresent([HolderReportDto].self, forKey: .holders) ?? []
+        holderProbes =
+            try container.decodeIfPresent([HolderProbeReportDto].self, forKey: .holderProbes) ?? []
+        executableDependency =
+            try container.decodeIfPresent(
+                DependencyExplainReportDto.self, forKey: .executableDependency)
+            ?? .notReported
+        cargoTarget =
+            try container.decodeIfPresent(CargoTargetExplainReportDto.self, forKey: .cargoTarget)
+        git = try container.decodeIfPresent(GitExplainReportDto.self, forKey: .git) ?? .notReported
+    }
+
+    /// Non-decoding initializer for tests and previews.
+    init(
+        resourceId: String,
+        kind: String,
+        detector: String,
+        sources: [String],
+        logicalBytes: UInt64?,
+        logicalHuman: String?,
+        reclaimableBytes: UInt64?,
+        reclaimableHuman: String?,
+        reclaimableBytesIsLowerBound: Bool,
+        completeness: String,
+        confidence: String,
+        activeUseSignals: [String],
+        regenerability: String,
+        policyLabel: String,
+        reasons: [String],
+        nativeCleanupAvailable: Bool,
+        nativeCleanupActionId: String?,
+        fingerprintToken: String?,
+        executable: Bool,
+        offeredActions: [OfferedActionDto],
+        refusalReason: String?,
+        refusalSource: String? = nil,
+        holders: [HolderReportDto] = [],
+        holderProbes: [HolderProbeReportDto] = [],
+        executableDependency: DependencyExplainReportDto = .notReported,
+        cargoTarget: CargoTargetExplainReportDto? = nil,
+        git: GitExplainReportDto = .notReported
+    ) {
+        self.resourceId = resourceId
+        self.kind = kind
+        self.detector = detector
+        self.sources = sources
+        self.logicalBytes = logicalBytes
+        self.logicalHuman = logicalHuman
+        self.reclaimableBytes = reclaimableBytes
+        self.reclaimableHuman = reclaimableHuman
+        self.reclaimableBytesIsLowerBound = reclaimableBytesIsLowerBound
+        self.completeness = completeness
+        self.confidence = confidence
+        self.activeUseSignals = activeUseSignals
+        self.regenerability = regenerability
+        self.policyLabel = policyLabel
+        self.reasons = reasons
+        self.nativeCleanupAvailable = nativeCleanupAvailable
+        self.nativeCleanupActionId = nativeCleanupActionId
+        self.fingerprintToken = fingerprintToken
+        self.executable = executable
+        self.offeredActions = offeredActions
+        self.refusalReason = refusalReason
+        self.refusalSource = refusalSource
+        self.holders = holders
+        self.holderProbes = holderProbes
+        self.executableDependency = executableDependency
+        self.cargoTarget = cargoTarget
+        self.git = git
+    }
+}
+
+/// Mirrors `reporting::dto::HolderReport` (HORO-1828) — one process
+/// observed to hold a resource open, with cwd inside it, or with its own
+/// executable mapping resolving inside it.
+struct HolderReportDto: Decodable, Equatable {
+    let pid: UInt32
+    let command: String
+    /// `"open_file"`, `"cwd"`, or `"executable"`.
+    let relation: String
+    /// `GlomerisVocabulary.processClaim`'s token — explanation only, never
+    /// a policy input.
+    let claim: String
+    /// `"inferred"`, always — see the Rust field's own doc comment.
+    let provenance: String
+}
+
+/// Mirrors `reporting::dto::HolderProbeReport` (HORO-1828) — whether one
+/// holder relation's own probe could answer at all. A relation whose
+/// `unavailableReason` is non-nil contributed nothing to `holders` for a
+/// reason OTHER than "nothing holds this resource" — never read the same
+/// as a clean negative.
+struct HolderProbeReportDto: Decodable, Equatable {
+    let relation: String
+    let unavailableReason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case relation
+        case unavailableReason = "unavailable_reason"
+    }
+}
+
+/// Mirrors `reporting::dto::DependencyReferenceReport` (HORO-1828/
+/// HORO-1825). Deliberately carries no resolved path — see
+/// `DependencyExplainReportDto`'s doc comment.
+struct DependencyReferenceReportDto: Decodable, Equatable {
+    let source: String
+    let pointer: String
+    let provenance: String
+}
+
+/// Mirrors `reporting::dto::UnresolvedDependencyReport` (HORO-1828). Carries
+/// only the stable `kind` tag and `source` — never a pointer or path.
+struct UnresolvedDependencyReportDto: Decodable, Equatable {
+    let source: String
+    let kind: String
+}
+
+/// Mirrors `reporting::dto::DependencyExplainReport` (HORO-1828/HORO-1825
+/// §4.3).
+///
+/// PRIVACY: never decodes a resolved path or raw executable identity —
+/// there is none in the wire shape to decode. `references`/`unresolved`
+/// carry only source tags, structural pointers, and kind tags.
+struct DependencyExplainReportDto: Decodable, Equatable {
+    /// `"observed"`, or a `ProbeReason` tag when the probe did not run.
+    let probe: String
+    let references: [DependencyReferenceReportDto]
+    let unresolved: [UnresolvedDependencyReportDto]
+    let sourcesExamined: [String]
+    /// ADR-0001 §4.3's stated known gap, shown verbatim.
+    let note: String
+
+    enum CodingKeys: String, CodingKey {
+        case probe
+        case references
+        case unresolved
+        case sourcesExamined = "sources_examined"
+        case note
+    }
+
+    /// The nothing-reported default for a CLI that predates this field —
+    /// never shown as "nothing depends on this", only as "not reported by
+    /// this CLI version" (the view distinguishes the two via `probe`).
+    static let notReported = DependencyExplainReportDto(
+        probe: "not_attempted",
+        references: [],
+        unresolved: [],
+        sourcesExamined: [],
+        note: "MCP server commands and shell startup files are not examined"
+    )
+}
+
+/// Mirrors `reporting::dto::CargoTargetExplainReport` (HORO-1828/HORO-1824
+/// §4.2). Deliberately carries no resolved path — see
+/// `DependencyExplainReportDto`'s PRIVACY note, which applies to the whole
+/// `ExplainReportDto`.
+struct CargoTargetExplainReportDto: Decodable, Equatable {
+    /// `"local"`, `"orphan"`, `"redirected"`, or `"unknown"`.
+    let scope: String
+    let isDirectLocator: Bool
+    let provenance: String
+    /// Present only for `scope == "redirected"`.
+    let coldRebuildNote: String?
+
+    enum CodingKeys: String, CodingKey {
+        case scope
+        case isDirectLocator = "is_direct_locator"
+        case provenance
+        case coldRebuildNote = "cold_rebuild_note"
+    }
+}
+
+/// Mirrors `reporting::dto::GitExplainReport` (HORO-1828) — added to fix a
+/// real wording bug: `dirty` and `linkedWorktree` must be worded
+/// separately (see `GlomerisVocabulary.reason`'s `git_worktree_dirty`
+/// case and `CandidateDetailViewModel.gitWorktreeDirtyWording`), never
+/// collapsed into "uncommitted work", which is false whenever the real
+/// trigger was `linkedWorktree` alone.
+struct GitExplainReportDto: Decodable, Equatable {
+    let probe: String
+    let dirty: Bool
+    let linkedWorktree: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case probe
+        case dirty
+        case linkedWorktree = "linked_worktree"
+    }
+
+    static let notReported = GitExplainReportDto(
+        probe: "not_attempted", dirty: false, linkedWorktree: false)
 }
 
 /// Mirrors `reporting::dto::ExecuteReport`. `outcome` is deliberately kept
