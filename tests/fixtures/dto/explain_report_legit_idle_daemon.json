@@ -1,0 +1,65 @@
+{
+  "resource_id": "node_modules:/Users/dev/proj/node_modules",
+  "kind": "node_modules",
+  "detector": "test",
+  "sources": [],
+  "logical_bytes": 4096,
+  "logical_human": "4.0 KB",
+  "reclaimable_bytes": 4096,
+  "reclaimable_human": "4.0 KB",
+  "reclaimable_bytes_is_lower_bound": false,
+  "completeness": "complete",
+  "confidence": "high",
+  "active_use_signals": [
+    "open by process: node(pid 4242) [claim: idle_but_valid]"
+  ],
+  "regenerability": "regenerable_by_rebuild",
+  "policy_label": "ASK",
+  "reasons": [
+    "resource_in_active_use"
+  ],
+  "native_cleanup_available": false,
+  "native_cleanup_action_id": null,
+  "fingerprint_token": null,
+  "executable": true,
+  "offered_actions": [
+    {
+      "action_id": "node.clean.node_modules",
+      "requires_confirmation": true
+    }
+  ],
+  "refusal_reason": null,
+  "refusal_source": null,
+  "holders": [
+    {
+      "pid": 4242,
+      "command": "node",
+      "relation": "open_file",
+      "claim": "idle_but_valid",
+      "provenance": "inferred"
+    }
+  ],
+  "holder_probes": [
+    {
+      "relation": "open_file"
+    },
+    {
+      "relation": "cwd"
+    },
+    {
+      "relation": "executable"
+    }
+  ],
+  "executable_dependency": {
+    "probe": "observed",
+    "references": [],
+    "unresolved": [],
+    "sources_examined": [],
+    "note": "MCP server commands and shell startup files are not examined"
+  },
+  "git": {
+    "probe": "observed",
+    "dirty": false,
+    "linked_worktree": false
+  }
+}
