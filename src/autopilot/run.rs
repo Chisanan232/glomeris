@@ -662,6 +662,15 @@ fn append_autopilot_audit_record(
             ActionSource::AutopilotAutoSafe.to_string()
         },
         model_rank,
+        // HORO-1826: this function receives `AutopilotItemOutcome`, an
+        // already-digested projection of `ExecutionReport` that drops
+        // `host_integrity`/`volume_free_delta` before reaching here.
+        // Wiring those through would mean widening `AutopilotItemOutcome`
+        // and `AutopilotReport` -- deferred, and disclosed as a known gap
+        // in this ticket's PR rather than silently assumed done (the
+        // `execute`/`free`/`emergency` paths above all carry real values).
+        host_integrity_status: None,
+        volume_free_delta: None,
     };
     let _ = append_audit_record(audit_log_path, &record);
 }

@@ -339,6 +339,11 @@ fn append_self_state_audit_record(
         source: ActionSource::Emergency.to_string(),
         // No model is consulted anywhere in this module (see its docs).
         model_rank: None,
+        // This record is for the self-state deletion, which never goes
+        // through `crate::executor::execute` at all -- there is no
+        // host-integrity/volume-delta concept to report here.
+        host_integrity_status: None,
+        volume_free_delta: None,
     };
     let _ = append_audit_record(audit_log_path, &record);
 }
@@ -510,6 +515,11 @@ fn append_emergency_audit_record(
         source: ActionSource::Emergency.to_string(),
         // Emergency mode never calls a model (see this module's docs).
         model_rank: None,
+        host_integrity_status: report
+            .host_integrity
+            .as_ref()
+            .map(|integrity| integrity.status.as_str().to_string()),
+        volume_free_delta: report.volume_free_delta.observed().copied(),
     };
     let _ = append_audit_record(audit_log_path, &record);
 }

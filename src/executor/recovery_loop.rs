@@ -1636,6 +1636,11 @@ fn append_recovery_audit_record(
         source: ActionSource::Free.to_string(),
         // The recovery loop ranks by rule, never by model.
         model_rank: None,
+        host_integrity_status: report
+            .host_integrity
+            .as_ref()
+            .map(|integrity| integrity.status.as_str().to_string()),
+        volume_free_delta: report.volume_free_delta.observed().copied(),
     };
     let _ = append_audit_record(audit_log_path, &record);
 }
@@ -2114,19 +2119,11 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         // unbroken string of per-action "OK" notes would bury the ones
         // that matter.
         if let Some(integrity) = &report.host_integrity {
-            use crate::evidence::model::IntegrityStatus;
-            let note = match integrity.status {
-                IntegrityStatus::Degraded => Some(format!(
-                    "{action_label}: host-dependency integrity DEGRADED \
-                     ({} dependency record(s))",
-                    integrity.entries.len()
-                )),
-                IntegrityStatus::Unverified => Some(format!(
-                    "{action_label}: host-dependency integrity could not be verified"
-                )),
-                IntegrityStatus::Ok => None,
-            };
-            if let Some(note) = note {
+            // `summary_note` is the single producer of this wording,
+            // shared with `ExecuteReport`'s own host-integrity surfacing
+            // -- see its doc comment.
+            if let Some(summary) = integrity.summary_note() {
+                let note = format!("{action_label}: {summary}");
                 if !host_integrity_notes.contains(&note) {
                     host_integrity_notes.push(note);
                 }

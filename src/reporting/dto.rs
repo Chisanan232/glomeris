@@ -1380,6 +1380,29 @@ pub struct ExecuteReport {
     /// missing. Whoever owns the convention has to emit the string.
     pub expected_reclaimed_human: Option<String>,
     pub actual_reclaimed_human: Option<String>,
+    /// HORO-1826 §4.4: `"ok"` / `"degraded"` / `"unverified"`, or `None`
+    /// when nothing was mutated or the pre-action probe cleanly found
+    /// nothing to verify. Never omitted to mean "ok" — a reclaim-success
+    /// outcome must not imply every configured coding-agent hook/
+    /// integration still works. See
+    /// `crate::executor::ExecutionReport::host_integrity`'s own doc
+    /// comment for the full gating rule.
+    pub host_integrity_status: Option<&'static str>,
+    /// A short, path-free sentence explaining a non-`Ok`
+    /// `host_integrity_status` (see
+    /// [`crate::evidence::model::HostIntegrityReport::summary_note`]).
+    /// `None` whenever `host_integrity_status` is `None` or `"ok"`.
+    /// Never a raw dependency path — those are more sensitive than the
+    /// resource's own path (ADR-0001 §6).
+    pub host_integrity_note: Option<String>,
+    /// Signed free-byte delta measured immediately before and after the
+    /// mutating step (ADR-0001 §4.4). Includes concurrent writers — a
+    /// negative value means something else grew the volume's usage
+    /// faster than this action freed it, not that the action failed.
+    /// `None` when not measured (no sampler supplied, no single
+    /// resource path, either sample failed, or the resource's own
+    /// filesystem differs from the measured volume's).
+    pub volume_free_delta: Option<i64>,
 }
 
 /// Why `glomeris execute` refused, as the machine-readable token

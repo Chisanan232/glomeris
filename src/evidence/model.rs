@@ -1159,6 +1159,19 @@ pub enum IntegrityStatus {
     Unverified,
 }
 
+impl IntegrityStatus {
+    /// Stable snake_case tag — the single producer for every surface that
+    /// needs to render this as a string (CLI `--json`, the audit log),
+    /// following the same convention as [`SourceTag::as_str`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IntegrityStatus::Ok => "ok",
+            IntegrityStatus::Degraded => "degraded",
+            IntegrityStatus::Unverified => "unverified",
+        }
+    }
+}
+
 /// One pre-action [`DependencyRef`] compared against its post-action
 /// counterpart (HORO-1826). Only file identity (`resolved`/`exe`) drives
 /// `status` — a process that was running pre-action and has since exited
@@ -1188,6 +1201,32 @@ pub struct HostIntegrityReport {
     /// omission (ADR-0001 §4.4).
     pub status: IntegrityStatus,
     pub entries: Vec<DependencyIntegrityEntry>,
+}
+
+impl HostIntegrityReport {
+    /// A short, path-free human sentence describing a non-`Ok` verdict,
+    /// or `None` for `Ok` — the single producer for every surface that
+    /// needs to say *why* a run is not all-clear without repeating a raw
+    /// dependency path into a report (ADR-0001 §6 privacy row: host
+    /// config/hook-binary paths are more sensitive than the resource's
+    /// own path and never belong in a reporting surface). Used by both
+    /// the recovery-loop's per-action caveat note
+    /// (`crate::executor::recovery_loop`) and the single-action
+    /// `glomeris execute` report (`crate::reporting::dto::ExecuteReport`),
+    /// so the two surfaces cannot drift into different wording for the
+    /// same fact.
+    pub fn summary_note(&self) -> Option<String> {
+        match self.status {
+            IntegrityStatus::Ok => None,
+            IntegrityStatus::Degraded => Some(format!(
+                "host-dependency integrity DEGRADED ({} dependency record(s))",
+                self.entries.len()
+            )),
+            IntegrityStatus::Unverified => {
+                Some("host-dependency integrity could not be verified".to_string())
+            }
+        }
+    }
 }
 
 /// Git repository state for a resource's containing directory, as
