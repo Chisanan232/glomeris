@@ -573,6 +573,10 @@ pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
             continue;
         }
 
+        // HORO-1826: volume-delta wiring deferred for the Autopilot path —
+        // flagged in that ticket's PR rather than silently assumed done.
+        // `None` reports `Unavailable(NotAttempted)`, never a fabricated
+        // measurement.
         let exec = execute(action, &approval, collector, policy, now, None);
         let actual = exec.actual_reclaimed_bytes.observed().copied();
         let outcome = match exec.outcome {

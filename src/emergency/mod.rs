@@ -643,6 +643,10 @@ fn process_candidate(
     };
 
     report.actions_attempted += 1;
+    // HORO-1826: volume-delta wiring deferred for the emergency path —
+    // flagged in that ticket's PR rather than silently assumed done.
+    // `None` reports `Unavailable(NotAttempted)`, never a fabricated
+    // measurement.
     let exec_report = execute(action, &approval, collector, &cfg, now, None);
     // HORO-1057: best-effort audit-log append, AFTER the real outcome
     // above is already known. `append_emergency_audit_record` never
