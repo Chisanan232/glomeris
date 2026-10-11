@@ -134,40 +134,69 @@ pub fn compare_host_integrity(
     for dep in &pre_report.references_inside {
         let dep_status = match post_report {
             None => IntegrityStatus::Unverified,
-            Some(post_report) => match post_report
-                .references_inside
-                .iter()
-                .find(|post_dep| post_dep.source == dep.source && post_dep.pointer == dep.pointer)
-            {
-                Some(post_dep) if post_dep.resolved == dep.resolved && post_dep.exe == dep.exe => {
-                    IntegrityStatus::Ok
-                }
-                // Same structural pointer, but the resolved path or the
-                // (dev, ino) identity differs — genuinely changed.
+            Some(post_report) => match post_report.references_inside.iter().find(|post_dep| {
+                // Matches on `(source, pointer, resolved)`, not
+                // `(source, pointer)` (round-3 independent review of PR
+                // #163): `resolve_command` can legitimately push multiple
+                // `DependencyRef`s sharing one exact `(source, pointer)`
+                // (e.g. a command whose head and an absolute-path argument
+                // both resolve inside the resource), each with its own
+                // `resolved` path. Matching on `(source, pointer)` alone
+                // would let `.find()` return the WRONG sibling's post-
+                // action entry, mis-pairing one dependency's survival
+                // against another's deletion — always in the safe
+                // direction (a mis-pair can only ever read a genuinely-OK
+                // dependency as `Degraded`, never the reverse, since a
+                // mismatched `exe`/`resolved` falls through to the
+                // `Degraded` arm below), but still the same root cause as
+                // the `unresolved`-matching fix just below it, so fixed in
+                // the same pass.
+                post_dep.source == dep.source
+                    && post_dep.pointer == dep.pointer
+                    && post_dep.resolved == dep.resolved
+            }) {
+                Some(post_dep) if post_dep.exe == dep.exe => IntegrityStatus::Ok,
+                // Same `(source, pointer, resolved)`, but the (dev, ino)
+                // identity differs — genuinely changed in place.
                 Some(_) => IntegrityStatus::Degraded,
                 None => {
                     // Not found in the post-action references. If the
                     // post-probe itself flagged THIS dependency's own
-                    // source/pointer as unresolved, the absence does not
-                    // confirm removal — fail closed to Unverified rather
-                    // than reading a gap as a clean negative. Otherwise,
-                    // the post-probe examined this source cleanly and
-                    // found nothing there: genuinely missing.
+                    // source/pointer/resolved as unresolved, the absence
+                    // does not confirm removal — fail closed to Unverified
+                    // rather than reading a gap as a clean negative.
+                    // Otherwise, the post-probe examined this source
+                    // cleanly and found nothing there: genuinely missing.
                     //
-                    // Matches on `(source, pointer)`, not `source` alone
-                    // (independent-review finding on PR #163): two
-                    // dependencies can share one `SourceTag` (e.g. two
-                    // hooks in the same `ClaudeUserSettings` file), and
-                    // matching on `source` alone would let one
-                    // dependency's genuinely confirmed-missing status get
-                    // masked into `Unverified` by an unrelated entry's
-                    // `unresolved` record for the same source.
-                    // `SourceUnreadable` carries no pointer at all — the
-                    // whole file failed to read, which blocks every
-                    // pointer from that source, so it still matches by
-                    // source alone (`u.pointer().is_none()`).
+                    // Matches on `(source, pointer)` plus `resolved` when
+                    // the unresolved entry carries one (independent-review
+                    // findings on PR #163, rounds 2 and 3):
+                    //
+                    // - Two dependencies can share one `SourceTag` (e.g.
+                    //   two hooks in the same `ClaudeUserSettings` file),
+                    //   so matching on `source` alone would let one
+                    //   dependency's genuinely confirmed-missing status get
+                    //   masked into `Unverified` by an unrelated entry's
+                    //   `unresolved` record for the same source.
+                    //   `SourceUnreadable` carries no pointer at all — the
+                    //   whole file failed to read, which blocks every
+                    //   pointer from that source, so it still matches by
+                    //   source alone (`u.pointer().is_none()`).
+                    // - Two dependencies can ALSO share one exact `(source,
+                    //   pointer)` with different `resolved` paths (see the
+                    //   `.find()` comment above). `UnresolvedRef::resolved()`
+                    //   returns `Some` only for `RestatFailed`, which is
+                    //   scoped to one dependency's own re-stat — so when it
+                    //   is present, it must also match `dep.resolved`, or a
+                    //   sibling's restat failure would mask this
+                    //   dependency's genuinely confirmed `Missing` into
+                    //   `Unverified`. Every other variant carries no
+                    //   `resolved` (`None`), meaning "matches any resolved
+                    //   path at this pointer" — unchanged from round 2.
                     if post_report.unresolved.iter().any(|u| {
-                        u.source() == &dep.source && u.pointer().is_none_or(|p| p == dep.pointer)
+                        u.source() == &dep.source
+                            && u.pointer().is_none_or(|p| p == dep.pointer)
+                            && u.resolved().is_none_or(|r| r == dep.resolved)
                     }) {
                         IntegrityStatus::Unverified
                     } else {
@@ -273,6 +302,7 @@ pub fn restat_post_action(
                 unresolved.push(UnresolvedRef::RestatFailed {
                     source: dep.source.clone(),
                     pointer: dep.pointer.clone(),
+                    resolved: dep.resolved.clone(),
                 });
             }
         }
@@ -716,6 +746,120 @@ mod tests {
             .expect("the failed-restat dependency must still be reported");
         assert_eq!(failed_entry.status, IntegrityStatus::Unverified);
         assert_eq!(report.status, IntegrityStatus::Degraded);
+    }
+
+    /// Independent-review finding on PR #163 (round 3): the exact masking
+    /// bug round 2 "fixed" reproduces one level deeper. `resolve_command`
+    /// can push multiple `DependencyRef`s sharing one exact `(source,
+    /// pointer)` — e.g. a command whose head and an absolute-path argument
+    /// both resolve inside the resource — so `(source, pointer)` is not a
+    /// unique per-dependency key. Two dependencies here share BOTH source
+    /// AND pointer, differing only by `resolved`: one restats `Failed`,
+    /// the other restats `Missing`. The missing one must still report
+    /// `Degraded`, not get masked into `Unverified` by its sibling's
+    /// restat failure.
+    ///
+    /// Locates each entry by `pre_resolved`, not `pointer` — both entries
+    /// share the pointer here, so looking up by pointer alone would find
+    /// whichever entry happens to come first and make this test vacuous.
+    #[test]
+    fn a_sibling_with_the_same_pointer_but_a_different_resolved_path_does_not_mask_a_genuinely_missing_one(
+    ) {
+        let failed_dep = DependencyRef {
+            resolved: PathBuf::from("/resource/bin/head-flaky-stat"),
+            ..real_dep_ref_literal("/resource/bin/head-flaky-stat")
+        };
+        let missing_dep = DependencyRef {
+            resolved: PathBuf::from("/resource/bin/arg-gone"),
+            ..real_dep_ref_literal("/resource/bin/arg-gone")
+        };
+        assert_eq!(
+            failed_dep.pointer, missing_dep.pointer,
+            "this test's premise is that both dependencies share one exact \
+             (source, pointer) — only `resolved` differs"
+        );
+        let pre_report = clean(vec![failed_dep.clone(), missing_dep.clone()])
+            .observed()
+            .unwrap()
+            .clone();
+        let pre = ProbeOutcome::Observed(pre_report.clone());
+
+        let mut table = std::collections::HashMap::new();
+        table.insert(failed_dep.resolved.clone(), "failed");
+        table.insert(missing_dep.resolved.clone(), "missing");
+        let restat = FixedRestat(table);
+
+        let post = restat_post_action(&pre_report, &restat);
+        let report = compare_host_integrity(&pre, &post);
+
+        let missing_entry = report
+            .entries
+            .iter()
+            .find(|e| e.pre_resolved == missing_dep.resolved)
+            .expect("the missing dependency must still be reported");
+        assert_eq!(
+            missing_entry.status,
+            IntegrityStatus::Degraded,
+            "a sibling sharing the SAME (source, pointer) but a DIFFERENT \
+             resolved path must not mask a genuinely missing dependency \
+             into Unverified"
+        );
+        let failed_entry = report
+            .entries
+            .iter()
+            .find(|e| e.pre_resolved == failed_dep.resolved)
+            .expect("the failed-restat dependency must still be reported");
+        assert_eq!(failed_entry.status, IntegrityStatus::Unverified);
+        assert_eq!(report.status, IntegrityStatus::Degraded);
+    }
+
+    /// Secondary mis-pairing (round-3 independent review of PR #163,
+    /// safe-direction but same root cause): the post-dependency lookup in
+    /// `compare_host_integrity` used to `.find()` on `(source, pointer)`
+    /// alone, so when two dependencies share one exact `(source,
+    /// pointer)`, it could grab the WRONG sibling's post-action entry.
+    /// Here both survive restat `Present`, unchanged — matching on
+    /// `(source, pointer)` alone would still compare each pre-dependency
+    /// against whichever post-entry `.find()` happens to return first,
+    /// which is fine only by accident when both are unchanged; this test
+    /// pins that both are correctly paired with THEIR OWN post entry by
+    /// `resolved`, not an arbitrary one.
+    #[test]
+    fn two_siblings_with_the_same_pointer_are_each_compared_against_their_own_post_entry() {
+        let dep_one = DependencyRef {
+            resolved: PathBuf::from("/resource/bin/head-unchanged"),
+            ..real_dep_ref_literal("/resource/bin/head-unchanged")
+        };
+        let dep_two = DependencyRef {
+            resolved: PathBuf::from("/resource/bin/arg-unchanged"),
+            exe: crate::evidence::model::ExeIdentity {
+                path: PathBuf::from("/resource/bin/arg-unchanged"),
+                dev: 1,
+                ino: 99,
+            },
+            ..real_dep_ref_literal("/resource/bin/arg-unchanged")
+        };
+        assert_eq!(dep_one.pointer, dep_two.pointer);
+        assert_ne!(
+            dep_one.exe, dep_two.exe,
+            "distinct (dev, ino) per sibling is what would expose a \
+             wrong-sibling mis-pairing as a false Degraded"
+        );
+
+        let pre = clean(vec![dep_one.clone(), dep_two.clone()]);
+        let post = clean(vec![dep_one.clone(), dep_two.clone()]);
+
+        let report = compare_host_integrity(&pre, &post);
+
+        assert_eq!(
+            report.status,
+            IntegrityStatus::Ok,
+            "both siblings are genuinely unchanged; a wrong-sibling \
+             mis-pairing on (source, pointer) alone would falsely degrade one"
+        );
+        for entry in &report.entries {
+            assert_eq!(entry.status, IntegrityStatus::Ok);
+        }
     }
 
     /// Literal `DependencyRef` builder for a fixed, non-existent path —

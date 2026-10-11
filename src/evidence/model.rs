@@ -1044,7 +1044,26 @@ pub enum UnresolvedRef {
     /// different pointer, same config file) into `Unverified` instead of
     /// the correct `Degraded`. This variant keeps the pointer, so that
     /// masking cannot happen.
-    RestatFailed { source: SourceTag, pointer: String },
+    ///
+    /// Also carries `resolved` (round-3 independent review of PR #163):
+    /// `(source, pointer)` is STILL not a unique key for one dependency —
+    /// `resolve_command` can legitimately push multiple [`DependencyRef`]s
+    /// that share one exact `(source, pointer)` (e.g. a command whose head
+    /// AND an absolute-path argument both resolve inside the same
+    /// resource), each with its own `resolved` path. Without `resolved`
+    /// here, this one dependency's own restat failure would match EVERY
+    /// sibling sharing its `(source, pointer)` in
+    /// [`crate::evidence::correlate::host_integrity::compare_host_integrity`],
+    /// masking a genuinely missing sibling (same source, same pointer,
+    /// different `resolved`) into `Unverified` instead of `Degraded` — the
+    /// exact masking bug this variant was introduced to close, recurring
+    /// one level deeper. `resolved` narrows the match back down to this
+    /// one dependency.
+    RestatFailed {
+        source: SourceTag,
+        pointer: String,
+        resolved: PathBuf,
+    },
 }
 
 impl UnresolvedRef {
@@ -1081,6 +1100,31 @@ impl UnresolvedRef {
             | UnresolvedRef::MalformedSchema { pointer, .. }
             | UnresolvedRef::RestatFailed { pointer, .. } => Some(pointer),
             UnresolvedRef::SourceUnreadable { .. } => None,
+        }
+    }
+
+    /// The specific dependency path this unresolved entry is scoped to,
+    /// when it has one. Only [`UnresolvedRef::RestatFailed`] carries a
+    /// `resolved` path — every other variant arises before any candidate
+    /// is resolved to a concrete path at all, so `None` here means the
+    /// wider claim "matches any `resolved` path at this `(source,
+    /// pointer)`", exactly as `pointer()` returning `None` for
+    /// [`UnresolvedRef::SourceUnreadable`] means "matches any pointer at
+    /// this source".
+    ///
+    /// HORO-1826 (round-3 independent review of PR #163): `resolve_command`
+    /// can legitimately push multiple [`DependencyRef`]s sharing one exact
+    /// `(source, pointer)` with different `resolved` paths. Matching a
+    /// [`UnresolvedRef::RestatFailed`] on `(source, pointer)` alone would
+    /// mask a genuinely missing SIBLING dependency (same source, same
+    /// pointer, different `resolved`) into `Unverified` — this accessor
+    /// lets [`crate::evidence::correlate::host_integrity::compare_host_integrity`]
+    /// narrow the match back down to the one dependency this restat
+    /// failure actually concerns.
+    pub fn resolved(&self) -> Option<&std::path::Path> {
+        match self {
+            UnresolvedRef::RestatFailed { resolved, .. } => Some(resolved),
+            _ => None,
         }
     }
 }
