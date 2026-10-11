@@ -63,7 +63,7 @@
 # src/executor/lock.rs, which is why a repo-wide grep was never a
 # substitute for a producer here.
 #
-# Exit 0 = the twenty-two checked vocabularies match. Exit 1 = drift, or an
+# Exit 0 = the twenty-four checked vocabularies match. Exit 1 = drift, or an
 # extraction that came back empty (which would otherwise be a vacuous
 # pass).
 
@@ -200,12 +200,22 @@ VOCABULARIES=(
   # the field is absent rather than tagged in that case.
   'worktreeEquivalence;;src/workspace/branch.rs;;PatchEquivalence::tag;;PatchEquivalence'
   'worktreeEquivalenceMethod;;src/workspace/branch.rs;;EquivalenceMethod::tag;;EquivalenceMethod'
+  # HORO-1828. What, if anything, is eligible right now — the whole point of
+  # the eligibility axis is that an empty/all-guarded candidate list must not
+  # read as a clean bill of health without saying why. Sole producer:
+  # `eligibility_verdict`'s own `EligibilityVerdict::as_str`, scoped to that
+  # impl block since `src/reporting/eligibility.rs` has only the one `as_str`.
+  'eligibility;;src/reporting/eligibility.rs;;EligibilityVerdict::as_str;;EligibilityVerdict'
+  # HORO-1827/HORO-1828. Whether the user's free-space goal is reachable, and
+  # by what means. Sole producer: `FeasibilityVerdict::tag`, scoped to its impl
+  # block for the same reason as the row above.
+  'feasibility;;src/monitor/feasibility.rs;;FeasibilityVerdict::tag;;FeasibilityVerdict'
 )
 
 # One more than the number of rows above: `outcome` has no producer to diff
 # against (see this script's header). Cross-checked against the rows actually
 # walked, at the end.
-TOTAL_VOCABULARIES=23
+TOTAL_VOCABULARIES=25
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent
