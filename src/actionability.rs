@@ -64,6 +64,73 @@ use crate::actions::{Action, ActionRegistry};
 use crate::evidence::Evidence;
 use crate::policy::{PolicyClass, PolicyDecision};
 
+/// Which of the three structurally distinct reasons a refusal came from
+/// (HORO-1828) — added so `explain`'s `refusal_source` can project *why*
+/// `executable` is `false` as a stable token, rather than a caller having
+/// to pattern-match the human sentence in [`StaticRefusal::message`] (which
+/// stays free-text and unstable on purpose; see that field's doc comment).
+///
+/// Deliberately three variants, matching [`static_refusal`]'s own
+/// sequencing exactly: a resource refused for being
+/// [`PolicyClass::Protected`], one with no action registered for its
+/// kind, and one whose registered action could not be planned or was
+/// structurally refused by the executor's own rule (both of
+/// [`plan_refusal`]'s branches collapse into this third token — from a
+/// caller's point of view both mean "an action exists, but it refused this
+/// resource").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalSource {
+    PolicyProtected,
+    NoRegisteredAction,
+    ActionCannotPlan,
+}
+
+impl RefusalSource {
+    /// Stable snake_case token, same convention as every other
+    /// `as_str`/`tag` producer in this codebase (e.g. `SourceTag::as_str`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RefusalSource::PolicyProtected => "policy_protected",
+            RefusalSource::NoRegisteredAction => "no_registered_action",
+            RefusalSource::ActionCannotPlan => "action_cannot_plan",
+        }
+    }
+}
+
+/// A refusal, carrying both the stable [`RefusalSource`] token and the
+/// human sentence every existing caller already reads. `message` is kept
+/// byte-identical to what `static_refusal`/`plan_refusal` always returned —
+/// several fixtures and tests are pinned to its exact text (see
+/// `tests/golden_llm_plan_protected_refusal.rs`,
+/// `tests/fixtures/dto/recovery_preview_report*.json`) — so this type is
+/// additive, not a replacement vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticRefusal {
+    pub source: RefusalSource,
+    pub message: String,
+}
+
+/// Typed counterpart of [`plan_refusal`] — see that function for the exact
+/// behavior. Kept `pub(crate)` rather than `pub`: outside this module and
+/// `reporting::dto`, nothing needs the typed source for a plan-only
+/// refusal.
+pub(crate) fn plan_refusal_typed(action: &dyn Action, ev: &Evidence) -> Option<StaticRefusal> {
+    // An action that cannot even produce a plan for this resource certainly
+    // cannot run against it. Reported with the planner's own words rather
+    // than a generic phrase, since `ActionError` already explains itself.
+    match action.plan(ev) {
+        Err(e) => Some(StaticRefusal {
+            source: RefusalSource::ActionCannotPlan,
+            message: format!("{} cannot be planned for this resource: {e}", action.id().0),
+        }),
+        // The executor's rule, not a restatement of it.
+        Ok(plan) => crate::executor::structural_refusal(&plan).map(|message| StaticRefusal {
+            source: RefusalSource::ActionCannotPlan,
+            message,
+        }),
+    }
+}
+
 /// Whether execution would refuse `action` for `ev` on sight: `None` when
 /// nothing statically known refuses it, `Some(reason)` with a sentence a
 /// user can read otherwise.
@@ -77,17 +144,39 @@ use crate::policy::{PolicyClass, PolicyDecision};
 /// `cargo.clean.target_dir` touches the filesystem while planning, and
 /// only for a single `is_file` stat on `Cargo.toml`.
 pub fn plan_refusal(action: &dyn Action, ev: &Evidence) -> Option<String> {
-    // An action that cannot even produce a plan for this resource certainly
-    // cannot run against it. Reported with the planner's own words rather
-    // than a generic phrase, since `ActionError` already explains itself.
-    match action.plan(ev) {
-        Err(e) => Some(format!(
-            "{} cannot be planned for this resource: {e}",
-            action.id().0
-        )),
-        // The executor's rule, not a restatement of it.
-        Ok(plan) => crate::executor::structural_refusal(&plan),
+    plan_refusal_typed(action, ev).map(|r| r.message)
+}
+
+/// Typed counterpart of [`static_refusal`] — see that function for the
+/// exact behavior and sequencing guarantee. `reporting::dto` reads this
+/// directly so `ExplainReport::refusal_source` (HORO-1828) and
+/// `refusal_reason` can never disagree about which refusal happened; every
+/// other caller keeps reading the untyped [`static_refusal`].
+pub(crate) fn static_refusal_typed(
+    ev: &Evidence,
+    decision: &PolicyDecision,
+    resolved_action: Option<&dyn Action>,
+) -> Option<StaticRefusal> {
+    if decision.class == PolicyClass::Protected {
+        let reason = decision
+            .reasons
+            .first()
+            .map(|r| r.as_str().to_string())
+            .unwrap_or_else(|| "protected".to_string());
+        return Some(StaticRefusal {
+            source: RefusalSource::PolicyProtected,
+            message: format!("PROTECTED: {reason}"),
+        });
     }
+
+    let Some(action) = resolved_action else {
+        return Some(StaticRefusal {
+            source: RefusalSource::NoRegisteredAction,
+            message: "no registered cleanup action for this resource kind".to_string(),
+        });
+    };
+
+    plan_refusal_typed(action, ev)
 }
 
 /// The full verdict for a resource whose [`PolicyDecision`] is known:
@@ -102,20 +191,7 @@ pub fn static_refusal(
     decision: &PolicyDecision,
     resolved_action: Option<&dyn Action>,
 ) -> Option<String> {
-    if decision.class == PolicyClass::Protected {
-        let reason = decision
-            .reasons
-            .first()
-            .map(|r| r.as_str().to_string())
-            .unwrap_or_else(|| "protected".to_string());
-        return Some(format!("PROTECTED: {reason}"));
-    }
-
-    let Some(action) = resolved_action else {
-        return Some("no registered cleanup action for this resource kind".to_string());
-    };
-
-    plan_refusal(action, ev)
+    static_refusal_typed(ev, decision, resolved_action).map(|r| r.message)
 }
 
 /// The dry-run text to show for `action` against `ev`, or the reason
@@ -396,6 +472,67 @@ mod tests {
         assert!(
             refusal.starts_with("cargo.clean.target_dir cannot be planned for this resource: "),
             "the refusal must name the action that refused, got {refusal:?}"
+        );
+    }
+
+    #[test]
+    fn typed_refusal_source_agrees_with_untyped_message_on_every_path() {
+        // HORO-1828: `static_refusal_typed`/`plan_refusal_typed` must never
+        // drift from the untyped functions they now wrap — same message,
+        // every path, and the right `RefusalSource` for each.
+        let actions = ActionRegistry::builtin();
+
+        // Protected.
+        let ev = protected_evidence();
+        let decision = decision_for(&ev);
+        let typed = static_refusal_typed(&ev, &decision, None).expect("protected refuses");
+        assert_eq!(typed.source, RefusalSource::PolicyProtected);
+        assert_eq!(typed.source.as_str(), "policy_protected");
+        assert_eq!(
+            Some(typed.message.as_str()),
+            static_refusal(&ev, &decision, None).as_deref()
+        );
+
+        // No registered action.
+        let derived = evidence_at(
+            make_temp_dir("typed-derived").as_path(),
+            ResourceKind::XcodeDerivedData,
+        );
+        let derived_decision = decision_for(&derived);
+        let typed =
+            static_refusal_typed(&derived, &derived_decision, None).expect("no action refuses");
+        assert_eq!(typed.source, RefusalSource::NoRegisteredAction);
+        assert_eq!(typed.source.as_str(), "no_registered_action");
+        assert_eq!(
+            Some(typed.message.as_str()),
+            static_refusal(&derived, &derived_decision, None).as_deref()
+        );
+
+        // Action cannot plan (orphan target dir, no manifest beside it).
+        let orphan = make_temp_dir("typed-orphan").join("target");
+        fs::create_dir_all(&orphan).unwrap();
+        let orphan_ev = evidence_at(&orphan, ResourceKind::CargoTargetDir);
+        let orphan_decision = decision_for(&orphan_ev);
+        let action = actions.get("cargo.clean.target_dir").unwrap();
+        let typed = plan_refusal_typed(action, &orphan_ev).expect("no manifest, so no plan");
+        assert_eq!(typed.source, RefusalSource::ActionCannotPlan);
+        assert_eq!(typed.source.as_str(), "action_cannot_plan");
+        assert_eq!(
+            Some(typed.message.as_str()),
+            plan_refusal(action, &orphan_ev).as_deref()
+        );
+        let typed_via_static =
+            static_refusal_typed(&orphan_ev, &orphan_decision, Some(action)).unwrap();
+        assert_eq!(typed_via_static.source, RefusalSource::ActionCannotPlan);
+
+        // Structural refusal (unscoped step).
+        let brew_action = actions.get("homebrew.cleanup.cache").unwrap();
+        let brew_ev = evidence_at(&make_temp_dir("typed-brew"), ResourceKind::HomebrewCache);
+        let typed = plan_refusal_typed(brew_action, &brew_ev).expect("unscoped step refuses");
+        assert_eq!(typed.source, RefusalSource::ActionCannotPlan);
+        assert_eq!(
+            Some(typed.message.as_str()),
+            plan_refusal(brew_action, &brew_ev).as_deref()
         );
     }
 
