@@ -53,6 +53,20 @@
 # (e.g. `Text(dto.eligibility)` or passing it to the vocabulary lookup) is
 # fine, same as `policyLabel`.
 #
+# HORO-1828 "explain structure" addition — refusalSource joins too
+# ------------------------------------------------------------------
+# `ExplainReportDto.refusalSource` (`refusal_source` on the wire) is the
+# same shape of risk again: a closed-vocabulary token
+# (`GlomerisVocabulary.refusalSource(_:)`) that sits right next to the
+# Clean button in the UI (it explains the SAME refusal `executable`/
+# `refusalReason` already gate on) and therefore must never itself be read
+# to decide anything — `isCleanEnabled` (a field read of `executable`)
+# stays the only source of truth for that. `holders`/`holderProbes`/
+# `executableDependency`/`cargoTarget`/`git` are deliberately NOT added
+# here: none of them is a closed-vocabulary label a view could be tempted
+# to gate on the way `policyLabel`/`eligibility`/`refusalSource` are — they
+# are structural facts (a pid, a pointer, a boolean), not policy verdicts.
+#
 # HORO-1306 addition — the display-vocabulary file
 # -------------------------------------------------
 # HORO-1306 needed plain-language wording for AUTO_SAFE / ASK / PROTECTED /
@@ -86,7 +100,7 @@ SEARCH_DIRS=(
   "macos/GlomerisMenuBar/Sources"
 )
 
-FIELD_PATTERN='policyLabel|policy_label|eligibility|feasibility'
+FIELD_PATTERN='policyLabel|policy_label|eligibility|feasibility|refusalSource|refusal_source'
 
 violations=0
 

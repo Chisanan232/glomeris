@@ -210,12 +210,35 @@ VOCABULARIES=(
   # by what means. Sole producer: `FeasibilityVerdict::tag`, scoped to its impl
   # block for the same reason as the row above.
   'feasibility;;src/monitor/feasibility.rs;;FeasibilityVerdict::tag;;FeasibilityVerdict'
+  # HORO-1828 "explain structure". Three more vocabularies, one per new
+  # `ExplainReport` block that carries a closed-vocabulary token.
+  #
+  # `refusalSource` is scoped to its own file/impl rather than reusing the
+  # `refusal`/`fn as_str(` row above: `src/reporting/dto.rs` already has an
+  # earlier, unrelated `fn as_str(` (`RefusalReason`'s) that an unscoped
+  # anchor there would hit first, and `RefusalSource` lives in a different
+  # file (`src/actionability.rs`) entirely, so there is no collision to
+  # scope against — but the row is still written as `Type::fn` for the
+  # same self-documenting reason the episode/worktree rows above are.
+  'refusalSource;;src/actionability.rs;;RefusalSource::as_str;;RefusalSource'
+  # `processClaim` reuses the existing `ProcessClaim` enum (HORO-1823) —
+  # `process_claim_label` was already its sole producer for
+  # `active_use_signals`' prose before this ticket; `holders[].claim` now
+  # reads the exact same function, so one row covers both call sites.
+  'processClaim;;src/reporting/dto.rs;;process_claim_label;;ProcessClaim'
+  # `targetScope` diffs against `target_scope_tag`, which HORO-1828
+  # deliberately made the sole producer of ALL FOUR tokens including
+  # `"unknown"` (see that function's own doc comment) — a literal
+  # `"unknown"` left at its one call site instead would have been real
+  # wording this script could never see, same gap as `ExecuteReport
+  # ::outcome` in the header above.
+  'targetScope;;src/reporting/dto.rs;;target_scope_tag;;TargetScope'
 )
 
-# One more than the number of rows above: `outcome` has no producer to diff
-# against (see this script's header). Cross-checked against the rows actually
-# walked, at the end.
-TOTAL_VOCABULARIES=25
+# Three more than the number of rows above: `outcome` has no producer to
+# diff against (see this script's header). Cross-checked against the rows
+# actually walked, at the end.
+TOTAL_VOCABULARIES=28
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent
