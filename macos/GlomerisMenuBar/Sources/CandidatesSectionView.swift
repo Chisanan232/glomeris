@@ -554,6 +554,14 @@ struct CandidatesSectionView: View {
         GlomerisCard(title: "Reclaimable space", trailing: countText) {
             controlRow
 
+            // HORO-1828: the headline, before the list — within a glance,
+            // is there anything eligible right now. Shown only once a scan
+            // has actually produced an answer; before that there is nothing
+            // yet to claim.
+            if scan.lastScannedAt != nil {
+                GlomerisBadgeView(term: GlomerisVocabulary.eligibility(scan.eligibility))
+            }
+
             if scan.isScanning, let progressStatusText = scan.progressStatusText {
                 Text(progressStatusText)
                     .font(GlomerisDesign.captionFont)
@@ -908,6 +916,9 @@ struct CandidatesSectionView: View {
             // `scan.candidates`. Assigned a scan apart, the join would start
             // missing members that the family's byte total was summed from.
             scan.workspaces = result.output.workspaces
+            // Same turn again (HORO-1828): the headline eligibility badge
+            // must describe this exact scan, never a stale one.
+            scan.eligibility = result.output.eligibility
             scan.lastScannedAt = Date()
         } catch {
             scan.lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")

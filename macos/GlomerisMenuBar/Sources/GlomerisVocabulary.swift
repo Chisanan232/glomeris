@@ -1707,6 +1707,105 @@ enum GlomerisVocabulary {
         }
     }
 
+    // MARK: - Eligibility (`DetectReport.eligibility` / `RecoveryPreviewReport.eligibility`,
+    // HORO-1828, `src/reporting/eligibility.rs` `EligibilityVerdict::as_str`)
+
+    static let eligibilityAxis = "Eligibility"
+
+    /// What, if anything, there is for the user to do right now. The whole
+    /// point of this axis (HORO-1828) is to answer, within the first
+    /// glance, whether an empty or all-guarded candidate list is a real
+    /// clean bill of health or something less reassuring.
+    static func eligibility(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "discovery_incomplete":
+            return term(
+                token, eligibilityAxis, "Scan did not finish",
+                "Part of the search failed or was never run, so this cannot say "
+                    + "what is or is not eligible yet.",
+                "questionmark.circle.fill", .unknown
+            )
+        case "unknown":
+            return term(
+                token, eligibilityAxis, "Not enough evidence",
+                "Nothing is automatically eligible, and at least one item's evidence "
+                    + "is too thin to judge at all.",
+                "questionmark.circle.fill", .unknown
+            )
+        case "nothing_eligible":
+            return term(
+                token, eligibilityAxis, "Nothing eligible right now",
+                "The scan finished and found nothing Glomeris can reclaim "
+                    + "without your confirmation.",
+                "checkmark.circle", .neutral
+            )
+        case "eligible":
+            return term(
+                token, eligibilityAxis, "Something is eligible",
+                "At least one item can be reclaimed right now without asking.",
+                "checkmark.circle.fill", .positive
+            )
+        default:
+            return unrecognised(
+                token, eligibilityAxis, "Unrecognised eligibility state",
+                "The CLI reported an eligibility state this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Feasibility (`RecoveryPreviewReport.feasibility.verdict`, HORO-1827/
+    // HORO-1828, `src/monitor/feasibility.rs` `FeasibilityVerdict::tag`)
+
+    static let feasibilityAxis = "Goal feasibility"
+
+    /// Whether the user's target free-space goal is reachable, and by what
+    /// means, honestly accounting for observed stability. Never a
+    /// guarantee — see the Rust side's own doc comment on
+    /// `FeasibilityVerdict` for why every variant here is "estimate", not
+    /// "promise".
+    static func feasibility(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "insufficient_observation":
+            return term(
+                token, feasibilityAxis, "Not enough history yet",
+                "Capacity sampling has not run long enough (or is off) to make an "
+                    + "honest feasibility claim.",
+                "clock.fill", .unknown
+            )
+        case "already_at_goal":
+            return term(
+                token, feasibilityAxis, "Already there",
+                "Current free space already meets the goal. There is nothing to recover.",
+                "checkmark.circle.fill", .positive
+            )
+        case "reachable_auto_safe":
+            return term(
+                token, feasibilityAxis, "Reachable without asking",
+                "The space Glomeris can reclaim automatically is estimated to cover the goal.",
+                "checkmark.shield.fill", .positive
+            )
+        case "reachable_requires_consent":
+            return term(
+                token, feasibilityAxis, "Reachable with your OK",
+                "Reaching the goal needs your confirmation on at least one item — "
+                    + "it is not automatic.",
+                "hand.raised.fill", .caution
+            )
+        case "unreachable":
+            return term(
+                token, feasibilityAxis, "Not reachable today",
+                "Even every known byte, safe or not, does not cover the goal by any "
+                    + "means Glomeris knows about.",
+                "exclamationmark.triangle.fill", .warning
+            )
+        default:
+            return unrecognised(
+                token, feasibilityAxis, "Unrecognised feasibility state",
+                "The CLI reported a feasibility state this app has no wording for."
+            )
+        }
+    }
+
     // MARK: - Table helpers
 
     private static func term(
