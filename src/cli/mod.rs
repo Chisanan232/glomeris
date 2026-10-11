@@ -2182,7 +2182,14 @@ pub fn resolve_and_execute(
 
     match authorize(decision.clone(), ev.fingerprint.clone(), consent.as_ref()) {
         Some(approval) => {
-            let report = execute(action, &approval, collector, cfg, now);
+            let report = execute(
+                action,
+                &approval,
+                collector,
+                cfg,
+                now,
+                Some(&crate::executor::MacosVolumeDelta),
+            );
             // HORO-1057: best-effort audit-log append, AFTER the real
             // outcome is already known. `record_audit`'s `Result` is
             // never inspected here — see that function's doc comment for
@@ -4768,6 +4775,7 @@ mod execute_tests {
                 expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
                 actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
                 host_integrity: None,
+                volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             }
         }
 

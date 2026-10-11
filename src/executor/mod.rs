@@ -23,6 +23,7 @@ use crate::actions::{Action, ActionError, ActionId, ActionPlan, ActionStep};
 use crate::detectors::{
     discovery_evidence, estimate_logical_bytes, probe_mtime, size_estimate_budget, DetectorId,
 };
+use crate::evidence::correlate::host_integrity;
 use crate::evidence::correlate::{
     compare_host_integrity, merge_into, EvidenceCollector, ProbeBudget,
 };
@@ -37,6 +38,64 @@ use crate::policy::{classify, Approval, PolicyClass, PolicyConfig, PolicyDecisio
 /// pass. Kept short — this runs synchronously right before a destructive
 /// action, so it must not stall indefinitely.
 const REVALIDATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Capability seam for HORO-1826's per-action free-byte delta (ADR-0001
+/// §4.4). Deliberately its own trait rather than a new method on
+/// [`crate::monitor::fs_stat::FsStat`] — that trait's own doc comment
+/// explicitly rejects widening it, since every existing test double
+/// (`FixedFsStat`, `ScriptedFsStat`, `FailingFsStat`) would have to grow
+/// an unrelated method just to keep compiling for a capability only this
+/// module needs.
+pub trait VolumeDelta: Send + Sync {
+    /// `(volume_dev, free_bytes)` for the filesystem containing `path` —
+    /// one `statvfs`/`stat` pair, O(1), no directory traversal.
+    fn sample(&self, path: &Path) -> std::io::Result<(u64, u64)>;
+}
+
+/// Production [`VolumeDelta`]: wraps [`crate::platform::macos::statfs::MacosFsStat`]'s
+/// existing `stat`/`volume_dev` calls — no new syscall, no new dependency.
+#[cfg(unix)]
+pub struct MacosVolumeDelta;
+
+#[cfg(unix)]
+impl VolumeDelta for MacosVolumeDelta {
+    fn sample(&self, path: &Path) -> std::io::Result<(u64, u64)> {
+        use crate::monitor::fs_stat::FsStat;
+        use crate::platform::macos::statfs::MacosFsStat;
+        let stat = MacosFsStat;
+        let usage = stat.stat(path)?;
+        let dev = stat.volume_dev(path)?;
+        Ok((dev, usage.free_bytes))
+    }
+}
+
+/// Computes [`ExecutionReport::volume_free_delta`] from a `before`/`after`
+/// sample pair, fail-closed on every ambiguous case (ADR-0001 §4.4 /
+/// §8 "measured volume != resource volume => delta UNVERIFIED for that
+/// action").
+fn compute_volume_delta(
+    resource_dev: Option<u64>,
+    before: Option<(u64, u64)>,
+    after: Option<(u64, u64)>,
+) -> ProbeOutcome<i64> {
+    let (Some(resource_dev), Some((before_dev, before_free)), Some((after_dev, after_free))) =
+        (resource_dev, before, after)
+    else {
+        return ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+    };
+    // "Different filesystem" (ADR-0001 §4.4): the resource's own `st_dev`
+    // (captured pre-mutation, see `IdentitySnapshot`) must match the
+    // measured volume's `st_dev` on BOTH samples, and the two samples
+    // must agree with each other -- a volume swapped mid-action is not a
+    // byte count that means anything.
+    if before_dev != resource_dev || after_dev != resource_dev || before_dev != after_dev {
+        return ProbeOutcome::Unavailable(ProbeReason::Failed);
+    }
+    // Signed on purpose: a concurrent writer can outpace this action's
+    // own freed bytes, producing a negative delta. That is a true
+    // observation, not a failure -- see the field's own doc comment.
+    ProbeOutcome::Observed(after_free as i64 - before_free as i64)
+}
 
 /// The outcome of one execution (or dry-run) attempt.
 pub struct ExecutionReport {
@@ -54,6 +113,15 @@ pub struct ExecutionReport {
     /// OK": its own [`HostIntegrityReport::status`] fails closed to
     /// `Degraded`/`Unverified` on any probe failure.
     pub host_integrity: Option<HostIntegrityReport>,
+    /// Signed free-byte delta measured immediately before and after the
+    /// mutating step (ADR-0001 §4.4, HORO-1826). Includes concurrent
+    /// writers — a negative value means something else grew the volume's
+    /// usage faster than this action freed it, not that the action
+    /// failed. `Unavailable` when no [`VolumeDelta`] was supplied, the
+    /// resource has no single path (`ResourceLocator::Tool`), either
+    /// sample failed, or the resource's own filesystem differs from the
+    /// measured volume's (ADR-0001 §4.4 "different filesystem").
+    pub volume_free_delta: ProbeOutcome<i64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -109,6 +177,7 @@ pub fn execute(
     collector: &dyn EvidenceCollector,
     cfg: &PolicyConfig,
     now: SystemTime,
+    volume: Option<&dyn VolumeDelta>,
 ) -> ExecutionReport {
     let resource = approval.decision().resource.clone();
 
@@ -185,6 +254,22 @@ pub fn execute(
     };
 
     let pre_dependency = fresh_evidence.executable_dependency.clone();
+
+    // HORO-1826 §4.4: the "before" volume sample, taken as close to the
+    // actual mutation as this function gets -- right before
+    // `execute_plan`, not back at step 0's identity snapshot (which the
+    // revalidation's own, possibly slow, correlation pass sits between).
+    // `mount_path` is the resource's PARENT directory: it is on the same
+    // filesystem as the resource by definition, and -- unlike the
+    // resource itself -- still exists after a successful deletion, so
+    // the "after" sample below is taken against the same path.
+    let mount_path: Option<PathBuf> = match &resource.locator {
+        ResourceLocator::Path(p) => p.parent().map(Path::to_path_buf),
+        ResourceLocator::Tool { .. } => None,
+    };
+    let sample = |p: &Path| -> Option<(u64, u64)> { volume?.sample(p).ok() };
+    let before = mount_path.as_deref().and_then(sample);
+
     let mut report = execute_plan(plan, identity_snapshot);
 
     // HORO-1826 §4.4: a pre/post host-dependency integrity check, taken
@@ -194,16 +279,24 @@ pub fn execute(
     // whichever `host_integrity: None` default `execute_plan`'s own
     // constructors set, rather than threading the pre-snapshot and
     // collector through every one of its internal return sites.
-    report.host_integrity =
-        compute_host_integrity(&pre_dependency, &resource, collector, &report.outcome);
+    report.host_integrity = compute_host_integrity(&pre_dependency, &report.outcome);
+
+    // Same reasoning for the "after" sample: taken unconditionally once
+    // `execute_plan` returns, regardless of its outcome, because a
+    // `RunTool` step can exit non-zero (`Failed`) after partially
+    // mutating the filesystem -- the honest byte delta still matters
+    // then, not only on a clean `Succeeded`.
+    let after = mount_path.as_deref().and_then(sample);
+    report.volume_free_delta =
+        compute_volume_delta(identity_snapshot.map(|s| s.dev), before, after);
 
     report
 }
 
-/// Decides whether a post-action host-dependency probe is worth running
+/// Decides whether a post-action host-dependency check is worth running
 /// at all, and if so, runs it and compares against `pre` (HORO-1826 §4.4).
 ///
-/// Only runs the post-probe when the pre-action snapshot was NOT a clean,
+/// Only runs the post-check when the pre-action snapshot was NOT a clean,
 /// fully-resolved negative — i.e. when it found at least one reference to
 /// verify, or could not already confirm there wasn't one
 /// (`unresolved` non-empty, or the probe itself failed). A resource the
@@ -211,10 +304,23 @@ pub fn execute(
 /// usefully verify, so probing it again would be pure overhead, not a
 /// safety gap — see the ticket's own framing. `None` is returned for that
 /// case and for any outcome that never attempted a mutation.
+///
+/// **Why this does NOT call `collector.collect()` again for the post
+/// side** (the design this replaced): [`HostDependencyProbe::probe`]'s
+/// first step is `fs::canonicalize(resource_path)`, which fails the
+/// instant a successful cleanup has deleted the resource — exactly the
+/// case this check exists to verify. Re-running the full probe
+/// post-action would therefore report `Unavailable` on every real
+/// successful cleanup regardless of whether the tracked dependency
+/// itself survived, making `Ok`/`Degraded` unreachable in production and
+/// the "valid unchanged hook -> OK" / "disposable hook -> DEGRADED"
+/// acceptance criteria undemonstrable outside a fake collector. Instead,
+/// [`restat_post_action`] re-stats each already-known dependency's own
+/// path directly — no symlink-chain walk, no host-config re-read, no
+/// subprocess — which stays well-defined whether or not the resource
+/// itself still exists.
 fn compute_host_integrity(
     pre: &ProbeOutcome<ExecutableDependencyReport>,
-    resource: &ResourceId,
-    collector: &dyn EvidenceCollector,
     outcome: &ExecutionOutcome,
 ) -> Option<HostIntegrityReport> {
     // Nothing was mutated (or attempted) — there is no run to verify.
@@ -225,29 +331,27 @@ fn compute_host_integrity(
         return None;
     }
 
-    let needs_verification = match pre.observed() {
-        Some(report) => !report.references_inside.is_empty() || !report.unresolved.is_empty(),
+    let pre_report = match pre.observed() {
+        Some(report) => report,
         // The pre-action probe itself failed: we cannot confirm there was
         // nothing to protect, so fail closed and verify anyway rather
-        // than silently skipping.
-        None => true,
+        // than silently skipping — `compare_host_integrity` reads a
+        // failed `pre` as `Unverified` regardless of `post`.
+        None => {
+            return Some(compare_host_integrity(
+                pre,
+                &ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            ))
+        }
     };
+
+    let needs_verification =
+        !pre_report.references_inside.is_empty() || !pre_report.unresolved.is_empty();
     if !needs_verification {
         return None;
     }
 
-    // Reuses the SAME bounded, budgeted correlation pass `execute()`
-    // already uses for revalidation — no new timeout discipline, no
-    // unbounded invocation (ADR-0001 §14 "Bounds").
-    let post = collector
-        .collect(
-            resource,
-            ProbeBudget {
-                timeout: REVALIDATION_TIMEOUT,
-            },
-        )
-        .executable_dependency;
-
+    let post = host_integrity::restat_post_action(pre_report, &host_integrity::FsDependencyRestat);
     Some(compare_host_integrity(pre, &post))
 }
 
@@ -438,6 +542,11 @@ fn aborted_report(action: ActionId, resource: ResourceId, reason: AbortReason) -
         actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         // Nothing was mutated — there is no run to verify integrity for.
         host_integrity: None,
+        // Nothing was mutated — no delta to measure. `execute()` itself
+        // fills this in for its own real before/after sample (this
+        // constructor is only reached for an abort BEFORE `execute_plan`
+        // ever runs).
+        volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
     }
 }
 
@@ -459,6 +568,12 @@ fn failed_report(
         // check. `execute()` itself fills this in for failures that DO
         // reach a mutating step (see its own post-`execute_plan` step).
         host_integrity: None,
+        // Same reasoning: `execute()` overwrites this unconditionally
+        // after `execute_plan` returns for every call reached through
+        // that path; this default only matters for the `action.plan()`
+        // error path in `execute()` itself, which never reaches
+        // `execute_plan` at all.
+        volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
     }
 }
 
@@ -772,6 +887,9 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
         // see `compute_host_integrity`. `execute_plan` itself has no
         // pre-action snapshot or collector to compare against.
         host_integrity: None,
+        // Filled in by `execute()` immediately after this call returns —
+        // see its own before/after sampling around `execute_plan`.
+        volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
     }
 }
 
@@ -958,6 +1076,154 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    // --- HORO-1826 §4.4: `compute_volume_delta` unit tests ---------------
+
+    #[test]
+    fn volume_delta_is_unavailable_when_no_sampler_was_supplied() {
+        assert_eq!(
+            compute_volume_delta(Some(1), None, None),
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+    }
+
+    #[test]
+    fn volume_delta_reports_signed_bytes_freed() {
+        let delta = compute_volume_delta(Some(7), Some((7, 1_000)), Some((7, 1_500)));
+        assert_eq!(delta, ProbeOutcome::Observed(500));
+    }
+
+    /// Concurrent target regrowth (ticket AC): free bytes can go DOWN
+    /// between the before/after samples even though the action itself
+    /// only deleted things — a concurrent writer outpaced it. This must
+    /// be reported as a genuine negative `Observed` delta, never clamped
+    /// to zero and never read as a probe failure.
+    #[test]
+    fn volume_delta_reports_negative_bytes_on_concurrent_regrowth() {
+        let delta = compute_volume_delta(Some(7), Some((7, 1_000)), Some((7, 400)));
+        assert_eq!(delta, ProbeOutcome::Observed(-600));
+    }
+
+    /// Different filesystem (ADR-0001 §4.4 / §8): the resource's own
+    /// `st_dev` disagreeing with the measured volume's `st_dev` must
+    /// produce `Unavailable`, never a byte count that compares two
+    /// unrelated filesystems.
+    #[test]
+    fn volume_delta_is_unavailable_when_resource_is_on_a_different_filesystem() {
+        let delta = compute_volume_delta(Some(7), Some((9, 1_000)), Some((9, 1_500)));
+        assert_eq!(delta, ProbeOutcome::Unavailable(ProbeReason::Failed));
+    }
+
+    /// The mount itself changing between the two samples (an external
+    /// disk swapped mid-action) must also fail closed.
+    #[test]
+    fn volume_delta_is_unavailable_when_the_mount_changes_between_samples() {
+        let delta = compute_volume_delta(Some(7), Some((7, 1_000)), Some((9, 1_500)));
+        assert_eq!(delta, ProbeOutcome::Unavailable(ProbeReason::Failed));
+    }
+
+    #[test]
+    fn volume_delta_is_unavailable_when_either_sample_is_missing() {
+        assert_eq!(
+            compute_volume_delta(Some(7), None, Some((7, 1_500))),
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+        assert_eq!(
+            compute_volume_delta(Some(7), Some((7, 1_000)), None),
+            ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+        );
+    }
+
+    /// `host_integrity` and `volume_free_delta` are independent
+    /// dimensions: a negative (regrowth) delta must never influence the
+    /// host-dependency verdict, and vice versa. Exercised end to end
+    /// through `execute()` with a fake `VolumeDelta` that reports
+    /// regrowth alongside a clean, empty dependency probe.
+    struct FixedVolumeDelta {
+        before: (u64, u64),
+        after: (u64, u64),
+        calls: AtomicU64,
+    }
+
+    impl VolumeDelta for FixedVolumeDelta {
+        fn sample(&self, _path: &Path) -> std::io::Result<(u64, u64)> {
+            let call = self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(if call == 0 { self.before } else { self.after })
+        }
+    }
+
+    #[test]
+    fn execute_reports_regrowth_delta_independent_of_clean_host_integrity() {
+        let root = make_temp_dir("execute-volume-delta-regrowth");
+        pin_cargo_target_dir_locally(&root);
+        let target_dir = root.join("target");
+        fs::create_dir_all(target_dir.join("debug")).unwrap();
+        fs::write(
+            target_dir.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target_dir.join("debug/build_output.bin"), vec![0u8; 4096]).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"glomeris-test-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target_dir.clone()),
+        );
+        let fingerprint = fingerprint_of(&target_dir);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 1,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("AutoSafe decision must always authorize");
+
+        // The mount's `st_dev` must agree with the resource's own
+        // identity snapshot dev for the delta to be `Observed` at all.
+        let resource_dev = {
+            use std::os::unix::fs::MetadataExt;
+            fs::symlink_metadata(&target_dir).unwrap().dev()
+        };
+        let volume = FixedVolumeDelta {
+            before: (resource_dev, 10_000),
+            // Free bytes went DOWN despite a successful delete: a
+            // concurrent writer outpaced it.
+            after: (resource_dev, 3_000),
+            calls: AtomicU64::new(0),
+        };
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+            Some(&volume),
+        );
+
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        assert_eq!(report.volume_free_delta, ProbeOutcome::Observed(-7_000));
+        // A clean resource with nothing to protect skips host-integrity
+        // entirely -- the regrowth above must not have changed that.
+        assert!(report.host_integrity.is_none());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     /// HORO-1824: pins `cargo metadata`'s target-dir resolution to the
@@ -1154,6 +1420,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(
@@ -1229,6 +1496,7 @@ mod tests {
             &ActiveUseCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(
@@ -1282,6 +1550,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
@@ -1344,6 +1613,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
@@ -1408,6 +1678,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         match report.outcome {
@@ -1523,6 +1794,7 @@ mod tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
@@ -1608,6 +1880,7 @@ mod tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
@@ -1671,6 +1944,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         match &report.outcome {
@@ -1780,6 +2054,7 @@ mod tests {
             &collector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert!(
@@ -1899,6 +2174,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert!(
@@ -2133,6 +2409,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         assert_eq!(
@@ -2247,6 +2524,7 @@ mod tests {
             &FakeCollector,
             &PolicyConfig::default(),
             now,
+            None,
         );
 
         match &report.outcome {

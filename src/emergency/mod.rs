@@ -643,7 +643,7 @@ fn process_candidate(
     };
 
     report.actions_attempted += 1;
-    let exec_report = execute(action, &approval, collector, &cfg, now);
+    let exec_report = execute(action, &approval, collector, &cfg, now, None);
     // HORO-1057: best-effort audit-log append, AFTER the real outcome
     // above is already known. `append_emergency_audit_record` never
     // returns a `Result` its caller could (mis)handle — see that

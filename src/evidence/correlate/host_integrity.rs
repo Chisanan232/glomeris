@@ -1,12 +1,10 @@
 //! Pre/post host-dependency integrity comparison (ADR-0001 §4.4,
 //! HORO-1826).
 //!
-//! This module deliberately contains NO new probing logic. It is a pure
-//! comparison over two [`ExecutableDependencyReport`]s that were each
-//! produced by re-running the SAME HORO-1825 probe
-//! (`HostDependencyProbe::probe`) — once before an action mutates
-//! anything, once after. Glomeris reports and refuses; it never repairs,
-//! reinstalls, or restarts anything here (carried forward unchanged from
+//! [`compare_host_integrity`] deliberately contains NO new probing logic:
+//! it is a pure comparison over two [`ExecutableDependencyReport`]s.
+//! Glomeris reports and refuses; it never repairs, reinstalls, or
+//! restarts anything here (carried forward unchanged from
 //! HORO-1825/1823/1824).
 //!
 //! The central fail-closed rule, stated once: a probe FAILURE on either
@@ -14,9 +12,27 @@
 //! sank the first review round of HORO-1823, HORO-1824 and HORO-1825 —
 //! see [`compare_host_integrity`]'s doc comment for how this module closes
 //! it structurally rather than by convention.
+//!
+//! [`restat_post_action`] builds the POST-action report that
+//! [`compare_host_integrity`] compares against — deliberately NOT by
+//! re-running [`super::host_dependency::HostDependencyProbe::probe`]
+//! again. That probe's first step is `fs::canonicalize(resource_path)`,
+//! which fails the instant a successful cleanup has deleted the
+//! resource — exactly the case this ticket exists to verify. Re-running
+//! it post-action would report every real cleanup as "probe failed"
+//! regardless of whether the tracked dependency itself survived, which
+//! is vacuous, not safe (a prior draft of this module had exactly that
+//! bug — see HORO-1826's PR discussion). Instead, each already-known
+//! dependency's own resolved path is re-stat'd directly via
+//! [`DependencyRestat`] — no symlink-chain walk, no host-config re-read,
+//! no subprocess, and well-defined whether or not the resource itself
+//! still exists.
+
+use std::path::Path;
 
 use crate::evidence::model::{
-    DependencyIntegrityEntry, ExecutableDependencyReport, HostIntegrityReport, IntegrityStatus,
+    DependencyIntegrityEntry, DependencyRef, ExecutableDependencyReport, HostIntegrityReport,
+    IntegrityStatus, UnresolvedRef,
 };
 use crate::evidence::probe::ProbeOutcome;
 
@@ -160,6 +176,96 @@ pub fn compare_host_integrity(
     }
 
     HostIntegrityReport { status, entries }
+}
+
+/// Re-stat seam for one already-resolved dependency path (ADR-0001 §4.4).
+/// Never walks a symlink chain and never reads a host config file — see
+/// the module header for why a full `probe()` re-run is wrong here. The
+/// production implementation ([`FsDependencyRestat`]) is a direct
+/// `fs::symlink_metadata` call; tests inject a fixed table instead of
+/// touching the real filesystem.
+pub trait DependencyRestat {
+    fn restat(&self, resolved: &Path) -> RestatOutcome;
+}
+
+/// What re-stating one previously-known dependency path found.
+pub enum RestatOutcome {
+    /// The path still resolves to a filesystem entry with this identity —
+    /// may or may not match the pre-action identity; that comparison is
+    /// [`compare_host_integrity`]'s job, not this type's.
+    Present(crate::evidence::model::ExeIdentity),
+    /// Confirmed absent (`ENOENT`/equivalent) — the only outcome
+    /// [`restat_post_action`] reads as "genuinely gone".
+    Missing,
+    /// The stat itself failed for any other reason (permission denied,
+    /// I/O error, or an injected failure standing in for "the health
+    /// probe did not complete" — the "crash before health probe"
+    /// scenario). Never read as a confirmed negative.
+    Failed,
+}
+
+/// Production [`DependencyRestat`]: a direct `fs::symlink_metadata` call.
+#[cfg(unix)]
+pub struct FsDependencyRestat;
+
+#[cfg(unix)]
+impl DependencyRestat for FsDependencyRestat {
+    fn restat(&self, resolved: &Path) -> RestatOutcome {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(resolved) {
+            Ok(meta) => RestatOutcome::Present(crate::evidence::model::ExeIdentity {
+                path: resolved.to_path_buf(),
+                dev: meta.dev(),
+                ino: meta.ino(),
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => RestatOutcome::Missing,
+            Err(_) => RestatOutcome::Failed,
+        }
+    }
+}
+
+/// Builds the POST-action [`ProbeOutcome<ExecutableDependencyReport>`]
+/// that [`compare_host_integrity`] compares `pre` against, by re-stat'ing
+/// only the dependencies `pre` already found — see the module header for
+/// why this must not re-run the full discovery probe.
+///
+/// A dependency confirmed [`RestatOutcome::Missing`] is simply omitted
+/// from the returned report's `references_inside` (and NOT recorded in
+/// `unresolved` either) — `compare_host_integrity` reads exactly that
+/// shape as a confirmed `Degraded`. A dependency whose re-stat
+/// [`RestatOutcome::Failed`] is recorded as an `unresolved` entry for its
+/// own source instead, so `compare_host_integrity` reads it as
+/// `Unverified`, never a confirmed negative. A dependency still
+/// [`RestatOutcome::Present`] is carried forward with its freshly
+/// observed identity, whether or not that identity still matches —
+/// `compare_host_integrity` does that comparison.
+pub fn restat_post_action(
+    pre: &ExecutableDependencyReport,
+    restat: &dyn DependencyRestat,
+) -> ProbeOutcome<ExecutableDependencyReport> {
+    let mut references_inside = Vec::with_capacity(pre.references_inside.len());
+    let mut unresolved = Vec::new();
+
+    for dep in &pre.references_inside {
+        match restat.restat(&dep.resolved) {
+            RestatOutcome::Present(exe) => {
+                references_inside.push(DependencyRef { exe, ..dep.clone() });
+            }
+            RestatOutcome::Missing => {}
+            RestatOutcome::Failed => {
+                unresolved.push(UnresolvedRef::SourceUnreadable {
+                    source: dep.source.clone(),
+                });
+            }
+        }
+    }
+
+    ProbeOutcome::Observed(ExecutableDependencyReport {
+        references_inside,
+        running_inside: Vec::new(),
+        unresolved,
+        sources_examined: pre.sources_examined.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -400,5 +506,123 @@ mod tests {
 
         assert_eq!(report.status, IntegrityStatus::Ok);
         assert!(report.entries.is_empty());
+    }
+
+    // --- Real-filesystem integration tests for `restat_post_action` /
+    // `FsDependencyRestat` -----------------------------------------------
+    //
+    // `references_inside` is unconditionally `PROTECTED` by
+    // `classify` step 2b, so an *executed* action's pre-action snapshot
+    // can never carry one in production — `execute()`'s own
+    // class/reason-widening revalidation aborts first (see
+    // `crate::executor::execute`'s module docs). The tests below prove
+    // the underlying re-stat MECHANISM is correct against a real
+    // filesystem (never a mock), independent of that policy-reachability
+    // question, which is addressed in the PR description rather than
+    // here.
+
+    fn real_temp_dir(prefix: &str) -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-host-integrity-{prefix}-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        std::fs::create_dir_all(&dir).expect("create real temp dir");
+        dir
+    }
+
+    fn real_dep_ref(path: &std::path::Path) -> DependencyRef {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(path).expect("fixture file must exist");
+        DependencyRef {
+            source: SourceTag::ClaudeUserSettings,
+            pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            resolved: path.to_path_buf(),
+            exe: crate::evidence::model::ExeIdentity {
+                path: path.to_path_buf(),
+                dev: meta.dev(),
+                ino: meta.ino(),
+            },
+            provenance: Provenance::Observed,
+            next_invocation: true,
+        }
+    }
+
+    /// AC negative control, real filesystem: a disposable hook-dependency
+    /// target whose binary is deleted (standing in for a bad `cargo clean
+    /// --target-dir` sweep) must record DEGRADED via the real
+    /// `fs::symlink_metadata`-based re-stat, not via any fake.
+    #[test]
+    fn real_fs_disposable_hook_target_missing_binary_is_degraded() {
+        let root = real_temp_dir("missing");
+        let hook_path = root.join("hook-binary");
+        std::fs::write(&hook_path, b"#!/bin/sh\necho hook\n").unwrap();
+
+        let dep = real_dep_ref(&hook_path);
+        let pre = clean(vec![dep]);
+        let pre_report = pre.observed().unwrap().clone();
+
+        // The disposable-target cleanup deletes the binary alongside
+        // everything else in the cache.
+        std::fs::remove_file(&hook_path).unwrap();
+
+        let post = restat_post_action(&pre_report, &FsDependencyRestat);
+        let report = compare_host_integrity(&pre, &post);
+
+        assert_eq!(report.status, IntegrityStatus::Degraded);
+        assert_eq!(report.entries[0].status, IntegrityStatus::Degraded);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// AC: a valid, unchanged hook (same path, same real dev/ino on both
+    /// sides) stays OK through the real re-stat mechanism.
+    #[test]
+    fn real_fs_valid_unchanged_hook_is_ok() {
+        let root = real_temp_dir("unchanged");
+        let hook_path = root.join("hook-binary");
+        std::fs::write(&hook_path, b"#!/bin/sh\necho hook\n").unwrap();
+
+        let dep = real_dep_ref(&hook_path);
+        let pre = clean(vec![dep]);
+        let pre_report = pre.observed().unwrap().clone();
+
+        // Nothing touches the hook binary this time.
+        let post = restat_post_action(&pre_report, &FsDependencyRestat);
+        let report = compare_host_integrity(&pre, &post);
+
+        assert_eq!(report.status, IntegrityStatus::Ok);
+        assert_eq!(report.entries[0].status, IntegrityStatus::Ok);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A re-stat failure that is NOT a confirmed absence (simulated here
+    /// via a dependency path whose PARENT directory was removed, which on
+    /// most platforms still yields `NotFound` — so this additionally
+    /// covers the "stale/dangling path" shape) must still never resolve
+    /// to `Ok`. Covered precisely by `unresolvable_post_stat_is_unverified_never_ok`-
+    /// style fixed-table tests above; this real-fs test only confirms
+    /// `FsDependencyRestat` itself classifies a missing parent directory
+    /// as `Missing`, not `Failed` or a panic.
+    #[test]
+    fn real_fs_restat_of_a_path_whose_parent_dir_is_gone_does_not_panic() {
+        let root = real_temp_dir("parent-gone");
+        let hook_path = root.join("subdir").join("hook-binary");
+        std::fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+        std::fs::write(&hook_path, b"x").unwrap();
+        let dep = real_dep_ref(&hook_path);
+
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let outcome = FsDependencyRestat.restat(&dep.resolved);
+        assert!(matches!(outcome, RestatOutcome::Missing));
     }
 }

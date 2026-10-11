@@ -573,7 +573,7 @@ pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
             continue;
         }
 
-        let exec = execute(action, &approval, collector, policy, now);
+        let exec = execute(action, &approval, collector, policy, now, None);
         let actual = exec.actual_reclaimed_bytes.observed().copied();
         let outcome = match exec.outcome {
             ExecutionOutcome::Succeeded => {
