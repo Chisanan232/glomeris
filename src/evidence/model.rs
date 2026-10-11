@@ -1025,6 +1025,26 @@ pub enum UnresolvedRef {
     /// malformed-but-present entry, never silently skipped as if it
     /// simply didn't exist.
     MalformedSchema { source: SourceTag, pointer: String },
+    /// HORO-1826 §4.4: a post-action re-stat of ONE already-known
+    /// dependency's own resolved path failed for a reason that is not a
+    /// confirmed absence (permission denied, I/O error, or an injected
+    /// failure standing in for "the health probe did not complete").
+    ///
+    /// Deliberately its own variant rather than reusing
+    /// [`UnresolvedRef::SourceUnreadable`] (independent-review finding on
+    /// PR #163): `SourceUnreadable` carries no `pointer` BY DESIGN,
+    /// because it means "the whole config file failed to read, which
+    /// blocks every pointer from that source" — a strictly wider claim.
+    /// Reusing it here to mean the narrower "this one dependency's own
+    /// re-stat failed" would make [`UnresolvedRef::pointer`] return
+    /// `None` for a failure that is actually scoped to one pointer,
+    /// which [`crate::evidence::correlate::host_integrity::compare_host_integrity`]
+    /// reads as "matches any pointer from this source" — silently
+    /// masking a genuinely missing SIBLING dependency (same `SourceTag`,
+    /// different pointer, same config file) into `Unverified` instead of
+    /// the correct `Degraded`. This variant keeps the pointer, so that
+    /// masking cannot happen.
+    RestatFailed { source: SourceTag, pointer: String },
 }
 
 impl UnresolvedRef {
@@ -1036,7 +1056,8 @@ impl UnresolvedRef {
             | UnresolvedRef::SourceUnreadable { source }
             | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. }
             | UnresolvedRef::PathResolutionIndeterminate { source, .. }
-            | UnresolvedRef::MalformedSchema { source, .. } => source,
+            | UnresolvedRef::MalformedSchema { source, .. }
+            | UnresolvedRef::RestatFailed { source, .. } => source,
         }
     }
 
@@ -1057,7 +1078,8 @@ impl UnresolvedRef {
             | UnresolvedRef::PathResolutionDivergent { pointer, .. }
             | UnresolvedRef::SymlinkLoopOrTooDeep { pointer, .. }
             | UnresolvedRef::PathResolutionIndeterminate { pointer, .. }
-            | UnresolvedRef::MalformedSchema { pointer, .. } => Some(pointer),
+            | UnresolvedRef::MalformedSchema { pointer, .. }
+            | UnresolvedRef::RestatFailed { pointer, .. } => Some(pointer),
             UnresolvedRef::SourceUnreadable { .. } => None,
         }
     }

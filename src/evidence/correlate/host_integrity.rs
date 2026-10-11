@@ -244,9 +244,15 @@ impl DependencyRestat for FsDependencyRestat {
 /// from the returned report's `references_inside` (and NOT recorded in
 /// `unresolved` either) — `compare_host_integrity` reads exactly that
 /// shape as a confirmed `Degraded`. A dependency whose re-stat
-/// [`RestatOutcome::Failed`] is recorded as an `unresolved` entry for its
-/// own source instead, so `compare_host_integrity` reads it as
-/// `Unverified`, never a confirmed negative. A dependency still
+/// [`RestatOutcome::Failed`] is recorded as an [`UnresolvedRef::RestatFailed`]
+/// entry carrying THIS dependency's own `(source, pointer)` — never
+/// [`UnresolvedRef::SourceUnreadable`] (independent-review finding on PR
+/// #163): that variant's `pointer()` is `None` by design, meaning "the
+/// whole config file failed, every pointer from this source is
+/// unresolved" — reusing it for a single dependency's own restat
+/// failure would silently widen that claim and mask a genuinely missing
+/// SIBLING dependency (same `SourceTag`, different pointer) into
+/// `Unverified` instead of the correct `Degraded`. A dependency still
 /// [`RestatOutcome::Present`] is carried forward with its freshly
 /// observed identity, whether or not that identity still matches —
 /// `compare_host_integrity` does that comparison.
@@ -264,8 +270,9 @@ pub fn restat_post_action(
             }
             RestatOutcome::Missing => {}
             RestatOutcome::Failed => {
-                unresolved.push(UnresolvedRef::SourceUnreadable {
+                unresolved.push(UnresolvedRef::RestatFailed {
                     source: dep.source.clone(),
+                    pointer: dep.pointer.clone(),
                 });
             }
         }
@@ -639,6 +646,94 @@ mod tests {
         assert_eq!(report.entries[0].status, IntegrityStatus::Degraded);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A restat double that returns a fixed [`RestatOutcome`] per path —
+    /// used only where [`FsDependencyRestat`] cannot express the needed
+    /// case (a generic I/O error, as opposed to a confirmed `ENOENT`).
+    struct FixedRestat(std::collections::HashMap<PathBuf, &'static str>);
+
+    impl DependencyRestat for FixedRestat {
+        fn restat(&self, resolved: &std::path::Path) -> RestatOutcome {
+            match self.0.get(resolved).copied() {
+                Some("missing") => RestatOutcome::Missing,
+                Some("failed") => RestatOutcome::Failed,
+                Some(_) | None => panic!("no fixture entry for {}", resolved.display()),
+            }
+        }
+    }
+
+    /// Independent-review finding on PR #163 (round 2): `restat_post_action`
+    /// must give a per-dependency restat failure its OWN `(source,
+    /// pointer)` -- never [`UnresolvedRef::SourceUnreadable`], whose
+    /// pointer-less shape would silently widen "this one dependency's
+    /// restat failed" into "every dependency from this source is
+    /// unresolved", masking a genuinely missing SIBLING into
+    /// `Unverified`. Two dependencies share `SourceTag::ClaudeUserSettings`
+    /// at different pointers: one restats `Failed`, the other restats
+    /// `Missing`. The missing one must still report `Degraded`.
+    #[test]
+    fn a_sibling_dependencys_restat_failure_does_not_mask_a_genuinely_missing_one() {
+        let failed_dep = DependencyRef {
+            pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            resolved: PathBuf::from("/resource/bin/flaky-stat"),
+            ..real_dep_ref_literal("/resource/bin/flaky-stat")
+        };
+        let missing_dep = DependencyRef {
+            pointer: "hooks.PostToolUse[0].hooks[1]".to_string(),
+            resolved: PathBuf::from("/resource/bin/gone"),
+            ..real_dep_ref_literal("/resource/bin/gone")
+        };
+        let pre_report = clean(vec![failed_dep.clone(), missing_dep.clone()])
+            .observed()
+            .unwrap()
+            .clone();
+        let pre = ProbeOutcome::Observed(pre_report.clone());
+
+        let mut table = std::collections::HashMap::new();
+        table.insert(failed_dep.resolved.clone(), "failed");
+        table.insert(missing_dep.resolved.clone(), "missing");
+        let restat = FixedRestat(table);
+
+        let post = restat_post_action(&pre_report, &restat);
+        let report = compare_host_integrity(&pre, &post);
+
+        let missing_entry = report
+            .entries
+            .iter()
+            .find(|e| e.pointer == missing_dep.pointer)
+            .expect("the missing dependency must still be reported");
+        assert_eq!(
+            missing_entry.status,
+            IntegrityStatus::Degraded,
+            "a sibling dependency's own restat failure must not mask a genuinely \
+             missing dependency into Unverified"
+        );
+        let failed_entry = report
+            .entries
+            .iter()
+            .find(|e| e.pointer == failed_dep.pointer)
+            .expect("the failed-restat dependency must still be reported");
+        assert_eq!(failed_entry.status, IntegrityStatus::Unverified);
+        assert_eq!(report.status, IntegrityStatus::Degraded);
+    }
+
+    /// Literal `DependencyRef` builder for a fixed, non-existent path —
+    /// unlike `real_dep_ref`, this never touches the real filesystem,
+    /// which is what the `FixedRestat`-backed test above needs.
+    fn real_dep_ref_literal(path: &str) -> DependencyRef {
+        DependencyRef {
+            source: SourceTag::ClaudeUserSettings,
+            pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            resolved: PathBuf::from(path),
+            exe: crate::evidence::model::ExeIdentity {
+                path: PathBuf::from(path),
+                dev: 1,
+                ino: 2,
+            },
+            provenance: Provenance::Observed,
+            next_invocation: true,
+        }
     }
 
     /// AC: a valid, unchanged hook (same path, same real dev/ino on both
