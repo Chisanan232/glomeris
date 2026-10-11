@@ -194,6 +194,20 @@ impl ActionRegistry {
         }
     }
 
+    /// Test-only seam: builds a registry from an arbitrary action list.
+    /// `actions` is private to this module, so an integration test in
+    /// another module (e.g. `crate::autopilot::run`) has no other way to
+    /// register a test-only [`Action`] alongside, or instead of, the real
+    /// built-in ones (HORO-1826, round-3 independent review of PR #163 —
+    /// needed to exercise `run_autopilot`'s real execution path for a
+    /// resource kind whose only real registered action,
+    /// `HomebrewCleanupCache`, is structurally unexecutable today, per its
+    /// own doc comment).
+    #[cfg(test)]
+    pub(crate) fn from_actions(actions: Vec<Box<dyn Action>>) -> Self {
+        Self { actions }
+    }
+
     /// Every registered action, in registration order — the read-only
     /// enumeration primitive `glomeris actions list --json` (HORO-1047) is
     /// built on, so registering a new action in [`ActionRegistry::builtin`]

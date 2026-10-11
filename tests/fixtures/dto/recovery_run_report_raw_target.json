@@ -23,6 +23,7 @@
   ],
   "detectors_not_examined": [],
   "discovery_complete": false,
+  "host_integrity_notes": [],
   "caveats": [
     "Discovery was incomplete: 1 detector(s) failed, so what they would have found is unknown and the real opportunity may be larger.",
     "This run stopped because no safe candidate remained among the detectors that answered. That is not a finding that nothing safe is left."

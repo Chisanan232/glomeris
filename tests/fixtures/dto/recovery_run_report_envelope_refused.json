@@ -27,5 +27,6 @@
   "detector_failures": [],
   "detectors_not_examined": [],
   "discovery_complete": true,
+  "host_integrity_notes": [],
   "caveats": []
 }

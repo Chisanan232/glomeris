@@ -1025,6 +1025,45 @@ pub enum UnresolvedRef {
     /// malformed-but-present entry, never silently skipped as if it
     /// simply didn't exist.
     MalformedSchema { source: SourceTag, pointer: String },
+    /// HORO-1826 §4.4: a post-action re-stat of ONE already-known
+    /// dependency's own resolved path failed for a reason that is not a
+    /// confirmed absence (permission denied, I/O error, or an injected
+    /// failure standing in for "the health probe did not complete").
+    ///
+    /// Deliberately its own variant rather than reusing
+    /// [`UnresolvedRef::SourceUnreadable`] (independent-review finding on
+    /// PR #163): `SourceUnreadable` carries no `pointer` BY DESIGN,
+    /// because it means "the whole config file failed to read, which
+    /// blocks every pointer from that source" — a strictly wider claim.
+    /// Reusing it here to mean the narrower "this one dependency's own
+    /// re-stat failed" would make [`UnresolvedRef::pointer`] return
+    /// `None` for a failure that is actually scoped to one pointer,
+    /// which [`crate::evidence::correlate::host_integrity::compare_host_integrity`]
+    /// reads as "matches any pointer from this source" — silently
+    /// masking a genuinely missing SIBLING dependency (same `SourceTag`,
+    /// different pointer, same config file) into `Unverified` instead of
+    /// the correct `Degraded`. This variant keeps the pointer, so that
+    /// masking cannot happen.
+    ///
+    /// Also carries `resolved` (round-3 independent review of PR #163):
+    /// `(source, pointer)` is STILL not a unique key for one dependency —
+    /// `resolve_command` can legitimately push multiple [`DependencyRef`]s
+    /// that share one exact `(source, pointer)` (e.g. a command whose head
+    /// AND an absolute-path argument both resolve inside the same
+    /// resource), each with its own `resolved` path. Without `resolved`
+    /// here, this one dependency's own restat failure would match EVERY
+    /// sibling sharing its `(source, pointer)` in
+    /// [`crate::evidence::correlate::host_integrity::compare_host_integrity`],
+    /// masking a genuinely missing sibling (same source, same pointer,
+    /// different `resolved`) into `Unverified` instead of `Degraded` — the
+    /// exact masking bug this variant was introduced to close, recurring
+    /// one level deeper. `resolved` narrows the match back down to this
+    /// one dependency.
+    RestatFailed {
+        source: SourceTag,
+        pointer: String,
+        resolved: PathBuf,
+    },
 }
 
 impl UnresolvedRef {
@@ -1036,7 +1075,56 @@ impl UnresolvedRef {
             | UnresolvedRef::SourceUnreadable { source }
             | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. }
             | UnresolvedRef::PathResolutionIndeterminate { source, .. }
-            | UnresolvedRef::MalformedSchema { source, .. } => source,
+            | UnresolvedRef::MalformedSchema { source, .. }
+            | UnresolvedRef::RestatFailed { source, .. } => source,
+        }
+    }
+
+    /// The structural pointer this unresolved entry is about, when it has
+    /// one. Only [`UnresolvedRef::SourceUnreadable`] carries none — a
+    /// whole config file failed to read, which blocks every entry from
+    /// that source, not just one pointer.
+    ///
+    /// HORO-1826: used to disambiguate two dependencies that share one
+    /// `SourceTag` (e.g. two hooks in the same `ClaudeUserSettings`
+    /// file) — matching on `source()` alone would let one dependency's
+    /// genuinely confirmed `Missing` get masked into `Unverified` by an
+    /// unrelated entry's `unresolved` record for the same source.
+    pub fn pointer(&self) -> Option<&str> {
+        match self {
+            UnresolvedRef::NonInspectable { pointer, .. }
+            | UnresolvedRef::NotOnPath { pointer, .. }
+            | UnresolvedRef::PathResolutionDivergent { pointer, .. }
+            | UnresolvedRef::SymlinkLoopOrTooDeep { pointer, .. }
+            | UnresolvedRef::PathResolutionIndeterminate { pointer, .. }
+            | UnresolvedRef::MalformedSchema { pointer, .. }
+            | UnresolvedRef::RestatFailed { pointer, .. } => Some(pointer),
+            UnresolvedRef::SourceUnreadable { .. } => None,
+        }
+    }
+
+    /// The specific dependency path this unresolved entry is scoped to,
+    /// when it has one. Only [`UnresolvedRef::RestatFailed`] carries a
+    /// `resolved` path — every other variant arises before any candidate
+    /// is resolved to a concrete path at all, so `None` here means the
+    /// wider claim "matches any `resolved` path at this `(source,
+    /// pointer)`", exactly as `pointer()` returning `None` for
+    /// [`UnresolvedRef::SourceUnreadable`] means "matches any pointer at
+    /// this source".
+    ///
+    /// HORO-1826 (round-3 independent review of PR #163): `resolve_command`
+    /// can legitimately push multiple [`DependencyRef`]s sharing one exact
+    /// `(source, pointer)` with different `resolved` paths. Matching a
+    /// [`UnresolvedRef::RestatFailed`] on `(source, pointer)` alone would
+    /// mask a genuinely missing SIBLING dependency (same source, same
+    /// pointer, different `resolved`) into `Unverified` — this accessor
+    /// lets [`crate::evidence::correlate::host_integrity::compare_host_integrity`]
+    /// narrow the match back down to the one dependency this restat
+    /// failure actually concerns.
+    pub fn resolved(&self) -> Option<&std::path::Path> {
+        match self {
+            UnresolvedRef::RestatFailed { resolved, .. } => Some(resolved),
+            _ => None,
         }
     }
 }
@@ -1136,6 +1224,96 @@ impl ExecutableDependencyReport {
         self.references_inside.is_empty()
             && self.running_inside.is_empty()
             && self.unresolved.is_empty()
+    }
+}
+
+/// Tri-state verdict for one dependency's pre/post comparison, or for a
+/// whole run (ADR-0001 §4.4, HORO-1826). `Degraded` and `Unverified` both
+/// withhold confidence; only `Ok` is a positive claim. There is
+/// deliberately no `Default` and no ordering that would let a fold over
+/// several statuses silently settle on `Ok` by omission — callers combine
+/// them explicitly (see
+/// [`crate::evidence::correlate::host_integrity::compare_host_integrity`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityStatus {
+    /// Same resolved path and same (dev, ino) as the pre-action snapshot.
+    Ok,
+    /// Was present pre-action; now missing or changed post-action.
+    Degraded,
+    /// Either probe failed (pre or post), the run crashed/aborted before
+    /// the post-probe could run, or sources_examined was incomplete on
+    /// either side. Never collapsed into `Ok` — a failed observation is
+    /// not a clean one.
+    Unverified,
+}
+
+impl IntegrityStatus {
+    /// Stable snake_case tag — the single producer for every surface that
+    /// needs to render this as a string (CLI `--json`, the audit log),
+    /// following the same convention as [`SourceTag::as_str`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IntegrityStatus::Ok => "ok",
+            IntegrityStatus::Degraded => "degraded",
+            IntegrityStatus::Unverified => "unverified",
+        }
+    }
+}
+
+/// One pre-action [`DependencyRef`] compared against its post-action
+/// counterpart (HORO-1826). Only file identity (`resolved`/`exe`) drives
+/// `status` — a process that was running pre-action and has since exited
+/// is NOT itself a degradation; see
+/// [`ExecutableDependencyReport::running_inside`], which this comparison
+/// never reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependencyIntegrityEntry {
+    pub source: SourceTag,
+    pub pointer: String,
+    pub pre_resolved: PathBuf,
+    pub pre_exe: ExeIdentity,
+    pub status: IntegrityStatus,
+}
+
+/// Whole-run host-integrity report (HORO-1826 §4.4): the HORO-1825 §4.3
+/// dependency report taken immediately before and after an action,
+/// compared per dependency. Produced only when there was something to
+/// verify — see [`crate::executor::execute`]'s gating — never a
+/// placeholder "all OK" for a run nothing was checked on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostIntegrityReport {
+    /// `Ok` only if every entry is `Ok` and both the pre- and post-action
+    /// probes were fully observed with nothing left unresolved. Any
+    /// `Degraded` entry makes this `Degraded`; otherwise any failed/
+    /// incomplete probe makes this `Unverified`. Never `Ok` by default or
+    /// omission (ADR-0001 §4.4).
+    pub status: IntegrityStatus,
+    pub entries: Vec<DependencyIntegrityEntry>,
+}
+
+impl HostIntegrityReport {
+    /// A short, path-free human sentence describing a non-`Ok` verdict,
+    /// or `None` for `Ok` — the single producer for every surface that
+    /// needs to say *why* a run is not all-clear without repeating a raw
+    /// dependency path into a report (ADR-0001 §6 privacy row: host
+    /// config/hook-binary paths are more sensitive than the resource's
+    /// own path and never belong in a reporting surface). Used by both
+    /// the recovery-loop's per-action caveat note
+    /// (`crate::executor::recovery_loop`) and the single-action
+    /// `glomeris execute` report (`crate::reporting::dto::ExecuteReport`),
+    /// so the two surfaces cannot drift into different wording for the
+    /// same fact.
+    pub fn summary_note(&self) -> Option<String> {
+        match self.status {
+            IntegrityStatus::Ok => None,
+            IntegrityStatus::Degraded => Some(format!(
+                "host-dependency integrity DEGRADED ({} dependency record(s))",
+                self.entries.len()
+            )),
+            IntegrityStatus::Unverified => {
+                Some("host-dependency integrity could not be verified".to_string())
+            }
+        }
     }
 }
 

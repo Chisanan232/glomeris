@@ -7,5 +7,8 @@
   "expected_reclaimed_bytes": 2147483648,
   "actual_reclaimed_bytes": 2147483648,
   "expected_reclaimed_human": "2.0 GB",
-  "actual_reclaimed_human": "2.0 GB"
+  "actual_reclaimed_human": "2.0 GB",
+  "host_integrity_status": null,
+  "host_integrity_note": null,
+  "volume_free_delta": null
 }

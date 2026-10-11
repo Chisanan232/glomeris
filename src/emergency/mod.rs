@@ -339,6 +339,11 @@ fn append_self_state_audit_record(
         source: ActionSource::Emergency.to_string(),
         // No model is consulted anywhere in this module (see its docs).
         model_rank: None,
+        // This record is for the self-state deletion, which never goes
+        // through `crate::executor::execute` at all -- there is no
+        // host-integrity/volume-delta concept to report here.
+        host_integrity_status: None,
+        volume_free_delta: None,
     };
     let _ = append_audit_record(audit_log_path, &record);
 }
@@ -510,6 +515,11 @@ fn append_emergency_audit_record(
         source: ActionSource::Emergency.to_string(),
         // Emergency mode never calls a model (see this module's docs).
         model_rank: None,
+        host_integrity_status: report
+            .host_integrity
+            .as_ref()
+            .map(|integrity| integrity.status.as_str().to_string()),
+        volume_free_delta: report.volume_free_delta.observed().copied(),
     };
     let _ = append_audit_record(audit_log_path, &record);
 }
@@ -643,7 +653,11 @@ fn process_candidate(
     };
 
     report.actions_attempted += 1;
-    let exec_report = execute(action, &approval, collector, &cfg, now);
+    // HORO-1826: volume-delta wiring deferred for the emergency path —
+    // flagged in that ticket's PR rather than silently assumed done.
+    // `None` reports `Unavailable(NotAttempted)`, never a fabricated
+    // measurement.
+    let exec_report = execute(action, &approval, collector, &cfg, now, None);
     // HORO-1057: best-effort audit-log append, AFTER the real outcome
     // above is already known. `append_emergency_audit_record` never
     // returns a `Result` its caller could (mis)handle — see that

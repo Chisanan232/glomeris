@@ -208,7 +208,7 @@ fn symlinked_target_with_decoy_neighbor_executes_against_the_real_manifest() {
         .find_for_kind(evidence.resource.kind)
         .expect("a cargo action must be registered for CargoTargetDir");
 
-    let report = execute(action, &approval, &collector, &cfg, now);
+    let report = execute(action, &approval, &collector, &cfg, now, None);
 
     match &report.outcome {
         ExecutionOutcome::Succeeded => {}

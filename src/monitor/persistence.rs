@@ -286,6 +286,23 @@ pub struct AuditRecord {
     /// user's existing audit history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_rank: Option<u32>,
+    /// HORO-1826 §4.4: `"ok"` / `"degraded"` / `"unverified"`, or `None`
+    /// when nothing was mutated, the pre-action probe cleanly found
+    /// nothing to verify, or this record was produced by a path that
+    /// never ran `crate::executor::execute` at all (emergency mode's own
+    /// self-state-deletion record). Never omitted to mean "ok" — see
+    /// `crate::executor::ExecutionReport::host_integrity`'s own doc
+    /// comment.
+    ///
+    /// `#[serde(default)]` for the same backward-compatibility reason as
+    /// `model_rank`: an `actions.jsonl` line written before this field
+    /// existed must still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_integrity_status: Option<String>,
+    /// Signed free-byte delta measured immediately before and after the
+    /// mutating step (ADR-0001 §4.4). `None` when not measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_free_delta: Option<i64>,
 }
 
 /// The single producer of every [`AuditRecord::source`] value (HORO-1312).
@@ -704,6 +721,8 @@ mod tests {
             actual_reclaimed_bytes: Some(1_024),
             source: "execute".to_string(),
             model_rank: None,
+            host_integrity_status: None,
+            volume_free_delta: None,
         }
     }
 

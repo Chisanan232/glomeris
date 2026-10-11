@@ -2182,7 +2182,14 @@ pub fn resolve_and_execute(
 
     match authorize(decision.clone(), ev.fingerprint.clone(), consent.as_ref()) {
         Some(approval) => {
-            let report = execute(action, &approval, collector, cfg, now);
+            let report = execute(
+                action,
+                &approval,
+                collector,
+                cfg,
+                now,
+                Some(&crate::executor::MacosVolumeDelta),
+            );
             // HORO-1057: best-effort audit-log append, AFTER the real
             // outcome is already known. `record_audit`'s `Result` is
             // never inspected here — see that function's doc comment for
@@ -2246,6 +2253,14 @@ fn record_audit(
         // `execute`/`free` act on a resource the user named, never on a
         // model's ranking — only `autopilot` ever sets this.
         model_rank: None,
+        // HORO-1826 §4.4: the audit log is this product's permanent,
+        // append-only record — it must carry the host-integrity verdict
+        // even when `--json`/stdout was never read by anything.
+        host_integrity_status: report
+            .host_integrity
+            .as_ref()
+            .map(|integrity| integrity.status.as_str().to_string()),
+        volume_free_delta: report.volume_free_delta.observed().copied(),
     };
     let _ = crate::monitor::append_audit_record(audit_log_path, &record);
 }
@@ -2266,6 +2281,21 @@ pub fn build_execute_report(report: &ExecutionReport) -> ExecuteReport {
     let expected_reclaimed_bytes = report.expected_reclaimed_bytes.observed().copied();
     let actual_reclaimed_bytes = report.actual_reclaimed_bytes.observed().copied();
 
+    // HORO-1826 §4.4: `glomeris execute` is the primary scripted/
+    // non-interactive mutation path, and must not silently drop the one
+    // signal this whole ticket exists to produce. `host_integrity` is
+    // `Option` on `ExecutionReport` itself (not applicable/not mutated),
+    // so `None` here means exactly that — never "ok by omission".
+    let host_integrity_status = report
+        .host_integrity
+        .as_ref()
+        .map(|integrity| integrity.status.as_str());
+    let host_integrity_note = report
+        .host_integrity
+        .as_ref()
+        .and_then(|integrity| integrity.summary_note());
+    let volume_free_delta = report.volume_free_delta.observed().copied();
+
     ExecuteReport {
         action_id: report.action.0,
         resource_id: report.resource.to_string(),
@@ -2280,6 +2310,9 @@ pub fn build_execute_report(report: &ExecutionReport) -> ExecuteReport {
         // unavailable probe is not zero bytes, and "0 B" would claim it was.
         expected_reclaimed_human: expected_reclaimed_bytes.map(crate::reporting::human_bytes),
         actual_reclaimed_human: actual_reclaimed_bytes.map(crate::reporting::human_bytes),
+        host_integrity_status,
+        host_integrity_note,
+        volume_free_delta,
     }
 }
 
@@ -2311,6 +2344,19 @@ pub fn print_execute_report(report: &ExecuteReport) {
             .clone()
             .unwrap_or_else(|| "unavailable".to_string())
     );
+    // HORO-1826 §4.4: printed whenever it is anything other than silently
+    // "not applicable" — a reclaim-success line above must never be the
+    // only thing a non-interactive caller sees when a host integration
+    // could not be confirmed intact.
+    if let Some(status) = report.host_integrity_status {
+        println!("host integrity:      {status}");
+        if let Some(note) = &report.host_integrity_note {
+            println!("  - {note}");
+        }
+    }
+    if let Some(delta) = report.volume_free_delta {
+        println!("volume free delta:   {delta} bytes");
+    }
 }
 
 #[cfg(test)]
@@ -4672,6 +4718,113 @@ mod execute_tests {
         assert_eq!(audit_record.policy_label, "AUTO_SAFE");
         assert_eq!(audit_record.resource_id, ev.resource.to_string());
         assert!(audit_record.actual_reclaimed_bytes.unwrap_or(0) > 0);
+        // A clean resource with nothing to protect reports "not applicable",
+        // never a trivial "ok" nor silently absent (HORO-1826). Confirmed
+        // non-null for a real `Degraded`/`Unverified` case by
+        // `glomeris_execute_cli_path_surfaces_unverified_host_integrity_end_to_end`
+        // below.
+        assert_eq!(audit_record.host_integrity_status, None);
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A collector whose `executable_dependency` answer is incomplete
+    /// (`unresolved` non-empty) on every call — the same real veto shape
+    /// `recovery_loop.rs`'s equivalent test double stands in for
+    /// (HORO-1825's `ExecutableDependencyUnknown`, a real `Ask` reason an
+    /// action can execute under explicit consent).
+    struct UnresolvedDependencyCollector;
+    impl EvidenceCollector for UnresolvedDependencyCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(
+                    crate::evidence::ExecutableDependencyReport {
+                        references_inside: Vec::new(),
+                        running_inside: Vec::new(),
+                        unresolved: vec![crate::evidence::model::UnresolvedRef::SourceUnreadable {
+                            source: crate::evidence::model::SourceTag::CodexHooks,
+                        }],
+                        sources_examined: vec![crate::evidence::model::SourceTag::CodexHooks],
+                    },
+                ),
+            }
+        }
+    }
+
+    /// HORO-1826 §4.4, the exact regression an independent review of PR
+    /// #163 caught: `glomeris execute`'s REAL, full `resolve_and_execute`
+    /// pipeline must surface a non-`Ok` host-integrity verdict all the
+    /// way through to BOTH `ExecuteReport` (the `--json`/text surface)
+    /// AND the persisted `AuditRecord` — not just inside `execute()`
+    /// itself, where a prior draft computed it faithfully and then
+    /// discarded it before either surface.
+    #[test]
+    fn glomeris_execute_cli_path_surfaces_unverified_host_integrity_end_to_end() {
+        let root = make_temp_dir("execute-cli-host-integrity");
+        let target = root.join("node_modules");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("pkg.js"), vec![0u8; 16]).unwrap();
+
+        let now = SystemTime::now();
+        let collector = UnresolvedDependencyCollector;
+        let candidates = discover_one(&target, ResourceKind::NodeModules, &collector, now);
+        let (ev, decision) = &candidates[0];
+        assert_eq!(
+            decision.class,
+            PolicyClass::Ask,
+            "an incomplete executable-dependency probe must veto AutoSafe for this test \
+             to exercise the real Ask+consent path"
+        );
+
+        let actions = ActionRegistry::builtin();
+        let action = resolve_action_for(ev, &actions).unwrap();
+        let matching_fingerprint = token_for(&ev.fingerprint);
+        let audit_log_path = root.join("actions.jsonl");
+
+        let resolution = resolve_and_execute(
+            &candidates,
+            &actions,
+            &ev.resource.to_string(),
+            action.id().0,
+            Some(matching_fingerprint),
+            &collector,
+            &PolicyConfig::default(),
+            now,
+            &audit_log_path,
+        );
+
+        let ExecuteResolution::Executed(report) = resolution else {
+            panic!("expected Executed(_), got {resolution:?}");
+        };
+        assert_eq!(report.outcome, ExecutionOutcome::Succeeded);
+        assert!(
+            !target.exists(),
+            "the real fixture must actually be deleted"
+        );
+
+        // Surface 1: the DTO `glomeris execute`'s text/--json output renders.
+        let execute_report = build_execute_report(&report);
+        assert_eq!(
+            execute_report.host_integrity_status,
+            Some("unverified"),
+            "an incomplete pre-action host-dependency sweep must reach ExecuteReport, \
+             never silently stay None"
+        );
+        assert!(execute_report.host_integrity_note.is_some());
+
+        // Surface 2: the permanent, append-only audit log.
+        let audit_tail = crate::monitor::read_audit_tail(&audit_log_path, 10);
+        assert_eq!(audit_tail.len(), 1);
+        assert_eq!(
+            audit_tail[0].host_integrity_status.as_deref(),
+            Some("unverified"),
+            "the audit record must carry the same verdict as ExecuteReport -- a reader \
+             of actions.jsonl alone must still see it"
+        );
 
         fs::remove_dir_all(&root).ok();
     }
@@ -4767,6 +4920,8 @@ mod execute_tests {
                 outcome,
                 expected_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
                 actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+                host_integrity: None,
+                volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             }
         }
 
@@ -4822,6 +4977,76 @@ mod execute_tests {
                 }
             }
         }
+    }
+
+    /// HORO-1826 §4.4: `build_execute_report` — the single projection
+    /// `glomeris execute`'s text and `--json` output both read — must
+    /// surface a real `Degraded` host-integrity verdict and a real
+    /// signed `volume_free_delta`, never silently drop them. This is the
+    /// exact regression an independent review of PR #163 caught: the
+    /// first draft computed both fields faithfully inside `execute()`
+    /// and then discarded them before they ever reached `ExecuteReport`.
+    #[test]
+    fn build_execute_report_surfaces_degraded_host_integrity_and_volume_delta() {
+        use crate::evidence::model::{
+            DependencyIntegrityEntry, ExeIdentity, HostIntegrityReport, IntegrityStatus, SourceTag,
+        };
+
+        let report = ExecutionReport {
+            action: crate::evidence::model::ActionId("test.action"),
+            resource: ResourceId::new(
+                ResourceKind::NodeModules,
+                ResourceLocator::Path(PathBuf::from("/tmp/does-not-matter")),
+            ),
+            outcome: ExecutionOutcome::Succeeded,
+            expected_reclaimed_bytes: ProbeOutcome::Observed(1_024),
+            actual_reclaimed_bytes: ProbeOutcome::Observed(1_024),
+            host_integrity: Some(HostIntegrityReport {
+                status: IntegrityStatus::Degraded,
+                entries: vec![DependencyIntegrityEntry {
+                    source: SourceTag::ClaudeUserSettings,
+                    pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+                    pre_resolved: PathBuf::from("/resource/bin/hook"),
+                    pre_exe: ExeIdentity {
+                        path: PathBuf::from("/resource/bin/hook"),
+                        dev: 1,
+                        ino: 2,
+                    },
+                    status: IntegrityStatus::Degraded,
+                }],
+            }),
+            volume_free_delta: ProbeOutcome::Observed(-512),
+        };
+
+        let execute_report = build_execute_report(&report);
+
+        assert_eq!(
+            execute_report.host_integrity_status,
+            Some("degraded"),
+            "a Degraded ExecutionReport.host_integrity must not be dropped on its way \
+             into ExecuteReport"
+        );
+        assert_eq!(
+            execute_report.host_integrity_note.as_deref(),
+            Some("host-dependency integrity DEGRADED (1 dependency record(s))")
+        );
+        assert_eq!(
+            execute_report.volume_free_delta,
+            Some(-512),
+            "a negative (regrowth) volume_free_delta must not be dropped either"
+        );
+
+        // The clean/not-applicable case must stay distinguishable from the
+        // above, not collapse to the same "nothing to report" shape.
+        let clean_report = ExecutionReport {
+            host_integrity: None,
+            volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            ..report
+        };
+        let clean_execute_report = build_execute_report(&clean_report);
+        assert_eq!(clean_execute_report.host_integrity_status, None);
+        assert_eq!(clean_execute_report.host_integrity_note, None);
+        assert_eq!(clean_execute_report.volume_free_delta, None);
     }
 
     /// A resource whose `--action-id` does not match what actually

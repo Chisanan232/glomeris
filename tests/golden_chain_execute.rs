@@ -175,7 +175,7 @@ fn real_autosafe_candidate_executes_successfully_and_frees_real_bytes() {
         .find_for_kind(evidence.resource.kind)
         .expect("a node action must be registered for NodeModules");
 
-    let report = execute(action, &approval, &collector, &cfg, now);
+    let report = execute(action, &approval, &collector, &cfg, now, None);
 
     match &report.outcome {
         ExecutionOutcome::Succeeded => {}

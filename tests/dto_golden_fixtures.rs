@@ -321,6 +321,11 @@ fn execute_report_succeeded_matches_golden_fixture() {
         // 524_288_000, HORO-1310).
         expected_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
         actual_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
+        // HORO-1826: no recognized host dependency referenced this
+        // resource pre-action, so there was nothing to verify.
+        host_integrity_status: None,
+        host_integrity_note: None,
+        volume_free_delta: None,
     };
     assert_matches_fixture(&report, "execute_report_succeeded.json");
 }
@@ -340,8 +345,39 @@ fn execute_report_aborted_by_revalidation_matches_golden_fixture() {
         // the same claim as "0 B". Pinned as null so a client rendering this
         // row cannot report a successful zero-byte cleanup.
         actual_reclaimed_human: None,
+        // Nothing was mutated -- there is no run to verify integrity for.
+        host_integrity_status: None,
+        host_integrity_note: None,
+        volume_free_delta: None,
     };
     assert_matches_fixture(&report, "execute_report_aborted.json");
+}
+
+/// HORO-1826 §4.4: `glomeris execute --json` must surface a non-OK
+/// host-integrity verdict, never silently drop it the way an earlier
+/// draft of this ticket's implementation did (caught by independent
+/// review on PR #163). Also pins `volume_free_delta`'s signed shape.
+#[test]
+fn execute_report_degraded_host_integrity_matches_golden_fixture() {
+    let report = ExecuteReport {
+        action_id: "cargo.clean.target_dir",
+        resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+        outcome: "succeeded",
+        failure_message: None,
+        abort_reason: None,
+        expected_reclaimed_bytes: Some(2_147_483_648),
+        actual_reclaimed_bytes: Some(2_147_483_648),
+        expected_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
+        actual_reclaimed_human: Some(glomeris::reporting::human_bytes(2_147_483_648)),
+        host_integrity_status: Some("degraded"),
+        host_integrity_note: Some(
+            "host-dependency integrity DEGRADED (1 dependency record(s))".to_string(),
+        ),
+        // A negative delta is a genuine observation (concurrent writer
+        // outpacing this action), never clamped to zero.
+        volume_free_delta: Some(-512),
+    };
+    assert_matches_fixture(&report, "execute_report_degraded_host_integrity.json");
 }
 
 /// HORO-1308. The fixture deliberately holds all three shapes the AI Plan
@@ -1438,6 +1474,7 @@ fn recovery_run_report_matches_golden_fixture() {
         final_free_bytes: 210_000_000_000,
         detector_failures: vec![],
         detectors_not_examined: vec![],
+        host_integrity_notes: vec![],
     };
     // 210 GB free of 500 GB is 42% free, which clears the goal's 40% floor —
     // so `target_met` is decided by the re-measured reading, not by the
@@ -1480,6 +1517,7 @@ fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
         final_free_bytes: 62_147_483_648,
         detector_failures: vec!["homebrew_cache: brew --cache exited 1".to_string()],
         detectors_not_examined: vec![],
+        host_integrity_notes: vec![],
     };
     let report = build_recovery_run_report(None, &target, 500_000_000_000, &inner);
     assert_matches_fixture(&report, "recovery_run_report_raw_target.json");
@@ -1524,6 +1562,7 @@ fn recovery_run_report_for_an_envelope_refusal_matches_golden_fixture() {
         final_free_bytes: 65_368_709_120,
         detector_failures: vec![],
         detectors_not_examined: vec![],
+        host_integrity_notes: vec![],
     };
     // 65.4 GB free of 500 GB is 13% free, well short of the goal's 40% floor:
     // the run really did stop early, and `target_met` says so from the
@@ -1556,6 +1595,7 @@ fn a_pre_discovery_envelope_refusal_omits_the_remaining_breakdown() {
         final_free_bytes: 60_000_000_000,
         detector_failures: vec![],
         detectors_not_examined: vec![],
+        host_integrity_notes: vec![],
     };
     let report = build_recovery_run_report(
         None,
