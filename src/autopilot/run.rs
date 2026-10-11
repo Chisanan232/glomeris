@@ -1326,16 +1326,24 @@ mod tests {
         );
         assert!(audit[0].actual_reclaimed_bytes.is_some_and(|b| b > 0));
         // HORO-1826 (round-2 independent review of PR #163): the field
-        // must be present (carried through, never omitted), even though
-        // `None` is the only value an `AutoSafe` candidate can honestly
-        // report here -- `classify()` only reaches `AutoSafe` from a
-        // COMPLETE, clean `executable_dependency` probe (empty
-        // `unresolved`, empty `references_inside`), which is exactly
-        // the "nothing to protect" case `compute_host_integrity` skips
-        // by design (see its own doc comment in `executor/mod.rs`). A
-        // non-`None` value is reachable through Autopilot only via the
-        // direct-unit-test below:
-        // `append_autopilot_audit_record_carries_host_integrity_and_volume_delta_from_the_execution_report`.
+        // must be present (carried through, never omitted). `None` here
+        // is NOT "the only value an `AutoSafe` candidate can honestly
+        // report" in general (round-3 independent review of PR #163
+        // corrected that overclaim -- see
+        // `an_auto_safe_non_executable_bearing_candidate_with_unresolved_dependencies_reports_unverified_through_the_real_run_path`
+        // below for the counter-case). It is `None` specifically for
+        // `NodeModules` here because `ev.resource.kind.is_executable_bearing()`
+        // is `true` for it (`policy::engine::classify` step 6 / ADR-0001
+        // §5, §8): a non-empty `unresolved` on an executable-bearing kind
+        // vetoes to `Ask` before `AutoSafe` is ever reached, so `AutoSafe`
+        // for THIS kind only arrives from a COMPLETE, clean
+        // `executable_dependency` probe (empty `unresolved`, empty
+        // `references_inside`) -- exactly the "nothing to protect" case
+        // `compute_host_integrity` skips by design (see its own doc
+        // comment in `executor/mod.rs`). A kind that is NOT
+        // executable-bearing (e.g. `HomebrewCache`) carries no such veto,
+        // so it can reach `AutoSafe` with `unresolved` still non-empty,
+        // and `compute_host_integrity` then reports `Some(Unverified)`.
         assert_eq!(audit[0].host_integrity_status, None);
 
         fs::remove_dir_all(&root).ok();
@@ -1347,16 +1355,17 @@ mod tests {
     /// audit-log writer -- not just that the function signature accepts
     /// the values.
     ///
-    /// A real full `run()` cannot exercise a non-`None` host-integrity
-    /// verdict here: `classify()` only reaches `AutoSafe` from a clean,
-    /// complete dependency probe (the only `None`-producing case for
-    /// this field, by design), and `ExecutableDependencyUnknown` --
-    /// which WOULD drive a non-`None` verdict -- is explicitly NOT
-    /// preauthorizable (ADR-0001 §5), so Autopilot can never admit a
-    /// candidate that carries it. This test therefore exercises
-    /// `append_autopilot_audit_record` directly, the same way a unit
-    /// test of a pure function would, rather than threading a fake all
-    /// the way through `run_autopilot`'s real admission/execution path.
+    /// This test exercises `append_autopilot_audit_record` directly, the
+    /// same way a unit test of a pure function would, rather than
+    /// threading a fake all the way through `run_autopilot`'s real
+    /// admission/execution path. That is a coverage gap, not a structural
+    /// impossibility (round-3 independent review of PR #163 corrected an
+    /// earlier claim here that a real `run()` could never exercise a
+    /// non-`None` verdict -- it can, for a non-executable-bearing kind
+    /// like `HomebrewCache`; see
+    /// `an_auto_safe_non_executable_bearing_candidate_with_unresolved_dependencies_reports_unverified_through_the_real_run_path`
+    /// below, which closes that gap through the real `run_autopilot` path
+    /// with a test-only registered action).
     #[test]
     fn append_autopilot_audit_record_carries_host_integrity_and_volume_delta_from_the_execution_report(
     ) {
@@ -1389,6 +1398,184 @@ mod tests {
         assert_eq!(audit[0].volume_free_delta, Some(-512));
 
         fs::remove_dir_all(&audit_root).ok();
+    }
+
+    // --- HORO-1826 round-3: non-executable-bearing kind, real `run()` path ---
+
+    /// Test-only [`crate::actions::Action`] for [`ResourceKind::HomebrewCache`]
+    /// that actually deletes the scoped path. The real registered action,
+    /// `HomebrewCleanupCache`, has `scoped_path: None` by design and is
+    /// therefore refused by `executor::structural_refusal` before
+    /// `execute()` is ever called (see `an_unrunnable_action_is_ineligible_
+    /// rather_than_a_failed_attempt` above) — which means it can never
+    /// reach `compute_host_integrity` through `run_autopilot`. This stands
+    /// in for "some real, runnable action exists for a non-executable-
+    /// bearing kind" so the test below can exercise that path for real,
+    /// rather than asserting something only true because no such action
+    /// happens to be registered today.
+    struct TestHomebrewDeletePath;
+
+    impl crate::actions::Action for TestHomebrewDeletePath {
+        fn id(&self) -> ActionId {
+            ActionId("test.homebrew.delete_path")
+        }
+
+        fn applies_to(&self) -> &'static [ResourceKind] {
+            &[ResourceKind::HomebrewCache]
+        }
+
+        fn required_evidence(&self) -> &'static [crate::evidence::model::EvidenceField] {
+            &[crate::evidence::model::EvidenceField::ReclaimableBytes]
+        }
+
+        fn recoverability(&self) -> Recoverability {
+            Recoverability::RegenerableByTool
+        }
+
+        fn plan(
+            &self,
+            ev: &Evidence,
+        ) -> Result<crate::actions::ActionPlan, crate::actions::ActionError> {
+            if ev.resource.kind != ResourceKind::HomebrewCache {
+                return Err(crate::actions::ActionError::ResourceMismatch);
+            }
+            let path = match &ev.resource.locator {
+                ResourceLocator::Path(p) => p.clone(),
+                ResourceLocator::Tool { .. } => {
+                    return Err(crate::actions::ActionError::Unsupported(
+                        "HomebrewCache resource must be a Path locator".to_string(),
+                    ))
+                }
+            };
+            Ok(crate::actions::ActionPlan {
+                action: self.id(),
+                resource: ev.resource.clone(),
+                steps: vec![crate::actions::ActionStep::DeletePath { path }],
+                expected_reclaimed_bytes: ev.reclaimable_bytes.clone(),
+                explain: "test-only direct delete of a HomebrewCache fixture".to_string(),
+            })
+        }
+    }
+
+    /// Returns a non-empty, non-vetoing `unresolved` for `HomebrewCache`
+    /// candidates and the same clean report `CleanCollector` returns for
+    /// everything else — standing in for the real host-dependency probe
+    /// finding something it could not resolve (e.g. the malformed-Codex-
+    /// config `SourceUnreadable` case at `host_dependency.rs:1075-1080`).
+    struct UnresolvedHomebrewCollector;
+
+    impl EvidenceCollector for UnresolvedHomebrewCollector {
+        fn collect(&self, id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            let executable_dependency = if id.kind == ResourceKind::HomebrewCache {
+                ProbeOutcome::Observed(crate::evidence::ExecutableDependencyReport {
+                    references_inside: Vec::new(),
+                    running_inside: Vec::new(),
+                    unresolved: vec![crate::evidence::model::UnresolvedRef::SourceUnreadable {
+                        source: crate::evidence::model::SourceTag::CodexHooks,
+                    }],
+                    sources_examined: vec![crate::evidence::model::SourceTag::CodexHooks],
+                })
+            } else {
+                ProbeOutcome::Observed(crate::evidence::ExecutableDependencyReport::empty())
+            };
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::<ProcessRef>::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency,
+            }
+        }
+    }
+
+    /// HORO-1826 (round-3 independent review of PR #163): the comment this
+    /// test's sibling (`a_real_auto_safe_run_deletes_the_fixture_and_audits_
+    /// the_autopilot_source`) used to carry claimed `None` is "the only
+    /// value an `AutoSafe` candidate can honestly report here". That is
+    /// false per ADR-0001 §5/§8: the `unresolved` -> `Ask` veto in
+    /// `policy::engine::classify` is scoped to executable-bearing kinds
+    /// only (`ResourceKind::is_executable_bearing`), and `HomebrewCache` is
+    /// NOT one of them. A `HomebrewCache` candidate can therefore reach
+    /// `AutoSafe` with a non-empty `unresolved` still attached, and
+    /// `compute_host_integrity` then reports `Some(Unverified)`, not
+    /// `None` -- exercised here end to end through the REAL `run_autopilot`
+    /// entry point (not by calling `append_autopilot_audit_record`
+    /// directly, which the round-2 test above already does and which
+    /// cannot catch a regression at the real call site: mutating that call
+    /// site to pass `None, None` left it, and all other `autopilot::`
+    /// tests, green).
+    #[test]
+    fn an_auto_safe_non_executable_bearing_candidate_with_unresolved_dependencies_reports_unverified_through_the_real_run_path(
+    ) {
+        assert!(
+            !ResourceKind::HomebrewCache.is_executable_bearing(),
+            "this test's premise is that HomebrewCache does not veto on \
+             unresolved -- if that ever changes, this test needs a \
+             different non-executable-bearing kind"
+        );
+
+        let fixture = Fixture {
+            actions: ActionRegistry::from_actions(vec![Box::new(TestHomebrewDeletePath)]),
+            policy: PolicyConfig::default(),
+            audit_log: {
+                let root = make_temp_dir("autopilot-audit-homebrew-unverified");
+                root.join("actions.jsonl")
+            },
+            _audit_root: PathBuf::new(),
+        };
+
+        let brew_root = make_temp_dir("brew-cache-unresolved");
+        let cache = brew_root.join("Cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(cache.join("some.bottle.tar.gz"), vec![0u8; 8192]).unwrap();
+        let brew = evidence_for(
+            &cache,
+            ResourceKind::HomebrewCache,
+            Regenerability::RegenerableByTool,
+            8192,
+        );
+        let envelope = enabled_envelope(&[ResourceKind::HomebrewCache]);
+
+        let report = run_autopilot(AutopilotRunRequest {
+            envelope: &envelope,
+            candidates: vec![brew],
+            model_order: &[],
+            collector: &UnresolvedHomebrewCollector,
+            actions: &fixture.actions,
+            policy: &fixture.policy,
+            observed_pressure: Some(PressureState::Pressured),
+            now: SystemTime::now(),
+            started_at: Instant::now(),
+            audit_log_path: &fixture.audit_log,
+            dry_run: false,
+        });
+
+        // Positive controls: this candidate really did reach AutoSafe and
+        // really did execute -- a HomebrewCache with non-empty
+        // `unresolved` does NOT veto to Ask, unlike an executable-bearing
+        // kind would.
+        assert_eq!(report.safety_refusals(), 0, "not a policy denial");
+        assert_eq!(report.items[0].policy_label, "AUTO_SAFE");
+        assert_eq!(
+            report.items[0].outcome,
+            AutopilotItemOutcome::Succeeded {
+                reclaimed_bytes: Some(8192)
+            },
+            "expected a real execution through the test-only runnable action"
+        );
+        assert!(!cache.exists());
+
+        let audit = read_audit_tail(&fixture.audit_log, 8);
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].host_integrity_status.as_deref(),
+            Some("unverified"),
+            "a non-executable-bearing AutoSafe candidate with non-empty \
+             `unresolved` must report Unverified, never None -- that is \
+             the exact claim the corrected comment above documents"
+        );
+
+        fs::remove_dir_all(&brew_root).ok();
     }
 
     #[test]
