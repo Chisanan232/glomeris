@@ -268,6 +268,10 @@ final class DtoGoldenFixturesTests: XCTestCase {
             dto.workspaces.isEmpty,
             "an older CLI reports no families, which is not the same as having none"
         )
+        // HORO-1828: an older CLI never claimed anything about eligibility.
+        // `"nothing_eligible"` is the honest default — never `"eligible"`,
+        // which would wrongly promise automatic safe work exists.
+        XCTAssertEqual(dto.eligibility, "nothing_eligible")
     }
 
     // MARK: - WorkspaceFamilyReport (HORO-1511)
@@ -855,6 +859,15 @@ final class DtoGoldenFixturesTests: XCTestCase {
             dto.notConfiguredDetectors.isEmpty,
             "this preview's gap is a failure, and the two lists must not borrow each other"
         )
+
+        // HORO-1828: discovery is incomplete here, so eligibility must say so
+        // regardless of the AUTO_SAFE candidate the fixture also carries.
+        XCTAssertEqual(dto.eligibility, "discovery_incomplete")
+        XCTAssertEqual(dto.guarded.count, 3)
+        XCTAssertEqual(dto.guarded.first?.policyLabel, "UNKNOWN_INCOMPLETE")
+        XCTAssertEqual(dto.feasibility.verdict, "insufficient_observation")
+        XCTAssertEqual(dto.feasibility.elapsedSecs, 0)
+        XCTAssertEqual(dto.feasibility.requiredSecs, 43200)
     }
 
     /// The already-met goal, which is the state the card must not offer a
@@ -885,6 +898,75 @@ final class DtoGoldenFixturesTests: XCTestCase {
             },
             "the preview must say a real run would be refused: \(dto.caveats)"
         )
+
+        // HORO-1828: the goal is already met even though this fixture's
+        // stability reading is `InsufficientObservation` (no samples ring
+        // populated) — proving the already-at-goal check is never masked by
+        // the stability gate. See
+        // `feasibility::tests::already_at_goal_even_when_observation_is_insufficient`
+        // on the Rust side for the matching mutation-test anchor.
+        XCTAssertEqual(dto.feasibility.verdict, "already_at_goal")
+        XCTAssertNil(dto.feasibility.gapBytes)
+        XCTAssertNil(dto.feasibility.elapsedSecs)
+    }
+
+    /// HORO-1828: discovery itself did not finish (one `failed` detector, one
+    /// `not_configured`), alongside a candidate that would otherwise be
+    /// eligible on its own. `eligibility` must say `discovery_incomplete`
+    /// regardless.
+    func testDecodesRecoveryPreviewReportDiscoveryIncomplete() throws {
+        let dto = try decodeFixture(
+            "recovery_preview_report_discovery_incomplete.json",
+            as: RecoveryPreviewReportDto.self
+        )
+        XCTAssertEqual(dto.eligibility, "discovery_incomplete")
+        XCTAssertFalse(dto.discoveryComplete)
+    }
+
+    /// HORO-1828: a large `PROTECTED` candidate's bytes must never count
+    /// toward "reachable with consent" — only the ASK candidate's bytes may.
+    /// If a future change folded PROTECTED bytes into the consent-reachable
+    /// estimate, `feasibility.verdict` would read `reachable_requires_consent`
+    /// instead of `unreachable`, which is exactly what this test would catch.
+    func testDecodesRecoveryPreviewReportTargetUnreachable() throws {
+        let dto = try decodeFixture(
+            "recovery_preview_report_target_unreachable.json",
+            as: RecoveryPreviewReportDto.self
+        )
+        XCTAssertEqual(dto.feasibility.verdict, "unreachable")
+        XCTAssertEqual(dto.feasibility.consentReachableEstimateBytes, 2_000_000_000)
+        XCTAssertTrue(
+            dto.guarded.contains {
+                $0.policyLabel == "PROTECTED" && $0.estimatedBytes == 900_000_000_000
+            },
+            "the PROTECTED candidate's bytes must appear in `guarded`: \(dto.guarded)"
+        )
+    }
+
+    /// Backward compatibility: a CLI predating HORO-1828 omits `eligibility`,
+    /// `guarded` and `feasibility` entirely. The report must still decode,
+    /// defaulting to the honest "this binary never claimed anything about
+    /// this" values rather than failing the whole document.
+    func testRecoveryPreviewReportStillDecodesWithoutTheEligibilityGuardedFeasibilityKeys() throws {
+        let json = """
+        {"goal":{"used_percent":60.0,"free_percent":40.0,"description":"60% used (40% free)"},
+        "current":{"total_bytes":1,"free_bytes":1,"used_percent":0.0,"free_human":"1 B",
+        "total_human":"1 B","pressure_state":"OK"},
+        "required_free_bytes":1,"required_free_human":"1 B",
+        "bytes_needed":0,"bytes_needed_human":"0 B",
+        "opportunity":{"actionable_now_count":0,"actionable_now_bytes":0,
+        "actionable_now_human":"0 B","requires_confirmation_count":0,
+        "requires_confirmation_bytes":0,"requires_confirmation_human":"0 B",
+        "not_executable_count":0,"protected_count":0,"is_lower_bound":false},
+        "goal_appears_reachable":true,"discovery_complete":true,
+        "caveats":[],"detectors":[],"candidates":[]}
+        """
+        let dto = try JSONDecoder().decode(RecoveryPreviewReportDto.self, from: Data(json.utf8))
+
+        XCTAssertEqual(dto.eligibility, "nothing_eligible")
+        XCTAssertTrue(dto.guarded.isEmpty)
+        XCTAssertEqual(dto.feasibility.verdict, "insufficient_observation")
+        XCTAssertFalse(dto.feasibility.regrowthRisk)
     }
 
     /// The preview exists to stop a goal being sold as achievable on the

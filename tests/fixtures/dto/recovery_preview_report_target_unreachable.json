@@ -1,0 +1,135 @@
+{
+  "goal": {
+    "used_percent": 95.0,
+    "free_percent": 5.0,
+    "description": "95% used (5% free)"
+  },
+  "current": {
+    "total_bytes": 500000000000,
+    "free_bytes": 10000000000,
+    "used_percent": 98.0,
+    "free_human": "9.3 GB",
+    "total_human": "465.7 GB",
+    "pressure_state": "EMERGENCY"
+  },
+  "required_free_bytes": 25000000000,
+  "required_free_human": "23.3 GB",
+  "bytes_needed": 15000000000,
+  "bytes_needed_human": "14.0 GB",
+  "opportunity": {
+    "actionable_now_count": 1,
+    "actionable_now_bytes": 1000000000,
+    "actionable_now_human": "953.7 MB",
+    "requires_confirmation_count": 1,
+    "requires_confirmation_bytes": 2000000000,
+    "requires_confirmation_human": "1.9 GB",
+    "not_executable_count": 1,
+    "protected_count": 1,
+    "is_lower_bound": false
+  },
+  "goal_appears_reachable": false,
+  "discovery_complete": true,
+  "caveats": [
+    "Reclaimable figures are detector estimates. Actual progress is measured from the filesystem after each action.",
+    "1 candidate(s) need your confirmation and will not be reclaimed automatically.",
+    "1 candidate(s) are protected and cannot be reclaimed by any run."
+  ],
+  "detectors": [
+    {
+      "detector": "cargo_target_dir",
+      "status": "found",
+      "candidates_found": 2
+    }
+  ],
+  "candidates": [
+    {
+      "resource_id": "cargo_target_dir:/Users/dev/proj/target",
+      "kind": "cargo_target_dir",
+      "reclaimable_bytes": 1000000000,
+      "reclaimable_human": "953.7 MB",
+      "reclaimable_bytes_is_lower_bound": false,
+      "impact_tier": "notable",
+      "policy_label": "AUTO_SAFE",
+      "reasons": [
+        "no_active_use_observed"
+      ],
+      "executable": true,
+      "offered_actions": [
+        {
+          "action_id": "cargo.clean.target_dir",
+          "requires_confirmation": false
+        }
+      ],
+      "refusal_reason": null
+    },
+    {
+      "resource_id": "node_modules:/Users/dev/proj/node_modules",
+      "kind": "node_modules",
+      "reclaimable_bytes": 2000000000,
+      "reclaimable_human": "1.9 GB",
+      "reclaimable_bytes_is_lower_bound": false,
+      "impact_tier": "notable",
+      "policy_label": "ASK",
+      "reasons": [
+        "rebuild_cost_high"
+      ],
+      "executable": true,
+      "offered_actions": [
+        {
+          "action_id": "node.remove.node_modules",
+          "requires_confirmation": true
+        }
+      ],
+      "refusal_reason": null
+    },
+    {
+      "resource_id": "cargo_target_dir:/Users/shared/target",
+      "kind": "cargo_target_dir",
+      "reclaimable_bytes": 900000000000,
+      "reclaimable_human": "838.2 GB",
+      "reclaimable_bytes_is_lower_bound": false,
+      "impact_tier": "large",
+      "policy_label": "PROTECTED",
+      "reasons": [
+        "protected_executable_dependency"
+      ],
+      "executable": false,
+      "offered_actions": [],
+      "refusal_reason": "PROTECTED: protected_executable_dependency"
+    }
+  ],
+  "eligibility": "eligible",
+  "guarded": [
+    {
+      "policy_label": "PROTECTED",
+      "reason": "protected_executable_dependency",
+      "count": 1,
+      "estimated_bytes": 900000000000,
+      "estimated_human": "838.2 GB",
+      "bytes_unknown_count": 0,
+      "is_lower_bound": false
+    },
+    {
+      "policy_label": "ASK",
+      "reason": "rebuild_cost_high",
+      "count": 1,
+      "estimated_bytes": 2000000000,
+      "estimated_human": "1.9 GB",
+      "bytes_unknown_count": 0,
+      "is_lower_bound": false
+    }
+  ],
+  "feasibility": {
+    "verdict": "unreachable",
+    "gap_bytes": 15000000000,
+    "gap_human": "14.0 GB",
+    "auto_safe_estimate_bytes": 1000000000,
+    "auto_safe_estimate_human": "953.7 MB",
+    "consent_reachable_estimate_bytes": 2000000000,
+    "consent_reachable_estimate_human": "1.9 GB",
+    "measured_actual_reclaimed_bytes": 0,
+    "measured_actual_reclaimed_human": "0 B",
+    "regrowth_risk": false,
+    "snapshots_may_delay_recovery": false
+  }
+}

@@ -143,6 +143,14 @@ final class ScanState: ObservableObject {
     /// Neither is a failure, and the card draws nothing for either.
     @Published var workspaces: [WorkspaceFamilyReportDto] = []
 
+    /// What, if anything, there is to do right now (HORO-1828) — written in
+    /// the same turn as `candidates` for the same reason `failedDetectors`
+    /// is: this is a derived summary of that same report, and a scan apart
+    /// would let the headline disagree with the list underneath it.
+    /// Defaults to `"nothing_eligible"`, the same honest default
+    /// `DetectReportDto` itself uses for a CLI that predates the field.
+    @Published var eligibility: String = "nothing_eligible"
+
     /// HORO-1307 view controls. Both default to "show me everything, in the
     /// order Glomeris recommends", so the panel a user opens for the first
     /// time is never silently filtered.

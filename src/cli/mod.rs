@@ -564,6 +564,8 @@ pub fn build_detect_report(
     let discovery_complete = !detectors
         .iter()
         .any(|(_, outcome)| outcome.left_discovery_incomplete());
+    let eligibility =
+        crate::reporting::eligibility_verdict(discovery_complete, &candidates).as_str();
     DetectReport {
         candidates,
         detectors: detectors
@@ -580,6 +582,7 @@ pub fn build_detect_report(
             .iter()
             .map(WorkspaceFamilyReport::from_family)
             .collect(),
+        eligibility,
     }
 }
 

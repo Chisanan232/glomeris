@@ -9,12 +9,14 @@
 
 pub mod bytes;
 pub mod dto;
+pub mod eligibility;
 pub mod impact;
 pub mod policy_label;
 pub mod ranking;
 pub mod used_percent;
 
 pub use bytes::human_bytes;
+pub use eligibility::{eligibility_verdict, EligibilityVerdict};
 pub use impact::{classify_impact, ImpactContext, ImpactThresholds, StorageImpactTier};
 pub use policy_label::{label_for, PolicyLabel};
 pub use used_percent::{

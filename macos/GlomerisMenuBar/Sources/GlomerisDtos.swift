@@ -469,11 +469,21 @@ struct DetectReportDto: Decodable, Equatable {
     /// and in no family, so the families never account for the whole list.
     let workspaces: [WorkspaceFamilyReportDto]
 
+    /// What, if anything, an operator can do right now (HORO-1828) — one of
+    /// `GlomerisTerm.eligibility`'s tokens. Optional on decode and defaulted
+    /// to `"nothing_eligible"` for the same forward/backward reason as
+    /// `discoveryComplete`: an older CLI that predates this field has not
+    /// claimed anything stronger than "nothing found", and a client must
+    /// never default a missing field to the one meaning "there is real,
+    /// automatic safe work available" or "discovery itself was incomplete".
+    let eligibility: String
+
     enum CodingKeys: String, CodingKey {
         case candidates
         case detectors
         case discoveryComplete = "discovery_complete"
         case workspaces
+        case eligibility
     }
 
     init(from decoder: Decoder) throws {
@@ -486,6 +496,8 @@ struct DetectReportDto: Decodable, Equatable {
         workspaces =
             try container.decodeIfPresent([WorkspaceFamilyReportDto].self, forKey: .workspaces)
             ?? []
+        eligibility =
+            try container.decodeIfPresent(String.self, forKey: .eligibility) ?? "nothing_eligible"
     }
 
     /// Non-decoding initializer for tests and previews.
@@ -493,12 +505,14 @@ struct DetectReportDto: Decodable, Equatable {
         candidates: [DetectCandidateReportDto],
         detectors: [DetectorHealthReportDto] = [],
         discoveryComplete: Bool = true,
-        workspaces: [WorkspaceFamilyReportDto] = []
+        workspaces: [WorkspaceFamilyReportDto] = [],
+        eligibility: String = "nothing_eligible"
     ) {
         self.candidates = candidates
         self.detectors = detectors
         self.discoveryComplete = discoveryComplete
         self.workspaces = workspaces
+        self.eligibility = eligibility
     }
 }
 
@@ -1045,6 +1059,91 @@ struct RecoveryOpportunityReportDto: Decodable, Equatable {
     }
 }
 
+/// Mirrors `reporting::dto::GuardedGroupReport` (HORO-1828): one group of
+/// bytes that are guarded — never "recoverable" or "opportunity" — broken
+/// out by policy label and reason so "hundreds of GiB are still guarded"
+/// comes with a reason attached to every byte, rather than one opaque
+/// not-executable count.
+struct GuardedGroupReportDto: Decodable, Equatable, Identifiable {
+    let policyLabel: String
+    let reason: String
+    let count: Int
+    let estimatedBytes: UInt64
+    let estimatedHuman: String
+    let bytesUnknownCount: Int
+    let isLowerBound: Bool
+
+    var id: String { "\(policyLabel):\(reason)" }
+
+    enum CodingKeys: String, CodingKey {
+        case policyLabel = "policy_label"
+        case reason
+        case count
+        case estimatedBytes = "estimated_bytes"
+        case estimatedHuman = "estimated_human"
+        case bytesUnknownCount = "bytes_unknown_count"
+        case isLowerBound = "is_lower_bound"
+    }
+}
+
+/// Mirrors `reporting::dto::FeasibilityReport` (HORO-1827/HORO-1828): an
+/// honest answer to "is the goal reachable, and by what means", given
+/// observed stability. Every byte field is `nil` unless the verdict itself
+/// carries it — see `GlomerisTerm.feasibility` for the plain-language
+/// wording per `verdict` token, and never branch on `verdict`'s text
+/// outside `GlomerisVocabulary.swift` (see
+/// `scripts/check-no-policy-label-branching.sh`).
+struct FeasibilityReportDto: Decodable, Equatable {
+    let verdict: String
+    let elapsedSecs: UInt64?
+    let requiredSecs: UInt64?
+    let gapBytes: UInt64?
+    let gapHuman: String?
+    let autoSafeEstimateBytes: UInt64?
+    let autoSafeEstimateHuman: String?
+    let consentReachableEstimateBytes: UInt64?
+    let consentReachableEstimateHuman: String?
+    let measuredActualReclaimedBytes: UInt64?
+    let measuredActualReclaimedHuman: String?
+    let regrowthRisk: Bool
+    let snapshotsMayDelayRecovery: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case verdict
+        case elapsedSecs = "elapsed_secs"
+        case requiredSecs = "required_secs"
+        case gapBytes = "gap_bytes"
+        case gapHuman = "gap_human"
+        case autoSafeEstimateBytes = "auto_safe_estimate_bytes"
+        case autoSafeEstimateHuman = "auto_safe_estimate_human"
+        case consentReachableEstimateBytes = "consent_reachable_estimate_bytes"
+        case consentReachableEstimateHuman = "consent_reachable_estimate_human"
+        case measuredActualReclaimedBytes = "measured_actual_reclaimed_bytes"
+        case measuredActualReclaimedHuman = "measured_actual_reclaimed_human"
+        case regrowthRisk = "regrowth_risk"
+        case snapshotsMayDelayRecovery = "snapshots_may_delay_recovery"
+    }
+
+    /// A report from a CLI that predates this field (HORO-1828): no verdict
+    /// was ever computed, so `"insufficient_observation"` — never a
+    /// stronger claim this app did not earn — is the honest default.
+    static let unknown = FeasibilityReportDto(
+        verdict: "insufficient_observation",
+        elapsedSecs: nil,
+        requiredSecs: nil,
+        gapBytes: nil,
+        gapHuman: nil,
+        autoSafeEstimateBytes: nil,
+        autoSafeEstimateHuman: nil,
+        consentReachableEstimateBytes: nil,
+        consentReachableEstimateHuman: nil,
+        measuredActualReclaimedBytes: nil,
+        measuredActualReclaimedHuman: nil,
+        regrowthRisk: false,
+        snapshotsMayDelayRecovery: false
+    )
+}
+
 /// Mirrors `reporting::dto::RecoveryPreviewReport` — the pre-flight for a
 /// recovery goal, from `glomeris free --dry-run --json`.
 ///
@@ -1082,6 +1181,19 @@ struct RecoveryPreviewReportDto: Decodable, Equatable {
     let caveats: [String]
     let detectors: [DetectorHealthReportDto]
     let candidates: [DetectCandidateReportDto]
+    /// What, if anything, an operator can do right now (HORO-1828) — see
+    /// `DetectReportDto.eligibility`'s doc comment for the same
+    /// forward/backward-compatibility reasoning.
+    let eligibility: String
+    /// Why bytes beyond `opportunity.actionableNowBytes` are still guarded,
+    /// broken down by policy label and reason (HORO-1828). Defaults to
+    /// empty for a CLI that predates the field — not evidence that nothing
+    /// is guarded, only that this report cannot say.
+    let guarded: [GuardedGroupReportDto]
+    /// Whether the goal is reachable, and by what means (HORO-1827/
+    /// HORO-1828). Defaults to `FeasibilityReportDto.unknown` for a CLI
+    /// that predates the field.
+    let feasibility: FeasibilityReportDto
 
     enum CodingKeys: String, CodingKey {
         case goal
@@ -1096,6 +1208,68 @@ struct RecoveryPreviewReportDto: Decodable, Equatable {
         case caveats
         case detectors
         case candidates
+        case eligibility
+        case guarded
+        case feasibility
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        goal = try container.decode(RecoveryGoalReportDto.self, forKey: .goal)
+        current = try container.decode(StatusReportDto.self, forKey: .current)
+        requiredFreeBytes = try container.decode(UInt64.self, forKey: .requiredFreeBytes)
+        requiredFreeHuman = try container.decode(String.self, forKey: .requiredFreeHuman)
+        bytesNeeded = try container.decode(UInt64.self, forKey: .bytesNeeded)
+        bytesNeededHuman = try container.decode(String.self, forKey: .bytesNeededHuman)
+        opportunity = try container.decode(
+            RecoveryOpportunityReportDto.self, forKey: .opportunity)
+        goalAppearsReachable = try container.decode(Bool.self, forKey: .goalAppearsReachable)
+        discoveryComplete = try container.decode(Bool.self, forKey: .discoveryComplete)
+        caveats = try container.decode([String].self, forKey: .caveats)
+        detectors = try container.decode([DetectorHealthReportDto].self, forKey: .detectors)
+        candidates = try container.decode([DetectCandidateReportDto].self, forKey: .candidates)
+        eligibility =
+            try container.decodeIfPresent(String.self, forKey: .eligibility) ?? "nothing_eligible"
+        guarded =
+            try container.decodeIfPresent([GuardedGroupReportDto].self, forKey: .guarded) ?? []
+        feasibility =
+            try container.decodeIfPresent(FeasibilityReportDto.self, forKey: .feasibility)
+            ?? .unknown
+    }
+
+    /// Non-decoding initializer for tests and previews.
+    init(
+        goal: RecoveryGoalReportDto,
+        current: StatusReportDto,
+        requiredFreeBytes: UInt64,
+        requiredFreeHuman: String,
+        bytesNeeded: UInt64,
+        bytesNeededHuman: String,
+        opportunity: RecoveryOpportunityReportDto,
+        goalAppearsReachable: Bool,
+        discoveryComplete: Bool,
+        caveats: [String],
+        detectors: [DetectorHealthReportDto],
+        candidates: [DetectCandidateReportDto],
+        eligibility: String = "nothing_eligible",
+        guarded: [GuardedGroupReportDto] = [],
+        feasibility: FeasibilityReportDto = .unknown
+    ) {
+        self.goal = goal
+        self.current = current
+        self.requiredFreeBytes = requiredFreeBytes
+        self.requiredFreeHuman = requiredFreeHuman
+        self.bytesNeeded = bytesNeeded
+        self.bytesNeededHuman = bytesNeededHuman
+        self.opportunity = opportunity
+        self.goalAppearsReachable = goalAppearsReachable
+        self.discoveryComplete = discoveryComplete
+        self.caveats = caveats
+        self.detectors = detectors
+        self.candidates = candidates
+        self.eligibility = eligibility
+        self.guarded = guarded
+        self.feasibility = feasibility
     }
 
     /// Detectors whose probe failed, for the same advisory the candidates card

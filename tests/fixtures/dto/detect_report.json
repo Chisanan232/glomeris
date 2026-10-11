@@ -8,7 +8,9 @@
       "reclaimable_bytes_is_lower_bound": false,
       "impact_tier": "notable",
       "policy_label": "AUTO_SAFE",
-      "reasons": ["no_active_use_observed"],
+      "reasons": [
+        "no_active_use_observed"
+      ],
       "executable": true,
       "offered_actions": [
         {
@@ -26,7 +28,9 @@
       "reclaimable_bytes_is_lower_bound": true,
       "impact_tier": "large",
       "policy_label": "UNKNOWN_INCOMPLETE",
-      "reasons": ["evidence_incomplete"],
+      "reasons": [
+        "evidence_incomplete"
+      ],
       "executable": false,
       "offered_actions": [],
       "refusal_reason": "no registered cleanup action for this resource kind"
@@ -65,5 +69,6 @@
       "reason": "permission denied reading /Users/dev/private"
     }
   ],
-  "discovery_complete": false
+  "discovery_complete": false,
+  "eligibility": "discovery_incomplete"
 }

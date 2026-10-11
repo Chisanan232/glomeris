@@ -3287,11 +3287,7 @@ fn daemon_run() {
     // (not instead of) `history_path`'s pressure-transition log — same
     // `Library/Application Support/Glomeris/` directory as every other
     // best-effort store this daemon owns.
-    let volume_samples_path = std::env::var("HOME")
-        .map(|home| {
-            PathBuf::from(home).join("Library/Application Support/Glomeris/pressure_samples.json")
-        })
-        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-pressure-samples.json"));
+    let volume_samples_path = volume_samples_path();
     // Counts completed poll cycles so sampling can run on every k-th tick
     // of *this* loop (ADR-0001 §14: "no new scheduler/daemon ... sampling
     // is statvfs only") instead of adding a second timer. In-memory only —
@@ -3461,6 +3457,19 @@ fn episode_step(
 #[cfg(target_os = "macos")]
 const RECOVERY_TARGET_MOUNT: &str = "/";
 
+/// Where opt-in capacity-history sampling is recorded (HORO-1827), shared by
+/// the daemon's own sampling step and `free --dry-run`'s feasibility read
+/// (HORO-1828) so both read/write the exact same ring rather than two paths
+/// that could silently drift apart.
+#[cfg(target_os = "macos")]
+fn volume_samples_path() -> PathBuf {
+    std::env::var("HOME")
+        .map(|home| {
+            PathBuf::from(home).join("Library/Application Support/Glomeris/pressure_samples.json")
+        })
+        .unwrap_or_else(|_| PathBuf::from("/tmp/glomeris-pressure-samples.json"))
+}
+
 /// `glomeris free --dry-run` — the pre-flight for a goal (HORO-1506).
 ///
 /// Takes no execution lock and mutates nothing: it is a read of the volume
@@ -3506,11 +3515,27 @@ fn free_preview(
         &glomeris::cli::group_workspaces_now(&pass.candidates),
     );
 
+    // HORO-1828. Same samples ring the daemon's opt-in sampling step writes
+    // (`volume_samples_path`); honestly `InsufficientObservation` when
+    // sampling has never run or the window is too short — see
+    // `monitor::stability::analyze`'s own "never fabricate" rule.
+    let samples = glomeris::monitor::read_volume_samples(&volume_samples_path());
+    let stability = glomeris::monitor::stability::analyze(
+        &samples,
+        glomeris::monitor::SAMPLE_EVERY_N_TICKS * 60,
+    );
+    let local_snapshots_present = matches!(
+        glomeris::platform::macos::statfs::probe_local_snapshots(),
+        glomeris::evidence::probe::ProbeOutcome::Observed(count) if count > 0
+    );
+
     let report = glomeris::cli::recovery::build_recovery_preview_report(
         &goal,
         &usage,
         &ThresholdConfig::default(),
         detect,
+        &stability,
+        local_snapshots_present,
     );
 
     if json {

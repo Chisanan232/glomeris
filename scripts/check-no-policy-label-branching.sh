@@ -40,6 +40,19 @@
 # decisions this ticket is guarding against would appear, so that is what's
 # scanned mechanically here.
 #
+# HORO-1828 addition — eligibility/feasibility join the guarded field set
+# ------------------------------------------------------------------------
+# `DetectReport.eligibility`, `RecoveryPreviewReport.eligibility` and
+# `RecoveryPreviewReport.feasibility.verdict` (HORO-1828) are the same shape
+# of risk as `policyLabel`: closed-vocabulary tokens a view must route
+# through `GlomerisVocabulary.eligibility(_:)`/`.feasibility(_:)` for display
+# wording, and must never branch UI behavior on directly. `FIELD_PATTERN`
+# below therefore also matches `eligibility`/`feasibility` so a line like
+# `if dto.eligibility == "eligible"` in a view is caught exactly the way a
+# `policyLabel == "ASK"` line already is. Reading and displaying the field
+# (e.g. `Text(dto.eligibility)` or passing it to the vocabulary lookup) is
+# fine, same as `policyLabel`.
+#
 # HORO-1306 addition — the display-vocabulary file
 # -------------------------------------------------
 # HORO-1306 needed plain-language wording for AUTO_SAFE / ASK / PROTECTED /
@@ -73,7 +86,7 @@ SEARCH_DIRS=(
   "macos/GlomerisMenuBar/Sources"
 )
 
-FIELD_PATTERN='policyLabel|policy_label'
+FIELD_PATTERN='policyLabel|policy_label|eligibility|feasibility'
 
 violations=0
 
@@ -128,7 +141,7 @@ if [[ "$violations" -gt 0 ]]; then
   exit 1
 fi
 
-echo "PASS: no policyLabel/policy_label branching detected under ${SEARCH_DIRS[*]}."
+echo "PASS: no policyLabel/policy_label/eligibility/feasibility branching detected under ${SEARCH_DIRS[*]}."
 
 # ---------------------------------------------------------------------------
 # HORO-1306: the display-vocabulary file must be incapable of gating anything.

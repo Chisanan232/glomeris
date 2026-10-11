@@ -14,9 +14,18 @@
 //! [`FeasibilityInputs::measured_actual_reclaimed_bytes`] (a fact — the sum
 //! of `actual_reclaimed_bytes` from real, df-confirmed executions) stays in
 //! its own field in every verdict that carries it, never folded into
-//! `auto_safe_estimate_bytes` or `ask_protected_unknown_estimate_bytes` (both
+//! `auto_safe_estimate_bytes` or `consent_reachable_estimate_bytes` (both
 //! upper-bound predictions). A caller that wants one number has to choose
 //! which kind it means; this module will not choose for it.
+//!
+//! A second invariant, fixed by HORO-1828 after review found the ordering
+//! bug: **an already-met goal is reported as [`FeasibilityVerdict::AlreadyAtGoal`]
+//! even when stability observation is insufficient.** The gap-to-target
+//! check is arithmetic over the caller's own two byte readings
+//! (`target_free_bytes`, `current_free_bytes`); it needs no trend history
+//! at all, so it must not be masked by a stability gate that exists to
+//! protect a *different* claim (whether a reclaim estimate's trend can be
+//! trusted). [`assess`] checks this first, before looking at `stability`.
 
 use super::stability::StabilityVerdict;
 
@@ -32,10 +41,25 @@ pub struct FeasibilityInputs {
     /// `st_nlink > 1` counted once) so a hardlinked Cargo binary is not
     /// counted twice.
     pub auto_safe_estimate_bytes: u64,
-    /// Upper-bound estimate of ASK/PROTECTED/UNKNOWN bytes, kept separate
-    /// from `auto_safe_estimate_bytes` so a verdict can never collapse
-    /// "safe without asking" into "safe only with consent".
-    pub ask_protected_unknown_estimate_bytes: u64,
+    /// Upper-bound estimate of bytes reachable only with the user's
+    /// explicit consent — i.e. candidates that are `executable` but whose
+    /// offered action `requires_confirmation` (ASK, or ASK labelled
+    /// `UNKNOWN_INCOMPLETE`). Kept separate from `auto_safe_estimate_bytes`
+    /// so a verdict can never collapse "safe without asking" into "safe
+    /// only with consent".
+    ///
+    /// **`PROTECTED`-classified bytes must never be included here.**
+    /// `PolicyClass::Protected` has no override path at all — see
+    /// `crate::policy::approval::authorize` (`PROTECTED => None`) — so a
+    /// byte that can only ever be reached by a hypothetical future consent
+    /// mechanism is not "reachable with consent" in any sense this verdict
+    /// may honestly claim; it belongs nowhere in a feasibility total. The
+    /// caller is responsible for pre-filtering: this is the
+    /// `requires_confirmation`-but-not-protected subset only, the same
+    /// split `crate::reporting::dto::RecoveryOpportunityReport` already
+    /// makes between `requires_confirmation_bytes` (real, consent-gated
+    /// opportunity) and `protected_count` (counted, never summed).
+    pub consent_reachable_estimate_bytes: u64,
     /// Sum of `actual_reclaimed_bytes` from real, df-confirmed executions
     /// recorded in `actions.jsonl` — a measured fact, not a prediction. See
     /// this module's doc comment: never summed into either estimate field.
@@ -55,11 +79,11 @@ pub struct FeasibilityInputs {
 
 /// The outcome of a feasibility assessment.
 ///
-/// [`FeasibilityVerdict::InsufficientObservation`] is reachable from this
-/// module alone: [`assess`] returns it whenever `stability` is itself
-/// [`StabilityVerdict::InsufficientObservation`], before looking at any
-/// byte total — the same "never fabricate" rule as the stability module
-/// one level down.
+/// [`FeasibilityVerdict::AlreadyAtGoal`] is checked, and may be returned,
+/// BEFORE [`FeasibilityVerdict::InsufficientObservation`] — see [`assess`]'s
+/// doc comment and this module's own doc comment for why an already-met
+/// goal must never be masked by a stability gate that exists for a
+/// different claim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeasibilityVerdict {
     /// Fewer than 12 real hours of stable same-volume observation exist
@@ -101,9 +125,43 @@ pub enum FeasibilityVerdict {
     },
 }
 
+impl FeasibilityVerdict {
+    /// Stable wire tag for this verdict, consumed by
+    /// `crate::reporting::dto::FeasibilityReport` and diffed against
+    /// `GlomerisVocabulary.swift`'s `feasibility` lookup by
+    /// `scripts/check-vocabulary-covers-cli-tokens.sh`. Never
+    /// `#[derive(Serialize)]`'d directly — same reasoning as every other
+    /// `as_str`/`tag` in this crate (see `src/reporting/dto.rs`'s module
+    /// doc comment).
+    pub fn tag(&self) -> &'static str {
+        match self {
+            FeasibilityVerdict::InsufficientObservation { .. } => "insufficient_observation",
+            FeasibilityVerdict::AlreadyAtGoal => "already_at_goal",
+            FeasibilityVerdict::ReachableAutoSafe { .. } => "reachable_auto_safe",
+            FeasibilityVerdict::ReachableRequiresConsent { .. } => "reachable_requires_consent",
+            FeasibilityVerdict::Unreachable { .. } => "unreachable",
+        }
+    }
+}
+
 /// Assesses feasibility. See this module's doc comment for the invariants
 /// every variant preserves.
+///
+/// **Ordering is load-bearing (HORO-1828 fix).** The already-met-goal check
+/// runs BEFORE the stability gate: it is pure arithmetic over the caller's
+/// own `target_free_bytes`/`current_free_bytes` and needs no trend history
+/// to be honest, so an [`FeasibilityVerdict::InsufficientObservation`]
+/// stability reading must never mask it. The reverse ordering was a real
+/// bug — see `mutation_reverting_the_reorder_turns_the_new_test_red` below
+/// for the mutation test that pins it.
 pub fn assess(stability: &StabilityVerdict, inputs: FeasibilityInputs) -> FeasibilityVerdict {
+    let gap_bytes = inputs
+        .target_free_bytes
+        .saturating_sub(inputs.current_free_bytes);
+    if gap_bytes == 0 {
+        return FeasibilityVerdict::AlreadyAtGoal;
+    }
+
     if let StabilityVerdict::InsufficientObservation {
         elapsed_secs,
         required_secs,
@@ -113,13 +171,6 @@ pub fn assess(stability: &StabilityVerdict, inputs: FeasibilityInputs) -> Feasib
             elapsed_secs: *elapsed_secs,
             required_secs: *required_secs,
         };
-    }
-
-    let gap_bytes = inputs
-        .target_free_bytes
-        .saturating_sub(inputs.current_free_bytes);
-    if gap_bytes == 0 {
-        return FeasibilityVerdict::AlreadyAtGoal;
     }
 
     if inputs.auto_safe_estimate_bytes >= gap_bytes {
@@ -133,12 +184,12 @@ pub fn assess(stability: &StabilityVerdict, inputs: FeasibilityInputs) -> Feasib
 
     let combined_estimate = inputs
         .auto_safe_estimate_bytes
-        .saturating_add(inputs.ask_protected_unknown_estimate_bytes);
+        .saturating_add(inputs.consent_reachable_estimate_bytes);
     if combined_estimate >= gap_bytes {
         return FeasibilityVerdict::ReachableRequiresConsent {
             gap_bytes,
             auto_safe_estimate_bytes: inputs.auto_safe_estimate_bytes,
-            ask_protected_unknown_estimate_bytes: inputs.ask_protected_unknown_estimate_bytes,
+            ask_protected_unknown_estimate_bytes: inputs.consent_reachable_estimate_bytes,
             regrowth_risk: inputs.shared_target_regrowth_risk,
             snapshots_may_delay_recovery: inputs.local_snapshots_present,
         };
@@ -147,7 +198,7 @@ pub fn assess(stability: &StabilityVerdict, inputs: FeasibilityInputs) -> Feasib
     FeasibilityVerdict::Unreachable {
         gap_bytes,
         auto_safe_estimate_bytes: inputs.auto_safe_estimate_bytes,
-        ask_protected_unknown_estimate_bytes: inputs.ask_protected_unknown_estimate_bytes,
+        ask_protected_unknown_estimate_bytes: inputs.consent_reachable_estimate_bytes,
         measured_actual_reclaimed_bytes: inputs.measured_actual_reclaimed_bytes,
         regrowth_risk: inputs.shared_target_regrowth_risk,
     }
@@ -180,7 +231,7 @@ mod tests {
             target_free_bytes: 1_099_511_627_776, // 1 TiB
             current_free_bytes: 300 * 1024 * 1024 * 1024,
             auto_safe_estimate_bytes: 0,
-            ask_protected_unknown_estimate_bytes: 0,
+            consent_reachable_estimate_bytes: 0,
             measured_actual_reclaimed_bytes: 0,
             shared_target_regrowth_risk: false,
             local_snapshots_present: false,
@@ -212,6 +263,40 @@ mod tests {
         );
     }
 
+    /// HORO-1828: an already-met goal must be reported as `AlreadyAtGoal`
+    /// even when stability observation is insufficient or entirely absent
+    /// — the goal-vs-current comparison needs no trend history at all.
+    ///
+    /// This is the mutation-test anchor for the reorder fix: swapping the
+    /// order of the two checks inside `assess` back to "stability first"
+    /// turns this test RED (it would observe `InsufficientObservation`
+    /// instead), while every other test in this module stays GREEN, which
+    /// is exactly the masking bug HORO-1828 fixed and the trap a narrower
+    /// test could miss.
+    #[test]
+    fn already_at_goal_even_when_observation_is_insufficient() {
+        let insufficient = StabilityVerdict::insufficient(60);
+        let mut inputs = base_inputs();
+        inputs.current_free_bytes = inputs.target_free_bytes;
+        assert_eq!(
+            assess(&insufficient, inputs),
+            FeasibilityVerdict::AlreadyAtGoal
+        );
+    }
+
+    /// Same shape, with literally no samples collected yet (the common,
+    /// sampling-off-by-default case ADR-0001 §8 calls out).
+    #[test]
+    fn already_at_goal_even_with_zero_samples_collected() {
+        let never_observed = StabilityVerdict::insufficient(0);
+        let mut inputs = base_inputs();
+        inputs.current_free_bytes = inputs.target_free_bytes + 1; // already past the goal
+        assert_eq!(
+            assess(&never_observed, inputs),
+            FeasibilityVerdict::AlreadyAtGoal
+        );
+    }
+
     #[test]
     fn reachable_auto_safe_when_the_safe_estimate_alone_covers_the_gap() {
         let mut inputs = base_inputs();
@@ -230,7 +315,7 @@ mod tests {
         let mut inputs = base_inputs();
         let gap = inputs.target_free_bytes - inputs.current_free_bytes;
         inputs.auto_safe_estimate_bytes = gap / 2;
-        inputs.ask_protected_unknown_estimate_bytes = gap; // combined covers it
+        inputs.consent_reachable_estimate_bytes = gap; // combined covers it
         match assess(&observed(), inputs) {
             FeasibilityVerdict::ReachableRequiresConsent { gap_bytes, .. } => {
                 assert_eq!(gap_bytes, gap);
@@ -247,7 +332,7 @@ mod tests {
     fn target_unreachable_when_every_known_byte_is_insufficient() {
         let mut inputs = base_inputs();
         inputs.auto_safe_estimate_bytes = 109u64 * 1024 * 1024 * 1024;
-        inputs.ask_protected_unknown_estimate_bytes = 525u64 * 1024 * 1024 * 1024;
+        inputs.consent_reachable_estimate_bytes = 525u64 * 1024 * 1024 * 1024;
         inputs.measured_actual_reclaimed_bytes = 10u64 * 1024 * 1024 * 1024;
         inputs.shared_target_regrowth_risk = true;
 
@@ -266,7 +351,7 @@ mod tests {
                 assert_eq!(auto_safe_estimate_bytes, inputs.auto_safe_estimate_bytes);
                 assert_eq!(
                     ask_protected_unknown_estimate_bytes,
-                    inputs.ask_protected_unknown_estimate_bytes
+                    inputs.consent_reachable_estimate_bytes
                 );
                 assert_eq!(
                     measured_actual_reclaimed_bytes,
@@ -287,7 +372,7 @@ mod tests {
         let gap = inputs.target_free_bytes - inputs.current_free_bytes;
         // Estimates alone fall short of the gap...
         inputs.auto_safe_estimate_bytes = gap / 4;
-        inputs.ask_protected_unknown_estimate_bytes = gap / 4;
+        inputs.consent_reachable_estimate_bytes = gap / 4;
         // ...but the measured figure, if wrongly added in, would cover it.
         inputs.measured_actual_reclaimed_bytes = gap;
 

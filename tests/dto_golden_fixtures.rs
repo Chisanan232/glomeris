@@ -301,6 +301,11 @@ fn detect_report_matches_golden_fixture() {
         // `detect_report_with_workspaces_matches_golden_fixture`, and the
         // note above about "absent" being a meaning of its own here.
         workspaces: vec![],
+        // `discovery_complete` is `false` above, so this is
+        // `discovery_incomplete` regardless of the one AUTO_SAFE candidate
+        // that would otherwise make it `eligible` — see
+        // `eligibility_verdict`'s precedence.
+        eligibility: "discovery_incomplete",
     };
     assert_matches_fixture(&report, "detect_report.json");
 }
@@ -1232,6 +1237,9 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
         workspaces: vec![WorkspaceFamilyReport::from_family(
             &one_repositorys_three_checkouts(),
         )],
+        // Two candidates are executable with no confirmation required
+        // (cargo_target_dir, homebrew_cache), so this is `eligible`.
+        eligibility: "eligible",
     };
     assert_matches_fixture(&report, "detect_report_with_workspaces.json");
 }
@@ -1412,7 +1420,19 @@ fn recovery_discovery_pass() -> DetectReport {
         // where the bulk sits; grouping would add a second thing for those
         // fixtures to pin. HORO-1511's own fixture covers it.
         workspaces: vec![],
+        // `discovery_complete` is `false` above, so this is
+        // `discovery_incomplete` regardless of the AUTO_SAFE candidate.
+        eligibility: "discovery_incomplete",
     }
+}
+
+/// No samples ring populated — the honest default for a fixture that is not
+/// specifically about feasibility's own stability gate (see
+/// `recovery_preview_report_goal_already_met_matches_golden_fixture` and
+/// `recovery_preview_report_target_unreachable_matches_golden_fixture` for
+/// the tests that are).
+fn no_observation() -> glomeris::monitor::stability::StabilityVerdict {
+    glomeris::monitor::stability::StabilityVerdict::insufficient(0)
 }
 
 #[test]
@@ -1429,6 +1449,8 @@ fn recovery_preview_report_matches_golden_fixture() {
         &usage,
         &ThresholdConfig::default(),
         recovery_discovery_pass(),
+        &no_observation(),
+        false,
     );
     assert_matches_fixture(&report, "recovery_preview_report.json");
 }
@@ -1448,6 +1470,13 @@ fn recovery_preview_report_matches_golden_fixture() {
 ///   * `goal_appears_reachable` is `true` here for the trivial reason — there is
 ///     nothing left to reach — which is worth having in a fixture so nobody
 ///     reads that flag as "there is enough to reclaim".
+///
+/// HORO-1828: `stability` is deliberately `InsufficientObservation` (no
+/// samples ring populated) here, and `feasibility.verdict` still pins
+/// `"already_at_goal"` rather than `"insufficient_observation"` — the
+/// mutation test this fixture anchors is
+/// `glomeris::monitor::feasibility::tests::already_at_goal_even_when_observation_is_insufficient`,
+/// and this fixture is the same fact proven at the wire level.
 #[test]
 fn recovery_preview_report_for_an_already_met_goal_matches_golden_fixture() {
     let usage = FsUsage::new(500_000_000_000, 60_000_000_000);
@@ -1457,8 +1486,197 @@ fn recovery_preview_report_for_an_already_met_goal_matches_golden_fixture() {
         &usage,
         &ThresholdConfig::default(),
         recovery_discovery_pass(),
+        &no_observation(),
+        false,
     );
+    assert_eq!(report.feasibility.verdict, "already_at_goal");
     assert_matches_fixture(&report, "recovery_preview_report_goal_already_met.json");
+}
+
+/// HORO-1828: discovery itself failed to finish — one detector `failed`,
+/// one had nothing configured (`not_configured`) — alongside a candidate
+/// that would otherwise be `eligible` on its own. Asserts `eligibility` is
+/// `discovery_incomplete` regardless of that candidate's shape: an
+/// incomplete scan cannot honestly support any other verdict, including
+/// "something is eligible".
+#[test]
+fn recovery_preview_report_discovery_incomplete_matches_golden_fixture() {
+    let usage = FsUsage::new(500_000_000_000, 60_000_000_000);
+    let goal = RecoveryGoal::from_used_percent(60.0).expect("60% used is a valid goal");
+    let detect = DetectReport {
+        candidates: vec![DetectCandidateReport {
+            resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+            kind: "cargo_target_dir",
+            reclaimable_bytes: Some(2_147_483_648),
+            reclaimable_human: Some("2.0 GB".to_string()),
+            reclaimable_bytes_is_lower_bound: false,
+            impact_tier: "notable",
+            policy_label: "AUTO_SAFE",
+            reasons: vec!["no_active_use_observed"],
+            executable: true,
+            offered_actions: vec![OfferedAction {
+                action_id: "cargo.clean.target_dir".to_string(),
+                requires_confirmation: false,
+            }],
+            refusal_reason: None,
+        }],
+        detectors: vec![
+            DetectorHealthReport {
+                detector: "homebrew_cache".to_string(),
+                status: "failed",
+                candidates_found: 0,
+                reason: Some("brew --cache exited 1".to_string()),
+            },
+            DetectorHealthReport {
+                detector: "node_modules".to_string(),
+                status: "not_configured",
+                candidates_found: 0,
+                reason: None,
+            },
+        ],
+        discovery_complete: false,
+        workspaces: vec![],
+        eligibility: "discovery_incomplete",
+    };
+    let report = build_recovery_preview_report(
+        &goal,
+        &usage,
+        &ThresholdConfig::default(),
+        detect,
+        &no_observation(),
+        false,
+    );
+    assert_eq!(
+        report.eligibility, "discovery_incomplete",
+        "an incomplete scan must never read as eligible, regardless of what one candidate shows"
+    );
+    assert_matches_fixture(&report, "recovery_preview_report_discovery_incomplete.json");
+}
+
+/// HORO-1828: a large `PROTECTED` candidate's bytes make the preview's
+/// *total* known opportunity look enormous, but they must never count
+/// toward "reachable with consent" — `PolicyClass::Protected` has no
+/// override path at all. Asserts `feasibility.verdict` is `"unreachable"`
+/// (not `"reachable_requires_consent"`, which is what a bug that folded
+/// PROTECTED bytes into the consent-reachable estimate would wrongly
+/// produce), and that the PROTECTED bytes appear in `guarded` instead.
+#[test]
+fn recovery_preview_report_target_unreachable_matches_golden_fixture() {
+    use glomeris::monitor::stability::{StabilityAnalysis, StabilityVerdict, Trend};
+    use glomeris::monitor::MIN_OBSERVATION_SECS;
+
+    // A real (not insufficient) stability reading, so the already-at-goal/
+    // observation gates are out of the way and the byte arithmetic itself is
+    // what this test is proving.
+    let observed_stability = StabilityVerdict::Analyzed(StabilityAnalysis {
+        volume_dev: 1,
+        window_start_unix_secs: 0,
+        window_end_unix_secs: MIN_OBSERVATION_SECS,
+        elapsed_secs: MIN_OBSERVATION_SECS,
+        min_free_bytes: 0,
+        max_free_bytes: 0,
+        start_free_bytes: 0,
+        end_free_bytes: 0,
+        rate_bytes_per_sec: 0.0,
+        missing_intervals: 0,
+        trend: Trend::Healthy,
+        low_watermark_free_bytes: 0,
+    });
+
+    // 500 GB volume, 10 GB free; a 95%-used goal needs 25 GB free, a 15 GB
+    // gap. AUTO_SAFE (1 GB) + ASK-with-confirmation (2 GB) = 3 GB, nowhere
+    // near the gap — Unreachable, UNLESS the 900 GB PROTECTED candidate's
+    // bytes are wrongly folded in, which would make it look reachable.
+    let usage = FsUsage::new(500_000_000_000, 10_000_000_000);
+    let goal = RecoveryGoal::from_used_percent(95.0).expect("95% used is a valid goal");
+    let detect = DetectReport {
+        candidates: vec![
+            DetectCandidateReport {
+                resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
+                kind: "cargo_target_dir",
+                reclaimable_bytes: Some(1_000_000_000),
+                reclaimable_human: Some(glomeris::reporting::human_bytes(1_000_000_000)),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "AUTO_SAFE",
+                reasons: vec!["no_active_use_observed"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "cargo.clean.target_dir".to_string(),
+                    requires_confirmation: false,
+                }],
+                refusal_reason: None,
+            },
+            DetectCandidateReport {
+                resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
+                kind: "node_modules",
+                reclaimable_bytes: Some(2_000_000_000),
+                reclaimable_human: Some(glomeris::reporting::human_bytes(2_000_000_000)),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "notable",
+                policy_label: "ASK",
+                reasons: vec!["rebuild_cost_high"],
+                executable: true,
+                offered_actions: vec![OfferedAction {
+                    action_id: "node.remove.node_modules".to_string(),
+                    requires_confirmation: true,
+                }],
+                refusal_reason: None,
+            },
+            DetectCandidateReport {
+                resource_id: "cargo_target_dir:/Users/shared/target".to_string(),
+                kind: "cargo_target_dir",
+                reclaimable_bytes: Some(900_000_000_000),
+                reclaimable_human: Some(glomeris::reporting::human_bytes(900_000_000_000)),
+                reclaimable_bytes_is_lower_bound: false,
+                impact_tier: "large",
+                policy_label: "PROTECTED",
+                reasons: vec!["protected_executable_dependency"],
+                executable: false,
+                offered_actions: vec![],
+                refusal_reason: Some("PROTECTED: protected_executable_dependency".to_string()),
+            },
+        ],
+        detectors: vec![DetectorHealthReport {
+            detector: "cargo_target_dir".to_string(),
+            status: "found",
+            candidates_found: 2,
+            reason: None,
+        }],
+        discovery_complete: true,
+        workspaces: vec![],
+        eligibility: "eligible",
+    };
+
+    let report = build_recovery_preview_report(
+        &goal,
+        &usage,
+        &ThresholdConfig::default(),
+        detect,
+        &observed_stability,
+        false,
+    );
+
+    assert_eq!(
+        report.feasibility.verdict, "unreachable",
+        "PROTECTED bytes must never be folded into the consent-reachable estimate: {:?}",
+        report.feasibility
+    );
+    assert_eq!(
+        report.feasibility.consent_reachable_estimate_bytes,
+        Some(2_000_000_000),
+        "the consent-reachable estimate must be the ASK candidate's bytes only, never the \
+         PROTECTED candidate's 900 GB"
+    );
+    assert!(
+        report
+            .guarded
+            .iter()
+            .any(|g| g.policy_label == "PROTECTED" && g.estimated_bytes == 900_000_000_000),
+        "the PROTECTED candidate's bytes must appear in `guarded` instead: {:?}",
+        report.guarded
+    );
+    assert_matches_fixture(&report, "recovery_preview_report_target_unreachable.json");
 }
 
 #[test]

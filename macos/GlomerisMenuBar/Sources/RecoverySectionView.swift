@@ -109,6 +109,18 @@ struct RecoveryPreviewSummary: Equatable {
     let reachabilityText: String
     /// Rust's sentences, verbatim and in order.
     let caveats: [String]
+    /// What, if anything, there is to do right now (HORO-1828) — read
+    /// straight from `dto.eligibility` through the vocabulary lookup, never
+    /// re-derived here. See `GlomerisVocabulary.eligibility(_:)`.
+    let eligibilityTerm: GlomerisTerm
+    /// Why bytes beyond `actionableNowText` are still guarded, largest group
+    /// first, as `"PROTECTED: active process using path — 1.0 GB"`. Empty
+    /// when nothing is guarded. HORO-1828.
+    let guardedLines: [String]
+    /// Whether the goal is reachable, and by what means, honestly
+    /// accounting for observed stability (HORO-1827/HORO-1828). Read from
+    /// `dto.feasibility.verdict` through the vocabulary lookup.
+    let feasibilityTerm: GlomerisTerm
 
     init(_ dto: RecoveryPreviewReportDto) {
         goalText = dto.goal.description
@@ -151,6 +163,19 @@ struct RecoveryPreviewSummary: Equatable {
             : "On this estimate there may not be enough to reclaim. "
                 + "A run would still take what it safely can."
         caveats = dto.caveats
+
+        eligibilityTerm = GlomerisVocabulary.eligibility(dto.eligibility)
+        feasibilityTerm = GlomerisVocabulary.feasibility(dto.feasibility.verdict)
+        // Largest first — `guarded` already arrives sorted that way from
+        // Rust (`build_guarded_breakdown`), so this is display formatting
+        // only, never a re-sort that could disagree with the byte order the
+        // CLI chose.
+        guardedLines = dto.guarded.map { group in
+            let reasonTerm = GlomerisVocabulary.reason(group.reason)
+            let lowerBound = group.isLowerBound ? " (lower bound)" : ""
+            return "\(GlomerisVocabulary.safety(group.policyLabel).title): "
+                + "\(reasonTerm.title) — \(group.estimatedHuman)\(lowerBound)"
+        }
     }
 
     private static func spaceAcrossCandidates(
@@ -450,6 +475,12 @@ struct RecoverySectionView: View {
     /// close the gap.
     @ViewBuilder
     private func previewContent(_ summary: RecoveryPreviewSummary) -> some View {
+        // HORO-1828: the headline, first — within a glance, is there
+        // anything to do, and is the goal reachable at all. Everything
+        // below this is the detail that backs those two answers up.
+        GlomerisDetailRow(label: "Eligibility") {
+            GlomerisBadgeView(term: summary.eligibilityTerm)
+        }
         GlomerisDetailRow(label: "Now") {
             VStack(alignment: .leading, spacing: 2) {
                 GlomerisBadgeView(term: summary.pressureTerm)
@@ -486,6 +517,22 @@ struct RecoverySectionView: View {
                 Text(notExecutable)
                     .font(GlomerisDesign.secondaryFont)
             }
+        }
+        // HORO-1828: why "off limits" is hundreds of GiB and not a handful
+        // of bytes — the guarded breakdown, largest group first.
+        if !summary.guardedLines.isEmpty {
+            GlomerisDetailRow(label: "Guarded") {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(summary.guardedLines, id: \.self) { line in
+                        Text(line)
+                            .font(GlomerisDesign.secondaryFont)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        GlomerisDetailRow(label: "Feasibility") {
+            GlomerisBadgeView(term: summary.feasibilityTerm)
         }
         Text(summary.reachabilityText)
             .font(GlomerisDesign.captionFont)
