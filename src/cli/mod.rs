@@ -1766,6 +1766,49 @@ pub fn print_explain_report(report: &ExplainReport) {
         report.policy_label,
         report.reasons.join(", ")
     );
+    match (&report.refusal_source, &report.refusal_reason) {
+        (Some(source), Some(reason)) => println!("refusal:       [{source}] {reason}"),
+        _ => println!("refusal:       none"),
+    }
+    if report.holders.is_empty() {
+        println!("holders:       none observed");
+    } else {
+        println!("holders:");
+        for h in &report.holders {
+            println!(
+                "  - {}(pid {}) relation={} claim={} ({})",
+                h.command, h.pid, h.relation, h.claim, h.provenance
+            );
+        }
+    }
+    for probe in &report.holder_probes {
+        if let Some(reason) = probe.unavailable_reason {
+            println!("  ! {} holder probe unavailable: {reason}", probe.relation);
+        }
+    }
+    println!(
+        "executable dependency: probe={} references={} unresolved={} examined={:?}",
+        report.executable_dependency.probe,
+        report.executable_dependency.references.len(),
+        report.executable_dependency.unresolved.len(),
+        report.executable_dependency.sources_examined,
+    );
+    println!("  note: {}", report.executable_dependency.note);
+    if let Some(cargo_target) = &report.cargo_target {
+        println!(
+            "cargo target:  scope={} is_direct_locator={}",
+            cargo_target.scope, cargo_target.is_direct_locator
+        );
+        if let Some(note) = cargo_target.cold_rebuild_note {
+            println!("  note: {note}");
+        }
+    }
+    if let Some(git) = &report.git {
+        println!(
+            "git:           probe={} dirty={} linked_worktree={}",
+            git.probe, git.dirty, git.linked_worktree
+        );
+    }
 }
 
 /// Prints a [`CleanDryRunReport`] as concise, human-readable text. Always

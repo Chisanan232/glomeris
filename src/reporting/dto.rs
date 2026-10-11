@@ -176,11 +176,31 @@ fn executable_fields(
     decision: &PolicyDecision,
     resolved_action: Option<&dyn Action>,
 ) -> (bool, Vec<OfferedAction>, Option<String>) {
+    let (executable, offered_actions, refusal) =
+        executable_fields_typed(ev, decision, resolved_action);
+    (executable, offered_actions, refusal.map(|r| r.message))
+}
+
+/// Typed counterpart of [`executable_fields`] (HORO-1828): identical
+/// behavior, but the refusal half carries [`crate::actionability::StaticRefusal`]
+/// rather than a bare `String`, so [`ExplainReport::refusal_source`] can
+/// never disagree with [`ExplainReport::refusal_reason`] about which
+/// refusal happened — both are read off the one typed value.
+fn executable_fields_typed(
+    ev: &Evidence,
+    decision: &PolicyDecision,
+    resolved_action: Option<&dyn Action>,
+) -> (
+    bool,
+    Vec<OfferedAction>,
+    Option<crate::actionability::StaticRefusal>,
+) {
     // Protected-before-planning lives inside `static_refusal`, which is what
     // `build_llm_plan_report` relies on so that no LLM response can cause a
     // protected resource's action to be planned. See that function's docs.
-    if let Some(reason) = crate::actionability::static_refusal(ev, decision, resolved_action) {
-        return (false, Vec::new(), Some(reason));
+    if let Some(refusal) = crate::actionability::static_refusal_typed(ev, decision, resolved_action)
+    {
+        return (false, Vec::new(), Some(refusal));
     }
 
     // `static_refusal` returned `None`, which it only does with an action in
@@ -190,7 +210,10 @@ fn executable_fields(
         return (
             false,
             Vec::new(),
-            Some("no registered cleanup action for this resource kind".to_string()),
+            Some(crate::actionability::StaticRefusal {
+                source: crate::actionability::RefusalSource::NoRegisteredAction,
+                message: "no registered cleanup action for this resource kind".to_string(),
+            }),
         );
     };
 
@@ -279,6 +302,388 @@ fn process_claim_label(claim: crate::evidence::ProcessClaim) -> &'static str {
         ProcessClaim::Stalled => "stalled",
         ProcessClaim::AbandonedCandidate => "abandoned_candidate",
         ProcessClaim::Unknown => "unknown",
+    }
+}
+
+/// One process observed to hold a resource open, with cwd inside it, or
+/// with its own executable mapping resolving inside it (HORO-1828) — the
+/// structured counterpart of the prose [`describe_process_with_claim`]
+/// line, for a client (the menu-bar app) that wants to render or group
+/// holders rather than just display a sentence.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HolderReport {
+    pub pid: u32,
+    pub command: String,
+    /// Which evidence list this holder came from: `"open_file"`
+    /// (`Evidence::open_by_process`), `"cwd"`
+    /// (`Evidence::process_cwd_match`), or `"executable"`
+    /// (`Evidence::executable_dependency.running_inside`, HORO-1825).
+    /// Derived purely from which list produced this entry, never a new
+    /// evidence field.
+    pub relation: &'static str,
+    /// [`process_claim_label`] of [`crate::evidence::derive_claim`] on
+    /// this holder's own identity — explanation only, same guarantee as
+    /// [`describe_process_with_claim`]: a claim never removes or adds a
+    /// policy veto.
+    pub claim: &'static str,
+    /// `"inferred"`, always — this field is about `claim` specifically,
+    /// not about the holder fact itself (the process genuinely holding
+    /// this resource, which this entry's mere presence already reports as
+    /// observed). `derive_claim` only ever infers from already-observed
+    /// identity fields; it never adds a new probe.
+    pub provenance: &'static str,
+}
+
+fn holder_report(p: &crate::evidence::ProcessRef, relation: &'static str) -> HolderReport {
+    HolderReport {
+        pid: p.pid,
+        command: p.command.clone(),
+        relation,
+        claim: process_claim_label(crate::evidence::derive_claim(&p.identity)),
+        provenance: "inferred",
+    }
+}
+
+/// Whether one holder relation's own probe could answer at all (HORO-1828)
+/// — the fail-closed sibling of [`HolderReport`]. `unavailable_reason` is
+/// `Some` exactly when this relation contributed nothing to `holders` for
+/// a reason OTHER than "nothing holds this resource": a failed or
+/// unattempted probe must never render as the same empty result a genuine
+/// clean negative does (ADR-0001 §4.1 "C1"). A client must check this
+/// list before reading an empty `holders` as "nobody is using this".
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HolderProbeReport {
+    pub relation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<&'static str>,
+}
+
+/// Builds [`ExplainReport::holders`]/[`ExplainReport::holder_probes`] from
+/// the three evidence lists a holder can come from. Each list's own
+/// [`ProbeOutcome`] is consulted independently — one relation's probe
+/// failing never hides another relation's genuine holders, and never
+/// upgrades to a clean negative on its own.
+fn holders_fields(ev: &Evidence) -> (Vec<HolderReport>, Vec<HolderProbeReport>) {
+    let mut holders = Vec::new();
+    let mut probes = Vec::new();
+
+    match &ev.open_by_process {
+        ProbeOutcome::Observed(procs) => {
+            probes.push(HolderProbeReport {
+                relation: "open_file",
+                unavailable_reason: None,
+            });
+            holders.extend(procs.iter().map(|p| holder_report(p, "open_file")));
+        }
+        ProbeOutcome::Unavailable(reason) => probes.push(HolderProbeReport {
+            relation: "open_file",
+            unavailable_reason: Some(reason.tag()),
+        }),
+    }
+
+    match &ev.process_cwd_match {
+        ProbeOutcome::Observed(procs) => {
+            probes.push(HolderProbeReport {
+                relation: "cwd",
+                unavailable_reason: None,
+            });
+            holders.extend(procs.iter().map(|p| holder_report(p, "cwd")));
+        }
+        ProbeOutcome::Unavailable(reason) => probes.push(HolderProbeReport {
+            relation: "cwd",
+            unavailable_reason: Some(reason.tag()),
+        }),
+    }
+
+    // `executable_dependency` is one probe shared with the dependency
+    // block below, but the running-process half of it is a holder in
+    // exactly the same sense as the other two lists. A per-pointer
+    // `RunningProcesses` read failure is recorded as an ordinary
+    // `UnresolvedRef::SourceUnreadable` with `running_inside` left empty
+    // (see `evidence::correlate::host_dependency`) — that must surface
+    // here as "unavailable", never as "nobody's executable is running
+    // from here".
+    match &ev.executable_dependency {
+        ProbeOutcome::Observed(rep) => {
+            let running_process_probe_failed = rep.unresolved.iter().any(|u| {
+                matches!(
+                    u,
+                    crate::evidence::UnresolvedRef::SourceUnreadable {
+                        source: crate::evidence::SourceTag::RunningProcesses
+                    }
+                )
+            });
+            if running_process_probe_failed {
+                probes.push(HolderProbeReport {
+                    relation: "executable",
+                    unavailable_reason: Some(ProbeReason::Failed.tag()),
+                });
+            } else {
+                probes.push(HolderProbeReport {
+                    relation: "executable",
+                    unavailable_reason: None,
+                });
+                holders.extend(
+                    rep.running_inside
+                        .iter()
+                        .map(|p| holder_report(p, "executable")),
+                );
+            }
+        }
+        ProbeOutcome::Unavailable(reason) => probes.push(HolderProbeReport {
+            relation: "executable",
+            unavailable_reason: Some(reason.tag()),
+        }),
+    }
+
+    (holders, probes)
+}
+
+/// One confirmed, already-wired dependency reference projected for
+/// `explain` (HORO-1828, HORO-1825 §4.3) — a privacy-safe counterpart of
+/// [`crate::evidence::DependencyRef`]. Deliberately carries NEITHER
+/// `resolved` (the reference's resolved path) NOR `exe` (its filesystem
+/// identity): see [`DependencyExplainReport`]'s doc comment for why.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DependencyReferenceReport {
+    pub source: &'static str,
+    /// Structural pointer only (e.g. `"hooks.PostToolUse[0].hooks[0]"`) —
+    /// never a raw path or command string.
+    pub pointer: String,
+    /// `"observed"` (read directly from a recognized config) or
+    /// `"inferred"` (resolved from a bare command name against Glomeris's
+    /// own `PATH` — see [`crate::evidence::Provenance`]).
+    pub provenance: &'static str,
+}
+
+/// One reference Glomeris could not resolve to a confirmed verdict,
+/// projected for `explain` (HORO-1828). Carries only the stable `kind`
+/// tag of the real [`crate::evidence::UnresolvedRef`] variant and its
+/// `source` — deliberately NOT its `pointer` or (for `RestatFailed`) its
+/// `resolved` path, which is privacy-sensitive host-config detail (see
+/// [`DependencyExplainReport`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnresolvedDependencyReport {
+    pub source: &'static str,
+    pub kind: &'static str,
+}
+
+fn unresolved_ref_kind(u: &crate::evidence::UnresolvedRef) -> &'static str {
+    use crate::evidence::UnresolvedRef;
+    match u {
+        UnresolvedRef::NonInspectable { .. } => "non_inspectable",
+        UnresolvedRef::NotOnPath { .. } => "not_on_path",
+        UnresolvedRef::PathResolutionDivergent { .. } => "path_resolution_divergent",
+        UnresolvedRef::SourceUnreadable { .. } => "source_unreadable",
+        UnresolvedRef::SymlinkLoopOrTooDeep { .. } => "symlink_loop_or_too_deep",
+        UnresolvedRef::PathResolutionIndeterminate { .. } => "path_resolution_indeterminate",
+        UnresolvedRef::MalformedSchema { .. } => "malformed_schema",
+        UnresolvedRef::RestatFailed { .. } => "restat_failed",
+    }
+}
+
+fn provenance_tag(p: crate::evidence::Provenance) -> &'static str {
+    use crate::evidence::Provenance;
+    match p {
+        Provenance::Observed => "observed",
+        Provenance::Inferred => "inferred",
+    }
+}
+
+/// `explain`'s structural projection of
+/// [`crate::evidence::ExecutableDependencyReport`] (HORO-1825 §4.3), added
+/// by HORO-1828 — today that probe is computed for every
+/// [`crate::evidence::ResourceLocator::Path`] resource and consulted by
+/// `classify`/the executor, but never shown to an operator at all.
+///
+/// # PRIVACY-CRITICAL
+///
+/// Never serializes a resolved path or raw executable identity — not
+/// here, and (per that rule) nowhere else in [`ExplainReport`] either.
+/// Matches the precedent [`crate::evidence::HostIntegrityReport::summary_note`]
+/// (HORO-1826) already set: that function prints a dependency COUNT, never
+/// a path. `references`/`unresolved` here carry only [`SourceTag::as_str`]
+/// tags and structural `pointer`s (e.g. `"hooks.PostToolUse[0].hooks[0]"`,
+/// `"ProgramArguments[0]"`, `"PATH"`) — never
+/// [`crate::evidence::DependencyRef::resolved`],
+/// [`crate::evidence::ExeIdentity::path`], or
+/// [`crate::evidence::UnresolvedRef::RestatFailed`]'s own `resolved`.
+/// `tests::explain_report_never_serializes_a_resolved_dependency_path`
+/// enforces this by grepping the whole serialized JSON for a marker path.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DependencyExplainReport {
+    /// `"observed"` when the probe ran, or the [`ProbeReason`] tag when it
+    /// did not — never an empty `references`/`unresolved` standing in for
+    /// an unattempted probe.
+    pub probe: &'static str,
+    pub references: Vec<DependencyReferenceReport>,
+    pub unresolved: Vec<UnresolvedDependencyReport>,
+    /// [`SourceTag::as_str`] of every recognized source actually examined
+    /// — display only, never a policy input (ADR-0001 §4.3).
+    pub sources_examined: Vec<String>,
+    /// ADR-0001 §4.3's stated known gap, shown verbatim so an operator is
+    /// never left assuming a clean `executable_dependency` covers every
+    /// way a command could be launched.
+    pub note: &'static str,
+}
+
+const EXECUTABLE_DEPENDENCY_SCOPE_NOTE: &str =
+    "MCP server commands and shell startup files are not examined";
+
+fn dependency_fields(ev: &Evidence) -> DependencyExplainReport {
+    match &ev.executable_dependency {
+        ProbeOutcome::Unavailable(reason) => DependencyExplainReport {
+            probe: reason.tag(),
+            references: Vec::new(),
+            unresolved: Vec::new(),
+            sources_examined: Vec::new(),
+            note: EXECUTABLE_DEPENDENCY_SCOPE_NOTE,
+        },
+        ProbeOutcome::Observed(rep) => DependencyExplainReport {
+            probe: "observed",
+            references: rep
+                .references_inside
+                .iter()
+                .map(|r| DependencyReferenceReport {
+                    source: r.source.as_str(),
+                    pointer: r.pointer.clone(),
+                    provenance: provenance_tag(r.provenance),
+                })
+                .collect(),
+            unresolved: rep
+                .unresolved
+                .iter()
+                .map(|u| UnresolvedDependencyReport {
+                    source: u.source().as_str(),
+                    kind: unresolved_ref_kind(u),
+                })
+                .collect(),
+            sources_examined: rep
+                .sources_examined
+                .iter()
+                .map(|s| s.as_str().to_string())
+                .collect(),
+            note: EXECUTABLE_DEPENDENCY_SCOPE_NOTE,
+        },
+    }
+}
+
+/// Sole producer of all four `cargo_target.scope` tokens (HORO-1828) —
+/// `scripts/check-vocabulary-covers-cli-tokens.sh`'s `targetScope` row
+/// diffs against this one function, which is why `"unknown"` lives here
+/// as a fourth match arm rather than as a literal sprinkled at the one
+/// call site that needs it (`cargo_target_fields`'s `Unavailable` arm):
+/// a literal there would be real wording the vocabulary guard could never
+/// see, the same gap `scripts/README.md` calls out for `ExecuteReport
+/// ::outcome`.
+fn target_scope_tag(scope: Option<crate::evidence::TargetScope>) -> &'static str {
+    use crate::evidence::TargetScope;
+    match scope {
+        Some(TargetScope::Local) => "local",
+        Some(TargetScope::Orphan) => "orphan",
+        Some(TargetScope::Redirected) => "redirected",
+        // The probe itself failed or never ran: a fourth, distinct value
+        // from the three real `TargetScope` variants, never a guess at
+        // one of them.
+        None => "unknown",
+    }
+}
+
+const COLD_REBUILD_NOTE: &str =
+    "every sharer's next build is a cold rebuild; the sharer set cannot be enumerated";
+
+/// `explain`'s projection of [`crate::evidence::CargoTargetScope`]
+/// (HORO-1824 §4.2), added by HORO-1828. `scope`/`is_direct_locator` are
+/// never recomputed here — both come straight from the one
+/// `resolve_cargo_target_scope` call `classify` itself already consulted
+/// (HORO-1824's security-critical note on `is_direct_locator` applies
+/// here exactly as it does there: it is this field, not `scope` alone,
+/// that `classify` keys its veto on).
+///
+/// Deliberately carries no resolved path (`resolved_target`/
+/// `workspace_root`) — see [`DependencyExplainReport`]'s PRIVACY-CRITICAL
+/// note, which applies to `ExplainReport` as a whole, not only to the
+/// dependency block.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CargoTargetExplainReport {
+    /// `"local"`, `"orphan"`, `"redirected"`, or `"unknown"` when the
+    /// probe itself could not run (never the same as a clean negative).
+    pub scope: &'static str,
+    pub is_direct_locator: bool,
+    /// `"inferred"` — this is Cargo's own `cargo metadata` resolution
+    /// re-read for display, not a direct user-facing observation.
+    pub provenance: &'static str,
+    /// Present only for `scope: "redirected"` (HORO-1824 §16.2, founder-
+    /// settled: permanently non-preauthorizable). Explains *why* in words
+    /// a user reads next to `shared_build_cache_blast_radius`, rather than
+    /// leaving the reason code to speak for itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cold_rebuild_note: Option<&'static str>,
+}
+
+fn cargo_target_fields(
+    scope: &ProbeOutcome<crate::evidence::CargoTargetScope>,
+) -> CargoTargetExplainReport {
+    use crate::evidence::TargetScope;
+    match scope {
+        // The probe itself failed or never ran. This block carries no
+        // separate `unavailable_reason` field (unlike `holders`/
+        // `executable_dependency`) — `target_scope_tag(None)`'s
+        // `"unknown"` already says so, which is the ticket's own
+        // four-value vocabulary (`local|orphan|redirected|unknown`).
+        ProbeOutcome::Unavailable(_) => CargoTargetExplainReport {
+            scope: target_scope_tag(None),
+            is_direct_locator: false,
+            provenance: "inferred",
+            cold_rebuild_note: None,
+        },
+        ProbeOutcome::Observed(s) => CargoTargetExplainReport {
+            scope: target_scope_tag(Some(s.scope)),
+            is_direct_locator: s.is_direct_locator,
+            provenance: "inferred",
+            cold_rebuild_note: matches!(s.scope, TargetScope::Redirected)
+                .then_some(COLD_REBUILD_NOTE),
+        },
+    }
+}
+
+/// `explain`'s projection of [`crate::evidence::GitState`] (HORO-1828) —
+/// added to fix a real wording bug (campaign design review): the
+/// menu-bar app's `git_worktree_dirty` copy said "The surrounding
+/// repository has uncommitted work" for EVERY `GitWorktreeDirty` reason,
+/// which is false whenever the actual trigger was `worktree` alone on an
+/// otherwise-clean linked worktree (`classify`'s condition is `dirty ||
+/// worktree`, see `policy::engine`). Exposing both booleans separately
+/// lets a client word the two cases correctly instead of restating the
+/// reason code's name as if it meant only one of them.
+///
+/// `untracked` is deliberately NOT projected here: it is not a policy
+/// input (`classify` never reads it), and showing it next to `dirty`
+/// invites a client to assume it is part of the same veto.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GitExplainReport {
+    pub probe: &'static str,
+    pub dirty: bool,
+    pub linked_worktree: bool,
+}
+
+fn git_fields(git_state: &ProbeOutcome<Option<crate::evidence::GitState>>) -> GitExplainReport {
+    match git_state {
+        ProbeOutcome::Unavailable(reason) => GitExplainReport {
+            probe: reason.tag(),
+            dirty: false,
+            linked_worktree: false,
+        },
+        ProbeOutcome::Observed(None) => GitExplainReport {
+            probe: "observed",
+            dirty: false,
+            linked_worktree: false,
+        },
+        ProbeOutcome::Observed(Some(g)) => GitExplainReport {
+            probe: "observed",
+            dirty: g.dirty,
+            linked_worktree: g.worktree,
+        },
     }
 }
 
@@ -877,6 +1282,35 @@ pub struct ExplainReport {
     /// Human-readable reason set exactly when `executable` is `false`.
     /// HORO-1053.
     pub refusal_reason: Option<String>,
+    /// Stable token for *why* `refusal_reason` is set (HORO-1828):
+    /// `"policy_protected"`, `"no_registered_action"`, or
+    /// `"action_cannot_plan"`. `None` exactly when `refusal_reason` is
+    /// `None` — both are read off the same
+    /// [`crate::actionability::StaticRefusal`] so they can never disagree.
+    pub refusal_source: Option<&'static str>,
+    /// Every process observed holding this resource open, with cwd
+    /// inside it, or with its own executable mapping resolving inside it
+    /// (HORO-1828) — see [`HolderReport`]. Check `holder_probes` before
+    /// reading an empty list here as "nobody is using this resource".
+    pub holders: Vec<HolderReport>,
+    /// Per-relation availability for `holders` (HORO-1828) — see
+    /// [`HolderProbeReport`].
+    pub holder_probes: Vec<HolderProbeReport>,
+    /// `explain`'s structural view of the HORO-1825 §4.3 executable-
+    /// dependency probe (HORO-1828) — see [`DependencyExplainReport`] for
+    /// the PRIVACY-CRITICAL guarantee this field carries.
+    pub executable_dependency: DependencyExplainReport,
+    /// Cargo's ownership relationship to its own target directory
+    /// (HORO-1824 §4.2), projected for `explain` (HORO-1828). `Some` only
+    /// when this resource's `cargo_target_scope` probe was ever run — see
+    /// [`crate::evidence::Evidence::cargo_target_scope`]'s doc comment:
+    /// `None` means "not a Cargo-target-shaped resource", not "unknown".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_target: Option<CargoTargetExplainReport>,
+    /// Git repository state for this resource's containing directory
+    /// (HORO-1828) — see [`GitExplainReport`] for the wording bug this
+    /// field exists to let a client fix.
+    pub git: Option<GitExplainReport>,
 }
 
 impl ExplainReport {
@@ -899,8 +1333,11 @@ impl ExplainReport {
         } else {
             None
         };
-        let (executable, offered_actions, refusal_reason) =
-            executable_fields(ev, decision, resolved_action);
+        let (executable, offered_actions, refusal) =
+            executable_fields_typed(ev, decision, resolved_action);
+        let refusal_source = refusal.as_ref().map(|r| r.source.as_str());
+        let refusal_reason = refusal.map(|r| r.message);
+        let (holders, holder_probes) = holders_fields(ev);
 
         Self {
             resource_id: ev.resource.to_string(),
@@ -925,6 +1362,12 @@ impl ExplainReport {
             executable,
             offered_actions,
             refusal_reason,
+            refusal_source,
+            holders,
+            holder_probes,
+            executable_dependency: dependency_fields(ev),
+            cargo_target: ev.cargo_target_scope.as_ref().map(cargo_target_fields),
+            git: Some(git_fields(&ev.git_state)),
         }
     }
 }
@@ -3681,6 +4124,358 @@ mod tests {
         assert_eq!(
             report.actionable_now_bytes, 1_000,
             "the protected member's bulk is not unlocked by a quiet family"
+        );
+    }
+
+    // --- HORO-1828: explain structure (holders, dependency, cargo, git) ---
+
+    fn process(pid: u32, command: &str) -> ProcessRef {
+        ProcessRef::new(pid, command.to_string())
+    }
+
+    fn process_with_identity(
+        pid: u32,
+        command: &str,
+        supervisor: crate::evidence::Supervisor,
+    ) -> ProcessRef {
+        use crate::evidence::{ExeIdentity, ProcessIdentity};
+        process(pid, command).with_identity(ProbeOutcome::Observed(ProcessIdentity {
+            start_time: SystemTime::UNIX_EPOCH,
+            uid: 501,
+            ppid: 1,
+            pgid: pid,
+            state_zombie: false,
+            exe: ProbeOutcome::Observed(ExeIdentity {
+                path: PathBuf::from("/usr/bin/true"),
+                dev: 1,
+                ino: 1,
+            }),
+            supervisor,
+        }))
+    }
+
+    #[test]
+    fn refusal_source_agrees_with_refusal_reason_on_every_path() {
+        // Protected.
+        let ev = base_evidence();
+        let d = decision(
+            PolicyClass::Protected,
+            vec![ReasonCode::ProtectedCredentialMaterial],
+        );
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+        assert_eq!(report.refusal_source, Some("policy_protected"));
+        assert!(report.refusal_reason.unwrap().starts_with("PROTECTED: "));
+
+        // No registered action.
+        let report = ExplainReport::from_evidence_and_decision(
+            &ev,
+            &decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]),
+            None,
+        );
+        assert_eq!(report.refusal_source, Some("no_registered_action"));
+
+        // Executable: no refusal at all.
+        let plannable = plannable_evidence();
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&plannable, &d, Some(node_action()));
+        assert!(report.executable);
+        assert_eq!(report.refusal_source, None);
+        assert_eq!(report.refusal_reason, None);
+    }
+
+    #[test]
+    fn an_unavailable_holder_probe_is_never_rendered_as_a_clean_negative() {
+        let mut ev = base_evidence();
+        ev.open_by_process = ProbeOutcome::Unavailable(ProbeReason::TimedOut);
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        assert!(report.holders.iter().all(|h| h.relation != "open_file"));
+        let probe = report
+            .holder_probes
+            .iter()
+            .find(|p| p.relation == "open_file")
+            .expect("open_file relation must always report its probe outcome");
+        assert_eq!(probe.unavailable_reason, Some("timed_out"));
+    }
+
+    #[test]
+    fn a_failed_running_process_probe_marks_the_executable_relation_unavailable() {
+        use crate::evidence::{ExecutableDependencyReport, SourceTag, UnresolvedRef};
+
+        let mut ev = base_evidence();
+        ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+            references_inside: Vec::new(),
+            running_inside: Vec::new(),
+            unresolved: vec![UnresolvedRef::SourceUnreadable {
+                source: SourceTag::RunningProcesses,
+            }],
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        });
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        let probe = report
+            .holder_probes
+            .iter()
+            .find(|p| p.relation == "executable")
+            .unwrap();
+        assert_eq!(
+            probe.unavailable_reason,
+            Some("failed"),
+            "a failed running-process read must not look like 'nothing running here'"
+        );
+        assert!(report.holders.iter().all(|h| h.relation != "executable"));
+    }
+
+    #[test]
+    fn a_holder_with_no_supervisor_claims_unknown_never_abandoned() {
+        let mut ev = base_evidence();
+        ev.open_by_process = ProbeOutcome::Observed(vec![process_with_identity(
+            4242,
+            "cargo",
+            crate::evidence::Supervisor::None,
+        )]);
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        let holder = report
+            .holders
+            .iter()
+            .find(|h| h.relation == "open_file")
+            .expect("the holder must still be reported");
+        assert_eq!(holder.claim, "unknown");
+        assert_ne!(
+            holder.claim, "abandoned_candidate",
+            "a detached build must never be labelled as a reason to delete"
+        );
+        assert_eq!(holder.provenance, "inferred");
+    }
+
+    #[test]
+    fn a_launchd_supervised_holder_claims_idle_but_valid() {
+        let mut ev = base_evidence();
+        ev.open_by_process = ProbeOutcome::Observed(vec![process_with_identity(
+            99,
+            "node",
+            crate::evidence::Supervisor::LaunchdJob,
+        )]);
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::ResourceInActiveUse]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        let holder = report
+            .holders
+            .iter()
+            .find(|h| h.relation == "open_file")
+            .unwrap();
+        assert_eq!(holder.claim, "idle_but_valid");
+        assert_eq!(holder.command, "node");
+        assert_eq!(holder.pid, 99);
+    }
+
+    #[test]
+    fn git_observed_none_and_unavailable_are_distinct() {
+        let mut ev = base_evidence();
+        ev.git_state = ProbeOutcome::Observed(None);
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let observed_none = ExplainReport::from_evidence_and_decision(&ev, &d, None)
+            .git
+            .unwrap();
+        assert_eq!(observed_none.probe, "observed");
+        assert!(!observed_none.dirty);
+        assert!(!observed_none.linked_worktree);
+
+        ev.git_state = ProbeOutcome::Unavailable(ProbeReason::Failed);
+        let unavailable = ExplainReport::from_evidence_and_decision(&ev, &d, None)
+            .git
+            .unwrap();
+        assert_eq!(unavailable.probe, "failed");
+        assert_ne!(
+            observed_none, unavailable,
+            "a clean negative and a failed probe must serialize differently"
+        );
+    }
+
+    #[test]
+    fn git_worktree_flag_is_exposed_distinctly_from_dirty() {
+        // The real wording bug this field exists to let a client fix: a
+        // clean linked worktree must report `dirty: false,
+        // linked_worktree: true`, never collapsed into one boolean a
+        // client could only word as "uncommitted work".
+        let mut ev = base_evidence();
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp/proj-wt"),
+            common_dir: PathBuf::from("/tmp/proj/.git"),
+            dirty: false,
+            untracked: false,
+            worktree: true,
+        }));
+        let d = decision(PolicyClass::Ask, vec![ReasonCode::GitWorktreeDirty]);
+        let git = ExplainReport::from_evidence_and_decision(&ev, &d, None)
+            .git
+            .unwrap();
+        assert!(!git.dirty);
+        assert!(git.linked_worktree);
+    }
+
+    #[test]
+    fn cargo_target_is_none_when_the_resource_is_not_cargo_shaped() {
+        let ev = plannable_evidence(); // NodeModules, cargo_target_scope: None
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+        assert!(report.cargo_target.is_none());
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("cargo_target"),
+            "a non-Cargo resource must omit cargo_target entirely, not serialize null"
+        );
+    }
+
+    #[test]
+    fn cargo_target_unknown_when_the_probe_itself_failed() {
+        let mut ev = base_evidence();
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+        let cargo_target = report.cargo_target.expect("probe was attempted");
+        assert_eq!(cargo_target.scope, "unknown");
+        assert!(!cargo_target.is_direct_locator);
+        assert!(cargo_target.cold_rebuild_note.is_none());
+    }
+
+    #[test]
+    fn cargo_target_redirected_always_carries_the_cold_rebuild_note() {
+        use crate::evidence::{CargoTargetScope, TargetScope};
+
+        let mut ev = base_evidence();
+        ev.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+            resolved_target: PathBuf::from("/Users/dev/.cargo/shared-target"),
+            resolved_build_dir: None,
+            workspace_root: PathBuf::from("/tmp/proj"),
+            scope: TargetScope::Redirected,
+            is_direct_locator: false,
+        }));
+        let d = decision(
+            PolicyClass::Ask,
+            vec![ReasonCode::SharedBuildCacheBlastRadius],
+        );
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+        let cargo_target = report.cargo_target.as_ref().unwrap();
+        assert_eq!(cargo_target.scope, "redirected");
+        assert!(!cargo_target.is_direct_locator);
+        assert_eq!(
+            cargo_target.cold_rebuild_note,
+            Some(
+                "every sharer's next build is a cold rebuild; the sharer set cannot be enumerated"
+            )
+        );
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            !json.contains("shared-target"),
+            "cargo_target must never carry its own resolved_target/workspace_root path \
+             (resource_id's own path is a separate, already-public field and is not what \
+             this assertion is about)"
+        );
+    }
+
+    #[test]
+    fn cargo_target_local_but_not_the_direct_locator_still_carries_the_flag() {
+        // HORO-1824's security-critical field: `scope: Local` alone is not
+        // what the veto keys on, `is_direct_locator` is — this must
+        // survive the explain projection unchanged.
+        use crate::evidence::{CargoTargetScope, TargetScope};
+
+        let mut ev = base_evidence();
+        ev.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+            resolved_target: PathBuf::from("/tmp/proj/target"),
+            resolved_build_dir: None,
+            workspace_root: PathBuf::from("/tmp/proj"),
+            scope: TargetScope::Local,
+            is_direct_locator: false,
+        }));
+        let d = decision(
+            PolicyClass::Ask,
+            vec![ReasonCode::SharedBuildCacheBlastRadius],
+        );
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+        let cargo_target = report.cargo_target.unwrap();
+        assert_eq!(cargo_target.scope, "local");
+        assert!(!cargo_target.is_direct_locator);
+    }
+
+    /// The single most important test in this PR (HORO-1828): no resolved
+    /// path or raw executable identity may ever appear in a serialized
+    /// `ExplainReport`, anywhere — matching the precedent
+    /// `HostIntegrityReport::summary_note` already set. Exercises every
+    /// shape that carries a path: `DependencyRef.resolved`,
+    /// `ExeIdentity.path`, and `UnresolvedRef::RestatFailed.resolved`.
+    #[test]
+    fn explain_report_never_serializes_a_resolved_dependency_path() {
+        use crate::evidence::{
+            DependencyRef, ExeIdentity, ExecutableDependencyReport, Provenance, SourceTag,
+            UnresolvedRef,
+        };
+
+        const MARKER: &str = "zz_privacy_marker_f3b2";
+        let marker_path = PathBuf::from(format!("/Users/dev/.{MARKER}/claude/settings.json"));
+
+        let mut ev = base_evidence();
+        ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+            references_inside: vec![DependencyRef {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+                resolved: marker_path.clone(),
+                exe: ExeIdentity {
+                    path: marker_path.clone(),
+                    dev: 1,
+                    ino: 1,
+                },
+                provenance: Provenance::Observed,
+                next_invocation: true,
+            }],
+            running_inside: Vec::new(),
+            unresolved: vec![UnresolvedRef::RestatFailed {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.Stop[0].hooks[0]".to_string(),
+                resolved: marker_path.clone(),
+            }],
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        });
+        let d = decision(
+            PolicyClass::Protected,
+            vec![ReasonCode::ProtectedExecutableDependency],
+        );
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, Some(cargo_action()));
+
+        let json = serde_json::to_string(&report).expect("serialize");
+        assert!(
+            !json.contains(MARKER),
+            "a resolved/exe path leaked into the serialized explain report: {json}"
+        );
+
+        // Positive control: the structural facts this privacy rule does
+        // NOT withhold must still be present, so the assertion above is
+        // about the path specifically, not an accidentally-empty report.
+        assert!(json.contains("claude_user_settings"));
+        assert!(json.contains("hooks.PostToolUse[0].hooks[0]"));
+        assert!(json.contains("restat_failed"));
+        assert_eq!(
+            report.executable_dependency.unresolved[0].kind,
+            "restat_failed"
+        );
+    }
+
+    #[test]
+    fn executable_dependency_always_carries_the_scope_note() {
+        let ev = base_evidence(); // executable_dependency: Unavailable(NotAttempted)
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+        assert_eq!(report.executable_dependency.probe, "not_attempted");
+        assert_eq!(
+            report.executable_dependency.note,
+            "MCP server commands and shell startup files are not examined"
         );
     }
 }
