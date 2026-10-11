@@ -305,6 +305,33 @@ fn process_claim_label(claim: crate::evidence::ProcessClaim) -> &'static str {
     }
 }
 
+/// Which evidence list a [`HolderReport`]/[`HolderProbeReport`] is about
+/// (HORO-1828). A closed, three-member vocabulary rather than a literal
+/// repeated at each of the three call sites in [`holders_fields`] — so
+/// `scripts/check-vocabulary-covers-cli-tokens.sh`'s `holderRelation` row
+/// has exactly one function ([`HolderRelation::as_str`]) to diff the
+/// Swift wording against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HolderRelation {
+    /// From [`Evidence::open_by_process`].
+    OpenFile,
+    /// From [`Evidence::process_cwd_match`].
+    Cwd,
+    /// From [`Evidence::executable_dependency`]`.running_inside`
+    /// (HORO-1825).
+    Executable,
+}
+
+impl HolderRelation {
+    fn as_str(self) -> &'static str {
+        match self {
+            HolderRelation::OpenFile => "open_file",
+            HolderRelation::Cwd => "cwd",
+            HolderRelation::Executable => "executable",
+        }
+    }
+}
+
 /// One process observed to hold a resource open, with cwd inside it, or
 /// with its own executable mapping resolving inside it (HORO-1828) — the
 /// structured counterpart of the prose [`describe_process_with_claim`]
@@ -314,10 +341,7 @@ fn process_claim_label(claim: crate::evidence::ProcessClaim) -> &'static str {
 pub struct HolderReport {
     pub pid: u32,
     pub command: String,
-    /// Which evidence list this holder came from: `"open_file"`
-    /// (`Evidence::open_by_process`), `"cwd"`
-    /// (`Evidence::process_cwd_match`), or `"executable"`
-    /// (`Evidence::executable_dependency.running_inside`, HORO-1825).
+    /// Which evidence list this holder came from — see [`HolderRelation`].
     /// Derived purely from which list produced this entry, never a new
     /// evidence field.
     pub relation: &'static str,
@@ -326,21 +350,22 @@ pub struct HolderReport {
     /// [`describe_process_with_claim`]: a claim never removes or adds a
     /// policy veto.
     pub claim: &'static str,
-    /// `"inferred"`, always — this field is about `claim` specifically,
-    /// not about the holder fact itself (the process genuinely holding
-    /// this resource, which this entry's mere presence already reports as
-    /// observed). `derive_claim` only ever infers from already-observed
-    /// identity fields; it never adds a new probe.
+    /// Always [`provenance_tag`]`(`[`crate::evidence::Provenance::Inferred`]`)`
+    /// — this field is about `claim` specifically, not about the holder
+    /// fact itself (the process genuinely holding this resource, which
+    /// this entry's mere presence already reports as observed).
+    /// `derive_claim` only ever infers from already-observed identity
+    /// fields; it never adds a new probe.
     pub provenance: &'static str,
 }
 
-fn holder_report(p: &crate::evidence::ProcessRef, relation: &'static str) -> HolderReport {
+fn holder_report(p: &crate::evidence::ProcessRef, relation: HolderRelation) -> HolderReport {
     HolderReport {
         pid: p.pid,
         command: p.command.clone(),
-        relation,
+        relation: relation.as_str(),
         claim: process_claim_label(crate::evidence::derive_claim(&p.identity)),
-        provenance: "inferred",
+        provenance: provenance_tag(crate::evidence::Provenance::Inferred),
     }
 }
 
@@ -370,13 +395,17 @@ fn holders_fields(ev: &Evidence) -> (Vec<HolderReport>, Vec<HolderProbeReport>) 
     match &ev.open_by_process {
         ProbeOutcome::Observed(procs) => {
             probes.push(HolderProbeReport {
-                relation: "open_file",
+                relation: HolderRelation::OpenFile.as_str(),
                 unavailable_reason: None,
             });
-            holders.extend(procs.iter().map(|p| holder_report(p, "open_file")));
+            holders.extend(
+                procs
+                    .iter()
+                    .map(|p| holder_report(p, HolderRelation::OpenFile)),
+            );
         }
         ProbeOutcome::Unavailable(reason) => probes.push(HolderProbeReport {
-            relation: "open_file",
+            relation: HolderRelation::OpenFile.as_str(),
             unavailable_reason: Some(reason.tag()),
         }),
     }
@@ -384,13 +413,13 @@ fn holders_fields(ev: &Evidence) -> (Vec<HolderReport>, Vec<HolderProbeReport>) 
     match &ev.process_cwd_match {
         ProbeOutcome::Observed(procs) => {
             probes.push(HolderProbeReport {
-                relation: "cwd",
+                relation: HolderRelation::Cwd.as_str(),
                 unavailable_reason: None,
             });
-            holders.extend(procs.iter().map(|p| holder_report(p, "cwd")));
+            holders.extend(procs.iter().map(|p| holder_report(p, HolderRelation::Cwd)));
         }
         ProbeOutcome::Unavailable(reason) => probes.push(HolderProbeReport {
-            relation: "cwd",
+            relation: HolderRelation::Cwd.as_str(),
             unavailable_reason: Some(reason.tag()),
         }),
     }
@@ -415,23 +444,23 @@ fn holders_fields(ev: &Evidence) -> (Vec<HolderReport>, Vec<HolderProbeReport>) 
             });
             if running_process_probe_failed {
                 probes.push(HolderProbeReport {
-                    relation: "executable",
+                    relation: HolderRelation::Executable.as_str(),
                     unavailable_reason: Some(ProbeReason::Failed.tag()),
                 });
             } else {
                 probes.push(HolderProbeReport {
-                    relation: "executable",
+                    relation: HolderRelation::Executable.as_str(),
                     unavailable_reason: None,
                 });
                 holders.extend(
                     rep.running_inside
                         .iter()
-                        .map(|p| holder_report(p, "executable")),
+                        .map(|p| holder_report(p, HolderRelation::Executable)),
                 );
             }
         }
         ProbeOutcome::Unavailable(reason) => probes.push(HolderProbeReport {
-            relation: "executable",
+            relation: HolderRelation::Executable.as_str(),
             unavailable_reason: Some(reason.tag()),
         }),
     }
@@ -634,13 +663,13 @@ fn cargo_target_fields(
         ProbeOutcome::Unavailable(_) => CargoTargetExplainReport {
             scope: target_scope_tag(None),
             is_direct_locator: false,
-            provenance: "inferred",
+            provenance: provenance_tag(crate::evidence::Provenance::Inferred),
             cold_rebuild_note: None,
         },
         ProbeOutcome::Observed(s) => CargoTargetExplainReport {
             scope: target_scope_tag(Some(s.scope)),
             is_direct_locator: s.is_direct_locator,
-            provenance: "inferred",
+            provenance: provenance_tag(crate::evidence::Provenance::Inferred),
             cold_rebuild_note: matches!(s.scope, TargetScope::Redirected)
                 .then_some(COLD_REBUILD_NOTE),
         },

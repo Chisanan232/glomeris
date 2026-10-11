@@ -174,10 +174,13 @@ struct CandidateDetailViewModel: Equatable {
 
     // MARK: - HORO-1828: explain structure (holders, dependency, cargo, git)
 
-    /// One row per holder, worded from `GlomerisVocabulary.processClaim`,
-    /// paired with its raw relation/command/pid for the detail list.
-    var holderRows: [(holder: HolderReportDto, claimTerm: GlomerisTerm)] {
-        holders.map { ($0, GlomerisVocabulary.processClaim($0.claim)) }
+    /// One row per holder, worded from `GlomerisVocabulary.processClaim`
+    /// and `.holderRelation`, paired with its raw command/pid for the
+    /// detail list.
+    var holderRows: [(holder: HolderReportDto, claimTerm: GlomerisTerm, relationTerm: GlomerisTerm)] {
+        holders.map {
+            ($0, GlomerisVocabulary.processClaim($0.claim), GlomerisVocabulary.holderRelation($0.relation))
+        }
     }
 
     /// Relations whose own probe could not answer — must be shown
@@ -187,12 +190,108 @@ struct CandidateDetailViewModel: Equatable {
         holderProbes.filter { $0.unavailableReason != nil }
     }
 
+    /// Whether this report's holder probe ran at all. `false` for a CLI
+    /// that predates HORO-1828 — `holderProbes` decodes to `[]` in that
+    /// case, which must never be read the same as "every relation was
+    /// checked and found clean" (the exact HORO-1825 fail-open shape).
+    var holderProbeWasReported: Bool {
+        !holderProbes.isEmpty
+    }
+
+    /// Single-line summary for the "Who is using this" `DisclosureGroup`
+    /// label (HORO-1828). Three cases, never collapsed into one another:
+    /// an older CLI that never asked, one or more relations whose probe
+    /// failed, and a genuine answer (holder count, possibly zero).
+    var holdersSummaryText: String {
+        guard holderProbeWasReported else {
+            return "Who is using this — not reported by this CLI version"
+        }
+        if !unavailableHolderProbes.isEmpty {
+            let names = unavailableHolderProbes.map(\.relation).joined(separator: ", ")
+            return holders.isEmpty
+                ? "Who is using this — could not fully check (\(names))"
+                : "Who is using this — \(holders.count), but could not fully check (\(names))"
+        }
+        return holders.isEmpty
+            ? "Who is using this — none observed"
+            : "Who is using this — \(holders.count)"
+    }
+
+    var holdersSummaryAccessibilityLabel: String {
+        guard holderProbeWasReported else {
+            return "Who is using this. Not reported by this version of the CLI."
+        }
+        if !unavailableHolderProbes.isEmpty {
+            let names = unavailableHolderProbes.map(\.relation).joined(separator: ", ")
+            return "Who is using this. \(holders.count) holder"
+                + (holders.count == 1 ? "" : "s")
+                + " observed. Could not fully check: \(names)."
+        }
+        return holders.isEmpty
+            ? "Who is using this. None observed."
+            : "Who is using this. \(holders.count) holder"
+                + (holders.count == 1 ? "" : "s") + "."
+    }
+
+    /// Sentence shown when there is nothing else to say inside "Who is
+    /// using this" — i.e. when both `holders` and `unavailableHolderProbes`
+    /// are empty AND the probe actually ran. Must only be reached in that
+    /// exact case: see `holdersSummaryText` for the other two.
+    static let noHoldersObservedSentence =
+        "No process was observed holding this open, as its current directory, "
+            + "or running from inside it."
+
     var dependencyReferenceCount: Int { executableDependency.references.count }
     var dependencyUnresolvedCount: Int { executableDependency.unresolved.count }
     var dependencySourcesExaminedText: String {
         executableDependency.sourcesExamined.isEmpty
             ? "none"
             : executableDependency.sourcesExamined.joined(separator: ", ")
+    }
+
+    /// Whether `executable_dependency`'s own probe actually ran. `false`
+    /// for a `ResourceLocator::Tool` resource, a CLI that predates the
+    /// field, or a failed probe — any of which must read as "could not be
+    /// checked", never as "nothing depends on this" (same fail-open
+    /// shape as `holdersSummaryText`).
+    var dependencyProbeWasObserved: Bool {
+        executableDependency.probe == "observed"
+    }
+
+    /// Single-line summary for the "Hooks and daemons" `DisclosureGroup`
+    /// label (HORO-1828/HORO-1825). Three cases: the probe did not run at
+    /// all, it ran and found nothing, or it ran and found references
+    /// and/or unresolved entries.
+    var hooksAndDaemonsSummaryText: String {
+        guard dependencyProbeWasObserved else {
+            return "Hooks and daemons that depend on this — could not be checked "
+                + "(\(executableDependency.probe))"
+        }
+        let count = dependencyReferenceCount
+        if count == 0 && dependencyUnresolvedCount == 0 {
+            return "Hooks and daemons that depend on this — none confirmed"
+        }
+        if count == 0 {
+            return "Hooks and daemons that depend on this — \(dependencyUnresolvedCount) unresolved"
+        }
+        return "Hooks and daemons that depend on this — \(count)"
+    }
+
+    var hooksAndDaemonsSummaryAccessibilityLabel: String {
+        guard dependencyProbeWasObserved else {
+            return "Hooks and daemons that depend on this. Could not be checked: "
+                + "\(executableDependency.probe)."
+        }
+        let count = dependencyReferenceCount
+        if count == 0 && dependencyUnresolvedCount == 0 {
+            return "Hooks and daemons that depend on this. None confirmed."
+        }
+        if count == 0 {
+            return "Hooks and daemons that depend on this. No confirmed references, "
+                + "but \(dependencyUnresolvedCount) unresolved."
+        }
+        return "Hooks and daemons that depend on this. \(count) confirmed reference"
+            + (count == 1 ? "" : "s") + "."
     }
 
     var cargoTargetScopeTerm: GlomerisTerm? {
@@ -695,27 +794,22 @@ struct CandidateDetailView: View {
 
     @ViewBuilder
     private func whoIsUsingThisSummary(_ viewModel: CandidateDetailViewModel) -> some View {
-        Text(
-            viewModel.holders.isEmpty
-                ? "Who is using this — none observed"
-                : "Who is using this — \(viewModel.holders.count)"
-        )
-        .font(GlomerisDesign.secondaryFont)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(
-            viewModel.holders.isEmpty
-                ? "Who is using this. None observed."
-                : "Who is using this. \(viewModel.holders.count) holder"
-                    + (viewModel.holders.count == 1 ? "" : "s") + "."
-        )
+        Text(viewModel.holdersSummaryText)
+            .font(GlomerisDesign.secondaryFont)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(viewModel.holdersSummaryAccessibilityLabel)
     }
 
     @ViewBuilder
     private func whoIsUsingThisContent(_ viewModel: CandidateDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
-            if viewModel.holders.isEmpty && viewModel.unavailableHolderProbes.isEmpty {
-                Text("No process was observed holding this open, as its current "
-                     + "directory, or running from inside it.")
+            if !viewModel.holderProbeWasReported {
+                Text("This version of the CLI does not report who is using this resource.")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if viewModel.holders.isEmpty && viewModel.unavailableHolderProbes.isEmpty {
+                Text(CandidateDetailViewModel.noHoldersObservedSentence)
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -723,7 +817,7 @@ struct CandidateDetailView: View {
             ForEach(Array(viewModel.holderRows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .firstTextBaseline, spacing: GlomerisDesign.inlineSpacing) {
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("\(row.holder.command) (pid \(row.holder.pid)) · \(row.holder.relation)")
+                        Text("\(row.holder.command) (pid \(row.holder.pid)) · \(row.relationTerm.title)")
                             .font(GlomerisDesign.secondaryFont)
                         Text("\(row.claimTerm.title) — \(row.claimTerm.explanation)")
                             .font(GlomerisDesign.captionFont)
@@ -734,17 +828,18 @@ struct CandidateDetailView: View {
                 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(
-                    "\(row.holder.command), process \(row.holder.pid), "
-                        + "relation \(row.holder.relation). \(row.claimTerm.accessibilityLabel)"
+                    "\(row.holder.command), process \(row.holder.pid). "
+                        + "\(row.relationTerm.accessibilityLabel) \(row.claimTerm.accessibilityLabel)"
                 )
             }
             ForEach(viewModel.unavailableHolderProbes, id: \.relation) { probe in
-                Text("\(probe.relation) could not be checked: \(probe.unavailableReason ?? "unknown")")
+                let relationTerm = GlomerisVocabulary.holderRelation(probe.relation)
+                Text("\(relationTerm.title) could not be checked: \(probe.unavailableReason ?? "unknown")")
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(
-                        "\(probe.relation) holder check unavailable: "
+                        "\(relationTerm.title) check unavailable: "
                             + "\(probe.unavailableReason ?? "unknown")"
                     )
             }
@@ -753,18 +848,10 @@ struct CandidateDetailView: View {
 
     @ViewBuilder
     private func hooksAndDaemonsSummary(_ viewModel: CandidateDetailViewModel) -> some View {
-        let count = viewModel.dependencyReferenceCount
-        Text(count == 0
-             ? "Hooks and daemons that depend on this — none confirmed"
-             : "Hooks and daemons that depend on this — \(count)")
+        Text(viewModel.hooksAndDaemonsSummaryText)
             .font(GlomerisDesign.secondaryFont)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(
-                count == 0
-                    ? "Hooks and daemons that depend on this. None confirmed."
-                    : "Hooks and daemons that depend on this. \(count) confirmed reference"
-                        + (count == 1 ? "" : "s") + "."
-            )
+            .accessibilityLabel(viewModel.hooksAndDaemonsSummaryAccessibilityLabel)
     }
 
     /// Never shows a resolved path or raw executable identity — there is
@@ -774,8 +861,16 @@ struct CandidateDetailView: View {
     @ViewBuilder
     private func hooksAndDaemonsContent(_ viewModel: CandidateDetailViewModel) -> some View {
         VStack(alignment: .leading, spacing: GlomerisDesign.rowSpacing) {
+            if !viewModel.dependencyProbeWasObserved {
+                Text("This probe could not run: \(viewModel.executableDependency.probe).")
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ForEach(Array(viewModel.executableDependency.references.enumerated()), id: \.offset) { _, ref in
-                Text("\(ref.source) · \(ref.pointer) (\(ref.provenance))")
+                let sourceTerm = GlomerisVocabulary.dependencySource(ref.source)
+                let provenanceTerm = GlomerisVocabulary.provenance(ref.provenance)
+                Text("\(sourceTerm.title) · \(ref.pointer) (\(provenanceTerm.title))")
                     .font(GlomerisDesign.captionFont)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -788,7 +883,9 @@ struct CandidateDetailView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 ForEach(Array(viewModel.executableDependency.unresolved.enumerated()), id: \.offset) { _, u in
-                    Text("\(u.source) · \(u.kind)")
+                    let sourceTerm = GlomerisVocabulary.dependencySource(u.source)
+                    let kindTerm = GlomerisVocabulary.unresolvedKind(u.kind)
+                    Text("\(sourceTerm.title) · \(kindTerm.title)")
                         .font(GlomerisDesign.captionFont)
                         .foregroundStyle(.secondary)
                 }

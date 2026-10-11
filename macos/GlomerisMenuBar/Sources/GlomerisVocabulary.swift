@@ -1980,44 +1980,234 @@ enum GlomerisVocabulary {
     /// below are reachable.
     static func gitWorktreeDirtyWording(git: GitExplainReportDto?) -> GlomerisTerm {
         guard let git, git.probe == "observed" else {
-            return term(
+            return prose(
                 "git_worktree_dirty", reasonAxis, "Working tree not settled",
                 "Either the repository has uncommitted work, or this is a linked "
-                    + "worktree — Git state could not be re-confirmed here.",
-                "questionmark.circle", .unknown
+                    + "worktree — Git state could not be re-confirmed here."
             )
         }
         switch (git.dirty, git.linkedWorktree) {
         case (true, true):
-            return term(
+            return prose(
                 "git_worktree_dirty", reasonAxis, "Uncommitted work, in a linked worktree",
                 "The surrounding repository has uncommitted changes, and this is "
-                    + "a linked worktree rather than the main checkout.",
-                "exclamationmark.triangle.fill", .caution
+                    + "a linked worktree rather than the main checkout."
             )
         case (true, false):
-            return term(
+            return prose(
                 "git_worktree_dirty", reasonAxis, "Uncommitted changes nearby",
-                "The surrounding repository has uncommitted work.",
-                "exclamationmark.triangle.fill", .caution
+                "The surrounding repository has uncommitted work."
             )
         case (false, true):
-            return term(
+            return prose(
                 "git_worktree_dirty", reasonAxis, "In a linked worktree",
                 "This sits inside a `git worktree add` sibling, not the main "
-                    + "checkout — nothing here is reported as dirty.",
-                "arrow.triangle.branch", .caution
+                    + "checkout — nothing here is reported as dirty."
             )
         case (false, false):
             // `classify` would not have fired this reason code with both
             // false — reachable only if a caller mismatches the reason
             // list against a different `git` snapshot. Worded honestly
             // rather than asserted away.
-            return term(
+            return prose(
                 "git_worktree_dirty", reasonAxis, "Working tree not settled",
                 "Neither uncommitted changes nor a linked worktree was observed "
-                    + "for this specific snapshot.",
-                "questionmark.circle", .unknown
+                    + "for this specific snapshot."
+            )
+        }
+    }
+
+    // MARK: - Holder relation (`holders[].relation`/`holder_probes[].relation`,
+    // HORO-1828, `src/reporting/dto.rs` `HolderRelation::as_str`)
+
+    static let holderRelationAxis = "Holder relation"
+
+    /// Which evidence list a holder (or an unavailable probe) came from.
+    /// Prose, not a chip: this is a label on a list row, not a state
+    /// worth a badge of its own.
+    static func holderRelation(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "open_file":
+            return prose(
+                token, holderRelationAxis, "Has it open",
+                "A process has this resource open as a file."
+            )
+        case "cwd":
+            return prose(
+                token, holderRelationAxis, "Current directory",
+                "A process's current working directory is inside this resource."
+            )
+        case "executable":
+            return prose(
+                token, holderRelationAxis, "Running from here",
+                "A process is currently running from inside this resource."
+            )
+        default:
+            return unrecognised(
+                token, holderRelationAxis, "Unrecognised holder relation",
+                "The CLI reported a holder relation this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Provenance (`holders[].provenance`/`cargo_target.provenance`/
+    // `executable_dependency.references[].provenance`, HORO-1828/HORO-1825,
+    // `src/reporting/dto.rs` `provenance_tag`)
+
+    static let provenanceAxis = "Provenance"
+
+    /// Whether a fact came straight from a recognized source
+    /// (`"observed"`) or was derived by resolving a bare command name
+    /// against Glomeris's own `PATH` (`"inferred"`) — see
+    /// `crate::evidence::Provenance`'s own doc comment for why `"inferred"`
+    /// is never sufficient on its own to conclude a clean negative.
+    static func provenance(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "observed":
+            return prose(
+                token, provenanceAxis, "Observed directly",
+                "Read straight from a recognized source or probe."
+            )
+        case "inferred":
+            return prose(
+                token, provenanceAxis, "Inferred",
+                "Derived — resolved from a bare name, or computed from an "
+                    + "already-observed fact rather than read directly."
+            )
+        default:
+            return unrecognised(
+                token, provenanceAxis, "Unrecognised provenance",
+                "The CLI reported a provenance this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Dependency source (`executable_dependency.references[].source`/
+    // `.unresolved[].source`, HORO-1828/HORO-1825 §4.3,
+    // `src/evidence/model.rs` `SourceTag::as_str`)
+
+    static let dependencySourceAxis = "Dependency source"
+
+    /// Which recognized config or probe a dependency reference came from.
+    /// Prose: this is detail inside a drill-down list, not a state worth
+    /// a badge.
+    static func dependencySource(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "claude_user_settings":
+            return prose(
+                token, dependencySourceAxis, "Claude user settings",
+                "A hook entry in the user-level Claude Code settings file."
+            )
+        case "claude_user_local":
+            return prose(
+                token, dependencySourceAxis, "Claude user local settings",
+                "A hook entry in the user-level local-only settings file."
+            )
+        case "claude_managed":
+            return prose(
+                token, dependencySourceAxis, "Claude managed settings",
+                "A hook entry in an organization-managed settings file."
+            )
+        case "claude_project":
+            return prose(
+                token, dependencySourceAxis, "Claude project settings",
+                "A hook entry in one of the configured project roots' own settings."
+            )
+        case "codex_hooks":
+            return prose(
+                token, dependencySourceAxis, "Codex hooks",
+                "A hook entry in Codex's own configuration."
+            )
+        case "codex_notify":
+            return prose(
+                token, dependencySourceAxis, "Codex notify",
+                "A `notify` command in Codex's own configuration."
+            )
+        case "launch_agent":
+            return prose(
+                token, dependencySourceAxis, "LaunchAgent",
+                "A macOS LaunchAgent's `Program`/`ProgramArguments`."
+            )
+        case "path_entry":
+            return prose(
+                token, dependencySourceAxis, "PATH entry",
+                "Resolved by searching Glomeris's own `PATH`."
+            )
+        case "running_processes":
+            return prose(
+                token, dependencySourceAxis, "Running processes",
+                "A currently-running process, not a config file at all."
+            )
+        default:
+            return unrecognised(
+                token, dependencySourceAxis, "Unrecognised dependency source",
+                "The CLI reported a dependency source this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Unresolved kind (`executable_dependency.unresolved[].kind`,
+    // HORO-1828/HORO-1825 §4.3, `src/reporting/dto.rs` `unresolved_ref_kind`)
+
+    static let unresolvedKindAxis = "Unresolved reason"
+
+    /// Why one dependency reference could not be cleared to a confirmed
+    /// in/out verdict — always a fail-closed catch, never a clean
+    /// negative. Prose: detail inside a drill-down list.
+    static func unresolvedKind(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "non_inspectable":
+            return prose(
+                token, unresolvedKindAxis, "Could not be inspected",
+                "The command contained a shell metacharacter, an unbalanced "
+                    + "quote, or an argument with no defined resolution directory."
+            )
+        case "not_on_path":
+            return prose(
+                token, unresolvedKindAxis, "Not found on PATH",
+                "A bare command name did not resolve against Glomeris's own PATH."
+            )
+        case "path_resolution_divergent":
+            return prose(
+                token, unresolvedKindAxis, "PATH may differ at runtime",
+                "The name resolved against Glomeris's own PATH, but the hook "
+                    + "runtime's actual PATH may differ, so that is not enough "
+                    + "to conclude a clean negative."
+            )
+        case "source_unreadable":
+            return prose(
+                token, unresolvedKindAxis, "Source could not be read",
+                "A recognized source file exists but could not be read or parsed."
+            )
+        case "symlink_loop_or_too_deep":
+            return prose(
+                token, unresolvedKindAxis, "Symlink loop or too deep",
+                "The symlink chain looped or exceeded the bound Glomeris follows."
+            )
+        case "path_resolution_indeterminate":
+            return prose(
+                token, unresolvedKindAxis, "Could not be resolved",
+                "An intermediate directory in the path does not exist, so it "
+                    + "cannot be canonicalized to check whether it lands inside "
+                    + "this resource."
+            )
+        case "malformed_schema":
+            return prose(
+                token, unresolvedKindAxis, "Malformed entry",
+                "A recognized source's file was read, but one entry inside it "
+                    + "did not match the expected shape."
+            )
+        case "restat_failed":
+            return prose(
+                token, unresolvedKindAxis, "Could not be re-checked",
+                "A post-action re-check of this one dependency's own path "
+                    + "failed for a reason that is not a confirmed absence."
+            )
+        default:
+            return unrecognised(
+                token, unresolvedKindAxis, "Unrecognised unresolved reason",
+                "The CLI reported an unresolved-reference kind this app has no "
+                    + "wording for."
             )
         }
     }
