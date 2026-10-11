@@ -147,17 +147,28 @@ pub fn compare_host_integrity(
                 Some(_) => IntegrityStatus::Degraded,
                 None => {
                     // Not found in the post-action references. If the
-                    // post-probe itself flagged this exact source as
-                    // unresolved, the absence does not confirm removal —
-                    // fail closed to Unverified rather than reading a gap
-                    // as a clean negative. Otherwise, the post-probe
-                    // examined this source cleanly and found nothing
-                    // there: genuinely missing.
-                    if post_report
-                        .unresolved
-                        .iter()
-                        .any(|u| u.source() == &dep.source)
-                    {
+                    // post-probe itself flagged THIS dependency's own
+                    // source/pointer as unresolved, the absence does not
+                    // confirm removal — fail closed to Unverified rather
+                    // than reading a gap as a clean negative. Otherwise,
+                    // the post-probe examined this source cleanly and
+                    // found nothing there: genuinely missing.
+                    //
+                    // Matches on `(source, pointer)`, not `source` alone
+                    // (independent-review finding on PR #163): two
+                    // dependencies can share one `SourceTag` (e.g. two
+                    // hooks in the same `ClaudeUserSettings` file), and
+                    // matching on `source` alone would let one
+                    // dependency's genuinely confirmed-missing status get
+                    // masked into `Unverified` by an unrelated entry's
+                    // `unresolved` record for the same source.
+                    // `SourceUnreadable` carries no pointer at all — the
+                    // whole file failed to read, which blocks every
+                    // pointer from that source, so it still matches by
+                    // source alone (`u.pointer().is_none()`).
+                    if post_report.unresolved.iter().any(|u| {
+                        u.source() == &dep.source && u.pointer().is_none_or(|p| p == dep.pointer)
+                    }) {
                         IntegrityStatus::Unverified
                     } else {
                         IntegrityStatus::Degraded
@@ -415,6 +426,54 @@ mod tests {
 
         assert_eq!(report.status, IntegrityStatus::Unverified);
         assert_eq!(report.entries[0].status, IntegrityStatus::Unverified);
+    }
+
+    /// Independent-review finding on PR #163: two dependencies sharing one
+    /// `SourceTag` (e.g. two hooks in the same `ClaudeUserSettings` file,
+    /// at different structural pointers) must not let one's genuinely
+    /// confirmed `Missing` get masked into `Unverified` by an unrelated
+    /// `unresolved` entry for the SAME source but a DIFFERENT pointer.
+    /// The matching rule is `(source, pointer)`, not `source` alone.
+    #[test]
+    fn unresolved_entry_for_a_different_pointer_does_not_mask_a_genuinely_missing_sibling() {
+        let genuinely_missing = DependencyRef {
+            pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            ..dep_ref(1)
+        };
+        let unrelated_unresolvable = DependencyRef {
+            pointer: "hooks.PostToolUse[0].hooks[1]".to_string(),
+            ..dep_ref(2)
+        };
+        let pre = clean(vec![
+            genuinely_missing.clone(),
+            unrelated_unresolvable.clone(),
+        ]);
+        let post = ProbeOutcome::Observed(ExecutableDependencyReport {
+            // `genuinely_missing` is simply gone; `unrelated_unresolvable`
+            // is still there (survives unchanged), but THIS source has a
+            // separate unresolved entry for the OTHER pointer.
+            references_inside: vec![unrelated_unresolvable.clone()],
+            running_inside: Vec::new(),
+            unresolved: vec![UnresolvedRef::MalformedSchema {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[1]".to_string(),
+            }],
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        });
+
+        let report = compare_host_integrity(&pre, &post);
+
+        let missing_entry = report
+            .entries
+            .iter()
+            .find(|e| e.pointer == genuinely_missing.pointer)
+            .expect("the missing dependency must still be reported");
+        assert_eq!(
+            missing_entry.status,
+            IntegrityStatus::Degraded,
+            "an unresolved entry for a DIFFERENT pointer on the same source must not mask \
+             a genuinely confirmed-missing dependency into Unverified"
+        );
     }
 
     /// Process-exit-after-deletion: a process that was running pre-action

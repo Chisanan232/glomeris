@@ -1039,6 +1039,28 @@ impl UnresolvedRef {
             | UnresolvedRef::MalformedSchema { source, .. } => source,
         }
     }
+
+    /// The structural pointer this unresolved entry is about, when it has
+    /// one. Only [`UnresolvedRef::SourceUnreadable`] carries none — a
+    /// whole config file failed to read, which blocks every entry from
+    /// that source, not just one pointer.
+    ///
+    /// HORO-1826: used to disambiguate two dependencies that share one
+    /// `SourceTag` (e.g. two hooks in the same `ClaudeUserSettings`
+    /// file) — matching on `source()` alone would let one dependency's
+    /// genuinely confirmed `Missing` get masked into `Unverified` by an
+    /// unrelated entry's `unresolved` record for the same source.
+    pub fn pointer(&self) -> Option<&str> {
+        match self {
+            UnresolvedRef::NonInspectable { pointer, .. }
+            | UnresolvedRef::NotOnPath { pointer, .. }
+            | UnresolvedRef::PathResolutionDivergent { pointer, .. }
+            | UnresolvedRef::SymlinkLoopOrTooDeep { pointer, .. }
+            | UnresolvedRef::PathResolutionIndeterminate { pointer, .. }
+            | UnresolvedRef::MalformedSchema { pointer, .. } => Some(pointer),
+            UnresolvedRef::SourceUnreadable { .. } => None,
+        }
+    }
 }
 
 /// Cargo's ownership relationship to its own config-resolved target
