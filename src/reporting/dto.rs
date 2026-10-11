@@ -696,23 +696,30 @@ pub struct GitExplainReport {
     pub linked_worktree: bool,
 }
 
-fn git_fields(git_state: &ProbeOutcome<Option<crate::evidence::GitState>>) -> GitExplainReport {
+/// `None` exactly when this resource is genuinely not inside any git
+/// working tree (`Observed(None)`) — never the same shape as a clean main
+/// checkout. A caller that collapsed this case to
+/// `Some(GitExplainReport { dirty: false, linked_worktree: false, .. })`
+/// would make "not in a repo" byte-identical to "in a clean main
+/// checkout", which is the same class of wording bug this whole block
+/// exists to fix, just moved one level up. `Unavailable` (the probe
+/// failed/never ran) still returns `Some`, carrying the reason — that is
+/// a real, if incomplete, answer, not an absence of the question.
+fn git_fields(
+    git_state: &ProbeOutcome<Option<crate::evidence::GitState>>,
+) -> Option<GitExplainReport> {
     match git_state {
-        ProbeOutcome::Unavailable(reason) => GitExplainReport {
+        ProbeOutcome::Unavailable(reason) => Some(GitExplainReport {
             probe: reason.tag(),
             dirty: false,
             linked_worktree: false,
-        },
-        ProbeOutcome::Observed(None) => GitExplainReport {
-            probe: "observed",
-            dirty: false,
-            linked_worktree: false,
-        },
-        ProbeOutcome::Observed(Some(g)) => GitExplainReport {
+        }),
+        ProbeOutcome::Observed(None) => None,
+        ProbeOutcome::Observed(Some(g)) => Some(GitExplainReport {
             probe: "observed",
             dirty: g.dirty,
             linked_worktree: g.worktree,
-        },
+        }),
     }
 }
 
@@ -1338,7 +1345,13 @@ pub struct ExplainReport {
     pub cargo_target: Option<CargoTargetExplainReport>,
     /// Git repository state for this resource's containing directory
     /// (HORO-1828) — see [`GitExplainReport`] for the wording bug this
-    /// field exists to let a client fix.
+    /// field exists to let a client fix. `None` means this resource is
+    /// genuinely not inside any git working tree — serialized as JSON
+    /// `null` (no `skip_serializing_if`) rather than omitted, so a client
+    /// can tell "not in a repo" (key present, `null`) apart from "older
+    /// CLI that predates this field" (key absent). See [`git_fields`]'s
+    /// doc comment for why this must never collapse to the same shape as
+    /// a clean main checkout.
     pub git: Option<GitExplainReport>,
 }
 
@@ -1396,7 +1409,7 @@ impl ExplainReport {
             holder_probes,
             executable_dependency: dependency_fields(ev),
             cargo_target: ev.cargo_target_scope.as_ref().map(cargo_target_fields),
-            git: Some(git_fields(&ev.git_state)),
+            git: git_fields(&ev.git_state),
         }
     }
 }
@@ -4304,24 +4317,48 @@ mod tests {
 
     #[test]
     fn git_observed_none_and_unavailable_are_distinct() {
+        // `Observed(None)` (genuinely not inside any git working tree)
+        // must be `None` here, never a `Some` indistinguishable from a
+        // clean main checkout — that would recreate, one level up, the
+        // exact wording bug this whole block exists to fix.
         let mut ev = base_evidence();
         ev.git_state = ProbeOutcome::Observed(None);
         let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
-        let observed_none = ExplainReport::from_evidence_and_decision(&ev, &d, None)
-            .git
-            .unwrap();
-        assert_eq!(observed_none.probe, "observed");
-        assert!(!observed_none.dirty);
-        assert!(!observed_none.linked_worktree);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+        assert!(
+            report.git.is_none(),
+            "a resource outside any git working tree must report git: None, \
+             not a false clean-checkout answer"
+        );
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["git"],
+            serde_json::Value::Null,
+            "git must serialize as an explicit null, not be omitted, so a client can tell \
+             'not in a repo' apart from 'older CLI that predates this field'"
+        );
 
         ev.git_state = ProbeOutcome::Unavailable(ProbeReason::Failed);
         let unavailable = ExplainReport::from_evidence_and_decision(&ev, &d, None)
             .git
             .unwrap();
         assert_eq!(unavailable.probe, "failed");
+
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp/proj"),
+            common_dir: PathBuf::from("/tmp/proj/.git"),
+            dirty: false,
+            untracked: false,
+            worktree: false,
+        }));
+        let clean_checkout = ExplainReport::from_evidence_and_decision(&ev, &d, None)
+            .git
+            .unwrap();
+        assert_eq!(clean_checkout.probe, "observed");
         assert_ne!(
-            observed_none, unavailable,
-            "a clean negative and a failed probe must serialize differently"
+            Some(unavailable),
+            Some(clean_checkout),
+            "a failed probe and a genuine clean checkout must serialize differently"
         );
     }
 

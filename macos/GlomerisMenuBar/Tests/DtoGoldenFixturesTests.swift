@@ -1762,9 +1762,12 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertTrue(dto.holderProbes.allSatisfy { $0.unavailableReason == nil })
         XCTAssertEqual(dto.executableDependency.probe, "observed")
         XCTAssertNil(dto.cargoTarget)
-        XCTAssertEqual(dto.git.probe, "observed")
-        XCTAssertFalse(dto.git.dirty)
-        XCTAssertFalse(dto.git.linkedWorktree)
+        // This resource is not inside any git working tree. `gitWasReported`
+        // must still be true (the probe ran and answered), and `git` itself
+        // must be `nil` — never a `Some` indistinguishable from a clean main
+        // checkout.
+        XCTAssertTrue(dto.gitWasReported)
+        XCTAssertNil(dto.git)
     }
 
     func testDecodesExplainReportDetachedBuildAndNeverClaimsAbandoned() throws {
@@ -1785,8 +1788,9 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(dto.cargoTarget?.coldRebuildNote)
         // The wording-bug fix: dirty is false, linkedWorktree is true,
         // reported as two distinct booleans rather than one collapsed flag.
-        XCTAssertFalse(dto.git.dirty)
-        XCTAssertTrue(dto.git.linkedWorktree)
+        XCTAssertTrue(dto.gitWasReported)
+        XCTAssertFalse(dto.git?.dirty ?? true)
+        XCTAssertTrue(dto.git?.linkedWorktree ?? false)
     }
 
     func testDecodesExplainReportSharedActiveTarget() throws {
@@ -1874,10 +1878,41 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertEqual(dto.executableDependency, .notReported)
         XCTAssertEqual(dto.executableDependency.probe, "not_attempted")
         XCTAssertNil(dto.cargoTarget)
-        XCTAssertEqual(dto.git, .notReported)
-        XCTAssertFalse(
-            dto.git.dirty || dto.git.linkedWorktree,
-            "an unreported git block must never claim a positive observation"
+        // An older CLI never asked about git at all — `gitWasReported` must
+        // be false, distinct from a current CLI that asked and genuinely
+        // found no repository (`gitWasReported: true, git: nil`).
+        XCTAssertFalse(dto.gitWasReported)
+        XCTAssertNil(dto.git)
+    }
+
+    /// The exact HORO-1828 wording bug, caught against adversarial review:
+    /// "not reported by this CLI" and "genuinely not in a git repository"
+    /// must decode to distinguishable states, never both to a bare `nil`
+    /// `git` with no way to tell them apart.
+    func testGitKeyPresentAsNullIsDistinctFromGitKeyAbsent() throws {
+        let keyAbsent = """
+        {"resource_id":"a","kind":"node_modules","detector":"test","sources":[],
+        "logical_bytes":1,"logical_human":"1 B","reclaimable_bytes":1,
+        "reclaimable_human":"1 B","reclaimable_bytes_is_lower_bound":false,
+        "completeness":"complete","confidence":"high","active_use_signals":[],
+        "regenerability":"regenerable_by_rebuild","policy_label":"AUTO_SAFE",
+        "reasons":[],"native_cleanup_available":false,"native_cleanup_action_id":null,
+        "fingerprint_token":null,"executable":true,"offered_actions":[],
+        "refusal_reason":null}
+        """
+        let keyNull = keyAbsent.replacingOccurrences(
+            of: "\"refusal_reason\":null}", with: "\"refusal_reason\":null,\"git\":null}")
+
+        let absentDto = try JSONDecoder().decode(ExplainReportDto.self, from: Data(keyAbsent.utf8))
+        let nullDto = try JSONDecoder().decode(ExplainReportDto.self, from: Data(keyNull.utf8))
+
+        XCTAssertFalse(absentDto.gitWasReported, "key absent must mean 'this CLI never asked'")
+        XCTAssertTrue(nullDto.gitWasReported, "an explicit null must mean 'asked, and the answer is none'")
+        XCTAssertNil(absentDto.git)
+        XCTAssertNil(nullDto.git)
+        XCTAssertNotEqual(
+            absentDto.gitWasReported, nullDto.gitWasReported,
+            "these are two different real-world states and must decode distinguishably"
         )
     }
 }

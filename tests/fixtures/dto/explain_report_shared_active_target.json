@@ -59,9 +59,5 @@
     "provenance": "inferred",
     "cold_rebuild_note": "every sharer's next build is a cold rebuild; the sharer set cannot be enumerated"
   },
-  "git": {
-    "probe": "observed",
-    "dirty": false,
-    "linked_worktree": false
-  }
+  "git": null
 }

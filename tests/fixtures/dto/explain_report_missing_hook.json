@@ -50,9 +50,5 @@
     ],
     "note": "MCP server commands and shell startup files are not examined"
   },
-  "git": {
-    "probe": "observed",
-    "dirty": false,
-    "linked_worktree": false
-  }
+  "git": null
 }

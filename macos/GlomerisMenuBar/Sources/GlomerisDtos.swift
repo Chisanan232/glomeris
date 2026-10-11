@@ -734,9 +734,23 @@ struct ExplainReportDto: Decodable, Equatable {
     /// a CLI that predates the field.
     let cargoTarget: CargoTargetExplainReportDto?
     /// Git repository state for this resource's containing directory
-    /// (HORO-1828). Defaults to `.notReported` for a CLI that predates the
-    /// field.
-    let git: GitExplainReportDto
+    /// (HORO-1828). THREE states, not two — `nil` alone is ambiguous
+    /// between them, which is why `gitWasReported` exists:
+    ///   - `gitWasReported == false`: a CLI that predates this field (the
+    ///     `git` key was absent from the JSON entirely).
+    ///   - `gitWasReported == true`, `git == nil`: the probe ran and this
+    ///     resource is genuinely not inside any git working tree — the
+    ///     wire value was an explicit `null`, never omitted.
+    ///   - `gitWasReported == true`, `git != nil`: a real observed/
+    ///     unavailable git state.
+    /// Collapsing the first two together would recreate, one level up,
+    /// the exact "clean negative looks the same as unasked" bug this
+    /// whole block exists to fix (see `GitExplainReport`'s Rust doc
+    /// comment on `git_fields`).
+    let git: GitExplainReportDto?
+    /// `true` when the `git` key was present in the JSON at all (even as
+    /// `null`) — see `git`'s own doc comment.
+    let gitWasReported: Bool
 
     enum CodingKeys: String, CodingKey {
         case resourceId = "resource_id"
@@ -803,7 +817,8 @@ struct ExplainReportDto: Decodable, Equatable {
             ?? .notReported
         cargoTarget =
             try container.decodeIfPresent(CargoTargetExplainReportDto.self, forKey: .cargoTarget)
-        git = try container.decodeIfPresent(GitExplainReportDto.self, forKey: .git) ?? .notReported
+        gitWasReported = container.contains(.git)
+        git = try container.decodeIfPresent(GitExplainReportDto.self, forKey: .git)
     }
 
     /// Non-decoding initializer for tests and previews.
@@ -834,7 +849,8 @@ struct ExplainReportDto: Decodable, Equatable {
         holderProbes: [HolderProbeReportDto] = [],
         executableDependency: DependencyExplainReportDto = .notReported,
         cargoTarget: CargoTargetExplainReportDto? = nil,
-        git: GitExplainReportDto = .notReported
+        git: GitExplainReportDto? = nil,
+        gitWasReported: Bool = true
     ) {
         self.resourceId = resourceId
         self.kind = kind
@@ -863,6 +879,7 @@ struct ExplainReportDto: Decodable, Equatable {
         self.executableDependency = executableDependency
         self.cargoTarget = cargoTarget
         self.git = git
+        self.gitWasReported = gitWasReported
     }
 }
 
@@ -983,9 +1000,6 @@ struct GitExplainReportDto: Decodable, Equatable {
         case dirty
         case linkedWorktree = "linked_worktree"
     }
-
-    static let notReported = GitExplainReportDto(
-        probe: "not_attempted", dirty: false, linkedWorktree: false)
 }
 
 /// Mirrors `reporting::dto::ExecuteReport`. `outcome` is deliberately kept
