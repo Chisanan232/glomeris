@@ -1740,4 +1740,179 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNotEqual(collected.state, never.state)
         XCTAssertNotEqual(collected.observationCount, never.observationCount)
     }
+
+
+    // MARK: - ExplainReport "explain structure" (HORO-1828)
+
+    func testDecodesExplainReportLegitIdleDaemon() throws {
+        let dto = try decodeFixture(
+            "explain_report_legit_idle_daemon.json", as: ExplainReportDto.self)
+
+        XCTAssertEqual(dto.policyLabel, "ASK")
+        XCTAssertEqual(dto.reasons, ["resource_in_active_use"])
+        XCTAssertTrue(dto.executable)
+        XCTAssertNil(dto.refusalSource)
+        XCTAssertEqual(dto.holders.count, 1)
+        XCTAssertEqual(dto.holders[0].command, "node")
+        XCTAssertEqual(dto.holders[0].pid, 4242)
+        XCTAssertEqual(dto.holders[0].relation, "open_file")
+        XCTAssertEqual(dto.holders[0].claim, "idle_but_valid")
+        XCTAssertEqual(dto.holders[0].provenance, "inferred")
+        XCTAssertEqual(dto.holderProbes.count, 3)
+        XCTAssertTrue(dto.holderProbes.allSatisfy { $0.unavailableReason == nil })
+        XCTAssertEqual(dto.executableDependency.probe, "observed")
+        XCTAssertNil(dto.cargoTarget)
+        // This resource is not inside any git working tree. `gitWasReported`
+        // must still be true (the probe ran and answered), and `git` itself
+        // must be `nil` — never a `Some` indistinguishable from a clean main
+        // checkout.
+        XCTAssertTrue(dto.gitWasReported)
+        XCTAssertNil(dto.git)
+    }
+
+    func testDecodesExplainReportDetachedBuildAndNeverClaimsAbandoned() throws {
+        let dto = try decodeFixture(
+            "explain_report_detached_build.json", as: ExplainReportDto.self)
+
+        XCTAssertEqual(dto.policyLabel, "ASK")
+        XCTAssertEqual(dto.reasons, ["resource_in_active_use", "git_worktree_dirty"])
+        XCTAssertEqual(dto.holders.count, 1)
+        XCTAssertEqual(dto.holders[0].claim, "unknown")
+        XCTAssertNotEqual(
+            dto.holders[0].claim, "abandoned_candidate",
+            "a detached build must never be labelled as a reason to delete"
+        )
+        XCTAssertEqual(dto.refusalSource, "no_registered_action")
+        XCTAssertEqual(dto.cargoTarget?.scope, "local")
+        XCTAssertEqual(dto.cargoTarget?.isDirectLocator, true)
+        XCTAssertNil(dto.cargoTarget?.coldRebuildNote)
+        // The wording-bug fix: dirty is false, linkedWorktree is true,
+        // reported as two distinct booleans rather than one collapsed flag.
+        XCTAssertTrue(dto.gitWasReported)
+        XCTAssertFalse(dto.git?.dirty ?? true)
+        XCTAssertTrue(dto.git?.linkedWorktree ?? false)
+    }
+
+    func testDecodesExplainReportSharedActiveTarget() throws {
+        let dto = try decodeFixture(
+            "explain_report_shared_active_target.json", as: ExplainReportDto.self)
+
+        XCTAssertEqual(
+            dto.reasons, ["resource_in_active_use", "shared_build_cache_blast_radius"])
+        XCTAssertEqual(dto.cargoTarget?.scope, "redirected")
+        XCTAssertEqual(dto.cargoTarget?.isDirectLocator, false)
+        XCTAssertEqual(
+            dto.cargoTarget?.coldRebuildNote,
+            "every sharer's next build is a cold rebuild; the sharer set cannot be enumerated"
+        )
+        XCTAssertEqual(dto.holders.count, 1)
+        XCTAssertEqual(dto.holders[0].command, "rustc")
+    }
+
+    func testDecodesExplainReportMissingHookWithNoPointerLeaked() throws {
+        let data = try loadFixture("explain_report_missing_hook.json")
+        let dto = try JSONDecoder().decode(ExplainReportDto.self, from: data)
+
+        XCTAssertEqual(dto.policyLabel, "UNKNOWN_INCOMPLETE")
+        XCTAssertEqual(dto.reasons, ["executable_dependency_unknown"])
+        XCTAssertEqual(dto.executableDependency.unresolved.count, 1)
+        XCTAssertEqual(dto.executableDependency.unresolved[0].source, "claude_user_settings")
+        XCTAssertEqual(dto.executableDependency.unresolved[0].kind, "not_on_path")
+        XCTAssertTrue(dto.holders.isEmpty)
+
+        // The fixture file itself must never carry the pointer alongside an
+        // unresolved entry — this is a decode-shape proof, not just a Rust
+        // one: `UnresolvedDependencyReportDto` has no `pointer` property at
+        // all, so there is nothing to decode even if the JSON had it.
+        let rawString = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(rawString.contains("hooks.Stop"))
+    }
+
+    func testDecodesExplainReportProtectedHookDependencyWithNoResolvedPath() throws {
+        let data = try loadFixture("explain_report_protected_hook_dependency.json")
+        let dto = try JSONDecoder().decode(ExplainReportDto.self, from: data)
+
+        XCTAssertEqual(dto.policyLabel, "PROTECTED")
+        XCTAssertEqual(dto.reasons, ["protected_executable_dependency"])
+        XCTAssertFalse(dto.executable)
+        XCTAssertTrue(dto.offeredActions.isEmpty)
+        XCTAssertEqual(dto.refusalSource, "policy_protected")
+        XCTAssertEqual(dto.refusalReason, "PROTECTED: protected_executable_dependency")
+        XCTAssertEqual(dto.executableDependency.references.count, 1)
+        XCTAssertEqual(dto.executableDependency.references[0].source, "claude_user_settings")
+        XCTAssertEqual(
+            dto.executableDependency.references[0].pointer, "hooks.PostToolUse[0].hooks[0]")
+        XCTAssertEqual(dto.cargoTarget?.scope, "redirected")
+
+        // Privacy: the fixture file itself must never contain the resolved
+        // dependency path or executable identity — this is the Swift half
+        // of the same guarantee `dto_golden_fixtures.rs`'s Rust test proves.
+        let rawString = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertFalse(rawString.contains("agent-hook"))
+        XCTAssertFalse(rawString.contains("\"resolved\""))
+        XCTAssertFalse(rawString.contains("\"exe\""))
+    }
+
+    /// An older CLI predating HORO-1828 reports none of the six new fields.
+    /// Every one of them must decode to its honest "not reported" default
+    /// — never to a value that reads as a clean negative (an empty
+    /// `holders` list, a `nil` `cargoTarget`, a `git` claiming `probe:
+    /// "observed"` with both booleans false would all be lies about a
+    /// resource this old CLI never even asked about).
+    func testExplainReportStillDecodesWithoutTheHORO1828Keys() throws {
+        let json = """
+        {"resource_id":"a","kind":"node_modules","detector":"test","sources":[],
+        "logical_bytes":1,"logical_human":"1 B","reclaimable_bytes":1,
+        "reclaimable_human":"1 B","reclaimable_bytes_is_lower_bound":false,
+        "completeness":"complete","confidence":"high","active_use_signals":[],
+        "regenerability":"regenerable_by_rebuild","policy_label":"AUTO_SAFE",
+        "reasons":[],"native_cleanup_available":false,"native_cleanup_action_id":null,
+        "fingerprint_token":null,"executable":true,"offered_actions":[],
+        "refusal_reason":null}
+        """
+        let dto = try JSONDecoder().decode(ExplainReportDto.self, from: Data(json.utf8))
+
+        XCTAssertNil(dto.refusalSource)
+        XCTAssertTrue(dto.holders.isEmpty)
+        XCTAssertTrue(dto.holderProbes.isEmpty)
+        XCTAssertEqual(dto.executableDependency, .notReported)
+        XCTAssertEqual(dto.executableDependency.probe, "not_attempted")
+        XCTAssertNil(dto.cargoTarget)
+        // An older CLI never asked about git at all — `gitWasReported` must
+        // be false, distinct from a current CLI that asked and genuinely
+        // found no repository (`gitWasReported: true, git: nil`).
+        XCTAssertFalse(dto.gitWasReported)
+        XCTAssertNil(dto.git)
+    }
+
+    /// The exact HORO-1828 wording bug, caught against adversarial review:
+    /// "not reported by this CLI" and "genuinely not in a git repository"
+    /// must decode to distinguishable states, never both to a bare `nil`
+    /// `git` with no way to tell them apart.
+    func testGitKeyPresentAsNullIsDistinctFromGitKeyAbsent() throws {
+        let keyAbsent = """
+        {"resource_id":"a","kind":"node_modules","detector":"test","sources":[],
+        "logical_bytes":1,"logical_human":"1 B","reclaimable_bytes":1,
+        "reclaimable_human":"1 B","reclaimable_bytes_is_lower_bound":false,
+        "completeness":"complete","confidence":"high","active_use_signals":[],
+        "regenerability":"regenerable_by_rebuild","policy_label":"AUTO_SAFE",
+        "reasons":[],"native_cleanup_available":false,"native_cleanup_action_id":null,
+        "fingerprint_token":null,"executable":true,"offered_actions":[],
+        "refusal_reason":null}
+        """
+        let keyNull = keyAbsent.replacingOccurrences(
+            of: "\"refusal_reason\":null}", with: "\"refusal_reason\":null,\"git\":null}")
+
+        let absentDto = try JSONDecoder().decode(ExplainReportDto.self, from: Data(keyAbsent.utf8))
+        let nullDto = try JSONDecoder().decode(ExplainReportDto.self, from: Data(keyNull.utf8))
+
+        XCTAssertFalse(absentDto.gitWasReported, "key absent must mean 'this CLI never asked'")
+        XCTAssertTrue(nullDto.gitWasReported, "an explicit null must mean 'asked, and the answer is none'")
+        XCTAssertNil(absentDto.git)
+        XCTAssertNil(nullDto.git)
+        XCTAssertNotEqual(
+            absentDto.gitWasReported, nullDto.gitWasReported,
+            "these are two different real-world states and must decode distinguishably"
+        )
+    }
 }

@@ -1,0 +1,54 @@
+{
+  "resource_id": "node_modules:/Users/dev/proj/node_modules",
+  "kind": "node_modules",
+  "detector": "test",
+  "sources": [],
+  "logical_bytes": 4096,
+  "logical_human": "4.0 KB",
+  "reclaimable_bytes": 4096,
+  "reclaimable_human": "4.0 KB",
+  "reclaimable_bytes_is_lower_bound": false,
+  "completeness": "complete",
+  "confidence": "high",
+  "active_use_signals": [],
+  "regenerability": "regenerable_by_rebuild",
+  "policy_label": "UNKNOWN_INCOMPLETE",
+  "reasons": [
+    "executable_dependency_unknown"
+  ],
+  "native_cleanup_available": false,
+  "native_cleanup_action_id": null,
+  "fingerprint_token": null,
+  "executable": false,
+  "offered_actions": [],
+  "refusal_reason": "no registered cleanup action for this resource kind",
+  "refusal_source": "no_registered_action",
+  "holders": [],
+  "holder_probes": [
+    {
+      "relation": "open_file"
+    },
+    {
+      "relation": "cwd"
+    },
+    {
+      "relation": "executable"
+    }
+  ],
+  "executable_dependency": {
+    "probe": "observed",
+    "references": [],
+    "unresolved": [
+      {
+        "source": "claude_user_settings",
+        "kind": "not_on_path"
+      }
+    ],
+    "sources_examined": [
+      "claude_user_settings",
+      "path_entry"
+    ],
+    "note": "MCP server commands and shell startup files are not examined"
+  },
+  "git": null
+}

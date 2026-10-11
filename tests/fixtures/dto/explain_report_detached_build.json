@@ -1,0 +1,67 @@
+{
+  "resource_id": "cargo_target_dir:/Users/dev/proj-wt/target",
+  "kind": "cargo_target_dir",
+  "detector": "test",
+  "sources": [],
+  "logical_bytes": 4096,
+  "logical_human": "4.0 KB",
+  "reclaimable_bytes": 4096,
+  "reclaimable_human": "4.0 KB",
+  "reclaimable_bytes_is_lower_bound": false,
+  "completeness": "complete",
+  "confidence": "high",
+  "active_use_signals": [
+    "open by process: cargo(pid 777) [claim: unknown]",
+    "git: is a linked worktree"
+  ],
+  "regenerability": "regenerable_by_rebuild",
+  "policy_label": "ASK",
+  "reasons": [
+    "resource_in_active_use",
+    "git_worktree_dirty"
+  ],
+  "native_cleanup_available": false,
+  "native_cleanup_action_id": null,
+  "fingerprint_token": null,
+  "executable": false,
+  "offered_actions": [],
+  "refusal_reason": "no registered cleanup action for this resource kind",
+  "refusal_source": "no_registered_action",
+  "holders": [
+    {
+      "pid": 777,
+      "command": "cargo",
+      "relation": "open_file",
+      "claim": "unknown",
+      "provenance": "inferred"
+    }
+  ],
+  "holder_probes": [
+    {
+      "relation": "open_file"
+    },
+    {
+      "relation": "cwd"
+    },
+    {
+      "relation": "executable"
+    }
+  ],
+  "executable_dependency": {
+    "probe": "observed",
+    "references": [],
+    "unresolved": [],
+    "sources_examined": [],
+    "note": "MCP server commands and shell startup files are not examined"
+  },
+  "cargo_target": {
+    "scope": "local",
+    "is_direct_locator": true,
+    "provenance": "inferred"
+  },
+  "git": {
+    "probe": "observed",
+    "dirty": false,
+    "linked_worktree": true
+  }
+}

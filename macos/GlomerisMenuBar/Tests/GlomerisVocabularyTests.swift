@@ -173,6 +173,47 @@ final class GlomerisVocabularyTests: XCTestCase {
         "per_commit_patch_id", "content_identical",
     ]
 
+    /// `src/actionability.rs` — `RefusalSource::as_str`. HORO-1828.
+    private static let refusalSourceTokens = [
+        "policy_protected", "no_registered_action", "action_cannot_plan",
+    ]
+
+    /// `src/reporting/dto.rs` — `process_claim_label`. HORO-1823/HORO-1828.
+    /// All five, including the two (`active`, `stalled`) no single-pass
+    /// probe emits yet — see `ProcessClaim`'s own doc comment.
+    private static let processClaimTokens = [
+        "active", "idle_but_valid", "stalled", "abandoned_candidate", "unknown",
+    ]
+
+    /// `src/reporting/dto.rs` — `target_scope_tag`. HORO-1824/HORO-1828.
+    /// Four, not three: `"unknown"` is the probe-failed case, deliberately
+    /// made a fourth real match arm of the same function rather than a
+    /// literal at the one call site that needed it — see that function's
+    /// own doc comment and this file's header on why a token outside its
+    /// sole producer is invisible to the mechanical vocabulary guard.
+    private static let targetScopeTokens = [
+        "local", "orphan", "redirected", "unknown",
+    ]
+
+    /// `src/reporting/dto.rs` — `HolderRelation::as_str`. HORO-1828.
+    private static let holderRelationTokens = ["open_file", "cwd", "executable"]
+
+    /// `src/reporting/dto.rs` — `provenance_tag`. HORO-1825/HORO-1828.
+    private static let provenanceTokens = ["observed", "inferred"]
+
+    /// `src/evidence/model.rs` — `SourceTag::as_str`. HORO-1825/HORO-1828.
+    private static let dependencySourceTokens = [
+        "claude_user_settings", "claude_user_local", "claude_managed", "claude_project",
+        "codex_hooks", "codex_notify", "launch_agent", "path_entry", "running_processes",
+    ]
+
+    /// `src/reporting/dto.rs` — `unresolved_ref_kind`. HORO-1825/HORO-1828.
+    private static let unresolvedKindTokens = [
+        "non_inspectable", "not_on_path", "path_resolution_divergent", "source_unreadable",
+        "symlink_loop_or_too_deep", "path_resolution_indeterminate", "malformed_schema",
+        "restat_failed",
+    ]
+
     /// The four developer-workspace axes that share a token (`unknown`)
     /// and must not share a reading of it.
     private static var worktreeAxes:
@@ -222,6 +263,13 @@ final class GlomerisVocabularyTests: XCTestCase {
             ("episodeResponse", episodeResponseTokens, GlomerisVocabulary.episodeResponse),
             ("episodeRejection", episodeRejectionTokens, GlomerisVocabulary.episodeRejection),
             ("autopilotRefusal", autopilotRefusalTokens, GlomerisVocabulary.autopilotRefusal),
+            ("refusalSource", refusalSourceTokens, GlomerisVocabulary.refusalSource),
+            ("processClaim", processClaimTokens, GlomerisVocabulary.processClaim),
+            ("targetScope", targetScopeTokens, GlomerisVocabulary.targetScope),
+            ("holderRelation", holderRelationTokens, GlomerisVocabulary.holderRelation),
+            ("provenance", provenanceTokens, GlomerisVocabulary.provenance),
+            ("dependencySource", dependencySourceTokens, GlomerisVocabulary.dependencySource),
+            ("unresolvedKind", unresolvedKindTokens, GlomerisVocabulary.unresolvedKind),
         ] + worktreeProseAxes
     }
 
@@ -234,6 +282,7 @@ final class GlomerisVocabularyTests: XCTestCase {
         let prose: Set<String> = [
             "kind", "reason", "worktreeActivity", "worktreeUpstream", "worktreeMerged",
             "worktreeEquivalence", "worktreeEquivalenceMethod",
+            "holderRelation", "provenance", "dependencySource", "unresolvedKind",
         ]
         return allAxes.filter { !prose.contains($0.name) }
     }
@@ -445,6 +494,13 @@ final class GlomerisVocabularyTests: XCTestCase {
             "worktreeMerged": GlomerisVocabulary.worktreeMergedAxis,
             "worktreeEquivalence": GlomerisVocabulary.worktreeEquivalenceAxis,
             "worktreeEquivalenceMethod": GlomerisVocabulary.worktreeEquivalenceMethodAxis,
+            "refusalSource": GlomerisVocabulary.refusalSourceAxis,
+            "processClaim": GlomerisVocabulary.processClaimAxis,
+            "targetScope": GlomerisVocabulary.targetScopeAxis,
+            "holderRelation": GlomerisVocabulary.holderRelationAxis,
+            "provenance": GlomerisVocabulary.provenanceAxis,
+            "dependencySource": GlomerisVocabulary.dependencySourceAxis,
+            "unresolvedKind": GlomerisVocabulary.unresolvedKindAxis,
         ]
         for axis in Self.allAxes {
             for token in axis.tokens {
@@ -1459,6 +1515,61 @@ final class GlomerisVocabularyTests: XCTestCase {
                 term.axis, axis.lookup("unknown").axis,
                 "\(axis.name): the fallback belongs to a different axis than the table"
             )
+        }
+    }
+
+
+    // MARK: - gitWorktreeDirtyWording (HORO-1828 wording-bug fix)
+
+    /// The real bug this function exists to fix: a clean linked worktree
+    /// must never be worded as having uncommitted work. All four
+    /// `(dirty, linkedWorktree)` combinations get distinct, honest
+    /// wording — this is the mutation-tested proof that the special
+    /// case in `CandidateDetailViewModel.reasonTerms` is load-bearing:
+    /// reverting it back to the generic `reason("git_worktree_dirty")`
+    /// lookup makes `testCleanLinkedWorktreeIsNeverWordedAsUncommitted`
+    /// fail.
+    func testCleanLinkedWorktreeIsNeverWordedAsUncommitted() {
+        let git = GitExplainReportDto(probe: "observed", dirty: false, linkedWorktree: true)
+        let term = GlomerisVocabulary.gitWorktreeDirtyWording(git: git)
+
+        XCTAssertFalse(term.title.localizedCaseInsensitiveContains("ncommitted"))
+        XCTAssertFalse(term.explanation.localizedCaseInsensitiveContains("ncommitted"))
+    }
+
+    func testDirtyNonWorktreeIsWordedAsUncommittedOnly() {
+        let git = GitExplainReportDto(probe: "observed", dirty: true, linkedWorktree: false)
+        let term = GlomerisVocabulary.gitWorktreeDirtyWording(git: git)
+
+        XCTAssertTrue(term.explanation.localizedCaseInsensitiveContains("uncommitted"))
+        XCTAssertFalse(term.title.localizedCaseInsensitiveContains("worktree"))
+    }
+
+    func testDirtyLinkedWorktreeMentionsBoth() {
+        let git = GitExplainReportDto(probe: "observed", dirty: true, linkedWorktree: true)
+        let term = GlomerisVocabulary.gitWorktreeDirtyWording(git: git)
+
+        XCTAssertTrue(term.explanation.localizedCaseInsensitiveContains("uncommitted"))
+        XCTAssertTrue(term.explanation.localizedCaseInsensitiveContains("worktree"))
+    }
+
+    func testUnavailableGitProbeIsWordedAsUnconfirmedRatherThanClean() {
+        let term = GlomerisVocabulary.gitWorktreeDirtyWording(
+            git: GitExplainReportDto(probe: "failed", dirty: false, linkedWorktree: false))
+        XCTAssertTrue(term.explanation.contains("could not be re-confirmed"))
+
+        let nilTerm = GlomerisVocabulary.gitWorktreeDirtyWording(git: nil)
+        XCTAssertEqual(term.title, nilTerm.title)
+    }
+
+    /// `gitWorktreeDirtyWording` is reason-axis prose, same as every other
+    /// `reason(_:)` entry — no symbol, neutral tone, never a chip.
+    func testGitWorktreeDirtyWordingIsProseNotAChip() {
+        for (dirty, worktree) in [(true, true), (true, false), (false, true), (false, false)] {
+            let git = GitExplainReportDto(probe: "observed", dirty: dirty, linkedWorktree: worktree)
+            let term = GlomerisVocabulary.gitWorktreeDirtyWording(git: git)
+            XCTAssertNil(term.symbolName, "(\(dirty), \(worktree)) must carry no symbol")
+            XCTAssertEqual(term.axis, GlomerisVocabulary.reasonAxis)
         }
     }
 }

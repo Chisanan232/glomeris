@@ -1,0 +1,60 @@
+{
+  "resource_id": "cargo_target_dir:/Users/dev/.cargo/shared-target",
+  "kind": "cargo_target_dir",
+  "detector": "test",
+  "sources": [],
+  "logical_bytes": 4096,
+  "logical_human": "4.0 KB",
+  "reclaimable_bytes": 4096,
+  "reclaimable_human": "4.0 KB",
+  "reclaimable_bytes_is_lower_bound": false,
+  "completeness": "complete",
+  "confidence": "high",
+  "active_use_signals": [],
+  "regenerability": "regenerable_by_rebuild",
+  "policy_label": "PROTECTED",
+  "reasons": [
+    "protected_executable_dependency"
+  ],
+  "native_cleanup_available": false,
+  "native_cleanup_action_id": null,
+  "fingerprint_token": null,
+  "executable": false,
+  "offered_actions": [],
+  "refusal_reason": "PROTECTED: protected_executable_dependency",
+  "refusal_source": "policy_protected",
+  "holders": [],
+  "holder_probes": [
+    {
+      "relation": "open_file"
+    },
+    {
+      "relation": "cwd"
+    },
+    {
+      "relation": "executable"
+    }
+  ],
+  "executable_dependency": {
+    "probe": "observed",
+    "references": [
+      {
+        "source": "claude_user_settings",
+        "pointer": "hooks.PostToolUse[0].hooks[0]",
+        "provenance": "observed"
+      }
+    ],
+    "unresolved": [],
+    "sources_examined": [
+      "claude_user_settings"
+    ],
+    "note": "MCP server commands and shell startup files are not examined"
+  },
+  "cargo_target": {
+    "scope": "redirected",
+    "is_direct_locator": false,
+    "provenance": "inferred",
+    "cold_rebuild_note": "every sharer's next build is a cold rebuild; the sharer set cannot be enumerated"
+  },
+  "git": null
+}

@@ -827,8 +827,18 @@ enum GlomerisVocabulary {
             return prose(token, reasonAxis, "In active use",
                          "Something is using this right now.")
         case "git_worktree_dirty":
-            return prose(token, reasonAxis, "Uncommitted changes nearby",
-                         "The surrounding repository has uncommitted work.")
+            // HORO-1828: this generic default is deliberately imprecise —
+            // `classify` fires this reason on `dirty || worktree`
+            // (`src/policy/engine.rs`), and a linked worktree with
+            // NOTHING dirty previously read as "has uncommitted work",
+            // which is false. A caller holding the real `ExplainReport`'s
+            // `git` block must call `gitWorktreeDirtyWording(git:)`
+            // instead of this generic fallback — see
+            // `CandidateDetailViewModel.reasonTerms`, the one caller that
+            // matters, which does exactly that.
+            return prose(token, reasonAxis, "Working tree not settled",
+                         "Either the repository has uncommitted work, or this is a "
+                             + "linked worktree — see the Git details below for which.")
         case "rebuild_cost_high":
             return prose(token, reasonAxis, "Expensive to rebuild",
                          "Recreating this would cost you real time.")
@@ -1807,6 +1817,400 @@ enum GlomerisVocabulary {
     }
 
     // MARK: - Table helpers
+
+    // MARK: - Refusal source (`refusal_source`, HORO-1828,
+    // `src/actionability.rs` `RefusalSource::as_str`)
+
+    static let refusalSourceAxis = "Refusal source"
+
+    /// *Why* a resource is not executable, as a stable category — separate
+    /// from `refusalReason`'s free sentence, which stays rendered verbatim
+    /// elsewhere and is never parsed. Shown only beside the Clean button's
+    /// disabled state, never used to decide whether it is enabled — see
+    /// `scripts/check-no-policy-label-branching.sh`, which treats this
+    /// token the same as `policyLabel`/`eligibility`.
+    static func refusalSource(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "policy_protected":
+            return term(
+                token, refusalSourceAxis, "Protected by policy",
+                "Policy classified this resource as Protected, so it was never "
+                    + "even planned.",
+                "lock.shield.fill", .guarded
+            )
+        case "no_registered_action":
+            return term(
+                token, refusalSourceAxis, "No cleanup action exists",
+                "Glomeris has no registered action for this resource kind at all.",
+                "questionmark.circle.fill", .unknown
+            )
+        case "action_cannot_plan":
+            return term(
+                token, refusalSourceAxis, "Action refused this resource",
+                "A cleanup action exists for this kind, but it could not build a "
+                    + "plan for this specific resource, or the executor's own "
+                    + "structural rule rejected the plan on sight.",
+                "exclamationmark.triangle.fill", .caution
+            )
+        default:
+            return unrecognised(
+                token, refusalSourceAxis, "Unrecognised refusal source",
+                "The CLI reported a refusal source this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Process claim (`holders[].claim`, HORO-1823/HORO-1828,
+    // `src/reporting/dto.rs` `process_claim_label`)
+
+    static let processClaimAxis = "Process claim"
+
+    /// Explanation only, for one holder's own identity — never a policy
+    /// input (see `src/evidence/correlate/process_identity.rs`
+    /// `derive_claim`'s doc comment: attaching a claim can only add words
+    /// to a report, never remove or add a veto). In particular,
+    /// `abandoned_candidate` is never a reason to delete anything on its
+    /// own: Glomeris has no kill authority, and a holder's mere presence
+    /// already vetoes regardless of which claim it carries.
+    static func processClaim(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "active":
+            return term(
+                token, processClaimAxis, "Actively working",
+                "This process is making progress right now (requires multi-sample "
+                    + "history; not emitted by a single scan).",
+                "bolt.fill", .neutral
+            )
+        case "idle_but_valid":
+            return term(
+                token, processClaimAxis, "Idle, but supervised",
+                "Alive and supervised by launchd, with no progress observed yet. "
+                    + "A normal state for a daemon, not a stall.",
+                "checkmark.circle", .neutral
+            )
+        case "stalled":
+            return term(
+                token, processClaimAxis, "Stalled",
+                "Same identity across a sampling window with no progress, still "
+                    + "holding the resource (requires multi-sample history; not "
+                    + "emitted by a single scan).",
+                "pause.circle", .caution
+            )
+        case "abandoned_candidate":
+            return term(
+                token, processClaimAxis, "Looks abandoned",
+                "No supervisor and no progress across samples — worth a human "
+                    + "look, never a reason Glomeris deletes anything on its own.",
+                "questionmark.circle.fill", .caution
+            )
+        case "unknown":
+            return term(
+                token, processClaimAxis, "Not established",
+                "A probe failed, the identity could not be confirmed, or this is "
+                    + "a single-pass scan with nothing yet to compare. The holder "
+                    + "still counts as active use either way.",
+                "questionmark.circle", .unknown
+            )
+        default:
+            return unrecognised(
+                token, processClaimAxis, "Unrecognised process claim",
+                "The CLI reported a process claim this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Cargo target scope (`cargo_target.scope`, HORO-1824/HORO-1828,
+    // `src/reporting/dto.rs` `target_scope_tag`)
+
+    static let targetScopeAxis = "Build cache scope"
+
+    static func targetScope(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "local":
+            return term(
+                token, targetScopeAxis, "This project's own cache",
+                "Cargo resolves this target directory to this project alone.",
+                "shippingbox", .neutral
+            )
+        case "orphan":
+            return term(
+                token, targetScopeAxis, "Leftover, unreferenced",
+                "Cargo's configuration for this project resolves elsewhere now — "
+                    + "nothing points at this directory any more.",
+                "shippingbox.fill", .neutral
+            )
+        case "redirected":
+            return term(
+                token, targetScopeAxis, "Shared with other projects",
+                "Cargo resolves this target directory outside this project, so an "
+                    + "unbounded, unenumerable set of other workspaces may share it. "
+                    + "Never offered without confirmation, and never pre-authorized.",
+                "arrow.triangle.branch", .guarded
+            )
+        case "unknown":
+            return term(
+                token, targetScopeAxis, "Could not be determined",
+                "Cargo's own metadata could not be read, so the ownership "
+                    + "relationship is unknown rather than clean.",
+                "questionmark.circle.fill", .unknown
+            )
+        default:
+            return unrecognised(
+                token, targetScopeAxis, "Unrecognised build cache scope",
+                "The CLI reported a Cargo target scope this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Git state (`git`, HORO-1828)
+
+    static let gitAxis = "Git"
+
+    /// The precise wording for the `git_worktree_dirty` reason code
+    /// (HORO-1828), given the real `dirty`/`linkedWorktree` booleans
+    /// `ExplainReportDto.git` carries. This is the fix for a real bug: the
+    /// generic `reason("git_worktree_dirty")` entry above cannot know
+    /// which of the two was actually true, so it used to say "The
+    /// surrounding repository has uncommitted work" even when the only
+    /// true fact was that this is a linked worktree with nothing dirty.
+    ///
+    /// `classify` fires `GitWorktreeDirty` on `dirty || worktree`
+    /// (`src/policy/engine.rs`), so at least one of the two is true
+    /// whenever this is called for that reason code; all three branches
+    /// below are reachable.
+    static func gitWorktreeDirtyWording(git: GitExplainReportDto?) -> GlomerisTerm {
+        guard let git, git.probe == "observed" else {
+            return prose(
+                "git_worktree_dirty", reasonAxis, "Working tree not settled",
+                "Either the repository has uncommitted work, or this is a linked "
+                    + "worktree — Git state could not be re-confirmed here."
+            )
+        }
+        switch (git.dirty, git.linkedWorktree) {
+        case (true, true):
+            return prose(
+                "git_worktree_dirty", reasonAxis, "Uncommitted work, in a linked worktree",
+                "The surrounding repository has uncommitted changes, and this is "
+                    + "a linked worktree rather than the main checkout."
+            )
+        case (true, false):
+            return prose(
+                "git_worktree_dirty", reasonAxis, "Uncommitted changes nearby",
+                "The surrounding repository has uncommitted work."
+            )
+        case (false, true):
+            return prose(
+                "git_worktree_dirty", reasonAxis, "In a linked worktree",
+                "This sits inside a `git worktree add` sibling, not the main "
+                    + "checkout — nothing here is reported as dirty."
+            )
+        case (false, false):
+            // `classify` would not have fired this reason code with both
+            // false — reachable only if a caller mismatches the reason
+            // list against a different `git` snapshot. Worded honestly
+            // rather than asserted away.
+            return prose(
+                "git_worktree_dirty", reasonAxis, "Working tree not settled",
+                "Neither uncommitted changes nor a linked worktree was observed "
+                    + "for this specific snapshot."
+            )
+        }
+    }
+
+    // MARK: - Holder relation (`holders[].relation`/`holder_probes[].relation`,
+    // HORO-1828, `src/reporting/dto.rs` `HolderRelation::as_str`)
+
+    static let holderRelationAxis = "Holder relation"
+
+    /// Which evidence list a holder (or an unavailable probe) came from.
+    /// Prose, not a chip: this is a label on a list row, not a state
+    /// worth a badge of its own.
+    static func holderRelation(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "open_file":
+            return prose(
+                token, holderRelationAxis, "Has it open",
+                "A process has this resource open as a file."
+            )
+        case "cwd":
+            return prose(
+                token, holderRelationAxis, "Current directory",
+                "A process's current working directory is inside this resource."
+            )
+        case "executable":
+            return prose(
+                token, holderRelationAxis, "Running from here",
+                "A process is currently running from inside this resource."
+            )
+        default:
+            return unrecognised(
+                token, holderRelationAxis, "Unrecognised holder relation",
+                "The CLI reported a holder relation this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Provenance (`holders[].provenance`/`cargo_target.provenance`/
+    // `executable_dependency.references[].provenance`, HORO-1828/HORO-1825,
+    // `src/reporting/dto.rs` `provenance_tag`)
+
+    static let provenanceAxis = "Provenance"
+
+    /// Whether a fact came straight from a recognized source
+    /// (`"observed"`) or was derived by resolving a bare command name
+    /// against Glomeris's own `PATH` (`"inferred"`) — see
+    /// `crate::evidence::Provenance`'s own doc comment for why `"inferred"`
+    /// is never sufficient on its own to conclude a clean negative.
+    static func provenance(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "observed":
+            return prose(
+                token, provenanceAxis, "Observed directly",
+                "Read straight from a recognized source or probe."
+            )
+        case "inferred":
+            return prose(
+                token, provenanceAxis, "Inferred",
+                "Derived — resolved from a bare name, or computed from an "
+                    + "already-observed fact rather than read directly."
+            )
+        default:
+            return unrecognised(
+                token, provenanceAxis, "Unrecognised provenance",
+                "The CLI reported a provenance this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Dependency source (`executable_dependency.references[].source`/
+    // `.unresolved[].source`, HORO-1828/HORO-1825 §4.3,
+    // `src/evidence/model.rs` `SourceTag::as_str`)
+
+    static let dependencySourceAxis = "Dependency source"
+
+    /// Which recognized config or probe a dependency reference came from.
+    /// Prose: this is detail inside a drill-down list, not a state worth
+    /// a badge.
+    static func dependencySource(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "claude_user_settings":
+            return prose(
+                token, dependencySourceAxis, "Claude user settings",
+                "A hook entry in the user-level Claude Code settings file."
+            )
+        case "claude_user_local":
+            return prose(
+                token, dependencySourceAxis, "Claude user local settings",
+                "A hook entry in the user-level local-only settings file."
+            )
+        case "claude_managed":
+            return prose(
+                token, dependencySourceAxis, "Claude managed settings",
+                "A hook entry in an organization-managed settings file."
+            )
+        case "claude_project":
+            return prose(
+                token, dependencySourceAxis, "Claude project settings",
+                "A hook entry in one of the configured project roots' own settings."
+            )
+        case "codex_hooks":
+            return prose(
+                token, dependencySourceAxis, "Codex hooks",
+                "A hook entry in Codex's own configuration."
+            )
+        case "codex_notify":
+            return prose(
+                token, dependencySourceAxis, "Codex notify",
+                "A `notify` command in Codex's own configuration."
+            )
+        case "launch_agent":
+            return prose(
+                token, dependencySourceAxis, "LaunchAgent",
+                "A macOS LaunchAgent's `Program`/`ProgramArguments`."
+            )
+        case "path_entry":
+            return prose(
+                token, dependencySourceAxis, "PATH entry",
+                "Resolved by searching Glomeris's own `PATH`."
+            )
+        case "running_processes":
+            return prose(
+                token, dependencySourceAxis, "Running processes",
+                "A currently-running process, not a config file at all."
+            )
+        default:
+            return unrecognised(
+                token, dependencySourceAxis, "Unrecognised dependency source",
+                "The CLI reported a dependency source this app has no wording for."
+            )
+        }
+    }
+
+    // MARK: - Unresolved kind (`executable_dependency.unresolved[].kind`,
+    // HORO-1828/HORO-1825 §4.3, `src/reporting/dto.rs` `unresolved_ref_kind`)
+
+    static let unresolvedKindAxis = "Unresolved reason"
+
+    /// Why one dependency reference could not be cleared to a confirmed
+    /// in/out verdict — always a fail-closed catch, never a clean
+    /// negative. Prose: detail inside a drill-down list.
+    static func unresolvedKind(_ token: String) -> GlomerisTerm {
+        switch token {
+        case "non_inspectable":
+            return prose(
+                token, unresolvedKindAxis, "Could not be inspected",
+                "The command contained a shell metacharacter, an unbalanced "
+                    + "quote, or an argument with no defined resolution directory."
+            )
+        case "not_on_path":
+            return prose(
+                token, unresolvedKindAxis, "Not found on PATH",
+                "A bare command name did not resolve against Glomeris's own PATH."
+            )
+        case "path_resolution_divergent":
+            return prose(
+                token, unresolvedKindAxis, "PATH may differ at runtime",
+                "The name resolved against Glomeris's own PATH, but the hook "
+                    + "runtime's actual PATH may differ, so that is not enough "
+                    + "to conclude a clean negative."
+            )
+        case "source_unreadable":
+            return prose(
+                token, unresolvedKindAxis, "Source could not be read",
+                "A recognized source file exists but could not be read or parsed."
+            )
+        case "symlink_loop_or_too_deep":
+            return prose(
+                token, unresolvedKindAxis, "Symlink loop or too deep",
+                "The symlink chain looped or exceeded the bound Glomeris follows."
+            )
+        case "path_resolution_indeterminate":
+            return prose(
+                token, unresolvedKindAxis, "Could not be resolved",
+                "An intermediate directory in the path does not exist, so it "
+                    + "cannot be canonicalized to check whether it lands inside "
+                    + "this resource."
+            )
+        case "malformed_schema":
+            return prose(
+                token, unresolvedKindAxis, "Malformed entry",
+                "A recognized source's file was read, but one entry inside it "
+                    + "did not match the expected shape."
+            )
+        case "restat_failed":
+            return prose(
+                token, unresolvedKindAxis, "Could not be re-checked",
+                "A post-action re-check of this one dependency's own path "
+                    + "failed for a reason that is not a confirmed absence."
+            )
+        default:
+            return unrecognised(
+                token, unresolvedKindAxis, "Unrecognised unresolved reason",
+                "The CLI reported an unresolved-reference kind this app has no "
+                    + "wording for."
+            )
+        }
+    }
 
     private static func term(
         _ token: String,

@@ -53,6 +53,20 @@
 # (e.g. `Text(dto.eligibility)` or passing it to the vocabulary lookup) is
 # fine, same as `policyLabel`.
 #
+# HORO-1828 "explain structure" addition — refusalSource joins too
+# ------------------------------------------------------------------
+# `ExplainReportDto.refusalSource` (`refusal_source` on the wire) is the
+# same shape of risk again: a closed-vocabulary token
+# (`GlomerisVocabulary.refusalSource(_:)`) that sits right next to the
+# Clean button in the UI (it explains the SAME refusal `executable`/
+# `refusalReason` already gate on) and therefore must never itself be read
+# to decide anything — `isCleanEnabled` (a field read of `executable`)
+# stays the only source of truth for that. `holders`/`holderProbes`/
+# `executableDependency`/`cargoTarget`/`git` are deliberately NOT added
+# here: none of them is a closed-vocabulary label a view could be tempted
+# to gate on the way `policyLabel`/`eligibility`/`refusalSource` are — they
+# are structural facts (a pid, a pointer, a boolean), not policy verdicts.
+#
 # HORO-1306 addition — the display-vocabulary file
 # -------------------------------------------------
 # HORO-1306 needed plain-language wording for AUTO_SAFE / ASK / PROTECTED /
@@ -86,7 +100,7 @@ SEARCH_DIRS=(
   "macos/GlomerisMenuBar/Sources"
 )
 
-FIELD_PATTERN='policyLabel|policy_label|eligibility|feasibility'
+FIELD_PATTERN='policyLabel|policy_label|eligibility|feasibility|refusalSource|refusal_source'
 
 violations=0
 
@@ -208,6 +222,18 @@ for entry in "${FORBIDDEN_IN_VOCABULARY[@]}"; do
   # Comments are stripped first: this file documents at length WHY it must
   # not do these things, and naming `requiresConfirmation` in that prose is
   # the explanation, not the act.
+  #
+  # HORO-1828 addition: a bare `case "<token>":` switch-arm line is also
+  # stripped. This file's whole premise is that switching on an anonymous
+  # token string is safe precisely because the switch cannot act on the
+  # result (see this script's header) — so a case label whose literal
+  # token text happens to collide with a forbidden word (e.g.
+  # `HolderRelation`'s `"executable"` token colliding with `\bexecutable\b`,
+  # the same word as `ExplainReportDto.executable`) is not the thing this
+  # check exists to catch. It cannot weaken the real protection: none of
+  # the forbidden constructs (`import SwiftUI`, `Button`, `.disabled(`,
+  # `GlomerisClient`, `Process(`, a CLI argument array literal) can ever
+  # be written as a bare `case "...":` line on its own.
   while IFS= read -r match; do
     echo "VIOLATION: ${VOCABULARY_FILE}:${match%%:*}: ${why}"
     echo "    ${match#*:}"
@@ -215,6 +241,7 @@ for entry in "${FORBIDDEN_IN_VOCABULARY[@]}"; do
   done < <(
     grep -nE "$pattern" "$abs_vocabulary" \
       | grep -vE '^[0-9]+:[[:space:]]*//' \
+      | grep -vE '^[0-9]+:[[:space:]]*case[[:space:]]+"[a-zA-Z0-9_]+"[[:space:]]*:[[:space:]]*$' \
       || true
   )
 done

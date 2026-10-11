@@ -26,9 +26,15 @@
 //! array of a DTO with the `executable`/`offered_actions`/`refusal_reason`
 //! triple, mixing populated and empty/null variants), and `ExecuteReport`
 //! (the `outcome` enum-as-`&'static str` field plus several optionals).
-//! `ExplainReport`, `ActionListReport`, `CleanDryRunReport`, and
-//! `ProgressEvent` remain out of scope for this ticket — none of them back a
-//! currently-planned screen yet.
+//! `ActionListReport`, `CleanDryRunReport`, and `ProgressEvent` remain out
+//! of scope for this ticket — none of them back a currently-planned screen
+//! yet. `ExplainReport` got its first five fixtures in HORO-1828 (the
+//! `explain_report_*` family below), once the detail screen's "explain
+//! structure" (holders, executable-dependency, Cargo target scope, git)
+//! needed a stable, independently-reviewable contract to decode against —
+//! each is built through the real `classify()` + `ExplainReport::
+//! from_evidence_and_decision` pipeline, never hand-assembled, so a fixture
+//! can only show a state the code actually produces.
 //! `ActionHistoryReport` was added in HORO-1066, when the recent-history +
 //! action-audit popover section actually needed it — see that ticket's
 //! `HistoryAuditSectionView.swift`. `LlmPlanReport` was added in HORO-1308,
@@ -58,6 +64,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use glomeris::actions::llm::{llm_check_outcome, LlmError, API_STYLE_CHAT_COMPLETIONS};
+use glomeris::actions::{Action, ActionRegistry};
 use glomeris::autopilot::RefusalReason;
 use glomeris::cli::external_context::build_external_context_preview;
 use glomeris::cli::pressure::{build_pressure_rejection_report, build_pressure_status_report};
@@ -66,7 +73,13 @@ use glomeris::cli::recovery::{
 };
 use glomeris::cli::settings::{build_settings_rejection_report, build_settings_report};
 use glomeris::cli::workflow_profile::build_workflow_profile_report;
-use glomeris::evidence::{ProbeOutcome, ProbeReason};
+use glomeris::detectors::DetectorId;
+use glomeris::evidence::{
+    CargoTargetScope, DependencyRef, Evidence, ExeIdentity, ExecutableDependencyReport, GitState,
+    NativeCleanup, ProbeOutcome, ProbeReason, ProcessIdentity, ProcessRef, Provenance,
+    Recoverability, ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator, SourceTag,
+    Supervisor, TargetScope, UnresolvedRef,
+};
 use glomeris::executor::goal::RecoveryGoal;
 use glomeris::executor::recovery_loop::{
     FreeTarget, RecoveryReport, RemainingCandidates, StopReason,
@@ -74,15 +87,16 @@ use glomeris::executor::recovery_loop::{
 use glomeris::monitor::config::ThresholdConfig;
 use glomeris::monitor::episode::{EpisodeConfig, EpisodeResponse, EpisodeTracker};
 use glomeris::monitor::fs_stat::FsUsage;
+use glomeris::policy::{classify, PolicyConfig};
 use glomeris::reporting::dto::{
     ActionHistoryEventReport, ActionHistoryReport, AutopilotAskPreauthorizationReport,
     AutopilotCeilingsReport, AutopilotEnvelopeReport, DaemonStatusReport, DetectCandidateReport,
-    DetectReport, DetectorHealthReport, ExecuteReport, HistoryEventReport, HistoryReport,
-    LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport, LlmPlanReport,
-    OfferedAction, StatusReport, WorkspaceEvidenceRequestReport, WorkspaceExpansionReport,
-    WorkspaceFamilyReport, WorkspaceObservationReport, WorkspacePlanDroppedReport,
-    WorkspacePlanItemReport, WorkspacePlanReport, WorkspaceProbeFindingReport,
-    WorkspaceProfileReport,
+    DetectReport, DetectorHealthReport, ExecuteReport, ExplainReport, HistoryEventReport,
+    HistoryReport, LlmCheckReport, LlmPayloadReport, LlmPayloadResourceAlias, LlmPlanItemReport,
+    LlmPlanReport, OfferedAction, StatusReport, WorkspaceEvidenceRequestReport,
+    WorkspaceExpansionReport, WorkspaceFamilyReport, WorkspaceObservationReport,
+    WorkspacePlanDroppedReport, WorkspacePlanItemReport, WorkspacePlanReport,
+    WorkspaceProbeFindingReport, WorkspaceProfileReport,
 };
 use glomeris::reporting::PolicyLabel;
 use glomeris::settings::RecoverySettings;
@@ -2195,4 +2209,295 @@ fn workflow_profile_report_matches_golden_fixture() {
 fn workflow_profile_report_never_collected_matches_golden_fixture() {
     let report = build_workflow_profile_report(&StoreState::NeverCollected, None, 1_700_000_000);
     assert_matches_fixture(&report, "workflow_profile_report_never_collected.json");
+}
+
+// --- HORO-1828: ExplainReport "explain structure" golden fixtures ---
+//
+// Every fixture below is produced through the real pipeline
+// (`classify()` then `ExplainReport::from_evidence_and_decision`), never
+// hand-assembled — a fixture can only show a state the code actually
+// produces, matching this file's own stated AC.
+
+fn explain_evidence(kind: ResourceKind, path: &str) -> Evidence {
+    Evidence {
+        resource: ResourceId::new(kind, ResourceLocator::Path(PathBuf::from(path))),
+        fingerprint: ResourceFingerprint {
+            dev_ino: None,
+            mtime: None,
+            tool_revision: None,
+        },
+        detector: DetectorId("test"),
+        logical_bytes: ProbeOutcome::Observed(4096),
+        physical_bytes: None,
+        reclaimable_bytes: ProbeOutcome::Observed(4096),
+        reclaimable_bytes_is_lower_bound: false,
+        last_modified: ProbeOutcome::Observed(SystemTime::UNIX_EPOCH),
+        last_accessed: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        regenerability: kind.regenerability(),
+        recoverability: Recoverability::RegenerableByRebuild,
+        native_cleanup: NativeCleanup::Unsupported,
+        open_by_process: ProbeOutcome::Observed(Vec::new()),
+        process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+        git_state: ProbeOutcome::Observed(None),
+        tool_liveness: ProbeOutcome::Observed(false),
+        docker_lifecycle: None,
+        // A clean-negative default, same reasoning as
+        // `policy::engine::tests::complete_evidence`: every fixture below
+        // overrides this explicitly where the scenario needs to.
+        executable_dependency: ProbeOutcome::Observed(ExecutableDependencyReport::empty()),
+        cargo_target_scope: if kind == ResourceKind::CargoTargetDir {
+            Some(ProbeOutcome::Observed(CargoTargetScope {
+                resolved_target: PathBuf::from(path),
+                resolved_build_dir: None,
+                workspace_root: PathBuf::from(
+                    PathBuf::from(path).parent().unwrap().to_str().unwrap(),
+                ),
+                scope: TargetScope::Local,
+                is_direct_locator: true,
+            }))
+        } else {
+            None
+        },
+        collected_at: SystemTime::UNIX_EPOCH,
+        sources: Vec::new(),
+    }
+}
+
+fn identity_with_supervisor(supervisor: Supervisor) -> ProbeOutcome<ProcessIdentity> {
+    ProbeOutcome::Observed(ProcessIdentity {
+        start_time: SystemTime::UNIX_EPOCH,
+        uid: 501,
+        ppid: 1,
+        pgid: 100,
+        state_zombie: false,
+        exe: ProbeOutcome::Observed(ExeIdentity {
+            path: PathBuf::from("/usr/bin/true"),
+            dev: 1,
+            ino: 1,
+        }),
+        supervisor,
+    })
+}
+
+fn explain_report_for(ev: &Evidence, action: Option<&dyn Action>) -> ExplainReport {
+    let decision = classify(ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+    ExplainReport::from_evidence_and_decision(ev, &decision, action)
+}
+
+/// Scenario 1: a `node_modules` directory held open by a `launchd`-
+/// supervised daemon. `classify` sends this to `ASK
+/// resource_in_active_use`; `holders` shows the one holder with claim
+/// `idle_but_valid` (HORO-1823), never a veto override.
+#[test]
+fn explain_report_legit_idle_daemon_matches_golden_fixture() {
+    let mut ev = explain_evidence(ResourceKind::NodeModules, "/Users/dev/proj/node_modules");
+    ev.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
+        pid: 4242,
+        command: "node".to_string(),
+        identity: identity_with_supervisor(Supervisor::LaunchdJob),
+    }]);
+    let registry = ActionRegistry::builtin();
+    let action = registry.get("node.clean.node_modules").unwrap();
+    let report = explain_report_for(&ev, Some(action));
+
+    assert_eq!(report.policy_label, "ASK");
+    assert_eq!(report.reasons, vec!["resource_in_active_use"]);
+    assert_eq!(report.holders.len(), 1);
+    assert_eq!(report.holders[0].relation, "open_file");
+    assert_eq!(report.holders[0].claim, "idle_but_valid");
+    assert!(report.executable);
+    assert!(report.offered_actions[0].requires_confirmation);
+
+    assert_matches_fixture(&report, "explain_report_legit_idle_daemon.json");
+}
+
+/// Scenario 2: a `cargo` process with no confirmed supervisor holding a
+/// LOCAL target dir open, inside a linked worktree with nothing dirty.
+/// Proves two things at once: the claim is `unknown` (and explicitly
+/// never `abandoned_candidate` — `derive_claim` has no single-pass path
+/// to that variant, ADR-0001 §4.1), and the git wording-bug fix: `dirty:
+/// false`, `linked_worktree: true` reported distinctly, not collapsed
+/// into one boolean.
+#[test]
+fn explain_report_detached_build_matches_golden_fixture() {
+    let mut ev = explain_evidence(ResourceKind::CargoTargetDir, "/Users/dev/proj-wt/target");
+    ev.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
+        pid: 777,
+        command: "cargo".to_string(),
+        identity: identity_with_supervisor(Supervisor::None),
+    }]);
+    ev.git_state = ProbeOutcome::Observed(Some(GitState {
+        repo_root: PathBuf::from("/Users/dev/proj-wt"),
+        common_dir: PathBuf::from("/Users/dev/proj/.git"),
+        dirty: false,
+        untracked: false,
+        worktree: true,
+    }));
+    let report = explain_report_for(&ev, None);
+
+    assert_eq!(report.policy_label, "ASK");
+    assert_eq!(
+        report.reasons,
+        vec!["resource_in_active_use", "git_worktree_dirty"]
+    );
+    assert_eq!(report.holders.len(), 1);
+    assert_eq!(report.holders[0].claim, "unknown");
+    assert_ne!(
+        report.holders[0].claim, "abandoned_candidate",
+        "a detached build must never be labelled as a reason to delete"
+    );
+    let git = report.git.as_ref().unwrap();
+    assert!(!git.dirty);
+    assert!(git.linked_worktree);
+
+    assert_matches_fixture(&report, "explain_report_detached_build.json");
+}
+
+/// Scenario 3: a Cargo target dir whose own `cargo metadata` resolution
+/// lands in a shared, redirected location — permanently non-
+/// preauthorizable (ADR-0001 §16.2). A holder is present via
+/// `open_by_process` (not `running_inside`, which would also add
+/// `executable_running_from_resource` and complicate the expected reason
+/// set). `cargo_target.scope: "redirected"` carries the cold-rebuild
+/// note.
+#[test]
+fn explain_report_shared_active_target_matches_golden_fixture() {
+    let mut ev = explain_evidence(
+        ResourceKind::CargoTargetDir,
+        "/Users/dev/.cargo/shared-target",
+    );
+    ev.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+        resolved_target: PathBuf::from("/Users/dev/.cargo/shared-target"),
+        resolved_build_dir: None,
+        workspace_root: PathBuf::from("/Users/dev/proj"),
+        scope: TargetScope::Redirected,
+        is_direct_locator: false,
+    }));
+    ev.open_by_process = ProbeOutcome::Observed(vec![ProcessRef {
+        pid: 888,
+        command: "rustc".to_string(),
+        identity: identity_with_supervisor(Supervisor::Unknown),
+    }]);
+    let report = explain_report_for(&ev, None);
+
+    assert_eq!(report.policy_label, "ASK");
+    assert_eq!(
+        report.reasons,
+        vec!["resource_in_active_use", "shared_build_cache_blast_radius"]
+    );
+    let cargo_target = report.cargo_target.as_ref().unwrap();
+    assert_eq!(cargo_target.scope, "redirected");
+    assert!(!cargo_target.is_direct_locator);
+    assert!(cargo_target.cold_rebuild_note.is_some());
+
+    assert_matches_fixture(&report, "explain_report_shared_active_target.json");
+}
+
+/// Scenario 4: a hook entry that does not resolve on Glomeris's own PATH
+/// (the real HORO-1825 `NotOnPath` shape) — a fail-closed catch, never a
+/// clean negative. `classify` sends an executable-bearing kind here to
+/// `ASK executable_dependency_unknown`, presented as `UNKNOWN_INCOMPLETE`
+/// (evidence-quality, not a judgment about the resource).
+#[test]
+fn explain_report_missing_hook_matches_golden_fixture() {
+    let mut ev = explain_evidence(ResourceKind::NodeModules, "/Users/dev/proj/node_modules");
+    ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+        references_inside: Vec::new(),
+        running_inside: Vec::new(),
+        unresolved: vec![UnresolvedRef::NotOnPath {
+            source: SourceTag::ClaudeUserSettings,
+            pointer: "hooks.Stop[0].hooks[0]".to_string(),
+        }],
+        sources_examined: vec![SourceTag::ClaudeUserSettings, SourceTag::PathEntry],
+    });
+    let report = explain_report_for(&ev, None);
+
+    assert_eq!(report.policy_label, "UNKNOWN_INCOMPLETE");
+    assert_eq!(report.reasons, vec!["executable_dependency_unknown"]);
+    assert_eq!(report.executable_dependency.unresolved.len(), 1);
+    assert_eq!(
+        report.executable_dependency.unresolved[0].source,
+        "claude_user_settings"
+    );
+    assert_eq!(
+        report.executable_dependency.unresolved[0].kind,
+        "not_on_path"
+    );
+
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(
+        !json.contains("hooks.Stop[0].hooks[0]"),
+        "unresolved must never carry its pointer"
+    );
+
+    assert_matches_fixture(&report, "explain_report_missing_hook.json");
+}
+
+/// Scenario 5: a confirmed hook reference resolving inside a REDIRECTED
+/// (shared) Cargo target dir — HORO-1825's core protected scenario,
+/// combined with HORO-1824's shared-cache scope. `classify` returns
+/// `PROTECTED protected_executable_dependency` before the Redirected
+/// scope is even consulted (step 2b precedes step 6), but `cargo_target`
+/// is still shown here since it is a structural fact about the resource,
+/// independent of why policy refused it. This is also the privacy test:
+/// the resolved path and exe identity constructed below must not appear
+/// anywhere in the serialized fixture.
+#[test]
+fn explain_report_protected_hook_dependency_matches_golden_fixture() {
+    let resolved = PathBuf::from("/Users/dev/.cargo/shared-target/release/agent-hook");
+    let mut ev = explain_evidence(
+        ResourceKind::CargoTargetDir,
+        "/Users/dev/.cargo/shared-target",
+    );
+    ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+        references_inside: vec![DependencyRef {
+            source: SourceTag::ClaudeUserSettings,
+            pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            resolved: resolved.clone(),
+            exe: ExeIdentity {
+                path: resolved.clone(),
+                dev: 7,
+                ino: 42,
+            },
+            provenance: Provenance::Observed,
+            next_invocation: true,
+        }],
+        running_inside: Vec::new(),
+        unresolved: Vec::new(),
+        sources_examined: vec![SourceTag::ClaudeUserSettings],
+    });
+    ev.cargo_target_scope = Some(ProbeOutcome::Observed(CargoTargetScope {
+        resolved_target: PathBuf::from("/Users/dev/.cargo/shared-target"),
+        resolved_build_dir: None,
+        workspace_root: PathBuf::from("/Users/dev/proj"),
+        scope: TargetScope::Redirected,
+        is_direct_locator: false,
+    }));
+    let registry = ActionRegistry::builtin();
+    let action = registry.get("cargo.clean.target_dir").unwrap();
+    let report = explain_report_for(&ev, Some(action));
+
+    assert_eq!(report.policy_label, "PROTECTED");
+    assert_eq!(report.reasons, vec!["protected_executable_dependency"]);
+    assert!(!report.executable);
+    assert!(report.offered_actions.is_empty());
+    assert_eq!(report.refusal_source, Some("policy_protected"));
+    assert_eq!(
+        report.executable_dependency.references[0].source,
+        "claude_user_settings"
+    );
+    assert_eq!(
+        report.executable_dependency.references[0].pointer,
+        "hooks.PostToolUse[0].hooks[0]"
+    );
+    let cargo_target = report.cargo_target.as_ref().unwrap();
+    assert_eq!(cargo_target.scope, "redirected");
+
+    let json = serde_json::to_string(&report).unwrap();
+    assert!(
+        !json.contains("agent-hook") && !json.contains("shared-target/release"),
+        "the resolved dependency path must never appear in a serialized ExplainReport: {json}"
+    );
+
+    assert_matches_fixture(&report, "explain_report_protected_hook_dependency.json");
 }

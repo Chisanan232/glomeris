@@ -114,7 +114,16 @@ VOCABULARIES=(
   # produced anywhere else. Eight tokens: the seven that mirror
   # `ExecuteResolution`'s non-`Executed` variants, plus `busy` from the
   # execution lock (see this script's header).
-  'refusal;;src/reporting/dto.rs;;as_str;;RefusalReason'
+  #
+  # Scoped to `RefusalReason::as_str` (HORO-1828) rather than a bare
+  # `as_str` anchor: `src/reporting/dto.rs` now defines an earlier
+  # `fn as_str(` of its own (`HolderRelation`'s, added for the
+  # `holderRelation` row below), and the anchor takes the FIRST match in
+  # the file — unscoped, this row would have silently re-extracted
+  # `HolderRelation`'s three tokens instead of `RefusalReason`'s eight.
+  # This is the exact `fn as_str(`/`fn tag(` hijack trap this script's own
+  # header already warns about for `EpisodeResponse`/`EpisodeRejection`.
+  'refusal;;src/reporting/dto.rs;;RefusalReason::as_str;;RefusalReason'
   # HORO-1506. Both of these are the wording a recovery run's outcome is
   # reported in, and both have one producer each by construction:
   # `RecoveryRunReport::stop_reason` is only ever written through
@@ -210,12 +219,60 @@ VOCABULARIES=(
   # by what means. Sole producer: `FeasibilityVerdict::tag`, scoped to its impl
   # block for the same reason as the row above.
   'feasibility;;src/monitor/feasibility.rs;;FeasibilityVerdict::tag;;FeasibilityVerdict'
+  # HORO-1828 "explain structure". Three more vocabularies, one per new
+  # `ExplainReport` block that carries a closed-vocabulary token.
+  #
+  # `refusalSource` is scoped to its own file/impl rather than reusing the
+  # `refusal`/`fn as_str(` row above: `src/reporting/dto.rs` already has an
+  # earlier, unrelated `fn as_str(` (`RefusalReason`'s) that an unscoped
+  # anchor there would hit first, and `RefusalSource` lives in a different
+  # file (`src/actionability.rs`) entirely, so there is no collision to
+  # scope against — but the row is still written as `Type::fn` for the
+  # same self-documenting reason the episode/worktree rows above are.
+  'refusalSource;;src/actionability.rs;;RefusalSource::as_str;;RefusalSource'
+  # `processClaim` reuses the existing `ProcessClaim` enum (HORO-1823) —
+  # `process_claim_label` was already its sole producer for
+  # `active_use_signals`' prose before this ticket; `holders[].claim` now
+  # reads the exact same function, so one row covers both call sites.
+  'processClaim;;src/reporting/dto.rs;;process_claim_label;;ProcessClaim'
+  # `targetScope` diffs against `target_scope_tag`, which HORO-1828
+  # deliberately made the sole producer of ALL FOUR tokens including
+  # `"unknown"` (see that function's own doc comment) — a literal
+  # `"unknown"` left at its one call site instead would have been real
+  # wording this script could never see, same gap as `ExecuteReport
+  # ::outcome` in the header above.
+  'targetScope;;src/reporting/dto.rs;;target_scope_tag;;TargetScope'
+  # Four more, added the same session once the architect/advisor review
+  # pointed out the ticket's own six-category list ("holder relation,
+  # process claim, provenance, dependency source tag, unresolved kind,
+  # cargo scope") was only half covered.
+  #
+  # `holderRelation` diffs against the new `HolderRelation::as_str` — a
+  # closed three-member enum added specifically so the three call sites
+  # in `holders_fields` share one producer instead of three repeated
+  # literals.
+  'holderRelation;;src/reporting/dto.rs;;HolderRelation::as_str;;HolderRelation'
+  # `provenance` diffs against `provenance_tag`, which every "inferred"/
+  # "observed" literal in this ticket's new blocks (holder claims, cargo
+  # target scope, dependency references) now routes through, rather than
+  # repeating the string at each call site.
+  'provenance;;src/reporting/dto.rs;;provenance_tag;;Provenance'
+  # `dependencySource` diffs against `SourceTag::as_str`, scoped to its
+  # impl block because `src/evidence/model.rs` also defines
+  # `IntegrityStatus::as_str` — an unscoped anchor would hit that one
+  # first and silently check the wrong nine-vs-three token set.
+  'dependencySource;;src/evidence/model.rs;;SourceTag::as_str;;SourceTag'
+  # `unresolvedKind` diffs against `unresolved_ref_kind`, the same sole
+  # producer the privacy-critical `explain_report_missing_hook`/
+  # `_protected_hook_dependency` golden fixtures already depend on for
+  # never emitting a pointer alongside this field.
+  'unresolvedKind;;src/reporting/dto.rs;;unresolved_ref_kind;;UnresolvedRef'
 )
 
-# One more than the number of rows above: `outcome` has no producer to diff
-# against (see this script's header). Cross-checked against the rows actually
-# walked, at the end.
-TOTAL_VOCABULARIES=25
+# Seven more than the number of rows above: `outcome` has no producer to
+# diff against (see this script's header). Cross-checked against the rows
+# actually walked, at the end.
+TOTAL_VOCABULARIES=32
 
 # Print the body of a function, from its `fn <name>` line to the line
 # where brace depth returns to zero. Brace counting rather than an indent
