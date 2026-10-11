@@ -1956,8 +1956,16 @@ pub struct RecoveryRunReport {
     /// non-empty — the run's counts are not the whole picture whether a probe
     /// broke or was never pointed anywhere.
     pub discovery_complete: bool,
+    /// HORO-1826 §4.4: one line per action whose pre/post host-dependency
+    /// integrity came back `Degraded` or `Unverified`, deduplicated and in
+    /// first-seen order — see
+    /// [`crate::executor::recovery_loop::RecoveryReport::host_integrity_notes`].
+    /// Empty does NOT mean every dependency was confirmed intact; it means
+    /// none came back anything other than `Ok`/not-applicable.
+    pub host_integrity_notes: Vec<String>,
     /// The same caveat sentences the prose output prints, so a client cannot
-    /// present a partial search as a complete one.
+    /// present a partial search as a complete one, or a reclaim as proof
+    /// every host integration still works.
     pub caveats: Vec<String>,
 }
 

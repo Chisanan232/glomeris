@@ -292,7 +292,10 @@ pub fn build_recovery_preview_report(
 /// sentences say what their failure *means*, which is the part no client should
 /// be deciding for itself.
 fn build_run_caveats(report: &RecoveryReport) -> Vec<String> {
-    if report.detector_failures.is_empty() && report.detectors_not_examined.is_empty() {
+    if report.detector_failures.is_empty()
+        && report.detectors_not_examined.is_empty()
+        && report.host_integrity_notes.is_empty()
+    {
         return Vec::new();
     }
 
@@ -319,6 +322,18 @@ fn build_run_caveats(report: &RecoveryReport) -> Vec<String> {
              that answered. That is not a finding that nothing safe is left."
                 .to_string(),
         );
+    }
+    // HORO-1826 §4.4: a reclaim-success count must not imply every host
+    // integration still works. See `RecoveryReport::host_integrity_notes`'s
+    // own doc comment for why an empty list here is not itself a positive
+    // finding.
+    if !report.host_integrity_notes.is_empty() {
+        caveats.push(format!(
+            "{} action(s) reported a host-dependency reference that is not confirmed \
+             intact after this run. The bytes freed above do not mean every \
+             coding-agent hook/integration still works.",
+            report.host_integrity_notes.len()
+        ));
     }
     caveats
 }
@@ -391,6 +406,7 @@ pub fn build_recovery_run_report(
         detectors_not_examined: report.detectors_not_examined.clone(),
         discovery_complete: report.detector_failures.is_empty()
             && report.detectors_not_examined.is_empty(),
+        host_integrity_notes: report.host_integrity_notes.clone(),
         caveats: build_run_caveats(report),
     }
 }
@@ -825,6 +841,7 @@ mod tests {
             final_free_bytes: final_free,
             detector_failures: vec![],
             detectors_not_examined: vec![],
+            host_integrity_notes: vec![],
         }
     }
 

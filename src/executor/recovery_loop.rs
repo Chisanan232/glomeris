@@ -433,6 +433,16 @@ pub struct RecoveryReport {
     /// that field so a human-facing renderer can say which of the two
     /// happened — one of them is something the user can fix.
     pub detectors_not_examined: Vec<String>,
+    /// HORO-1826 §4.4: one line per action whose pre/post host-dependency
+    /// integrity came back `Degraded` or `Unverified`, deduplicated and
+    /// in first-seen order (same convention as `detector_failures`
+    /// above). Empty does NOT mean every action's dependencies were
+    /// confirmed intact — it means none of them came back anything other
+    /// than `Ok`/not-applicable. Non-empty means this run's
+    /// `total_bytes_freed`/`Succeeded` outcome must not be read as "every
+    /// host integration still works" — the ticket's own user-outcome
+    /// statement.
+    pub host_integrity_notes: Vec<String>,
 }
 
 impl RecoveryReport {
@@ -476,6 +486,31 @@ impl RecoveryReport {
                  detectors that answered; it is not a finding that nothing safe is left"
                     .to_string(),
             );
+        }
+        lines
+    }
+
+    /// The lines a human-facing renderer must print alongside a
+    /// successful run's byte count whenever `host_integrity_notes` is
+    /// non-empty (HORO-1826 §4.4/ticket user outcome) — empty when every
+    /// action's host-dependency check came back `Ok`/not-applicable.
+    ///
+    /// Same reasoning as [`Self::discovery_caveat_lines`]: one producer,
+    /// assertable by a test, so "df improved" is never printed without
+    /// this caveat when a host integration's status is anything other
+    /// than confirmed intact.
+    pub fn host_integrity_caveat_lines(&self) -> Vec<String> {
+        if self.host_integrity_notes.is_empty() {
+            return Vec::new();
+        }
+        let mut lines = vec![format!(
+            "host integrity:         {} action(s) reported a dependency that is not \
+             confirmed intact -- reclaimed bytes above do not mean every host \
+             integration still works",
+            self.host_integrity_notes.len()
+        )];
+        for note in &self.host_integrity_notes {
+            lines.push(format!("  - {note}"));
         }
         lines
     }
@@ -1630,6 +1665,7 @@ fn build_report(
     started_free_bytes: u64,
     final_free_bytes: u64,
     gaps: &DiscoveryGaps,
+    host_integrity_notes: &[String],
 ) -> RecoveryReport {
     RecoveryReport {
         stop_reason,
@@ -1641,6 +1677,7 @@ fn build_report(
         final_free_bytes,
         detector_failures: gaps.failures.clone(),
         detectors_not_examined: gaps.not_examined.clone(),
+        host_integrity_notes: host_integrity_notes.to_vec(),
     }
 }
 
@@ -1728,6 +1765,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 // Nothing has been discovered yet, so there is nothing to
                 // report as incomplete.
                 &DiscoveryGaps::default(),
+                &[],
             );
         }
     };
@@ -1746,6 +1784,13 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
     // examined nothing, which repeat across iterations for an even more
     // obvious reason — the configuration does not change mid-run.
     let mut gaps = DiscoveryGaps::default();
+    // HORO-1826 §4.4: per-action host-dependency integrity caveats,
+    // accumulated across iterations the same way `gaps` is above — first-
+    // seen, deduplicated text lines, never a policy input. Non-empty means
+    // this run's `total_bytes_freed`/`Succeeded` outcome must not be read
+    // as "every host integration still works" (the ticket's own user
+    // outcome statement).
+    let mut host_integrity_notes: Vec<String> = Vec::new();
     // `Some` exactly for an automatic run (HORO-1510). The envelope and its
     // ledger are held together in one `Option` rather than in two, so there is
     // no representable state in which a run is narrowed by an envelope whose
@@ -1772,6 +1817,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                     started_free_bytes,
                     last_free_bytes,
                     &gaps,
+                    &host_integrity_notes,
                 );
             }
         };
@@ -1796,6 +1842,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 started_free_bytes,
                 last_free_bytes,
                 &gaps,
+                &host_integrity_notes,
             );
         }
 
@@ -1823,6 +1870,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 started_free_bytes,
                 last_free_bytes,
                 &gaps,
+                &host_integrity_notes,
             );
         }
 
@@ -1853,6 +1901,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                     started_free_bytes,
                     last_free_bytes,
                     &gaps,
+                    &host_integrity_notes,
                 );
             }
             // The pressure floor, checked once and deliberately never again.
@@ -1878,6 +1927,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                         started_free_bytes,
                         last_free_bytes,
                         &gaps,
+                        &host_integrity_notes,
                     );
                 }
             }
@@ -1898,6 +1948,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 started_free_bytes,
                 last_free_bytes,
                 &gaps,
+                &host_integrity_notes,
             );
         }
 
@@ -1973,6 +2024,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                 started_free_bytes,
                 last_free_bytes,
                 &gaps,
+                &host_integrity_notes,
             );
         };
 
@@ -2038,7 +2090,14 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             policy_label,
             estimated_bytes,
         });
-        let report = execute(action, &approval, collector, policy_cfg, now);
+        let report = execute(
+            action,
+            &approval,
+            collector,
+            policy_cfg,
+            now,
+            Some(&crate::executor::MacosVolumeDelta),
+        );
 
         // HORO-1057: best-effort audit-log append, AFTER the real outcome
         // above is already known. `append_recovery_audit_record` never
@@ -2046,6 +2105,33 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
         // function's doc comment for why an audit-write failure must
         // never influence this loop's own bookkeeping below.
         append_recovery_audit_record(&report, policy_label, audit_log_path, now);
+
+        // HORO-1826 §4.4: surface a non-OK host-dependency verdict as a
+        // run-level caveat, the same deduplicated/first-seen-order
+        // treatment `gaps` gets above. `None` (nothing to protect, or
+        // nothing mutated) adds no note — only `Degraded`/`Unverified`
+        // are caveats; `Ok` is not reported here either, since an
+        // unbroken string of per-action "OK" notes would bury the ones
+        // that matter.
+        if let Some(integrity) = &report.host_integrity {
+            use crate::evidence::model::IntegrityStatus;
+            let note = match integrity.status {
+                IntegrityStatus::Degraded => Some(format!(
+                    "{action_label}: host-dependency integrity DEGRADED \
+                     ({} dependency record(s))",
+                    integrity.entries.len()
+                )),
+                IntegrityStatus::Unverified => Some(format!(
+                    "{action_label}: host-dependency integrity could not be verified"
+                )),
+                IntegrityStatus::Ok => None,
+            };
+            if let Some(note) = note {
+                if !host_integrity_notes.contains(&note) {
+                    host_integrity_notes.push(note);
+                }
+            }
+        }
 
         // The running total is updated before the outcome is reported, so the
         // figure in `ActionFinished` already includes this action — a UI that
@@ -2112,6 +2198,7 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
                             started_free_bytes,
                             final_free_bytes,
                             &gaps,
+                            &host_integrity_notes,
                         );
                     }
                 }
@@ -3023,6 +3110,160 @@ mod run_tests {
              (measured {} time(s))",
             fs_stat.call_count()
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// A collector whose `executable_dependency` answer is incomplete
+    /// (`unresolved` non-empty) on every call — stands in for a host
+    /// config `lsof`/config-read failure (HORO-1825's
+    /// `ExecutableDependencyUnknown`), which is a real `Ask` veto an
+    /// action can execute under explicit consent, unlike
+    /// `references_inside` (unconditionally `PROTECTED`, never
+    /// executable). Every other correlation field stays clean.
+    struct UnresolvedDependencyCollector;
+
+    impl EvidenceCollector for UnresolvedDependencyCollector {
+        fn collect(&self, _id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(
+                    crate::evidence::ExecutableDependencyReport {
+                        references_inside: Vec::new(),
+                        running_inside: Vec::new(),
+                        unresolved: vec![crate::evidence::model::UnresolvedRef::SourceUnreadable {
+                            source: crate::evidence::model::SourceTag::CodexHooks,
+                        }],
+                        sources_examined: vec![crate::evidence::model::SourceTag::CodexHooks],
+                    },
+                ),
+            }
+        }
+    }
+
+    /// HORO-1826 §4.4: a run whose executed action's pre-action
+    /// host-dependency probe was incomplete must surface a non-empty
+    /// `host_integrity_notes` on the final [`RecoveryReport`], and
+    /// [`RecoveryReport::host_integrity_caveat_lines`] must render it —
+    /// a `Succeeded`/`total_bytes_freed > 0` run must never look like
+    /// unqualified good news when a host integration could not be
+    /// confirmed intact.
+    #[test]
+    fn run_report_surfaces_unverified_host_integrity_as_a_caveat() {
+        let root = make_temp_dir("host-integrity-caveat");
+        let ev = empty_node_modules_evidence(&root);
+        let node_modules = root.join("node_modules");
+
+        let fs_stat = ScriptedFsStat::new(vec![
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 950_000_000),
+        ]);
+        let config = RecoveryConfig {
+            target: FreeTarget::AbsoluteBytes(900_000_000),
+            // `ExecutableDependencyUnknown` is an `Ask` veto, not
+            // `AutoSafe` -- this run must auto-consent to it to execute
+            // at all.
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root.join("actions.jsonl");
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &fs_stat,
+            collector: &UnresolvedDependencyCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: None,
+        });
+
+        assert_eq!(report.actions_executed, 1);
+        assert!(!node_modules.exists(), "the mutation really happened");
+        assert_eq!(
+            report.host_integrity_notes.len(),
+            1,
+            "an incomplete pre-action host-dependency sweep on the one executed \
+             action must produce exactly one caveat note; got {:?}",
+            report.host_integrity_notes
+        );
+
+        let caveat = report.host_integrity_caveat_lines().join("\n");
+        assert!(
+            caveat.contains("host integrity"),
+            "the rendered report must flag the host-integrity caveat; got:\n{caveat}"
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Mutation test (ADR-0001 §13 anti-vacuity shape): a run in which
+    /// EVERY executed action's host-dependency check came back `Ok` (or
+    /// not-applicable) must report `host_integrity_notes` empty and
+    /// `host_integrity_caveat_lines()` empty. Restoring the real
+    /// `CleanCollector` behavior (as opposed to deliberately mutating
+    /// `recovery_loop.rs`'s note-pushing logic to always add a caveat
+    /// regardless of status) is what makes the test above meaningful: if
+    /// this one were also failing, the one above would not be proving
+    /// anything.
+    #[test]
+    fn run_report_has_no_host_integrity_caveat_when_everything_is_clean() {
+        let root = make_temp_dir("host-integrity-clean");
+        let ev = empty_node_modules_evidence(&root);
+
+        let fs_stat = ScriptedFsStat::new(vec![
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 100),
+            FsUsage::new(1_000_000_000, 950_000_000),
+        ]);
+        let config = RecoveryConfig {
+            target: FreeTarget::AbsoluteBytes(900_000_000),
+            auto_approve_ask: true,
+            ..base_config()
+        };
+        let clock = crate::monitor::FakeClock::new();
+        let wall_clock = FixedWallClock(SystemTime::now());
+        let action_registry = ActionRegistry::builtin();
+        let detector_registry = fake_registry(vec![ev]);
+        let ctx = empty_discovery_ctx();
+        let audit_log_path = root.join("actions.jsonl");
+
+        let report = run(RecoveryRunRequest {
+            config: &config,
+            fs_stat: &fs_stat,
+            collector: &CleanCollector,
+            detector_registry: &detector_registry,
+            action_registry: &action_registry,
+            clock: &clock,
+            wall_clock: &wall_clock,
+            policy_cfg: &PolicyConfig::default(),
+            target_mount: Path::new("/"),
+            discovery_ctx: &ctx,
+            audit_log_path: &audit_log_path,
+            observer: &SilentObserver,
+            stop: &NeverStops,
+            admission: None,
+        });
+
+        assert_eq!(report.actions_executed, 1);
+        assert!(report.host_integrity_notes.is_empty());
+        assert!(report.host_integrity_caveat_lines().is_empty());
 
         fs::remove_dir_all(&root).ok();
     }
