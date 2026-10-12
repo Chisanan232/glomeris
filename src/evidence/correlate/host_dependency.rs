@@ -3164,34 +3164,123 @@ mod tests {
     /// match (and, by extension, without being wired into a real probe
     /// call site), this test FAILS TO COMPILE, not just at runtime.
     #[test]
-    fn every_source_tag_variant_is_exhaustively_matched_at_compile_time() {
-        fn describe(tag: &SourceTag) -> &'static str {
+    fn every_recognized_source_variant_is_actually_produced_by_the_real_probe() {
+        // Exhaustive match, no wildcard arm: a future `SourceTag` variant
+        // fails THIS to compile, which is the structural half of the
+        // guard. The runtime half below then proves the variant is not
+        // merely matched here but actually wired into a real probe call
+        // site — exactly the "defined but never constructed" bug class
+        // HORO-1865 fixes (`ClaudeProject` sat in an exhaustive match
+        // just like this one for its entire time unconstructed, which is
+        // precisely why a hand-built-literal version of this guard would
+        // have passed throughout the whole bug and caught nothing).
+        fn index_of(tag: &SourceTag) -> usize {
             match tag {
-                SourceTag::ClaudeUserSettings => "claude_user_settings",
-                SourceTag::ClaudeUserLocal => "claude_user_local",
-                SourceTag::ClaudeManaged => "claude_managed",
-                SourceTag::ClaudeProject(_) => "claude_project",
-                SourceTag::CodexHooks => "codex_hooks",
-                SourceTag::CodexNotify => "codex_notify",
-                SourceTag::LaunchAgent(_) => "launch_agent",
-                SourceTag::PathEntry => "path_entry",
-                SourceTag::RunningProcesses => "running_processes",
+                SourceTag::ClaudeUserSettings => 0,
+                SourceTag::ClaudeUserLocal => 1,
+                SourceTag::ClaudeManaged => 2,
+                SourceTag::ClaudeProject(_) => 3,
+                SourceTag::CodexHooks => 4,
+                SourceTag::CodexNotify => 5,
+                SourceTag::LaunchAgent(_) => 6,
+                SourceTag::PathEntry => 7,
+                SourceTag::RunningProcesses => 8,
             }
         }
-
-        let all_variants = [
-            SourceTag::ClaudeUserSettings,
-            SourceTag::ClaudeUserLocal,
-            SourceTag::ClaudeManaged,
-            SourceTag::ClaudeProject("root-0".to_string()),
-            SourceTag::CodexHooks,
-            SourceTag::CodexNotify,
-            SourceTag::LaunchAgent("label".to_string()),
-            SourceTag::PathEntry,
-            SourceTag::RunningProcesses,
+        const NAMES: [&str; 9] = [
+            "claude_user_settings",
+            "claude_user_local",
+            "claude_managed",
+            "claude_project",
+            "codex_hooks",
+            "codex_notify",
+            "launch_agent",
+            "path_entry",
+            "running_processes",
         ];
-        for tag in &all_variants {
-            assert!(!describe(tag).is_empty());
+
+        let home = unique_temp_dir("exhaustive-home");
+        let root0 = unique_temp_dir("exhaustive-root0");
+        let resource = unique_temp_dir("exhaustive-target");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(&root0).unwrap();
+
+        // LaunchAgent: at least one plist must be present to be examined
+        // at all.
+        fs::create_dir_all(home.join("Library").join("LaunchAgents")).unwrap();
+        fs::write(
+            home.join("Library")
+                .join("LaunchAgents")
+                .join("com.example.guard.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.guard</string>
+    <key>Program</key>
+    <string>/usr/bin/true</string>
+</dict>
+</plist>
+"#,
+        )
+        .unwrap();
+
+        // PathEntry: a PATH directory that is itself inside the resource
+        // (`references_inside`, never `sources_examined` — see the
+        // module's own probe loop, which never pushes `PathEntry` there).
+        let path_dir = resource.join("bin");
+        fs::create_dir_all(&path_dir).unwrap();
+
+        // ClaudeManaged: examined as soon as `managed_settings` is
+        // `Some`, whether or not the file actually exists on disk.
+        let managed = home.join("managed-settings.json");
+
+        let roots = HostDependencyRoots {
+            home: home.clone(),
+            path_dirs: vec![path_dir],
+            plutil_bin: PathBuf::from("/usr/bin/plutil"),
+            lsof_bin: PathBuf::from("lsof"),
+            managed_settings: Some(managed),
+            project_roots: vec![root0.clone()],
+        };
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        let mut seen = [false; 9];
+        for tag in &report.sources_examined {
+            seen[index_of(tag)] = true;
         }
+        for dep in &report.references_inside {
+            seen[index_of(&dep.source)] = true;
+        }
+        for u in &report.unresolved {
+            seen[index_of(u.source())] = true;
+        }
+
+        for (i, was_seen) in seen.iter().enumerate() {
+            assert!(
+                *was_seen,
+                "SourceTag variant '{}' was never produced anywhere by the real probe \
+                 against a fixture configured with every recognized source — sources_examined={:?}, \
+                 references_inside sources={:?}, unresolved sources={:?}",
+                NAMES[i],
+                report.sources_examined,
+                report
+                    .references_inside
+                    .iter()
+                    .map(|d| &d.source)
+                    .collect::<Vec<_>>(),
+                report.unresolved.iter().map(|u| u.source()).collect::<Vec<_>>(),
+            );
+        }
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&resource).ok();
     }
 }

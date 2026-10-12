@@ -320,6 +320,36 @@ fn a3_project_settings_with_no_hooks_key_stays_auto_safe_and_deletable() {
     .expect("write settings.json with no hooks key");
 
     let node_modules_query = canonical(&node_modules);
+
+    // Proves this is a genuine negative, not the HORO-1865 bug reappearing
+    // (the project settings file silently never read at all): the probe
+    // must have actually examined it.
+    let explain = run_glomeris(
+        &[
+            "explain",
+            &node_modules_query,
+            "--project-root",
+            &project_root.to_string_lossy(),
+            "--json",
+        ],
+        &home,
+    );
+    assert!(
+        explain.status.success(),
+        "explain --json should succeed; stderr: {}",
+        String::from_utf8_lossy(&explain.stderr)
+    );
+    let explain_report = parse_json(&explain);
+    assert!(
+        explain_report["executable_dependency"]["sources_examined"]
+            .as_array()
+            .expect("sources_examined must be an array")
+            .iter()
+            .any(|s| s == "claude_project"),
+        "the project settings file must have actually been examined (and found clean), \
+         not silently skipped — got: {explain_report}"
+    );
+
     let resource_id = format!("node_modules:{node_modules_query}");
 
     let execute = run_glomeris(
@@ -376,6 +406,43 @@ fn a3_project_hook_pointing_outside_the_resource_stays_auto_safe_and_deletable()
     write_project_hook(&project_root, "settings.json", &outside_hook);
 
     let node_modules_query = canonical(&node_modules);
+
+    // Proves the hook was actually read and resolved (not silently
+    // skipped) — the reference it produces must land outside the
+    // resource, never inside it.
+    let explain = run_glomeris(
+        &[
+            "explain",
+            &node_modules_query,
+            "--project-root",
+            &project_root.to_string_lossy(),
+            "--json",
+        ],
+        &home,
+    );
+    assert!(
+        explain.status.success(),
+        "explain --json should succeed; stderr: {}",
+        String::from_utf8_lossy(&explain.stderr)
+    );
+    let explain_report = parse_json(&explain);
+    assert!(
+        explain_report["executable_dependency"]["sources_examined"]
+            .as_array()
+            .expect("sources_examined must be an array")
+            .iter()
+            .any(|s| s == "claude_project"),
+        "the project settings file must have actually been examined (and found clean), \
+         not silently skipped — got: {explain_report}"
+    );
+    assert!(
+        explain_report["executable_dependency"]["references"]
+            .as_array()
+            .expect("references must be an array")
+            .is_empty(),
+        "a hook pointing outside the resource must produce no reference INTO it, got: {explain_report}"
+    );
+
     let resource_id = format!("node_modules:{node_modules_query}");
 
     let execute = run_glomeris(
@@ -422,6 +489,23 @@ fn a3_project_hook_pointing_outside_the_resource_stays_auto_safe_and_deletable()
 /// AutoSafe candidate available (the only candidate is PROTECTED) and
 /// `auto_approve_ask: false`, the run must stop `safe_exhausted` having
 /// executed nothing, never touching the protected target dir.
+///
+/// Safe to run on any host, unlike the plausible-goal caution
+/// `tests/pressure_to_recovery_chain.rs`'s module doc comment states (a
+/// low/realistic goal would delete real host state because discovery
+/// is not confined to `$HOME`): `ActionRegistry::builtin()` registers
+/// exactly three actions — `CargoCleanTargetDir`, `NodeCleanNodeModules`,
+/// `HomebrewCleanupCache` — and no Docker or Xcode action at all, so a
+/// non-fixture Docker/Xcode resource this run might also discover on the
+/// real host can never actually be executed against (nothing to run).
+/// `HomebrewCleanupCache` itself plans an unscoped `RunTool` step, which
+/// `executor::structural_refusal` refuses on sight regardless of policy
+/// class (see `tests/actionability_agrees_with_execution.rs`'s own
+/// documentation of exactly this). That leaves Cargo/`node_modules` as
+/// the only kinds this run can ever mutate, and discovery for both is
+/// confined to `--project-root`-scoped directories under an isolated,
+/// empty fixture `$HOME` — so the only such resource this run can find
+/// at all is this test's own fixture.
 #[test]
 fn a4_free_recovery_loop_never_deletes_a_project_hook_protected_target_dir() {
     let home = unique_dir("a4-home");
