@@ -49,6 +49,21 @@ enum ProjectRootsWording {
     /// "Add" is unambiguous on screen, beside a field, and ambiguous when
     /// read on its own.
     static let addLabel = "Add project root"
+
+    /// Shown when the `check-project-root` call itself could not be
+    /// completed — the client failed to spawn `glomeris`, the process
+    /// exited non-zero, or its stdout did not decode (HORO-1629 follow-up).
+    /// Deliberately distinct from the `nil`-warning case: a server-reported
+    /// `"undetermined"` status (or a clean `"project_root"`/
+    /// `"no_projects_found"`) already produces `nil` by design — that is
+    /// ADR-0001 §16.1's open AC5, left alone here. What must never collapse
+    /// into that same `nil` is a check that never got an answer at all; if
+    /// it did, a client-side failure would read identically to "confirmed
+    /// not a parent of projects", the same fail-open shape AC4 forbids on
+    /// the Rust side. This string makes no claim about the folder either
+    /// way — it only says the check did not happen.
+    static let checkUnavailableMessage =
+        "Could not check this folder before adding it. Review it yourself if it may hold several projects."
 }
 
 struct ProjectRootsPreferencesView: View {
@@ -57,8 +72,18 @@ struct ProjectRootsPreferencesView: View {
     @State private var roots: [String]
     @State private var newRootPath: String = ""
     /// Server-authored warning from the most recent `check-project-root`
-    /// call, or `nil` when there is nothing to show (clean, undetermined,
-    /// or the check could not run at all — HORO-1629 §11/§16.1).
+    /// call, or `nil` when there is nothing to show (a clean
+    /// `"project_root"`/`"no_projects_found"`, or a server-reported
+    /// `"undetermined"`, which has no founder-approved wording of its own
+    /// — ADR-0001 §16.1's open AC5). When the check itself could not be
+    /// completed (process spawn/exit/decode failure), this is set to
+    /// ``ProjectRootsWording/checkUnavailableMessage`` instead of staying
+    /// `nil`, so a failed check is never indistinguishable from a clean
+    /// one. Tests assert on this behavior through ``checkProjectRootWarning``
+    /// directly rather than by reading this property back after ``addRoot``
+    /// — `@State` has no stable storage location outside a live SwiftUI
+    /// render graph, so a write made inside an `await`ed call does not
+    /// reliably read back through a second, independent access.
     @State private var warningMessage: String?
 
     init(store: ProjectRootsStore = ProjectRootsStore(), client: GlomerisClient = GlomerisClient()) {
@@ -120,8 +145,14 @@ struct ProjectRootsPreferencesView: View {
     /// regardless of the outcome: this is a warning, not a gate — the user
     /// may genuinely mean to scope detection to a folder that also happens
     /// to hold sibling directories, and ADR-0001 §11 never authorizes
-    /// refusing the add.
-    private func addRoot(_ path: String) async {
+    /// refusing the add. Includes when the check itself fails to run at all
+    /// — a user who hits that must still be able to add the root; the
+    /// indefinite block this would otherwise risk is exactly what AC-style
+    /// fail-closed handling must not do to a UI action, as opposed to a
+    /// safety verdict. Not `private` — `ProjectRootsPreferencesViewTests`
+    /// calls this directly to assert the root is persisted regardless of
+    /// the check's outcome.
+    func addRoot(_ path: String) async {
         let trimmed = path.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         warningMessage = await checkProjectRootWarning(for: trimmed)
@@ -130,13 +161,20 @@ struct ProjectRootsPreferencesView: View {
         newRootPath = ""
     }
 
-    /// The server-authored warning for `path`, or `nil` when there is none
-    /// to show — a clean root, an ordinary folder, an undetermined read
-    /// (no founder-approved wording exists for that case; see ADR-0001
-    /// §16.1's open AC5 question), or a `GlomerisClient` failure. This view
-    /// never composes or infers wording of its own; it only ever shows
-    /// exactly what the CLI returned.
-    private func checkProjectRootWarning(for path: String) async -> String? {
+    /// The warning to show for `path`: the server-authored warning verbatim
+    /// for `"parent_of_projects"`; `nil` for a clean root, an ordinary
+    /// folder, or a server-reported `"undetermined"` (no founder-approved
+    /// wording exists for that case — ADR-0001 §16.1's open AC5 question);
+    /// or ``ProjectRootsWording/checkUnavailableMessage`` when the
+    /// `GlomerisClient` call itself failed (spawn, non-zero exit, or
+    /// decode failure) — never silently folded into the `nil` case, which
+    /// would read as "checked and clean" for a check that never ran. This
+    /// view never composes or infers wording of its own for a completed
+    /// check; it only ever shows exactly what the CLI returned, with this
+    /// one exception for the no-answer-at-all case. Not `private` —
+    /// `ProjectRootsPreferencesViewTests` calls this directly to assert on
+    /// the decision for each CLI outcome, independent of `@State`.
+    func checkProjectRootWarning(for path: String) async -> String? {
         do {
             let result = try await client.run(
                 ["check-project-root", path, "--json"],
@@ -145,7 +183,7 @@ struct ProjectRootsPreferencesView: View {
             )
             return result.output.warning
         } catch {
-            return nil
+            return ProjectRootsWording.checkUnavailableMessage
         }
     }
 
