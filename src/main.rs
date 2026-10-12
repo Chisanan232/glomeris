@@ -508,11 +508,28 @@ fn run_emergency_command(args: &[String]) {
     let actions = ActionRegistry::builtin();
     // Emergency mode takes no arguments at all (see the usage check above)
     // and so has no `--project-root` list or other configured-root
-    // context to thread through. This is a residual, not a silent gap:
-    // without a configured root, the §4.3 project-level probe has
-    // nothing to examine, but emergency mode also cannot reach a Cargo
-    // or node_modules target in the first place, since those only exist
-    // under a configured root (HORO-1865).
+    // context to thread through — `&[]` here is a residual, stated
+    // precisely rather than papered over (HORO-1865):
+    //
+    // - CargoTargetDir/NodeModules discovery ALREADY finds nothing here,
+    //   independent of this choice — `discovery_ctx` below is built with
+    //   `DiscoveryContext::from_process_env(home_dir)` and no
+    //   `.with_known_project_roots(...)` call, and both detectors only
+    //   scan paths under `known_project_roots`. So the §4.3 gap this
+    //   residual names has no project-rooted Cargo/node candidate to
+    //   apply to today.
+    // - `XcodeDerivedData` IS discovered here (it is `$HOME`-scoped, not
+    //   project-root-scoped) and IS executable-bearing per ADR-0001 §5,
+    //   so a project hook pointing into it would, in principle, be missed
+    //   by this `&[]`. In practice this is not yet exploitable:
+    //   `ActionRegistry::builtin()` registers exactly three actions
+    //   (`CargoCleanTargetDir`, `NodeCleanNodeModules`,
+    //   `HomebrewCleanupCache`) and none for `XcodeDerivedData`, so
+    //   emergency mode (which deletes only through that registry) cannot
+    //   actually delete a DerivedData directory at all today, regardless
+    //   of this residual. This stops being true the moment a
+    //   DerivedData-deleting action is registered OR emergency mode is
+    //   given a configured-root argument — tracked here, not silently.
     let collector = live_evidence_collector(&[]);
 
     let report = run_emergency(

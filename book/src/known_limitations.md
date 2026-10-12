@@ -275,8 +275,10 @@ attempt to discover every possible way a hook or daemon could be configured
 on a machine. The remaining gaps below are explicitly out of scope and never
 silently widened to a false "no dependency" — but that was **not yet true**
 for every item on this list as of HORO-1825: a project-level
-`~/.claude/settings.json` hook was entirely unexamined, which meant a
-resource it referenced could read as a clean negative. HORO-1829's QA pass
+`<root>/.claude/settings.json` hook (a configured project root's own
+settings file, distinct from the home-scoped `~/.claude/settings.json`
+covered above) was entirely unexamined, which meant a resource it
+referenced could read as a clean negative. HORO-1829's QA pass
 found exactly this — a Cargo target dir referenced only by a project-level
 hook classified `AUTO_SAFE` and was deleted with zero consent. HORO-1865
 closes that specific gap: every configured root's own
@@ -320,6 +322,21 @@ above. This is an intended behavior change for anyone relying on a project
 hook written in one of those forms, not a regression; no founder sign-off
 was required for it under this ticket's design (ADR-0001 §4.3 already
 specifies this handling for every recognized source).
+
+**HORO-1865 residual, `glomeris emergency` specifically:** `emergency`
+takes no arguments and so has no configured-root list to give the
+project-level probe, which means a project hook pointing into
+`XcodeDerivedData` (`$HOME`-scoped, so still discovered; executable-bearing
+per ADR-0001 §5) could in principle be missed there. This is not yet
+exploitable: `ActionRegistry::builtin()` registers no action for
+`XcodeDerivedData` at all (only `CargoCleanTargetDir`,
+`NodeCleanNodeModules`, `HomebrewCleanupCache`), so emergency mode cannot
+actually delete a DerivedData directory today regardless of this gap.
+`CargoTargetDir`/`NodeModules` discovery already finds nothing in
+emergency mode independent of this residual, since emergency's discovery
+context is never given a configured-root list either. Tracked here so it
+is revisited if a DerivedData-deleting action is ever registered, or if
+emergency mode is ever given root context.
 
 ## What holds this book to the code
 
