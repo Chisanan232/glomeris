@@ -156,6 +156,7 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
     /// way this file already pins other call-site shapes
     /// (`testTheIncompleteDiscoveryAdvisoryIsAdditiveAndNeverReplacesTheRows`
     /// in `CandidatesSectionViewTests` is the sibling precedent).
+    @MainActor
     func testCheckProjectRootWarningReturnsTheADRStringForParentOfProjects() async throws {
         let warning = "This folder appears to contain multiple projects rather than being a " +
             "project root. Glomeris checks only the selected folder and does not " +
@@ -184,6 +185,7 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
 
     /// The normal case: a real project root reports `project_root`, no
     /// `warning` field at all, so there is nothing to show.
+    @MainActor
     func testCheckProjectRootWarningIsNilForAProjectRoot() async throws {
         let json = #"{"path":"/Users/dev/my-app","status":"project_root"}"#
         let client = try fixtureClient().withEnvironment([
@@ -205,6 +207,7 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
     /// ran indistinguishable from a check that ran and found nothing.
     /// `checkProjectRootWarning` must return something honest instead — the
     /// same fail-open shape AC4 forbids on the Rust side, closed here too.
+    @MainActor
     func testCheckProjectRootWarningReturnsTheUnavailableMessageOnAClientFailure() async throws {
         let client = try fixtureClient().withEnvironment([
             "GLOMERIS_FIXTURE_EXIT": "1",
@@ -228,6 +231,7 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
     /// `CheckProjectRootReportDto` JSON. `GlomerisClient.run` throws
     /// `outputDecodingFailed` for this, and it must land in the same honest
     /// bucket as a spawn/exit failure, not in the clean-root bucket.
+    @MainActor
     func testCheckProjectRootWarningReturnsTheUnavailableMessageOnUndecodableOutput() async throws {
         let client = try fixtureClient().withEnvironment([
             "GLOMERIS_FIXTURE_STDOUT": "not valid json at all",
@@ -248,6 +252,7 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
     /// answered honestly that it could not determine the folder's shape,
     /// which is a different fact from the client never getting an answer at
     /// all, and the two must not collapse into the same string.
+    @MainActor
     func testCheckProjectRootWarningIsNilNotTheFailureMessageForServerUndetermined() async throws {
         let json = #"{"path":"/Users/dev/missing","status":"undetermined","reason":"could not read /Users/dev/missing"}"#
         let client = try fixtureClient().withEnvironment([
@@ -273,6 +278,7 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
     /// and ADR-0001 §11. Covers both a reported warning and a client-side
     /// check failure, since "never blocks the user" matters most exactly
     /// when the check itself could not run.
+    @MainActor
     func testAddRootPersistsTheRootRegardlessOfTheCheckOutcome() async throws {
         let parentOfProjectsJSON =
             #"{"path":"/Users/dev/code","status":"parent_of_projects","warning":"w","matched_children":["a"]}"#
