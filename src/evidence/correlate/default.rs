@@ -1,6 +1,7 @@
 //! Composes the four real probes into one [`EvidenceCollector`].
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use super::git::{GitCliProbe, GitProbe};
 use super::host_dependency::{HostDependencyProbe, HostDependencyRoots, LiveHostDependencyProbe};
@@ -82,10 +83,20 @@ impl DefaultEvidenceCollector {
     }
 }
 
-impl Default for DefaultEvidenceCollector {
-    fn default() -> Self {
+impl DefaultEvidenceCollector {
+    /// Builds the real, subprocess-backed collector used at every
+    /// production entrypoint. `project_roots` (HORO-957's
+    /// `--project-root` list) is threaded into
+    /// [`HostDependencyRoots::from_env`] so the §4.3 probe examines each
+    /// configured root's own `.claude/settings.json` and
+    /// `.claude/settings.local.json` (HORO-1865), not just the
+    /// home-scoped sources. There is deliberately no `Default` impl: a
+    /// caller that reached for `::default()` would silently get an empty
+    /// root list and lose exactly the coverage this ticket adds — every
+    /// call site must pass the real roots in scope, explicitly.
+    pub fn live(project_roots: &[PathBuf]) -> Self {
         let host_dependency: Option<Box<dyn HostDependencyProbe + Send + Sync>> =
-            HostDependencyRoots::from_env()
+            HostDependencyRoots::from_env(project_roots.to_vec())
                 .map(|roots| Box::new(LiveHostDependencyProbe::new(roots)) as Box<_>);
         Self::new(
             Box::new(LsofOpenFileProbe),

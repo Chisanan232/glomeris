@@ -249,6 +249,21 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Builds the real, subprocess-backed [`glomeris::evidence::correlate::DefaultEvidenceCollector`]
+/// for a production entrypoint, threading through the configured project
+/// roots actually in scope at that call site (HORO-1865 / ADR-0001 §4.3)
+/// so the executable-dependency probe examines each root's own
+/// `.claude/settings.json` and `.claude/settings.local.json`, not just
+/// the home-scoped sources. Every call site must pass its own real root
+/// list here — there is no ambient fallback and no `Default` impl to
+/// reach for instead (see `DefaultEvidenceCollector::live`'s doc
+/// comment).
+fn live_evidence_collector(
+    project_roots: &[PathBuf],
+) -> glomeris::evidence::correlate::DefaultEvidenceCollector {
+    glomeris::evidence::correlate::DefaultEvidenceCollector::live(project_roots)
+}
+
 /// Builds the standard evidence-correlation-classification pipeline every
 /// `detect`/`explain`/`clean` subcommand uses: real detectors, the real
 /// `DefaultEvidenceCollector`, and the default policy config, evaluated at
@@ -264,14 +279,13 @@ fn discover_and_classify_now(
     glomeris::policy::PolicyDecision,
 )> {
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
-    use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::policy::PolicyConfig;
     use std::time::SystemTime;
 
+    let collector = live_evidence_collector(&project_roots);
     let ctx =
         DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
-    let collector = DefaultEvidenceCollector::default();
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
 
@@ -306,14 +320,13 @@ fn discover_pass_now(
     progress_json: bool,
 ) -> glomeris::cli::DiscoveryPass {
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
-    use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::policy::PolicyConfig;
     use std::time::SystemTime;
 
+    let collector = live_evidence_collector(&project_roots);
     let ctx =
         DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
-    let collector = DefaultEvidenceCollector::default();
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
 
@@ -472,7 +485,6 @@ fn run_emergency_command(args: &[String]) {
     use glomeris::actions::ActionRegistry;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::emergency::run_emergency;
-    use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use std::time::Duration;
 
     // HORO-1054: held for the duration of the real-execution portion
@@ -494,7 +506,14 @@ fn run_emergency_command(args: &[String]) {
     let ctx = DiscoveryContext::from_process_env(home_dir);
     let registry = DetectorRegistry::builtin();
     let actions = ActionRegistry::builtin();
-    let collector = DefaultEvidenceCollector::default();
+    // Emergency mode takes no arguments at all (see the usage check above)
+    // and so has no `--project-root` list or other configured-root
+    // context to thread through. This is a residual, not a silent gap:
+    // without a configured root, the §4.3 project-level probe has
+    // nothing to examine, but emergency mode also cannot reach a Cargo
+    // or node_modules target in the first place, since those only exist
+    // under a configured root (HORO-1865).
+    let collector = live_evidence_collector(&[]);
 
     let report = run_emergency(
         &collector,
@@ -1283,7 +1302,6 @@ fn run_llm_check_command(args: &[String]) {
 #[cfg(target_os = "macos")]
 fn run_execute_command(args: &[String]) {
     use glomeris::actions::ActionRegistry;
-    use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::policy::PolicyConfig;
     use std::time::SystemTime;
 
@@ -1394,9 +1412,9 @@ fn run_execute_command(args: &[String]) {
     // returns.
     let _execution_lock = acquire_execution_lock_or_exit("execute", json);
 
+    let collector = live_evidence_collector(&project_roots);
     let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
     let actions = ActionRegistry::builtin();
-    let collector = DefaultEvidenceCollector::default();
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
 
@@ -2155,7 +2173,6 @@ fn autopilot_run(args: &[String]) {
     use glomeris::autopilot::{
         load_envelope, run_autopilot, AutopilotItemOutcome, AutopilotRunRequest,
     };
-    use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::monitor::{FsStat, ThresholdConfig};
     use glomeris::platform::macos::MacosFsStat;
     use glomeris::policy::PolicyConfig;
@@ -2279,7 +2296,7 @@ fn autopilot_run(args: &[String]) {
         }
     };
 
-    let collector = DefaultEvidenceCollector::default();
+    let collector = live_evidence_collector(&project_roots);
     let policy = PolicyConfig::default();
 
     let report = run_autopilot(AutopilotRunRequest {
@@ -3611,7 +3628,6 @@ fn free_run(
     use glomeris::actions::ActionRegistry;
     use glomeris::cli::recovery::NdjsonProgressObserver;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
-    use glomeris::evidence::correlate::DefaultEvidenceCollector;
     use glomeris::executor::recovery_loop::{
         run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryObserver, RecoveryRunRequest,
         SilentObserver, StopFile, StopSignal, SystemWallClock,
@@ -3731,6 +3747,7 @@ fn free_run(
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
+    let collector = live_evidence_collector(&project_roots);
     let discovery_ctx =
         DiscoveryContext::from_process_env(home_dir).with_known_project_roots(project_roots);
 
@@ -3761,7 +3778,6 @@ fn free_run(
         auto_approve_ask: false,
     };
 
-    let collector = DefaultEvidenceCollector::default();
     let detector_registry = DetectorRegistry::builtin();
     let action_registry = ActionRegistry::builtin();
     let clock = SystemClock;

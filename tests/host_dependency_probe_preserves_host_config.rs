@@ -122,12 +122,31 @@ fn probe_preserves_every_recognized_host_config_file_byte_for_byte() {
     )
     .unwrap();
 
+    // HORO-1865: a project-level `.claude/settings.json` is also a
+    // recognized source now (ADR-0001 §4.3) — preservation must hold for
+    // it exactly as it does for the home-scoped files above.
+    let project_root = unique_temp_dir("project");
+    fs::create_dir_all(project_root.join(".claude")).unwrap();
+    let project_settings_path = project_root.join(".claude").join("settings.json");
+    fs::write(
+        &project_settings_path,
+        format!(
+            r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+            hook_bin.display()
+        ),
+    )
+    .unwrap();
+    let project_local_path = project_root.join(".claude").join("settings.local.json");
+    fs::write(&project_local_path, "{}").unwrap();
+
     let all_fixtures = [
         settings_path.clone(),
         local_path.clone(),
         codex_hooks_path.clone(),
         codex_toml_path.clone(),
         plist_path.clone(),
+        project_settings_path.clone(),
+        project_local_path.clone(),
     ];
     let before: Vec<Snapshot> = all_fixtures.iter().map(|p| snapshot(p)).collect();
 
@@ -137,6 +156,7 @@ fn probe_preserves_every_recognized_host_config_file_byte_for_byte() {
         plutil_bin: PathBuf::from("/usr/bin/plutil"),
         lsof_bin: PathBuf::from("lsof"),
         managed_settings: None,
+        project_roots: vec![project_root.clone()],
     };
     let probe = LiveHostDependencyProbe::new(roots);
     let report = probe
@@ -158,6 +178,7 @@ fn probe_preserves_every_recognized_host_config_file_byte_for_byte() {
 
     fs::remove_dir_all(&home).ok();
     fs::remove_dir_all(&resource).ok();
+    fs::remove_dir_all(&project_root).ok();
 }
 
 /// Negative control: an absent `plutil` must still leave every file on disk
@@ -182,6 +203,7 @@ fn absent_plutil_still_preserves_every_fixture_file() {
         plutil_bin: PathBuf::from("/definitely/not/a/real/plutil"),
         lsof_bin: PathBuf::from("lsof"),
         managed_settings: None,
+        project_roots: Vec::new(),
     };
     let probe = LiveHostDependencyProbe::new(roots);
     let _ = probe.probe(&resource, Duration::from_secs(5));

@@ -149,6 +149,7 @@ fn a_shared_target_surfaced_by_widening_is_protected_when_a_hook_lives_inside_it
         plutil_bin: PathBuf::from("/usr/bin/plutil"),
         lsof_bin: PathBuf::from("lsof"),
         managed_settings: None,
+        project_roots: Vec::new(),
     };
     let collector = DefaultEvidenceCollector::new(
         Box::new(LsofOpenFileProbe),
