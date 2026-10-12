@@ -126,6 +126,17 @@ final class ScanState: ObservableObject {
     /// case a single combined list would have described as three failures.
     @Published var notConfiguredDetectors: [DetectorHealthReportDto] = []
 
+    /// HORO-1629 (ADR-0001 §11/§16.1, option 2): the server-authored
+    /// "Examined N configured project root(s)..." sentence, present
+    /// exactly when a project-scoped detector reported `found` with zero
+    /// candidates while at least one project root was configured. Written
+    /// in the same assignment as `candidates`/`failedDetectors` above, for
+    /// the same reason: a scan apart would let this disagree with the
+    /// candidate list it is attributing. `nil` is the ordinary case and
+    /// draws nothing — this is purely additive attribution, never a new
+    /// completeness signal (`discoveryComplete` is unaffected either way).
+    @Published var scanCoverageNote: String?
+
     /// The git worktree families the last scan's candidates belong to
     /// (HORO-1511).
     ///

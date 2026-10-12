@@ -1,0 +1,6 @@
+{
+  "path": "/Users/dev/code",
+  "status": "parent_of_projects",
+  "warning": "This folder appears to contain multiple projects rather than being a project root. Glomeris checks only the selected folder and does not automatically scan nested projects. Add each project separately to include its build artifacts.",
+  "matched_children": ["repo-a"]
+}

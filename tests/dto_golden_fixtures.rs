@@ -320,6 +320,7 @@ fn detect_report_matches_golden_fixture() {
         // that would otherwise make it `eligible` — see
         // `eligibility_verdict`'s precedence.
         eligibility: "discovery_incomplete",
+        scan_coverage_note: None,
     };
     assert_matches_fixture(&report, "detect_report.json");
 }
@@ -1254,6 +1255,7 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
         // Two candidates are executable with no confirmation required
         // (cargo_target_dir, homebrew_cache), so this is `eligible`.
         eligibility: "eligible",
+        scan_coverage_note: None,
     };
     assert_matches_fixture(&report, "detect_report_with_workspaces.json");
 }
@@ -1437,6 +1439,7 @@ fn recovery_discovery_pass() -> DetectReport {
         // `discovery_complete` is `false` above, so this is
         // `discovery_incomplete` regardless of the AUTO_SAFE candidate.
         eligibility: "discovery_incomplete",
+        scan_coverage_note: None,
     }
 }
 
@@ -1551,6 +1554,7 @@ fn recovery_preview_report_discovery_incomplete_matches_golden_fixture() {
         discovery_complete: false,
         workspaces: vec![],
         eligibility: "discovery_incomplete",
+        scan_coverage_note: None,
     };
     let report = build_recovery_preview_report(
         &goal,
@@ -1660,6 +1664,7 @@ fn recovery_preview_report_target_unreachable_matches_golden_fixture() {
         discovery_complete: true,
         workspaces: vec![],
         eligibility: "eligible",
+        scan_coverage_note: None,
     };
 
     let report = build_recovery_preview_report(
@@ -2500,4 +2505,57 @@ fn explain_report_protected_hook_dependency_matches_golden_fixture() {
     );
 
     assert_matches_fixture(&report, "explain_report_protected_hook_dependency.json");
+}
+
+// ---- HORO-1629 §11/§16.1: CheckProjectRootReport ----
+
+/// Built through the real `build_check_project_root_report` pipeline against
+/// an actual planted fixture directory — never hand-assembled — so this
+/// fixture can only show a state the code genuinely produces (same
+/// convention as the `explain_report_*` family above).
+#[test]
+fn check_project_root_report_parent_of_projects_matches_golden_fixture() {
+    let root = std::env::temp_dir().join(format!(
+        "glomeris-dto-fixture-parent-of-projects-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(root.join("repo-a/target")).unwrap();
+    std::fs::write(root.join("repo-a/Cargo.toml"), "[package]\n").unwrap();
+
+    let report = glomeris::cli::build_check_project_root_report(&root);
+    assert_eq!(report.status, "parent_of_projects");
+    assert_eq!(report.matched_children, vec!["repo-a".to_string()]);
+
+    // The path itself is machine-specific (a temp dir), so it is normalized
+    // to the fixture's placeholder before comparison — the same reasoning
+    // `explain_report_*` applies to resource ids built from a fixture's own
+    // temp path elsewhere in this file.
+    let mut value = serde_json::to_value(&report).expect("serialize DTO to Value");
+    value["path"] = serde_json::Value::String("/Users/dev/code".to_string());
+    let fixture_text = read_fixture("check_project_root_report_parent_of_projects.json");
+    let expected: serde_json::Value = serde_json::from_str(&fixture_text).expect("parse fixture");
+    assert_eq!(value, expected);
+
+    std::fs::remove_dir_all(&root).ok();
+}
+
+#[test]
+fn check_project_root_report_undetermined_matches_golden_fixture() {
+    let root = std::env::temp_dir().join(format!(
+        "glomeris-dto-fixture-nonexistent-{}",
+        std::process::id()
+    ));
+    // Deliberately never created: a nonexistent path is one of the bounded
+    // read's own fail-closed cases (AC4).
+    let report = glomeris::cli::build_check_project_root_report(&root);
+    assert_eq!(report.status, "undetermined");
+    assert!(report.warning.is_none());
+    assert!(report.reason.is_some());
+
+    let mut value = serde_json::to_value(&report).expect("serialize DTO to Value");
+    value["path"] = serde_json::Value::String("/Users/dev/missing".to_string());
+    value["reason"] = serde_json::Value::String("could not read /Users/dev/missing".to_string());
+    let fixture_text = read_fixture("check_project_root_report_undetermined.json");
+    let expected: serde_json::Value = serde_json::from_str(&fixture_text).expect("parse fixture");
+    assert_eq!(value, expected);
 }

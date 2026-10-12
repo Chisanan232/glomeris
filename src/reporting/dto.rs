@@ -734,6 +734,37 @@ pub struct StatusReport {
     pub pressure_state: &'static str,
 }
 
+/// `glomeris check-project-root <path>` report (HORO-1629 §11/§16.1,
+/// ADR-0001 option 1): a bounded, one-level evaluation of a candidate
+/// project root, so Settings can warn BEFORE a parent-of-projects folder
+/// is actually added — never a client-side guess.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CheckProjectRootReport {
+    pub path: String,
+    /// One of `"project_root"`, `"parent_of_projects"`,
+    /// `"no_projects_found"`, `"undetermined"` — see
+    /// [`crate::cli::ProjectRootCheck`]'s own doc comment for what each
+    /// means and when it is returned.
+    pub status: &'static str,
+    /// Present only for `status == "parent_of_projects"`. Byte-identical to
+    /// ADR-0001 §16.1's founder-approved wording — never reworded, never
+    /// client-composed. `None` for every other status, including
+    /// `"undetermined"`: AC4/AC5 — an incomplete read has no
+    /// founder-approved wording of its own, so a client must never guess
+    /// one by showing this field for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<&'static str>,
+    /// Immediate child directory names that matched a project
+    /// marker/build-output, for `"parent_of_projects"` only. Empty for
+    /// every other status.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub matched_children: Vec<String>,
+    /// Present only for `status == "undetermined"` — why the bounded read
+    /// could not be completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// `glomeris daemon status` report (HORO-1045).
 ///
 /// `loaded` (launchd-reported: the job is registered/loaded) and
@@ -1256,6 +1287,23 @@ pub struct DetectReport {
     /// leave a client inferring it from an empty `candidates` list, which is
     /// exactly the false-all-clear this field exists to prevent.
     pub eligibility: &'static str,
+    /// HORO-1629 (ADR-0001 §11/§16.1, option 2): present exactly when at
+    /// least one configured-project-root-scoped detector (`cargo_target_dir`,
+    /// `node_modules`, `swiftpm_build_dir`) reported `found` with zero
+    /// candidates while at least one project root was configured — the
+    /// scenario where a clean bill of health could otherwise be read as "my
+    /// projects are clean" rather than "the configured root(s) held
+    /// nothing one level down". Byte-identical to the founder-approved
+    /// wording in ADR-0001 §16.1; see
+    /// [`crate::cli::project_root_check::scan_coverage_line`], the sole
+    /// producer.
+    ///
+    /// Deliberately does NOT change `discovery_complete`: a project-scoped
+    /// detector reporting `Found(vec![])` is a completed, honest search
+    /// (HORO-1576) — this field is purely additive attribution, not a new
+    /// completeness signal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_coverage_note: Option<String>,
 }
 
 /// `glomeris explain <resource>` report: the full evidence-and-policy

@@ -371,6 +371,12 @@ pub fn build_recovery_preview_report(
             opportunity.protected_count
         ));
     }
+    // HORO-1629 §11/§16.1, option 2: forwarded verbatim from `detect` (one
+    // producer — `cli::project_root_check::scan_coverage_line` — see
+    // `DetectReport::scan_coverage_note`'s own doc comment for the trigger).
+    if let Some(note) = &detect.scan_coverage_note {
+        caveats.push(note.clone());
+    }
 
     RecoveryPreviewReport {
         goal: build_recovery_goal_report(goal),
@@ -938,6 +944,7 @@ mod tests {
             discovery_complete: complete,
             workspaces: Vec::new(),
             eligibility,
+            scan_coverage_note: None,
         }
     }
 

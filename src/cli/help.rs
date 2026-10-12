@@ -455,6 +455,34 @@ pub const COMMANDS: &[CommandSpec] = &[
         see_also: &["explain", "clean", "free"],
     },
     CommandSpec {
+        name: "check-project-root",
+        group: Group::Inspect,
+        safety: Safety::ReadOnly,
+        summary: "Is this a project root, or does it hold several?",
+        usage: &["check-project-root <path>", "[--json]"],
+        details: "Reads `path` and its immediate children only — never a subprocess, never a \
+                  recursive walk below that one level (HORO-1629) — and reports whether it \
+                  looks like a project root itself, a folder holding several projects one \
+                  level down, a folder with no project markers at all, or that the bounded \
+                  read could not be completed. Meant to run BEFORE a folder is added as a \
+                  `--project-root`, because `cargo_target_dir`/`node_modules`/ \
+                  `swiftpm_build_dir` only ever look one level below a configured root: \
+                  adding a folder that holds many projects (e.g. `~/code`) yields a clean \
+                  bill of health with nothing examined below it, and this is the check that \
+                  catches that before it happens.",
+        subcommands: &[],
+        options: &[OptionSpec {
+            syntax: "--json",
+            description: "Print a CheckProjectRootReport as JSON on stdout.",
+        }],
+        examples: &[ExampleSpec {
+            command: "glomeris check-project-root ~/code --json",
+            purpose: "Is ~/code itself a project, or does it hold several?",
+        }],
+        exit_codes: &[],
+        see_also: &["detect"],
+    },
+    CommandSpec {
         name: "explain",
         group: Group::Inspect,
         safety: Safety::ConsultsInstalledTools,

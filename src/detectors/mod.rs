@@ -1697,6 +1697,15 @@ mod tests {
     ///   the developer's real `$HOME`/`~/.cargo` — and nothing it
     ///   discovers is ever routed into `authorize()`/`execute()`; it
     ///   stops at `classify()`.
+    /// - `tests/parent_of_projects_root_is_attributed.rs` (HORO-1629),
+    ///   which mirrors `tests/cli_project_root_wiring.rs`'s own
+    ///   already-reviewed shape: it calls `discover_and_classify_pass`
+    ///   (discovery + classification only) against disposable tempdir
+    ///   fixtures under a fixture `$HOME`, and never calls
+    ///   `authorize()`/`execute()` — it stops at the classified
+    ///   candidate list, proving `DetectReport::scan_coverage_note`'s
+    ///   attribution on the real `cargo_target_dir`/`node_modules`
+    ///   detectors rather than on a stub.
     ///
     /// Any new occurrence must be reviewed and added here explicitly —
     /// an un-reviewed new occurrence is exactly the failure mode this
@@ -1724,6 +1733,7 @@ mod tests {
                 "tests/cargo_discovery_widening_surfaces_shared_target.rs",
                 1,
             ),
+            ("tests/parent_of_projects_root_is_attributed.rs", 2),
         ];
 
         for (rel_path, expected_count) in allowlist {

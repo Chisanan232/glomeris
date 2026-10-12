@@ -21,9 +21,15 @@
 pub mod external_context;
 pub mod help;
 pub mod pressure;
+pub mod project_root_check;
 pub mod recovery;
 pub mod settings;
 pub mod workflow_profile;
+
+pub use project_root_check::{
+    build_check_project_root_report, check_project_root, expand_tilde, scan_coverage_line,
+    ProjectRootCheck,
+};
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -537,12 +543,19 @@ pub fn find_candidate<'a>(
 /// field is skipped from the JSON entirely when empty and so cannot read as
 /// "this machine has no worktree families". Build it with
 /// [`crate::workspace::group_families`].
+///
+/// `known_project_root_count` is `ctx.known_project_roots.len()` from the
+/// same [`DiscoveryContext`](crate::detectors::DiscoveryContext) this pass
+/// discovered from (HORO-1629 §11/§16.1, option 2) — used only to decide
+/// whether [`DetectReport::scan_coverage_note`] is populated, never to
+/// change `discovery_complete` or any candidate.
 pub fn build_detect_report(
     candidates: &[(Evidence, PolicyDecision)],
     detectors: &[(DetectorId, DetectorOutcome)],
     actions: &ActionRegistry,
     impact: ImpactContext,
     workspaces: &[WorkspaceFamily],
+    known_project_root_count: usize,
 ) -> DetectReport {
     let mut candidates: Vec<DetectCandidateReport> = candidates
         .iter()
@@ -566,6 +579,19 @@ pub fn build_detect_report(
         .any(|(_, outcome)| outcome.left_discovery_incomplete());
     let eligibility =
         crate::reporting::eligibility_verdict(discovery_complete, &candidates).as_str();
+    // HORO-1629 §11/§16.1, option 2: name which roots were examined exactly
+    // where an empty answer from a project-scoped detector could otherwise
+    // read as "my projects are clean" — the ticket's own bug scenario.
+    // Deliberately keyed on the detector `status`/`candidates_found`
+    // already projected into `DetectorHealthReport` below, not on a second,
+    // independent read of `detectors`, so this can never disagree with what
+    // the report itself shows.
+    let scan_coverage_note = (known_project_root_count > 0
+        && detectors.iter().any(|(id, outcome)| {
+            PROJECT_SCOPED_DETECTOR_IDS.contains(&id.0)
+                && matches!(outcome, DetectorOutcome::Found { candidates } if *candidates == 0)
+        }))
+    .then(|| project_root_check::scan_coverage_line(known_project_root_count));
     DetectReport {
         candidates,
         detectors: detectors
@@ -583,8 +609,16 @@ pub fn build_detect_report(
             .map(WorkspaceFamilyReport::from_family)
             .collect(),
         eligibility,
+        scan_coverage_note,
     }
 }
+
+/// Detector ids whose discovery is scoped to
+/// [`DiscoveryContext::known_project_roots`](crate::detectors::DiscoveryContext::known_project_roots)
+/// — exactly the three detectors HORO-1629 is about. One list, so a future
+/// call site cannot reach for a different subset (ADR-0001 §11, option 2).
+const PROJECT_SCOPED_DETECTOR_IDS: &[&str] =
+    &["cargo_target_dir", "node_modules", "swiftpm_build_dir"];
 
 /// Groups an already-discovered pass into git worktree families
 /// (HORO-1511), running the branch probe once per distinct worktree root.
@@ -1698,6 +1732,9 @@ pub fn print_detect_report(report: &DetectReport) {
                 reasons.join(" and ")
             );
         }
+        if let Some(note) = &report.scan_coverage_note {
+            println!("{note}");
+        }
         return;
     }
     for c in &report.candidates {
@@ -1713,6 +1750,9 @@ pub fn print_detect_report(report: &DetectReport) {
             size,
             c.reasons.join(",")
         );
+    }
+    if let Some(note) = &report.scan_coverage_note {
+        println!("{note}");
     }
 }
 
@@ -2926,7 +2966,8 @@ mod tests {
         ];
 
         let actions = ActionRegistry::builtin();
-        let report = build_detect_report(&candidates, &[], &actions, ImpactContext::default(), &[]);
+        let report =
+            build_detect_report(&candidates, &[], &actions, ImpactContext::default(), &[], 0);
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -3051,6 +3092,7 @@ mod tests {
             &actions,
             ImpactContext::default(),
             &[],
+            0,
         );
         let candidate = &detect_report.candidates[0];
         assert!(candidate.reclaimable_bytes_is_lower_bound);
@@ -3106,6 +3148,7 @@ mod tests {
             &actions,
             ImpactContext::default(),
             &[],
+            0,
         );
         let candidate = &detect_report.candidates[0];
         assert!(!candidate.reclaimable_bytes_is_lower_bound);

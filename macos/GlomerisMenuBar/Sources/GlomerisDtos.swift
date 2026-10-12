@@ -478,12 +478,28 @@ struct DetectReportDto: Decodable, Equatable {
     /// automatic safe work available" or "discovery itself was incomplete".
     let eligibility: String
 
+    /// HORO-1629 (ADR-0001 §11/§16.1, option 2): present exactly when a
+    /// project-scoped detector reported `found` with zero candidates while
+    /// at least one project root was configured — server-authored,
+    /// byte-identical to the founder-approved wording. `nil` means the
+    /// condition did not hold (or this binary predates the field); either
+    /// way there is nothing to show, never a client-composed fallback.
+    ///
+    /// Deliberately a free-text string, not a status token this view would
+    /// branch on: the wording itself is what ADR-0001 §16.1 approved, so
+    /// Swift displays it verbatim rather than reconstructing it from a
+    /// label (`check-no-policy-label-branching.sh`'s concern is policy
+    /// labels driving UI branching — this is pre-formatted server prose
+    /// shown as-is, the same shape as `caveats` elsewhere in this file).
+    let scanCoverageNote: String?
+
     enum CodingKeys: String, CodingKey {
         case candidates
         case detectors
         case discoveryComplete = "discovery_complete"
         case workspaces
         case eligibility
+        case scanCoverageNote = "scan_coverage_note"
     }
 
     init(from decoder: Decoder) throws {
@@ -498,6 +514,7 @@ struct DetectReportDto: Decodable, Equatable {
             ?? []
         eligibility =
             try container.decodeIfPresent(String.self, forKey: .eligibility) ?? "nothing_eligible"
+        scanCoverageNote = try container.decodeIfPresent(String.self, forKey: .scanCoverageNote)
     }
 
     /// Non-decoding initializer for tests and previews.
@@ -506,13 +523,62 @@ struct DetectReportDto: Decodable, Equatable {
         detectors: [DetectorHealthReportDto] = [],
         discoveryComplete: Bool = true,
         workspaces: [WorkspaceFamilyReportDto] = [],
-        eligibility: String = "nothing_eligible"
+        eligibility: String = "nothing_eligible",
+        scanCoverageNote: String? = nil
     ) {
         self.candidates = candidates
         self.detectors = detectors
         self.discoveryComplete = discoveryComplete
         self.workspaces = workspaces
         self.eligibility = eligibility
+        self.scanCoverageNote = scanCoverageNote
+    }
+}
+
+/// Mirrors `reporting::dto::CheckProjectRootReport` (HORO-1629 §11/§16.1).
+///
+/// Every field here is server-authored. This type makes no policy decision
+/// and composes no wording of its own: `warning` is `nil` unless the Rust
+/// side decided `status == "parent_of_projects"`, and when present it is
+/// shown verbatim.
+struct CheckProjectRootReportDto: Decodable, Equatable {
+    let path: String
+    let status: String
+    let warning: String?
+    let matchedChildren: [String]
+    let reason: String?
+
+    enum CodingKeys: String, CodingKey {
+        case path
+        case status
+        case warning
+        case matchedChildren = "matched_children"
+        case reason
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        status = try container.decode(String.self, forKey: .status)
+        warning = try container.decodeIfPresent(String.self, forKey: .warning)
+        matchedChildren =
+            try container.decodeIfPresent([String].self, forKey: .matchedChildren) ?? []
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+    }
+
+    /// Non-decoding initializer for tests and previews.
+    init(
+        path: String,
+        status: String,
+        warning: String? = nil,
+        matchedChildren: [String] = [],
+        reason: String? = nil
+    ) {
+        self.path = path
+        self.status = status
+        self.warning = warning
+        self.matchedChildren = matchedChildren
+        self.reason = reason
     }
 }
 
