@@ -272,16 +272,18 @@ terminal and the GUI.
 The HORO-1825 executable-dependency probe (`evidence::correlate::host_dependency`)
 examines a **closed, documented list** of recognized sources — it does not
 attempt to discover every possible way a hook or daemon could be configured
-on a machine. Known, explicitly out-of-scope gaps, none of them silently
-widened to a false "no dependency":
+on a machine. The remaining gaps below are explicitly out of scope and never
+silently widened to a false "no dependency" — but that was **not yet true**
+for every item on this list as of HORO-1825: a project-level
+`~/.claude/settings.json` hook was entirely unexamined, which meant a
+resource it referenced could read as a clean negative. HORO-1829's QA pass
+found exactly this — a Cargo target dir referenced only by a project-level
+hook classified `AUTO_SAFE` and was deleted with zero consent. HORO-1865
+closes that specific gap: every configured root's own
+`.claude/settings.json`/`settings.local.json` is now examined, the same as
+the home-scoped files below. The gaps that remain (Codex, MCP servers, shell
+rc files) are unaffected by that fix and are still named here honestly.
 
-- **Per-configured-project `claude_project(<root>)` sources** are not
-  examined. Only the home-scoped Claude Code settings
-  (`~/.claude/settings.json`, `settings.local.json`, managed settings) are
-  read. Wiring each configured project root's own `.claude/settings.json`
-  into this probe would touch every `DefaultEvidenceCollector::default()`
-  call site across the CLI, which was judged a larger blast radius than this
-  ticket's scope — tracked as follow-up work, not silently dropped.
 - **Codex `~/.codex/hooks.json`** is reported `unresolved` (fail-closed) if
   present. Its schema could not be confirmed from the Codex version
   available while this probe was written, so it is never parsed
@@ -308,6 +310,16 @@ machine's own shell `PATH`, which this probe cannot observe), essentially
 every executable-bearing resource becomes `ASK` rather than `AUTO_SAFE` —
 this is the intended, fail-closed behavior of the PATH-shadowing amendment
 (§4.3), not a bug to be "fixed" by loosening the match rule.
+
+**HORO-1865 residual, stated plainly:** a project-level hook `command`
+written as `$CLAUDE_PROJECT_DIR/...`, a relative (non-absolute, non-`~/`)
+path, or a bare name now follows exactly the rule home-level settings
+already followed — it correctly degrades to `ASK` rather than silently
+passing, the same fail-closed-in-the-safe-direction behavior described
+above. This is an intended behavior change for anyone relying on a project
+hook written in one of those forms, not a regression; no founder sign-off
+was required for it under this ticket's design (ADR-0001 §4.3 already
+specifies this handling for every recognized source).
 
 ## What holds this book to the code
 

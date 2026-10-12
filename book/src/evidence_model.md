@@ -187,9 +187,10 @@ independent review:
   has no defined resolution cwd at probe time, so it becomes
   `UnresolvedRef::NonInspectable` rather than being silently ignored.
 
-Deliberately out of scope for HORO-1825 (see that PR's description): the
-per-configured-project `claude_project(<root>)` source, Codex
+Deliberately out of scope for HORO-1825 (see that PR's description): Codex
 `~/.codex/hooks.json` (schema unconfirmed) and `~/.codex/config.toml`'s
 `notify` key (no `toml` dependency added) — a present Codex config file is
 reported `unresolved` rather than parsed speculatively, per the fail-closed
-contract above.
+contract above. (The per-configured-project `claude_project(<root>)` source
+was deferred at HORO-1825 but is wired in as of HORO-1865 — see
+`known_limitations.md`.)
