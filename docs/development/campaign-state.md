@@ -137,7 +137,7 @@ This file tracks the HORO-1822 post-incident sub-campaign, which is the dependen
 
 HORO-1073 itself says "Blocked by: everything — this is the last ticket in the Epic." Do not treat HORO-1829's completion as release-readiness; HORO-1073's human dogfood pass is the actual final gate, and items 1-3 above may need dedicated verification work this DAG never covered.
 
-## HORO-1865 — project-level `.claude/settings.json` hook source wired in (branch pushed pending, not yet a PR — see status note below)
+## HORO-1865 — project-level `.claude/settings.json` hook source wired in (PR #170 opened, not yet merged)
 
 HORO-1829's QA pass found that ADR-0001 §4.3's closed recognized-source list
 names each configured root's own `.claude/settings.json`/`settings.local.json`,
@@ -180,17 +180,16 @@ The Swift app side needed no change — `ProjectRootsStore`/
 already in `GlomerisVocabulary.swift`'s table — verified by reading the
 three files, not assumed from the design doc.
 
-Full validation (fmt, clippy -D warnings, full `cargo test`, `cargo deny`,
-the read-only-probe shell guard, the vocabulary guard,
-`check-no-policy-label-branching.sh`) all green in the worktree. The branch
-could not be pushed or opened as a PR in this session — this sandbox has no
-outbound network access (`github.com` connection timeout) and no valid
-`GITHUB_TOKEN`; pushing and opening the PR is left to the engineer. When
-opened, it must not be merged without independent adversarial review per
-this campaign's standing practice (every merged ticket in this DAG found
-something real on review), with explicit reviewer attention requested on:
-every collector-construction site including any added since this design,
-alias uniqueness against
+Full validation (fmt, clippy -D warnings, full `cargo test` — 1890 passed,
+0 failed, isolated clean run — `cargo deny`, the read-only-probe shell
+guard, the vocabulary guard, `check-no-policy-label-branching.sh`) all
+green. Branch pushed, PR #170 opened
+(https://github.com/Chisanan232/glomeris/pull/170). **Not merged** —
+flagged for independent adversarial review per this campaign's standing
+practice (every merged ticket in this DAG found something real on
+review), with explicit reviewer attention requested on: every
+collector-construction site including any added since this design, alias
+uniqueness against
 HORO-1826 host-integrity matching, and that a missing/unreadable/malformed
 project settings file can never come out "clean".
 
