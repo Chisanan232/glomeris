@@ -376,6 +376,60 @@ three may be presented alike.
 `detect`, `explain`, `llm-plan`, and `execute` all share this same
 discovery phase and all support `--progress-json` identically.
 
+## `glomeris check-project-root <path> [--json]`
+
+Not macOS-gated. Read-only (HORO-1629, ADR-0001 §11/§16.1): reads `path`
+itself and its immediate children only — exactly one `read_dir` plus a
+handful of marker/build-output probes, never a subprocess, never a
+recursive walk below that one level. Meant to run **before** `path` is
+added as a `--project-root`, because `cargo_target_dir`, `node_modules`,
+and `swiftpm_build_dir` only ever look one level below a configured root:
+adding a folder that itself holds several projects (e.g. `~/code`) yields
+a clean bill of health with nothing underneath it ever examined, and this
+is the check that catches that shape before it happens.
+
+`path`'s own markers are checked first; if `path` itself carries a project
+marker or build-output directory, it reports `project_root` immediately,
+without listing children — a root that is itself a project is never
+flagged as a parent of projects, no matter what else sits beside its
+manifest (a Cargo workspace's member crates, a JS monorepo's packages).
+Only when `path` has no marker of its own are its immediate children
+checked for one.
+
+```sh
+glomeris check-project-root ~/code --json
+```
+
+```json
+{
+  "path": "/Users/me/code",
+  "status": "parent_of_projects",
+  "warning": "This folder appears to contain multiple projects rather than being a project root. Glomeris checks only the selected folder and does not automatically scan nested projects. Add each project separately to include its build artifacts.",
+  "matched_children": ["my-app", "another-repo"]
+}
+```
+
+`status` is one of:
+
+- `"project_root"` — `path` itself carries a project marker or
+  build-output directory. No warning.
+- `"parent_of_projects"` — `path` carries no marker of its own, but at
+  least one immediate child does. `warning` is the founder-approved
+  (ADR-0001 §16.1), byte-identical string above, and `matched_children`
+  lists the immediate child directory names that matched, in read-dir
+  order.
+- `"no_projects_found"` — neither `path` nor any immediate child carries a
+  marker. An ordinary empty or unrelated folder; no warning.
+- `"undetermined"` — the bounded one-level read could not be completed
+  (`path` itself could not be probed, its directory listing failed, or a
+  child's probe failed with no other child supplying a positive match).
+  `reason` explains why. This is never folded into `"no_projects_found"` —
+  an incomplete read is not evidence of a clean folder (AC4).
+
+Without `--json`, prints the warning text for `parent_of_projects`, `could
+not determine: <reason>` for `undetermined`, or the bare `status` token
+otherwise.
+
 ## `glomeris explain <resource_id_or_path> [--project-root <path>]... [--json] [--progress-json]`
 
 Not macOS-gated. Runs the same discovery-and-classification pipeline as
