@@ -53,6 +53,7 @@ fn main() {
         }
         Some("status") => run_status_command(&args[1..]),
         Some("detect") => run_detect_command(&args[1..]),
+        Some("check-project-root") => run_check_project_root_command(&args[1..]),
         Some("explain") => run_explain_command(&args[1..]),
         Some("clean") => run_clean_command(&args[1..]),
         Some("llm-plan") => run_llm_plan_command(&args[1..]),
@@ -531,6 +532,9 @@ fn run_detect_command(args: &[String]) {
     };
     let flags = flags_only("detect", &remaining, &["--json", "--progress-json"]);
     let progress_json = flags.contains(&"--progress-json");
+    // Captured before `project_roots` moves into `discover_pass_now` below
+    // (HORO-1629 §11/§16.1, option 2).
+    let known_project_root_count = project_roots.len();
 
     // One discovery pass, both halves of the output (HORO-1487). The
     // per-detector lines and the report below them describe the same probe
@@ -579,12 +583,51 @@ fn run_detect_command(args: &[String]) {
         // Explanatory metadata — the candidate lines remain the only thing
         // that says what may run.
         &glomeris::cli::group_workspaces_now(&pass.candidates),
+        known_project_root_count,
     );
 
     if flags.contains(&"--json") {
         print_json_or_exit(&report);
     } else {
         glomeris::cli::print_detect_report(&report);
+    }
+}
+
+/// `glomeris check-project-root <path>` — HORO-1629 §11/§16.1, ADR-0001
+/// option 1: a bounded, one-level evaluation of `path`, so a Settings UI
+/// can warn BEFORE adding a folder that looks like a parent of projects
+/// rather than a project root itself. Deliberately does not take
+/// `--project-root`: `path` is the candidate being evaluated, not a root
+/// already configured, and this command never touches
+/// [`glomeris::detectors::DiscoveryContext::known_project_roots`].
+///
+/// Read-only by construction: exactly one `read_dir` plus a handful of
+/// `try_exists` stat calls, never a subprocess, never a recursive walk
+/// (AC3 — see [`glomeris::cli::check_project_root`]'s own doc comment for
+/// the bound).
+fn run_check_project_root_command(args: &[String]) {
+    let (positionals, flags) = match split_flags(args, &["--json"]) {
+        Ok(v) => v,
+        Err(unknown) => usage_error("check-project-root", unknown),
+    };
+    if let Some(extra) = positionals.get(1) {
+        usage_error("check-project-root", extra);
+    }
+    let Some(path) = positionals.first() else {
+        eprintln!("glomeris check-project-root: a folder path argument is required");
+        print_command_usage("check-project-root");
+        std::process::exit(2);
+    };
+
+    let report = glomeris::cli::build_check_project_root_report(std::path::Path::new(path));
+    if flags.contains(&"--json") {
+        print_json_or_exit(&report);
+    } else if let Some(warning) = report.warning {
+        println!("{warning}");
+    } else if let Some(reason) = &report.reason {
+        println!("could not determine: {reason}");
+    } else {
+        println!("{}", report.status);
     }
 }
 
@@ -3501,6 +3544,9 @@ fn free_preview(
 
     let goal = goal.unwrap_or_else(|| RecoveryGoal::from_free_target(&target, usage.total_bytes));
 
+    // Captured before `project_roots` moves into `discover_pass_now` below
+    // (HORO-1629 §11/§16.1, option 2).
+    let known_project_root_count = project_roots.len();
     let pass = discover_pass_now(project_roots, progress_json);
     let actions = glomeris::actions::ActionRegistry::builtin();
     let detect = glomeris::cli::build_detect_report(
@@ -3513,6 +3559,7 @@ fn free_preview(
         // nine worktrees of one project account for the bulk, and which of
         // them still hold work.
         &glomeris::cli::group_workspaces_now(&pass.candidates),
+        known_project_root_count,
     );
 
     // HORO-1828. Same samples ring the daemon's opt-in sampling step writes
