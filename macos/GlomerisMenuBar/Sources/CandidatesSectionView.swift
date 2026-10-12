@@ -595,6 +595,16 @@ struct CandidatesSectionView: View {
                 GlomerisStateMessageView(message: advisory)
             }
 
+            // HORO-1629 (ADR-0001 §11/§16.1, option 2): additive, same as the
+            // advisory above — names which configured root(s) this exact
+            // scan examined whenever a project-scoped detector came back
+            // empty, so a clean-looking list is never shown without saying
+            // what was actually looked at. Server-authored text, shown
+            // verbatim; this view composes none of it.
+            if let scanCoverageNote = scan.scanCoverageNote {
+                GlomerisStateMessageView(message: .notConfigured(scanCoverageNote))
+            }
+
             // Additive, never a replacement — the same rule the status card
             // follows. A scan that fails after an earlier one succeeded
             // leaves the previous list visible, which is useful, but showing
@@ -919,6 +929,10 @@ struct CandidatesSectionView: View {
             // Same turn again (HORO-1828): the headline eligibility badge
             // must describe this exact scan, never a stale one.
             scan.eligibility = result.output.eligibility
+            // Same turn again (HORO-1629 §11/§16.1): which roots this exact
+            // scan examined, so an empty project-scoped result is never
+            // shown without saying what was looked at.
+            scan.scanCoverageNote = result.output.scanCoverageNote
             scan.lastScannedAt = Date()
         } catch {
             scan.lastErrorMessage = SectionFetchErrors.shortMessage(error, subject: "detect")

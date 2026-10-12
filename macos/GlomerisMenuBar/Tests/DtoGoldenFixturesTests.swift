@@ -1915,4 +1915,63 @@ final class DtoGoldenFixturesTests: XCTestCase {
             "these are two different real-world states and must decode distinguishably"
         )
     }
+
+    // MARK: - CheckProjectRootReport (HORO-1629 §11/§16.1)
+
+    func testDecodesCheckProjectRootReportParentOfProjects() throws {
+        let dto = try decodeFixture(
+            "check_project_root_report_parent_of_projects.json",
+            as: CheckProjectRootReportDto.self)
+
+        XCTAssertEqual(dto.status, "parent_of_projects")
+        XCTAssertEqual(dto.matchedChildren, ["repo-a"])
+        XCTAssertEqual(
+            dto.warning,
+            "This folder appears to contain multiple projects rather than being a "
+                + "project root. Glomeris checks only the selected folder and does not "
+                + "automatically scan nested projects. Add each project separately to "
+                + "include its build artifacts.",
+            "the warning shown must be byte-identical to ADR-0001 §16.1's approved wording"
+        )
+        XCTAssertNil(dto.reason)
+    }
+
+    func testDecodesCheckProjectRootReportUndetermined() throws {
+        let dto = try decodeFixture(
+            "check_project_root_report_undetermined.json", as: CheckProjectRootReportDto.self)
+
+        XCTAssertEqual(dto.status, "undetermined")
+        XCTAssertNil(
+            dto.warning,
+            "AC4/AC5: an undetermined read has no founder-approved wording of its own, so "
+                + "this must never carry the parent-of-projects warning"
+        )
+        XCTAssertNotNil(dto.reason)
+        XCTAssertTrue(dto.matchedChildren.isEmpty)
+    }
+
+    // MARK: - DetectReport.scanCoverageNote (HORO-1629 §11/§16.1, option 2)
+
+    func testDetectReportDecodesScanCoverageNoteWhenPresent() throws {
+        let json = """
+            {"candidates":[],"detectors":[{"detector":"cargo_target_dir","status":"found",
+            "candidates_found":0,"reason":null}],"discovery_complete":true,"eligibility":
+            "nothing_eligible","scan_coverage_note":"Examined 1 configured project root(s). \
+            Nested projects were not scanned automatically."}
+            """
+        let dto = try JSONDecoder().decode(DetectReportDto.self, from: Data(json.utf8))
+
+        XCTAssertEqual(
+            dto.scanCoverageNote,
+            "Examined 1 configured project root(s). Nested projects were not scanned "
+                + "automatically.")
+    }
+
+    func testDetectReportScanCoverageNoteDefaultsToNilWhenAbsent() throws {
+        let dto = try decodeFixture("detect_report.json", as: DetectReportDto.self)
+        XCTAssertNil(
+            dto.scanCoverageNote,
+            "an older CLI (or a report where the condition never held) predates/omits the key"
+        )
+    }
 }
