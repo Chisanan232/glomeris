@@ -306,6 +306,92 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
         )
     }
 
+    // MARK: - HORO-1629 round 2: tilde expansion
+    //
+    // The round-2 finding: the ticket's own worked example types `~/code`
+    // into "New project root path". Before this fix, that literal string
+    // reached both the CLI check and the persisted store unexpanded —
+    // not a valid filesystem path without shell/libc expansion — so the
+    // bounded one-level check always saw a nonexistent directory and came
+    // back `undetermined`, which renders no warning at all.
+
+    /// The transform in isolation: `~` and `~/...` resolve against
+    /// `$HOME`; everything else, including `~user` (which
+    /// `NSString.expandingTildeInPath` would expand but the Rust side's
+    /// `expand_home` does not), passes through unchanged.
+    func testExpandingTildeExpandsHomeRelativePaths() throws {
+        let home = try XCTUnwrap(ProcessInfo.processInfo.environment["HOME"])
+
+        XCTAssertEqual(expandingTilde("~"), home)
+        XCTAssertEqual(expandingTilde("~/code"), home + "/code")
+        XCTAssertEqual(expandingTilde("~/a/b"), home + "/a/b")
+    }
+
+    func testExpandingTildeLeavesOtherPathsUnchanged() {
+        for path in [
+            "/Users/dev/code",
+            "relative/not/absolute",
+            "~user/code",
+            "~withNoSlash",
+            "",
+        ] {
+            XCTAssertEqual(
+                expandingTilde(path), path,
+                "a path with no leading `~/` or bare `~` must pass through verbatim: \(path)"
+            )
+        }
+    }
+
+    /// The actual defect: `addRoot("~/code")` must hand the CLI the
+    /// EXPANDED path, not the literal tilde string, so the bounded check
+    /// examines the real directory. Uses `GLOMERIS_FIXTURE_ARGV_LOG` (the
+    /// fixture's existing argv-capture knob) since the environment
+    /// protocol otherwise answers before ever looking at what `addRoot`
+    /// asked for.
+    @MainActor
+    func testAddRootPassesTheExpandedPathToTheClientNotTheLiteralTilde() async throws {
+        let home = try XCTUnwrap(ProcessInfo.processInfo.environment["HOME"])
+        let argvLogURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glomeris-fixture-argv-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: argvLogURL) }
+
+        let client = try fixtureClient().withEnvironment([
+            "GLOMERIS_FIXTURE_ARGV_LOG": argvLogURL.path,
+            "GLOMERIS_FIXTURE_STDOUT": #"{"path":"\#(home)/code","status":"no_projects_found"}"#,
+            "GLOMERIS_FIXTURE_EXIT": "0",
+        ])
+        let view = ProjectRootsPreferencesView(
+            store: ProjectRootsStore(defaults: TestUserDefaults.inMemory()), client: client)
+
+        await view.addRoot("~/code")
+
+        let loggedArgv = try String(contentsOf: argvLogURL, encoding: .utf8)
+        XCTAssertTrue(
+            loggedArgv.contains("\(home)/code"),
+            "the client was not handed the expanded path: \(loggedArgv)"
+        )
+        XCTAssertFalse(
+            loggedArgv.contains("~/code"),
+            "the client was handed the literal, unexpanded tilde: \(loggedArgv)"
+        )
+    }
+
+    /// The other half of the fix: the store itself must persist the
+    /// expanded path too, so a later `--project-root` build
+    /// (`ProjectRootsStore.scoped`) never hands the real CLI an
+    /// unresolved `~` either.
+    @MainActor
+    func testAddRootPersistsTheExpandedPathNotTheLiteralTilde() async throws {
+        let home = try XCTUnwrap(ProcessInfo.processInfo.environment["HOME"])
+        let client = try fixtureClient().withEnvironment(["GLOMERIS_FIXTURE_EXIT": "1"])
+        let defaults = TestUserDefaults.inMemory()
+        let view = ProjectRootsPreferencesView(store: ProjectRootsStore(defaults: defaults), client: client)
+
+        await view.addRoot("~/code")
+
+        XCTAssertEqual(ProjectRootsStore(defaults: defaults).roots, ["\(home)/code"])
+    }
+
     /// Structural counterpart to the behavioral tests above, in the same
     /// spirit as `CandidatesSectionViewTests
     /// .testTheIncompleteDiscoveryAdvisoryIsAdditiveAndNeverReplacesTheRows`:
@@ -321,12 +407,12 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
         let body = try Self.functionBody(named: "func addRoot(_ path: String) async", in: source)
 
         let assignIndex = try XCTUnwrap(
-            body.range(of: "warningMessage = await checkProjectRootWarning(for: trimmed)"),
+            body.range(of: "warningMessage = await checkProjectRootWarning(for: expanded)"),
             "addRoot no longer assigns checkProjectRootWarning's result to warningMessage: \(body)"
         )
         let addIndex = try XCTUnwrap(
-            body.range(of: "store.addRoot(trimmed)"),
-            "addRoot no longer calls store.addRoot(trimmed): \(body)"
+            body.range(of: "store.addRoot(expanded)"),
+            "addRoot no longer calls store.addRoot(expanded): \(body)"
         )
         XCTAssertLessThan(
             assignIndex.upperBound, addIndex.lowerBound,
@@ -354,14 +440,14 @@ final class ProjectRootsPreferencesViewTests: XCTestCase {
         let source = try Self.strippedOfComments(Self.readSource("ProjectRootsPreferencesView.swift"))
         let body = try Self.functionBody(named: "func addRoot(_ path: String) async", in: source)
         let regressed = body.replacingOccurrences(
-            of: "warningMessage = await checkProjectRootWarning(for: trimmed)",
-            with: "warningMessage = await checkProjectRootWarning(for: trimmed)\n"
+            of: "warningMessage = await checkProjectRootWarning(for: expanded)",
+            with: "warningMessage = await checkProjectRootWarning(for: expanded)\n"
                 + "        if warningMessage != nil { return }"
         )
         XCTAssertNotEqual(regressed, body, "no assignment line to splice onto — addRoot changed shape")
 
         let assignIndex = try XCTUnwrap(regressed.range(of: "warningMessage = await checkProjectRootWarning"))
-        let addIndex = try XCTUnwrap(regressed.range(of: "store.addRoot(trimmed)"))
+        let addIndex = try XCTUnwrap(regressed.range(of: "store.addRoot(expanded)"))
         let between = regressed[assignIndex.upperBound..<addIndex.lowerBound]
         XCTAssertTrue(
             between.contains("if "),

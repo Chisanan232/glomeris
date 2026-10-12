@@ -23,6 +23,7 @@
 //  returned, never composed here.
 //
 
+import Foundation
 import SwiftUI
 
 /// The spoken names for this pane's controls (HORO-1325).
@@ -64,6 +65,38 @@ enum ProjectRootsWording {
     /// way — it only says the check did not happen.
     static let checkUnavailableMessage =
         "Could not check this folder before adding it. Review it yourself if it may hold several projects."
+}
+
+/// Expands a leading `~` (home) or `~/...` to a real filesystem path,
+/// mirroring `expand_home` in `src/evidence/correlate/host_dependency.rs`
+/// — the Rust side's existing precedent for this exact transform — rather
+/// than reaching for `NSString.expandingTildeInPath`, which also expands
+/// `~user`; Rust's `check-project-root` positional argument does not, so
+/// using the broader Foundation behavior here would let the two surfaces
+/// disagree about the same literal input. Anything not starting with `~`
+/// passes through byte-for-byte unchanged, and so does a bare `~` or
+/// `~/...` when `$HOME` is unset or empty — never silently rewritten to
+/// something that cannot be meant.
+///
+/// This is the fix for HORO-1629's round-2 finding: the ticket's own
+/// worked example, typing `~/code` into "New project root path", used to
+/// reach `checkProjectRootWarning`/`store.addRoot` as the literal string
+/// `~/code`, which is not a valid filesystem path without this expansion
+/// — so the bounded check always saw a nonexistent directory and reported
+/// `undetermined`, which renders no warning at all for the exact scenario
+/// this feature exists to catch.
+func expandingTilde(_ path: String) -> String {
+    guard let home = ProcessInfo.processInfo.environment["HOME"], !home.isEmpty else {
+        return path
+    }
+    if path == "~" {
+        return home
+    }
+    if path.hasPrefix("~/") {
+        let rest = String(path.dropFirst(2))
+        return (home as NSString).appendingPathComponent(rest)
+    }
+    return path
 }
 
 struct ProjectRootsPreferencesView: View {
@@ -155,8 +188,15 @@ struct ProjectRootsPreferencesView: View {
     func addRoot(_ path: String) async {
         let trimmed = path.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        warningMessage = await checkProjectRootWarning(for: trimmed)
-        store.addRoot(trimmed)
+        // HORO-1629 round-2: expand before either the check or the
+        // persisted value, so `~/code` (this ticket's own worked example)
+        // resolves to the real directory the bounded check actually
+        // probes, and the store never holds an unresolved `~` that a
+        // later `--project-root` build would hand the CLI just as
+        // literally.
+        let expanded = expandingTilde(trimmed)
+        warningMessage = await checkProjectRootWarning(for: expanded)
+        store.addRoot(expanded)
         roots = store.roots
         newRootPath = ""
     }

@@ -619,7 +619,13 @@ fn run_check_project_root_command(args: &[String]) {
         std::process::exit(2);
     };
 
-    let report = glomeris::cli::build_check_project_root_report(std::path::Path::new(path));
+    // HORO-1629 round-2: expand a literal `~`/`~/...` before probing —
+    // this command's own documented example is `check-project-root
+    // ~/code`, and nothing between a no-shell spawn (GlomerisMenuBar's
+    // `GlomerisClient`) and here would otherwise have expanded it. See
+    // `cli::expand_tilde`'s doc comment for the full bug.
+    let expanded_path = glomeris::cli::expand_tilde(path, &home_dir());
+    let report = glomeris::cli::build_check_project_root_report(&expanded_path);
     if flags.contains(&"--json") {
         print_json_or_exit(&report);
     } else if let Some(warning) = report.warning {

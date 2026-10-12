@@ -27,7 +27,8 @@ pub mod settings;
 pub mod workflow_profile;
 
 pub use project_root_check::{
-    build_check_project_root_report, check_project_root, scan_coverage_line, ProjectRootCheck,
+    build_check_project_root_report, check_project_root, expand_tilde, scan_coverage_line,
+    ProjectRootCheck,
 };
 
 use std::path::{Path, PathBuf};

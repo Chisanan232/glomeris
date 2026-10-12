@@ -99,6 +99,36 @@ fn has_marker_or_build_output(dir: &Path) -> io::Result<bool> {
     Ok(false)
 }
 
+/// Expands a leading `~` (home) or `~/...` in `path` against `home`,
+/// mirroring the existing `expand_home` helper in
+/// `src/evidence/correlate/host_dependency.rs` — the same narrow
+/// transform, not full shell globbing, and deliberately not `~user` (which
+/// this process cannot resolve without a passwd lookup, and which the
+/// Swift-side `expandingTilde` added for HORO-1629 round 2 also declines
+/// to expand, so the two surfaces agree on the same literal input).
+/// Anything else, including a path that is merely prefixed by `~` without
+/// a following `/` (e.g. `~backup`), passes through unchanged.
+///
+/// HORO-1629 round-2 finding: `glomeris check-project-root ~/code` — this
+/// command's own documented example (`src/cli/help.rs`) — reaches this
+/// binary with `~/code` literal when nothing upstream is a shell (exactly
+/// how `GlomerisMenuBar`'s `GlomerisClient` spawns it, via
+/// `Process.executableURL` + `arguments`, never a shell interpreter).
+/// `std::fs` does not expand `~` either, so without this the bounded
+/// one-level read in [`check_project_root`] was probing a path that could
+/// not exist, and silently, correctly, failing closed to `Undetermined`
+/// — technically correct but reachable for the exact scenario this
+/// feature exists to catch.
+pub fn expand_tilde(path: &str, home: &Path) -> PathBuf {
+    if path == "~" {
+        return home.to_path_buf();
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return home.join(rest);
+    }
+    PathBuf::from(path)
+}
+
 /// Bounded, one-level evaluation of `root` (ADR-0001 §11/§16.1, option 1).
 ///
 /// Exactly two filesystem operations deep: `root`'s own marker/build-output
@@ -241,6 +271,42 @@ mod tests {
         ));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    /// HORO-1629 round-2 regression: the ticket's own worked example,
+    /// `check-project-root ~/code`, must resolve `~/code` against the
+    /// supplied home directory before it is ever probed.
+    #[test]
+    fn expand_tilde_resolves_bare_tilde_and_tilde_slash_against_home() {
+        let home = PathBuf::from("/Users/dev");
+
+        assert_eq!(expand_tilde("~", &home), home);
+        assert_eq!(expand_tilde("~/code", &home), home.join("code"));
+        assert_eq!(expand_tilde("~/a/b", &home), home.join("a/b"));
+    }
+
+    /// Everything else passes through unchanged — in particular `~user`,
+    /// which this process cannot resolve without a passwd lookup, and
+    /// which the Swift-side `expandingTilde` (HORO-1629 round 2) also
+    /// declines to expand, so the two surfaces never disagree about the
+    /// same literal input.
+    #[test]
+    fn expand_tilde_leaves_non_home_relative_paths_unchanged() {
+        let home = PathBuf::from("/Users/dev");
+
+        for path in [
+            "/Users/dev/code",
+            "relative/not/absolute",
+            "~user/code",
+            "~backup",
+            "",
+        ] {
+            assert_eq!(
+                expand_tilde(path, &home),
+                PathBuf::from(path),
+                "{path} should not have been rewritten"
+            );
+        }
     }
 
     /// AC5: the approved strings, byte-for-byte. A fuzzy/contains check
