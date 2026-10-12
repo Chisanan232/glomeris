@@ -443,6 +443,21 @@ fn inspect_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
         ("detect".to_string(), argv(&["detect"])),
         ("detect".to_string(), argv(&["detect", "--json"])),
         (
+            "check-project-root".to_string(),
+            vec![
+                "check-project-root".to_string(),
+                scratch.display().to_string(),
+            ],
+        ),
+        (
+            "check-project-root".to_string(),
+            vec![
+                "check-project-root".to_string(),
+                scratch.display().to_string(),
+                "--json".to_string(),
+            ],
+        ),
+        (
             "explain".to_string(),
             vec!["explain".to_string(), scratch.display().to_string()],
         ),

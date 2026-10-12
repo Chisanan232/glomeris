@@ -1,0 +1,25 @@
+glomeris check-project-root — Is this a project root, or does it hold several?
+
+usage: glomeris check-project-root <path> [--json]
+
+Read-only — changes nothing.
+
+Reads `path` and its immediate children only — never a subprocess, never a
+recursive walk below that one level (HORO-1629) — and reports whether it
+looks like a project root itself, a folder holding several projects one level
+down, a folder with no project markers at all, or that the bounded read could
+not be completed. Meant to run BEFORE a folder is added as a `--project-root`,
+because `cargo_target_dir`/`node_modules`/ `swiftpm_build_dir` only ever look
+one level below a configured root: adding a folder that holds many projects
+(e.g. `~/code`) yields a clean bill of health with nothing examined below it,
+and this is the check that catches that before it happens.
+
+Options
+  --json
+      Print a CheckProjectRootReport as JSON on stdout.
+
+Examples
+  glomeris check-project-root ~/code --json
+      Is ~/code itself a project, or does it hold several?
+
+See also: detect
