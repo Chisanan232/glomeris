@@ -1706,6 +1706,18 @@ mod tests {
     ///   candidate list, proving `DetectReport::scan_coverage_note`'s
     ///   attribution on the real `cargo_target_dir`/`node_modules`
     ///   detectors rather than on a stub.
+    /// - `tests/project_level_hook_source.rs`'s
+    ///   `m4_execute_revalidation_aborts_on_a_hook_added_after_plan_time_toctou`
+    ///   (HORO-1865 M4 regression): the `DetectorRegistry::builtin()`
+    ///   call is read-only discovery (`discover_and_classify`) against a
+    ///   disposable tempdir project root and fixture `$HOME` — whatever
+    ///   the real Docker/Homebrew/etc. detectors it also runs happen to
+    ///   find on the real host is discarded, since the test only reads
+    ///   back the ONE candidate matching its own fixture Cargo target
+    ///   dir by exact path. The one real `executor::execute()` call this
+    ///   test makes targets only that single matched resource, and is
+    ///   asserted to ABORT, never mutate — the fixture target dir and
+    ///   hook binary are proven to still exist afterward.
     ///
     /// Any new occurrence must be reviewed and added here explicitly —
     /// an un-reviewed new occurrence is exactly the failure mode this
@@ -1734,6 +1746,7 @@ mod tests {
                 1,
             ),
             ("tests/parent_of_projects_root_is_attributed.rs", 2),
+            ("tests/project_level_hook_source.rs", 1),
         ];
 
         for (rel_path, expected_count) in allowlist {

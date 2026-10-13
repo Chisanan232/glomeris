@@ -550,3 +550,354 @@ fn a4_free_recovery_loop_never_deletes_a_project_hook_protected_target_dir() {
     fs::remove_dir_all(&home).ok();
     fs::remove_dir_all(&project_root).ok();
 }
+
+// ---- M4: TOCTOU — hook added between plan-time discovery and the
+// `execute()` revalidation collector's re-probe ----
+
+/// Independent adversarial review of PR #170 found mutations M4/M5
+/// (mutating the `execute`-revalidation and Autopilot call sites' real
+/// `project_roots` to `&[]`) were not caught by any committed test, and
+/// proved the gap with an ad-hoc test of their own. This commits that
+/// proof as regression coverage for M4 (the `execute`-revalidation call
+/// site). M5 — the Autopilot call site at `src/main.rs`'s `autopilot_run`
+/// (`let collector = live_evidence_collector(&project_roots);`, around
+/// line 2316) — is NOT exercised by this test or by
+/// `m4b_execute_consented_ask_deletion_requires_the_revalidation_collector_to_see_real_project_roots`
+/// below; it remains an open gap. Unlike `execute`, Autopilot's
+/// `run_autopilot` re-classifies each candidate using the SAME collector
+/// instance it later revalidates with (`src/autopilot/run.rs`'s
+/// `collector.collect()` at its per-candidate loop, then `execute()`'s
+/// own internal revalidation reuses that same `collector` reference) —
+/// so an M5 mutation would make BOTH reads blind in the same way,
+/// needing no TOCTOU window at all: a hook present from the very start
+/// (a static fixture, no race) would already be invisible to Autopilot's
+/// own authorizing classification, and a cheap `glomeris autopilot run`
+/// subprocess test could catch it directly. Not added here to keep this
+/// commit scoped to M4.
+///
+/// This is a library-level test, not a subprocess one like A1-A4 above:
+/// it needs to control the exact ordering of discovery vs. mutation vs.
+/// revalidation, which this specific `executor::execute` TOCTOU window
+/// is too narrow to hit reliably from outside a single process (a real
+/// subprocess race would make the test non-deterministic). It drives the
+/// `executor::execute` function directly — the same one
+/// `cli::resolve_and_execute` calls at the end of `run_execute_command`
+/// (`src/main.rs`) — with the project hook written in between two
+/// otherwise-identical collector constructions:
+///
+/// 1. `discover_and_classify` against a project root with NO `.claude`
+///    hook yet — this is "plan time", and must decide `AutoSafe`.
+/// 2. `authorize()` the `AutoSafe` decision — `AutoSafe` always
+///    authorizes, no consent needed, exactly like a real `execute` call
+///    with no `--confirm-ask`.
+/// 3. Only now, write the project's `.claude/settings.json` hook
+///    referencing the target dir — the TOCTOU window: a config edit (or
+///    attacker-controlled edit) landing after the decision was made but
+///    before execution.
+/// 4. Call `executor::execute()` — the exact function
+///    `cli::resolve_and_execute` calls — with a collector scoped to the
+///    REAL project roots, matching the call site at `src/main.rs`'s
+///    `run_execute_command` (`let collector =
+///    live_evidence_collector(&project_roots);`, which is
+///    `DefaultEvidenceCollector::live(project_roots)` — this test builds
+///    the same probe composition, but against a fixture `$HOME` instead
+///    of `::live`'s real-process-env one, since this is an in-process
+///    test rather than a subprocess). This must see the now-present
+///    hook, reclassify as `Protected`, and abort with
+///    `AbortedByRevalidation(PolicyClassDowngraded)` — never mutating
+///    anything.
+///
+/// Manually verified mutation (not committed): repeating step 4 with
+/// `fixture_scoped_collector(&home, &[])` instead — the shape M4/M5
+/// mutate `src/main.rs`'s call sites to — reproduces the reviewer's
+/// finding exactly: `report.outcome` becomes `Succeeded` and
+/// `target_dir.exists()` becomes `false` (the fixture Cargo target dir
+/// is actually deleted). That is exactly the bug this whole ticket
+/// exists to prevent, so this test's `AbortedByRevalidation` assertion
+/// below is what that mutation flips to `Succeeded` plus a deleted
+/// target.
+///
+/// This test alone cannot catch the real `src/main.rs:1432` mutation —
+/// by construction, not by oversight: it links against the `glomeris`
+/// *library* crate and never calls into the `glomeris` *binary*'s
+/// `run_execute_command`, so it stays GREEN no matter what that line
+/// says. Only a real subprocess invocation can reach that specific call
+/// site. See
+/// `m4b_execute_consented_ask_deletion_requires_the_revalidation_collector_to_see_real_project_roots`
+/// below for the subprocess-level test that does — though its fixture
+/// happens to land on the SAFE side of the mutation's effect (the
+/// mutated collector disagrees with the plan and `execute()` fails
+/// closed with an abort), not the dangerous `Succeeded`-plus-deletion
+/// side this test's own in-test mutation reproduces above. Catching the
+/// real call site AND reproducing the dangerous symptom end-to-end would
+/// need the same race this test avoids; the two tests together cover the
+/// mechanism (this one) and the call site (M4b) separately instead.
+#[test]
+fn m4_execute_revalidation_aborts_on_a_hook_added_after_plan_time_toctou() {
+    use glomeris::actions::ActionRegistry;
+    use glomeris::cli::{discover_and_classify, find_candidate, resolve_action_for};
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::evidence::correlate::{
+        DefaultEvidenceCollector, GitCliProbe, HostDependencyRoots, LiveHostDependencyProbe,
+        LsofOpenFileProbe, LsofProcessCwdProbe, SystemToolLivenessProbe,
+    };
+    use glomeris::executor::{execute, AbortReason, ExecutionOutcome};
+    use glomeris::policy::approval::authorize;
+    use glomeris::policy::{PolicyClass, PolicyConfig};
+    use std::time::SystemTime;
+
+    // A collector scoped to the fixture `$HOME`, never the real
+    // developer `$HOME` — `DefaultEvidenceCollector::live` reads the
+    // real process `$HOME` via `HostDependencyRoots::from_env`, which
+    // this in-process (non-subprocess) test must not touch, unlike the
+    // subprocess tests above which isolate `$HOME` via `Command::env`.
+    fn fixture_scoped_collector(
+        home: &Path,
+        project_roots: &[PathBuf],
+    ) -> DefaultEvidenceCollector {
+        let roots = HostDependencyRoots {
+            home: home.to_path_buf(),
+            path_dirs: std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).collect())
+                .unwrap_or_default(),
+            plutil_bin: PathBuf::from("/usr/bin/plutil"),
+            lsof_bin: PathBuf::from("lsof"),
+            managed_settings: None,
+            project_roots: project_roots.to_vec(),
+        };
+        DefaultEvidenceCollector::new(
+            Box::new(LsofOpenFileProbe),
+            Box::new(LsofProcessCwdProbe),
+            Box::new(GitCliProbe),
+            Box::new(SystemToolLivenessProbe),
+            Some(Box::new(LiveHostDependencyProbe::new(roots))),
+        )
+    }
+
+    let home = unique_dir("m4-home");
+    let project_root = unique_dir("m4-project");
+
+    // Step 0: a real fixture-hook binary exists on disk from the start
+    // (it has to, to be referenced later), but NO `.claude/settings.json`
+    // references it yet — discovery below must see a clean project.
+    let hook_bin = build_fixture_hook(&project_root);
+    let target_dir = project_root.join("target");
+    let project_roots = vec![project_root.clone()];
+
+    let registry = DetectorRegistry::builtin();
+    let ctx = DiscoveryContext::from_process_env(home.clone())
+        .with_known_project_roots(project_roots.clone());
+    let discovery_collector = fixture_scoped_collector(&home, &project_roots);
+    let cfg = PolicyConfig::default();
+    let now = SystemTime::now();
+
+    let candidates = discover_and_classify(&registry, &ctx, &discovery_collector, &cfg, now);
+
+    let target_dir_query = canonical(&target_dir);
+    let Some((ev, decision)) = find_candidate(&target_dir_query, &candidates) else {
+        panic!(
+            "expected the fixture target dir to be a discoverable candidate, \
+             got candidates: {:?}",
+            candidates
+                .iter()
+                .map(|(e, _)| e.resource.to_string())
+                .collect::<Vec<_>>()
+        );
+    };
+
+    // Step 1: plan-time decision must be AutoSafe — no hook exists yet.
+    assert_eq!(
+        decision.class,
+        PolicyClass::AutoSafe,
+        "discovery must decide AutoSafe before the project hook is written, got: {decision:?}"
+    );
+
+    let actions = ActionRegistry::builtin();
+    let action = resolve_action_for(ev, &actions)
+        .expect("the fixture Cargo target dir must resolve to cargo.clean.target_dir");
+
+    // Step 2: AutoSafe always authorizes — no consent, exactly like a real
+    // `execute` invocation with no `--confirm-ask`/`--observed-fingerprint`.
+    let approval = authorize(decision.clone(), ev.fingerprint.clone(), None)
+        .expect("AutoSafe must always authorize");
+
+    // Step 3: the TOCTOU window — the project hook appears only now,
+    // strictly after the decision above was made.
+    write_project_hook(&project_root, "settings.json", &hook_bin);
+
+    // Step 4: the exact revalidation call site under test — a collector
+    // built from the REAL project roots, matching the unmutated
+    // `run_execute_command` in `src/main.rs`.
+    let revalidation_collector = fixture_scoped_collector(&home, &project_roots);
+    let report = execute(action, &approval, &revalidation_collector, &cfg, now, None);
+
+    assert_eq!(
+        report.outcome,
+        ExecutionOutcome::AbortedByRevalidation(AbortReason::PolicyClassDowngraded),
+        "a hook added after plan time but before execution must abort revalidation \
+         with PolicyClassDowngraded, got: {:?}",
+        report.outcome
+    );
+
+    assert!(
+        target_dir.exists(),
+        "the target dir must never be deleted once revalidation aborts"
+    );
+    assert!(
+        hook_bin.exists(),
+        "the hook binary must never be deleted once revalidation aborts"
+    );
+
+    fs::remove_dir_all(&home).ok();
+    fs::remove_dir_all(&project_root).ok();
+}
+
+// ---- M4b: CLI-level proof that `run_execute_command`'s revalidation
+// collector (`src/main.rs`) is the one that must see real project roots
+// ----
+
+/// The M4 test above proves the TOCTOU guard inside `executor::execute`
+/// itself is correct, but it calls that function directly — it never
+/// routes through `src/main.rs`'s `run_execute_command`, so mutating
+/// THAT call site (`let collector = live_evidence_collector(&project_roots);`
+/// at `src/main.rs`) cannot make it fail. This test closes that specific
+/// remaining gap with a real subprocess invocation of `glomeris execute`.
+///
+/// It does not need an artificial filesystem race: a project's
+/// `.claude/settings.json` that exists but fails to PARSE makes the
+/// executable-dependency probe report `source_unreadable` for
+/// `claude_project` and classify `Ask[ExecutableDependencyUnknown]` —
+/// but only when the probe actually examines that file, i.e. only when
+/// the collector it runs against was built with this project's real
+/// root. A collector built with no project roots at all (`&[]`, exactly
+/// what the M4/M5 mutation substitutes) never attempts to read that file
+/// and reports a clean probe instead, landing on `AutoSafe`.
+///
+/// `run_execute_command` calls `discover_and_classify_now_with_progress`
+/// (plan time) and the revalidation inside `execute()` with TWO
+/// SEPARATE collectors built from the SAME `project_roots` variable —
+/// discovery's is built by an untouched helper, so it always sees this
+/// malformed file and always decides `Ask`, regardless of the mutation.
+/// Only the revalidation collector is the mutated one. So:
+///
+/// - Unmutated: plan time decides `Ask[ExecutableDependencyUnknown]`;
+///   `--confirm-ask` with the real observed fingerprint authorizes it;
+///   revalidation (real roots) reaches the SAME `Ask[ExecutableDependencyUnknown]`
+///   decision, matches the plan, and the consented deletion proceeds —
+///   `succeeded`, `node_modules` actually deleted.
+/// - Mutated (`&[]` at that one call site): revalidation can no longer
+///   see the malformed file, decides `AutoSafe` instead, disagrees with
+///   the planned `Ask` class, and `execute()` aborts with
+///   `AbortedByRevalidation(PolicyClassDowngraded)` — `node_modules`
+///   preserved.
+///
+/// Manually verified against the real `src/main.rs:1432` mutation:
+/// temporarily changing that line to
+/// `live_evidence_collector(&[])` and rebuilding made this exact test
+/// fail — exit 4, `outcome: "aborted_by_revalidation"`,
+/// `abort_reason: "PolicyClassDowngraded"`, `node_modules` preserved —
+/// then reverting the line and rebuilding restored a passing `exit 0`,
+/// `outcome: "succeeded"`, `node_modules` deleted. This test commits the
+/// unmutated (correct) `succeeded`-and-deleted outcome as the
+/// assertion, which is exactly what that mutation flips.
+#[test]
+fn m4b_execute_consented_ask_deletion_requires_the_revalidation_collector_to_see_real_project_roots(
+) {
+    let home = unique_dir("m4b-home");
+    let project_root = unique_dir("m4b-project");
+    let node_modules = project_root.join("node_modules");
+    fs::create_dir_all(&node_modules).expect("create node_modules");
+    fs::write(node_modules.join("package.json"), "{}").expect("write package.json");
+
+    // A project `.claude/settings.json` that EXISTS but does not parse —
+    // the executable-dependency probe must report it as
+    // `source_unreadable`, never silently skip it (that would be the
+    // HORO-1865 bug reappearing in a different shape).
+    fs::create_dir_all(project_root.join(".claude")).expect("create .claude dir");
+    fs::write(
+        project_root.join(".claude").join("settings.json"),
+        "not valid json {{{",
+    )
+    .expect("write malformed settings.json");
+
+    let node_modules_query = canonical(&node_modules);
+
+    let explain = run_glomeris(
+        &[
+            "explain",
+            &node_modules_query,
+            "--project-root",
+            &project_root.to_string_lossy(),
+            "--json",
+        ],
+        &home,
+    );
+    assert!(
+        explain.status.success(),
+        "explain --json should succeed; stderr: {}",
+        String::from_utf8_lossy(&explain.stderr)
+    );
+    let explain_report = parse_json(&explain);
+    assert!(
+        explain_report["reasons"]
+            .as_array()
+            .expect("reasons must be an array")
+            .iter()
+            .any(|r| r == "executable_dependency_unknown"),
+        "a malformed project settings file must classify ExecutableDependencyUnknown \
+         (Ask), got: {explain_report}"
+    );
+    assert!(
+        explain_report["executable_dependency"]["unresolved"]
+            .as_array()
+            .expect("unresolved must be an array")
+            .iter()
+            .any(|u| u["source"] == "claude_project" && u["kind"] == "source_unreadable"),
+        "expected the malformed file to be reported source_unreadable, not silently \
+         skipped, got: {explain_report}"
+    );
+    let fingerprint_token = explain_report["fingerprint_token"]
+        .as_str()
+        .expect("fingerprint_token must be present for an Ask-eligible resource")
+        .to_string();
+
+    let resource_id = format!("node_modules:{node_modules_query}");
+    let execute = run_glomeris(
+        &[
+            "execute",
+            "--action-id",
+            "node.clean.node_modules",
+            "--resource-id",
+            &resource_id,
+            "--project-root",
+            &project_root.to_string_lossy(),
+            "--confirm-ask",
+            "--observed-fingerprint",
+            &fingerprint_token,
+            "--json",
+        ],
+        &home,
+    );
+    assert_eq!(
+        execute.status.code(),
+        Some(0),
+        "a consented Ask deletion where plan-time and revalidation agree must succeed; \
+         stderr: {}",
+        String::from_utf8_lossy(&execute.stderr)
+    );
+    let result = parse_json(&execute);
+    assert_eq!(
+        result["outcome"], "succeeded",
+        "expected the consented deletion to succeed — if this instead reports \
+         aborted_by_revalidation/PolicyClassDowngraded, the execute-revalidation \
+         collector at src/main.rs's run_execute_command has stopped seeing real \
+         project roots, got: {result}"
+    );
+    assert!(
+        !node_modules.exists(),
+        "the consented node_modules deletion must actually happen"
+    );
+
+    fs::remove_dir_all(&home).ok();
+    fs::remove_dir_all(&project_root).ok();
+}
