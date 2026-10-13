@@ -184,6 +184,7 @@ fn is_refusal_reason(reason: ReasonCode) -> bool {
         | ReasonCode::DockerObjectInUse
         | ReasonCode::DockerActivityUnknown
         | ReasonCode::ProtectedExecutableDependency
+        | ReasonCode::ProtectedUnresolvedExecutableDependency
         | ReasonCode::ExecutableRunningFromResource
         | ReasonCode::ExecutableDependencyUnknown
         // HORO-1824: both new Ask reasons are refusals, not AUTO_SAFE

@@ -877,9 +877,20 @@ enum GlomerisVocabulary {
             return prose(token, reasonAxis, "Something is running from here",
                          "A running process's program file is inside here right now.")
         case "executable_dependency_unknown":
-            return prose(token, reasonAxis, "Could not confirm no dependency",
-                         "A hook, daemon or LaunchAgent reference could not be fully "
-                             + "checked, so Glomeris will not assume it is safe.")
+            // HORO-1868: narrowed. This now fires ONLY when a hook config
+            // (or the check for programs running from here) itself could
+            // not be read at all — never for a reference that WAS read
+            // but whose target couldn't be confirmed, which is now
+            // `protected_unresolved_executable_dependency` below.
+            return prose(token, reasonAxis, "Could not check for a dependency",
+                         "A hook config, or the check for programs running from here, "
+                             + "could not be read, so Glomeris will not assume it is safe.")
+        case "protected_unresolved_executable_dependency":
+            return prose(token, reasonAxis, "Hook target could not be confirmed",
+                         "A configured hook, daemon or LaunchAgent command could not be "
+                             + "traced to a definite file, so it may run something inside "
+                             + "here. This cannot be overridden. Pointing that command at "
+                             + "an absolute file path lets Glomeris check it again.")
         case "shared_build_cache_blast_radius":
             return prose(token, reasonAxis, "Shared by other projects",
                          "Cargo's own configuration resolves this build cache outside "
@@ -2202,6 +2213,12 @@ enum GlomerisVocabulary {
                 token, unresolvedKindAxis, "Could not be re-checked",
                 "A post-action re-check of this one dependency's own path "
                     + "failed for a reason that is not a confirmed absence."
+            )
+        case "identity_unconfirmed":
+            return prose(
+                token, unresolvedKindAxis, "Confirmed, identity unconfirmed",
+                "This reference resolved to a file inside the resource, but "
+                    + "that file's own identity could not be checked."
             )
         default:
             return unrecognised(

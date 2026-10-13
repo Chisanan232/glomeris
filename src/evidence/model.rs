@@ -991,10 +991,15 @@ pub struct DependencyRef {
 }
 
 /// A reference Glomeris could not resolve to a confirmed in/out verdict —
-/// the catch-all fail-closed bucket. A non-empty
-/// `Vec<UnresolvedRef>` on an executable-bearing kind's
-/// [`ExecutableDependencyReport::unresolved`] is `ASK
-/// ExecutableDependencyUnknown`, never a clean negative (§4.3, §8).
+/// the catch-all fail-closed bucket. A non-empty `Vec<UnresolvedRef>` on
+/// an executable-bearing kind's [`ExecutableDependencyReport::unresolved`]
+/// is never a clean negative (§4.3, §8) — HORO-1868: it is NOT uniformly
+/// `ASK ExecutableDependencyUnknown` any more. Each entry whose
+/// [`UnresolvedRef::is_examined_reference`] is true is `Protected
+/// ProtectedUnresolvedExecutableDependency`; only
+/// [`UnresolvedRef::SourceUnreadable`] (a whole source failed to read,
+/// never examined at the reference level) stays `Ask
+/// ExecutableDependencyUnknown`. See `classify` step 2c.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnresolvedRef {
     /// The command contained a shell metacharacter, an unbalanced quote,
@@ -1064,6 +1069,31 @@ pub enum UnresolvedRef {
         pointer: String,
         resolved: PathBuf,
     },
+    /// HORO-1868 (commit 2, a real gap found during this ticket's design
+    /// pass): a candidate's symlink chain resolved successfully AND
+    /// matched inside the resource (`ChainMatch::Yes` in
+    /// `resolve_command`/the PATH-entry equivalent), but the follow-up
+    /// `exe_identity_of` stat call on the final resolved path then
+    /// failed. Previously this collapsed into the pointer-less
+    /// [`UnresolvedRef::SourceUnreadable`], which is wrong: a reference
+    /// CONFIRMED inside the resource whose identity merely couldn't be
+    /// stat'd is a stronger finding than "the whole source failed to
+    /// read" — lumping it with genuine source-read failures let a bare
+    /// unresolvable name (`NotOnPath`, now `Protected` via
+    /// `is_examined_reference`) become MORE protected than a reference
+    /// already confirmed to resolve inside the resource, which is
+    /// backwards. This variant follows the [`Self::RestatFailed`]
+    /// precedent exactly (same three fields, same reasoning for why
+    /// `resolved` is needed to avoid masking a sibling dependency sharing
+    /// one `(source, pointer)` — see that variant's doc comment).
+    /// `is_examined_reference` is `true` for this variant, so it
+    /// classifies `Protected ProtectedUnresolvedExecutableDependency`,
+    /// consistent with a confirmed-inside-resource reference's risk.
+    ReferenceIdentityUnconfirmed {
+        source: SourceTag,
+        pointer: String,
+        resolved: PathBuf,
+    },
 }
 
 impl UnresolvedRef {
@@ -1076,7 +1106,8 @@ impl UnresolvedRef {
             | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. }
             | UnresolvedRef::PathResolutionIndeterminate { source, .. }
             | UnresolvedRef::MalformedSchema { source, .. }
-            | UnresolvedRef::RestatFailed { source, .. } => source,
+            | UnresolvedRef::RestatFailed { source, .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { source, .. } => source,
         }
     }
 
@@ -1098,7 +1129,8 @@ impl UnresolvedRef {
             | UnresolvedRef::SymlinkLoopOrTooDeep { pointer, .. }
             | UnresolvedRef::PathResolutionIndeterminate { pointer, .. }
             | UnresolvedRef::MalformedSchema { pointer, .. }
-            | UnresolvedRef::RestatFailed { pointer, .. } => Some(pointer),
+            | UnresolvedRef::RestatFailed { pointer, .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { pointer, .. } => Some(pointer),
             UnresolvedRef::SourceUnreadable { .. } => None,
         }
     }
@@ -1123,8 +1155,53 @@ impl UnresolvedRef {
     /// failure actually concerns.
     pub fn resolved(&self) -> Option<&std::path::Path> {
         match self {
-            UnresolvedRef::RestatFailed { resolved, .. } => Some(resolved),
+            UnresolvedRef::RestatFailed { resolved, .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { resolved, .. } => Some(resolved),
             _ => None,
+        }
+    }
+
+    /// HORO-1868: true when an entry from a recognized source was
+    /// EXAMINED, but its target couldn't be confirmed — a neutral
+    /// evidence fact, not a policy judgment. `classify` step 2c sends
+    /// every such entry to `Protected
+    /// ProtectedUnresolvedExecutableDependency`, unconditionally.
+    ///
+    /// Deliberately exhaustive with no `_ =>` arm: a new `UnresolvedRef`
+    /// variant must make an explicit policy choice here before it
+    /// compiles, rather than silently inheriting whichever arm happens to
+    /// sit above a wildcard.
+    ///
+    /// Only [`UnresolvedRef::SourceUnreadable`] is `false` — the whole
+    /// source (a config file, or the running-process probe) failed to
+    /// read or parse, so no individual reference was ever examined at
+    /// all; that stays `Ask ExecutableDependencyUnknown` (`classify` step
+    /// 6). This is the only behavioral narrowing of
+    /// `ExecutableDependencyUnknown`'s previous meaning (HORO-1825): it
+    /// now covers only source-read failures, never an examined-but-
+    /// unresolved reference.
+    ///
+    /// [`UnresolvedRef::RestatFailed`] is `true` as a fail-safe: today it
+    /// is produced only by HORO-1826's post-action `host_integrity`
+    /// re-stat, which never flows back into `classify` (that compares
+    /// `HostIntegrityStatus`, not policy class) — so this arm is
+    /// currently unreachable from `classify`'s step 2c in practice. It is
+    /// included anyway so that if a future caller ever threads a
+    /// `RestatFailed` entry into a fresh `ExecutableDependencyReport`
+    /// ahead of classification, it fails closed to `Protected` rather
+    /// than silently falling through to whatever the next revision of
+    /// this match happens to default to.
+    pub fn is_examined_reference(&self) -> bool {
+        match self {
+            UnresolvedRef::NotOnPath { .. }
+            | UnresolvedRef::PathResolutionDivergent { .. }
+            | UnresolvedRef::NonInspectable { .. }
+            | UnresolvedRef::SymlinkLoopOrTooDeep { .. }
+            | UnresolvedRef::PathResolutionIndeterminate { .. }
+            | UnresolvedRef::MalformedSchema { .. }
+            | UnresolvedRef::RestatFailed { .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { .. } => true,
+            UnresolvedRef::SourceUnreadable { .. } => false,
         }
     }
 }
@@ -1198,9 +1275,13 @@ pub struct ExecutableDependencyReport {
     /// resolves inside the resource. Non-empty => `ASK
     /// ExecutableRunningFromResource` (`classify` step 6).
     pub running_inside: Vec<ProcessRef>,
-    /// Non-empty => `ASK ExecutableDependencyUnknown` for an
-    /// executable-bearing kind (`classify` step 6) — a fail-closed catch
-    /// for every reference Glomeris could not clear.
+    /// Non-empty => a fail-closed catch for every reference Glomeris
+    /// could not clear, for an executable-bearing kind. HORO-1868: an
+    /// entry that was an EXAMINED reference
+    /// ([`UnresolvedRef::is_examined_reference`]) sends it to `Protected
+    /// ProtectedUnresolvedExecutableDependency` (`classify` step 2c);
+    /// otherwise (source-read failure only) it is `Ask
+    /// ExecutableDependencyUnknown` (`classify` step 6).
     pub unresolved: Vec<UnresolvedRef>,
     /// Which recognized sources were actually examined, for display only
     /// — never policy input.

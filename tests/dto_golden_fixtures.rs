@@ -2417,8 +2417,14 @@ fn explain_report_missing_hook_matches_golden_fixture() {
     });
     let report = explain_report_for(&ev, None);
 
-    assert_eq!(report.policy_label, "UNKNOWN_INCOMPLETE");
-    assert_eq!(report.reasons, vec!["executable_dependency_unknown"]);
+    // HORO-1868: an examined-but-unresolved `NotOnPath` reference is now
+    // `Protected ProtectedUnresolvedExecutableDependency`, never a
+    // consentable ASK.
+    assert_eq!(report.policy_label, "PROTECTED");
+    assert_eq!(
+        report.reasons,
+        vec!["protected_unresolved_executable_dependency"]
+    );
     assert_eq!(report.executable_dependency.unresolved.len(), 1);
     assert_eq!(
         report.executable_dependency.unresolved[0].source,

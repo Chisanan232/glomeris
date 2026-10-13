@@ -172,7 +172,8 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         | ReasonCode::ProtectedSystemPath
         | ReasonCode::ProtectedUnsafeMountOrSymlink
         | ReasonCode::ProtectedUnknownResourceKind
-        | ReasonCode::ProtectedExecutableDependency => false,
+        | ReasonCode::ProtectedExecutableDependency
+        | ReasonCode::ProtectedUnresolvedExecutableDependency => false,
 
         // AutoSafe reasons are not Ask reasons; an `ASK` pre-authorization
         // naming one describes a decision that cannot occur.

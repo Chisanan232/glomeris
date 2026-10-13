@@ -12,17 +12,17 @@
   "confidence": "high",
   "active_use_signals": [],
   "regenerability": "regenerable_by_rebuild",
-  "policy_label": "UNKNOWN_INCOMPLETE",
+  "policy_label": "PROTECTED",
   "reasons": [
-    "executable_dependency_unknown"
+    "protected_unresolved_executable_dependency"
   ],
   "native_cleanup_available": false,
   "native_cleanup_action_id": null,
   "fingerprint_token": null,
   "executable": false,
   "offered_actions": [],
-  "refusal_reason": "no registered cleanup action for this resource kind",
-  "refusal_source": "no_registered_action",
+  "refusal_reason": "PROTECTED: protected_unresolved_executable_dependency",
+  "refusal_source": "policy_protected",
   "holders": [],
   "holder_probes": [
     {

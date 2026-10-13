@@ -108,7 +108,7 @@ final class GlomerisVocabularyTests: XCTestCase {
         "regenerability_unknown", "recoverability_irreversible",
         "owning_tool_live", "docker_object_in_use", "docker_activity_unknown",
         "evidence_fresh_and_complete", "regenerable_by_tool",
-        "no_active_use_observed",
+        "no_active_use_observed", "protected_unresolved_executable_dependency",
     ]
 
     /// `src/reporting/dto.rs` — `stop_reason_tag`, all seven. HORO-1506, plus
@@ -211,7 +211,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     private static let unresolvedKindTokens = [
         "non_inspectable", "not_on_path", "path_resolution_divergent", "source_unreadable",
         "symlink_loop_or_too_deep", "path_resolution_indeterminate", "malformed_schema",
-        "restat_failed",
+        "restat_failed", "identity_unconfirmed",
     ]
 
     /// The four developer-workspace axes that share a token (`unknown`)

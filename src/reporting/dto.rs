@@ -508,6 +508,7 @@ fn unresolved_ref_kind(u: &crate::evidence::UnresolvedRef) -> &'static str {
         UnresolvedRef::PathResolutionIndeterminate { .. } => "path_resolution_indeterminate",
         UnresolvedRef::MalformedSchema { .. } => "malformed_schema",
         UnresolvedRef::RestatFailed { .. } => "restat_failed",
+        UnresolvedRef::ReferenceIdentityUnconfirmed { .. } => "identity_unconfirmed",
     }
 }
 

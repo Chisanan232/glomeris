@@ -1813,8 +1813,11 @@ final class DtoGoldenFixturesTests: XCTestCase {
         let data = try loadFixture("explain_report_missing_hook.json")
         let dto = try JSONDecoder().decode(ExplainReportDto.self, from: data)
 
-        XCTAssertEqual(dto.policyLabel, "UNKNOWN_INCOMPLETE")
-        XCTAssertEqual(dto.reasons, ["executable_dependency_unknown"])
+        // HORO-1868: an examined-but-unresolved `NotOnPath` reference is
+        // now `Protected protected_unresolved_executable_dependency`,
+        // never a consentable ASK.
+        XCTAssertEqual(dto.policyLabel, "PROTECTED")
+        XCTAssertEqual(dto.reasons, ["protected_unresolved_executable_dependency"])
         XCTAssertEqual(dto.executableDependency.unresolved.count, 1)
         XCTAssertEqual(dto.executableDependency.unresolved[0].source, "claude_user_settings")
         XCTAssertEqual(dto.executableDependency.unresolved[0].kind, "not_on_path")
