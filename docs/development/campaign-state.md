@@ -5,18 +5,28 @@
 > Chat context will be lost across sessions; this file will not.
 
 - **Owning Epic:** HORO-1043 — Glomeris MVP 2.0 — Interactive Daily Driver / Trustworthy Recovery UX
-- **Active ticket:** HORO-1829 (independent QA — now fully unblocked, every other ticket in the dependency DAG is Done).
-- **HORO-1868 (2026-10-13, found during HORO-1829 QA, not yet merged):** a policy-classification
-  safety fix — an executable-dependency reference that was examined but couldn't be resolved
-  (e.g. `HOOK_BIN_B`, §1.1's bare-name hook that doesn't resolve on PATH) classified ASK
-  `ExecutableDependencyUnknown` (consentable); it is now PROTECTED
-  `ProtectedUnresolvedExecutableDependency` (never consentable) via a new `classify` step 2c.
+- **Active ticket:** HORO-1829 (independent QA — now fully unblocked, every other ticket in the dependency DAG, including HORO-1865 and HORO-1868, is Done).
+- **HORO-1865 — Done.** PR #170 merged, `main`@`dd59338`. Project-level
+  `.claude/settings.json`/`settings.local.json` hook sources now actually wired into
+  `recognized_sources()` (see the full section below for detail) — closes the fail-open
+  gap where `SourceTag::ClaudeProject` was defined but never constructed.
+- **HORO-1868 — Done.** PR #171 merged, `main`@`e076a67`. An executable-dependency
+  reference that was examined but couldn't be resolved
+  (e.g. `HOOK_BIN_B`, §1.1's bare-name hook that doesn't resolve on PATH) now classifies
+  PROTECTED (`ProtectedUnresolvedExecutableDependency`, never consentable) via a new
+  `classify` step 2c, instead of the old consentable ASK `ExecutableDependencyUnknown`.
   New `UnresolvedRef::ReferenceIdentityUnconfirmed` variant fixes a related gap in
   `host_dependency.rs` (a confirmed-inside-resource reference whose identity stat failed was
-  mislabeled `SourceUnreadable`). See ADR-0001 §17 for the full amendment and the PR for the
-  real-host blast-radius capture and mutation-test results. This is a `classify()`-touching
-  change and per standing campaign rule requires independent adversarial security review
-  before merge — not merged by the implementing session.
+  previously mislabeled `SourceUnreadable`). See ADR-0001 §17 for the full amendment.
+  Independent review PASS (mutation M6 independently reproduced: removing step 2c and
+  rebuilding the real binary let a consented `execute --confirm-ask` actually delete
+  `node_modules` under the old behavior; the fix refuses it). Real-host blast-radius
+  evidence: 1 resource flipped (`xcode_derived_data`, 535MB,
+  `UNKNOWN_INCOMPLETE`→`PROTECTED`). **Flag for HORO-1073**: this reclassification may
+  make the founder's own dogfood pass harder to satisfy if the founder's real machine has
+  an unresolvable hook reference — not a blocker, but worth founder awareness before that
+  ticket is attempted. Worktree removed/pruned, Jira transitioned to Done with full
+  evidence comment.
 - **Last session state (2026-10-12):** HORO-1822 through HORO-1629 — the entire dependency DAG feeding HORO-1829 — are fully complete and merged: HORO-1822 (ADR-0001, PR #156), HORO-1825 (PR #157, 4 review rounds), HORO-1827 (PR #158), HORO-1823 (PR #160, 1 review round + 1 found/fixed timeout-budget bug), HORO-1824 (PR #161, 2 review rounds — round 1 caught a real untrusted-`rust-toolchain.toml` code-execution risk in `cargo metadata` invocation plus a workspace/source-overlap scope bug; round 2 caught 2 more real gaps in those same two fixes), HORO-1826 (PR #163, `main`@fbb81c3, 4 review rounds — round 1: 3 of 4 `execute()` callers silently discarded computed `host_integrity`/`volume_free_delta`; round 2: per-dependency restat failures collapsed to a pointer-less unresolved variant, reintroducing sibling-masking, plus Autopilot audit-log wiring found directly fixable; round 3: `(source,pointer)` itself wasn't a unique dependency key, masking bug recurred one level deeper, plus a false "None is the only honest value" claim with zero real-path test coverage; round 4: both fixed and mutation-tested clean), HORO-1828 (2 PRs — #165 `main`@422518d eligibility/guarded/feasibility, 1 review round PASS; #166 `main`@5ead5d9 explain structure, 1 review round PASS — reviewer independently re-verified every privacy/mutation claim rather than trusting the diff; an automated scanner also caught 2 real bugs mid-development, both fixed and reviewer-confirmed absent from committed code: a resolved-path leak in the dependency `pointer` field, and the visible holders label missing fail-closed branches its accessibility-label sibling already had), HORO-1629 (PR #168, `main`@8d1f89d, 3 review rounds — round 1: 2 MUST-FIX, missing CLI docs plus zero test coverage on the one new UI check-before-add flow, both fixed; round 2: re-verified round 1 held including re-mutation-testing AC4's fail-closed path, caught that round 1's own fix commit broke the Swift-6 concurrency CI guard, then found the ticket's own literal worked example (`~/code`) silently resolved to `undetermined` for want of tilde-expansion; round 3: tilde-expansion added on both Swift and Rust sides, mutation-tested, PASS). All Jira-Done. Founder approved all 3 of ADR-0001 §16's open decisions on 2026-10-10 — recorded in ADR-0001 §16 directly.
 
 Jira tickets, raw per-ticket content, and the full dependency DAG were written this
@@ -148,7 +158,7 @@ This file tracks the HORO-1822 post-incident sub-campaign, which is the dependen
 
 HORO-1073 itself says "Blocked by: everything — this is the last ticket in the Epic." Do not treat HORO-1829's completion as release-readiness; HORO-1073's human dogfood pass is the actual final gate, and items 1-3 above may need dedicated verification work this DAG never covered.
 
-## HORO-1865 — project-level `.claude/settings.json` hook source wired in (PR #170 opened, not yet merged)
+## HORO-1865 — project-level `.claude/settings.json` hook source wired in (Done, PR #170 merged, `main`@`dd59338`)
 
 HORO-1829's QA pass found that ADR-0001 §4.3's closed recognized-source list
 names each configured root's own `.claude/settings.json`/`settings.local.json`,
@@ -195,14 +205,59 @@ Full validation (fmt, clippy -D warnings, full `cargo test` — 1890 passed,
 0 failed, isolated clean run — `cargo deny`, the read-only-probe shell
 guard, the vocabulary guard, `check-no-policy-label-branching.sh`) all
 green. Branch pushed, PR #170 opened
-(https://github.com/Chisanan232/glomeris/pull/170). **Not merged** —
-flagged for independent adversarial review per this campaign's standing
-practice (every merged ticket in this DAG found something real on
-review), with explicit reviewer attention requested on: every
-collector-construction site including any added since this design, alias
-uniqueness against
-HORO-1826 host-integrity matching, and that a missing/unreadable/malformed
-project settings file can never come out "clean".
+(https://github.com/Chisanan232/glomeris/pull/170), independent review
+PASS (1 round — reviewer grepped the whole tree confirming exactly 6
+construction sites, verified cross-root checking and alias uniqueness
+against HORO-1826's bug class, proved the structural guard is load-bearing
+by adding a dummy enum variant and confirming compile failure, and built
+their own TOCTOU test for the execute-revalidation call site that the
+author had left un-mutation-tested — added as a permanent commit
+(`1f6581e`) before merge). **Merged**, `main`@`dd59338`. Jira HORO-1865
+transitioned to Done.
+
+## HORO-1868 — unresolved executable-dependency reference reclassified PROTECTED (Done, PR #171 merged, `main`@`e076a67`)
+
+Founder-directed policy change (N9(c) finding from HORO-1829 QA): "An
+unresolved reference with unknown impact remains PROTECTED, not
+consentable deletion by default." Designed via `opus-architect` — chose a
+new `ProtectedUnresolvedExecutableDependency` reason code over reusing an
+existing one, to avoid conflating "confirmed protected" with "unresolved,
+now also protected" wording. New `classify()` step 2c sits strictly
+before Staleness (step 3) and the completeness checks (steps 4-5) —
+load-bearing ordering, mutation-tested both by the implementer and
+independently by the reviewer (M6: deleted step 2c, rebuilt the real
+binary, confirmed a real `execute --confirm-ask` actually deleted
+`node_modules` under the old/broken behavior; the real fix refuses it).
+New `UnresolvedRef::is_examined_reference()` predicate distinguishes "the
+source was read and a specific reference inside it couldn't be resolved"
+(now PROTECTED) from `SourceUnreadable` ("couldn't even read the source",
+stays whatever it already was) — exhaustive match, no catch-all, so a
+future `UnresolvedRef` variant must be explicitly classified.
+
+Mid-flow: the implementing agent disclosed skipping `xcodebuild`
+validation ("no macOS toolchain available this session") — flagged as
+likely transient (this machine has Xcode) and assigned to a follow-up
+agent, which also found PR #171 was based on stale `main` (pre-HORO-1865,
+same file). Rebased cleanly (non-overlapping regions, verified via `git
+range-diff`), then ran the previously-skipped `xcodebuild test` clean and
+caught a real failure: 2 new Swift wording strings exceeded the existing
+34-char chip-title limit — fixed (neither was founder-approved ADR §16.1
+text), re-ran clean, 1260/1260 passing with a genuine 178-line Swift-6
+guard scan. Independent review PASS, no MUST-FIX (1 non-blocking: PR
+description's validation table had gone stale after the rebase, fixed
+before merge). Real-host blast-radius evidence (`glomeris detect --json`):
+1 resource flipped, `xcode_derived_data` (535MB),
+`UNKNOWN_INCOMPLETE`→`PROTECTED`. ADR-0001 §17 added (append-only
+amendment, does not reopen existing Accepted sections).
+
+**Flag carried into HORO-1073**: this reclassification may make the
+founder's own planned dogfood step harder to satisfy if the founder's real
+machine has an unresolvable hook reference (the `HOOK_BIN_B` shape, ADR
+§1.1) — not a blocker for this ticket, but the founder should know before
+attempting HORO-1073.
+
+Worktree removed (`git worktree remove --force` + prune). Jira HORO-1868
+transitioned to Done with full merge-evidence comment.
 
 ## Status line
 
