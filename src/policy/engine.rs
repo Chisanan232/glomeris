@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use crate::evidence::{
     Completeness, DockerActivity, Evidence, ProbeOutcome, Recoverability, Regenerability,
-    ResourceKind, TargetScope,
+    ResourceKind, TargetScope, UnresolvedRef,
 };
 
 use super::class::{PolicyClass, ReasonCode};
@@ -28,14 +28,14 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         reasons,
         evidence_collected_at: ev.collected_at,
         evaluated_at: now,
-        // HORO-1824 §15: bumped 2 -> 3 for the step 6 `Redirected` ->
-        // `SharedBuildCacheBlastRadius` extension and the
-        // `Partial{missing: [TargetOwnership]}` -> `TargetOwnershipUnknown`
-        // completeness mapping. An outstanding explain->execute consent
-        // now meets new reasons, and the executor aborts with
-        // `PolicyReasonsWidened` (safe) rather than silently applying old
-        // consent to a decision shaped by rules it never saw.
-        policy_version: 3,
+        // HORO-1868: bumped 3 -> 4 for the new step 2c
+        // (`ProtectedUnresolvedExecutableDependency`) and the narrowing of
+        // `ExecutableDependencyUnknown` to source-read failures only. An
+        // outstanding explain->execute consent now meets new reasons, and
+        // the executor aborts with `PolicyReasonsWidened` (safe) rather
+        // than silently applying old consent to a decision shaped by
+        // rules it never saw.
+        policy_version: 4,
     };
 
     // 1. Unknown resource kind is an unconditional, fail-closed Protected
@@ -66,6 +66,35 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
                 PolicyClass::Protected,
                 vec![ReasonCode::ProtectedExecutableDependency],
             );
+        }
+    }
+
+    // 2c (HORO-1868). A reference from a recognized source, or the
+    // running-process probe, was EXAMINED but could not be confirmed
+    // either way (`UnresolvedRef::is_examined_reference`) — unconditionally
+    // Protected, same rationale as step 2b: a bare hook command that is
+    // not currently on PATH may still run on the next invocation, so
+    // "could not confirm it's absent" carries the same risk as "confirmed
+    // present". Placed BEFORE the staleness/completeness checks (steps
+    // 3-5) deliberately: this ordering is load-bearing. Placing it after
+    // completeness would make it bypassable — a resource with
+    // `Completeness::Partial` on an unrelated field, or stale evidence,
+    // would return `Ask` from an earlier step before step 2c's veto is
+    // ever reached, silently widening an examined-but-unresolved
+    // executable dependency into a consentable ASK through a
+    // Partial/stale shortcut.
+    if ev.resource.kind.is_executable_bearing() {
+        if let Some(report) = ev.executable_dependency.observed() {
+            if report
+                .unresolved
+                .iter()
+                .any(UnresolvedRef::is_examined_reference)
+            {
+                return decision(
+                    PolicyClass::Protected,
+                    vec![ReasonCode::ProtectedUnresolvedExecutableDependency],
+                );
+            }
         }
     }
 
@@ -962,12 +991,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_version_is_three() {
-        // HORO-1824 §15: bumped 2 -> 3. See the `classify()` comment at
+    fn policy_version_is_four() {
+        // HORO-1868: bumped 3 -> 4. See the `classify()` comment at
         // the `policy_version` literal for what changed.
         let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         let decision = classify(&ev, &cfg(), NOW);
-        assert_eq!(decision.policy_version, 3);
+        assert_eq!(decision.policy_version, 4);
     }
 
     // ---- HORO-1825 §13 anti-vacuity + AC tests ----
@@ -1041,15 +1070,22 @@ mod tests {
     /// contract via the `classify`-facing symptom: an `unresolved` entry
     /// present on an executable-bearing kind must reach `Ask`, never slip
     /// through as if it had been `Observed(empty)`.
+    ///
+    /// HORO-1868: this fixture now uses `SourceUnreadable` — the real
+    /// "unparseable config" shape (a whole source failed to read/parse,
+    /// never examined at the reference level) — rather than
+    /// `NonInspectable`, which as of HORO-1868 is an EXAMINED reference
+    /// and now classifies `Protected`. The `NonInspectable` -> `Protected`
+    /// case is covered by its own dedicated table test,
+    /// `each_examined_unresolved_variant_on_executable_bearing_kind_is_protected`.
     #[test]
     fn unresolved_reference_on_executable_bearing_kind_is_ask_not_auto_safe() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
             references_inside: Vec::new(),
             running_inside: Vec::new(),
-            unresolved: vec![UnresolvedRef::NonInspectable {
+            unresolved: vec![UnresolvedRef::SourceUnreadable {
                 source: SourceTag::ClaudeUserSettings,
-                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
             }],
             sources_examined: vec![SourceTag::ClaudeUserSettings],
         });

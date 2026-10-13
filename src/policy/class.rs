@@ -35,6 +35,19 @@ pub enum ReasonCode {
     /// regardless of staleness, matching `ProtectedCredentialMaterial`'s
     /// rationale.
     ProtectedExecutableDependency,
+    /// HORO-1868: a reference from a recognized source (or the running-
+    /// process probe) was EXAMINED but could not be confirmed either way
+    /// — `UnresolvedRef::is_examined_reference` is true for it. Previously
+    /// this fell through to `Ask ExecutableDependencyUnknown`, which is
+    /// consentable; that was wrong, because "examined, but target
+    /// unconfirmed" is not meaningfully different in risk from a
+    /// confirmed reference (`ProtectedExecutableDependency` above) — a
+    /// bare hook command not on PATH may still run on the next
+    /// invocation. Unconditionally `Protected`, never consentable.
+    /// `UnresolvedRef::SourceUnreadable` (the whole source failed to read
+    /// or parse — never examined at the reference level) is excluded and
+    /// stays `ExecutableDependencyUnknown`.
+    ProtectedUnresolvedExecutableDependency,
     // -> Ask
     EvidenceIncomplete,
     EvidenceStale,
@@ -70,10 +83,13 @@ pub enum ReasonCode {
     /// HORO-1825 §5 step 6.1: a currently-running process's executable
     /// mapping resolves inside this resource.
     ExecutableRunningFromResource,
-    /// HORO-1825 §5 step 6.2: at least one reference from a recognized
-    /// source, or a running process, could not be resolved to a confirmed
-    /// in/out verdict for an executable-bearing kind — fail-closed, never
-    /// a clean negative.
+    /// HORO-1825 §5 step 6.2, narrowed by HORO-1868: a recognized source,
+    /// or the running-process probe, could not be read — never a clean
+    /// negative. As of HORO-1868 this covers ONLY source-read failures
+    /// (`UnresolvedRef::SourceUnreadable`); an examined-but-unresolved
+    /// reference into a specific pointer is `Protected
+    /// ProtectedUnresolvedExecutableDependency` instead (see that
+    /// variant's doc comment).
     ExecutableDependencyUnknown,
     /// HORO-1824 §5 step 6.3: this resource's resolved target is
     /// `Redirected` — Cargo's own config resolves it outside the
@@ -109,6 +125,11 @@ impl ReasonCode {
             ReasonCode::ProtectedUnsafeMountOrSymlink => "protected_unsafe_mount_or_symlink",
             ReasonCode::ProtectedUnknownResourceKind => "protected_unknown_resource_kind",
             ReasonCode::ProtectedExecutableDependency => "protected_executable_dependency",
+            // Kept on one line (over rustfmt's default 100-col wrap) so
+            // `scripts/check-vocabulary-covers-cli-tokens.sh`'s `=>
+            // "token"`-on-one-line extraction regex finds this arm.
+            #[rustfmt::skip]
+            ReasonCode::ProtectedUnresolvedExecutableDependency => "protected_unresolved_executable_dependency",
             ReasonCode::EvidenceIncomplete => "evidence_incomplete",
             ReasonCode::EvidenceStale => "evidence_stale",
             ReasonCode::EvidenceProbeFailed => "evidence_probe_failed",
@@ -143,6 +164,7 @@ impl ReasonCode {
         ReasonCode::ProtectedUnsafeMountOrSymlink,
         ReasonCode::ProtectedUnknownResourceKind,
         ReasonCode::ProtectedExecutableDependency,
+        ReasonCode::ProtectedUnresolvedExecutableDependency,
         ReasonCode::EvidenceIncomplete,
         ReasonCode::EvidenceStale,
         ReasonCode::EvidenceProbeFailed,
@@ -215,24 +237,25 @@ mod tests {
                 ReasonCode::ProtectedUnsafeMountOrSymlink => 6,
                 ReasonCode::ProtectedUnknownResourceKind => 7,
                 ReasonCode::ProtectedExecutableDependency => 8,
-                ReasonCode::EvidenceIncomplete => 9,
-                ReasonCode::EvidenceStale => 10,
-                ReasonCode::EvidenceProbeFailed => 11,
-                ReasonCode::ResourceInActiveUse => 12,
-                ReasonCode::GitWorktreeDirty => 13,
-                ReasonCode::RebuildCostHigh => 14,
-                ReasonCode::RegenerabilityUnknown => 15,
-                ReasonCode::RecoverabilityIrreversible => 16,
-                ReasonCode::OwningToolLive => 17,
-                ReasonCode::DockerObjectInUse => 18,
-                ReasonCode::DockerActivityUnknown => 19,
-                ReasonCode::ExecutableRunningFromResource => 20,
-                ReasonCode::ExecutableDependencyUnknown => 21,
-                ReasonCode::SharedBuildCacheBlastRadius => 22,
-                ReasonCode::TargetOwnershipUnknown => 23,
-                ReasonCode::EvidenceFreshAndComplete => 24,
-                ReasonCode::RegenerableByTool => 25,
-                ReasonCode::NoActiveUseObserved => 26,
+                ReasonCode::ProtectedUnresolvedExecutableDependency => 9,
+                ReasonCode::EvidenceIncomplete => 10,
+                ReasonCode::EvidenceStale => 11,
+                ReasonCode::EvidenceProbeFailed => 12,
+                ReasonCode::ResourceInActiveUse => 13,
+                ReasonCode::GitWorktreeDirty => 14,
+                ReasonCode::RebuildCostHigh => 15,
+                ReasonCode::RegenerabilityUnknown => 16,
+                ReasonCode::RecoverabilityIrreversible => 17,
+                ReasonCode::OwningToolLive => 18,
+                ReasonCode::DockerObjectInUse => 19,
+                ReasonCode::DockerActivityUnknown => 20,
+                ReasonCode::ExecutableRunningFromResource => 21,
+                ReasonCode::ExecutableDependencyUnknown => 22,
+                ReasonCode::SharedBuildCacheBlastRadius => 23,
+                ReasonCode::TargetOwnershipUnknown => 24,
+                ReasonCode::EvidenceFreshAndComplete => 25,
+                ReasonCode::RegenerableByTool => 26,
+                ReasonCode::NoActiveUseObserved => 27,
             };
             assert_eq!(
                 index,
@@ -243,7 +266,7 @@ mod tests {
         }
         assert_eq!(
             ReasonCode::ALL.len(),
-            27,
+            28,
             "ReasonCode::ALL has gained, lost, or duplicated an entry"
         );
     }

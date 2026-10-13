@@ -108,7 +108,7 @@ final class GlomerisVocabularyTests: XCTestCase {
         "regenerability_unknown", "recoverability_irreversible",
         "owning_tool_live", "docker_object_in_use", "docker_activity_unknown",
         "evidence_fresh_and_complete", "regenerable_by_tool",
-        "no_active_use_observed",
+        "no_active_use_observed", "protected_unresolved_executable_dependency",
     ]
 
     /// `src/reporting/dto.rs` — `stop_reason_tag`, all seven. HORO-1506, plus
