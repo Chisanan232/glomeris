@@ -1517,6 +1517,78 @@ mod tests {
     /// identical class/reasons) — so `execute()` proceeds to actually
     /// delete a real disposable `node_modules` fixture.
     #[test]
+    fn untracked_data_created_after_approval_aborts_without_artifact_change() {
+        use crate::evidence::correlate::{GitCliProbe, GitProbe};
+
+        struct FreshGitCollector(PathBuf);
+        impl EvidenceCollector for FreshGitCollector {
+            fn collect(&self, id: &ResourceId, budget: ProbeBudget) -> CorrelationResult {
+                let timeout = budget.timeout;
+                let mut result = FakeCollector.collect(id, budget);
+                result.git_state = GitCliProbe.state_of(&self.0, timeout);
+                result
+            }
+        }
+        let root = make_temp_dir("execute-untracked-race");
+        let run = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        run(&["init"]);
+        run(&["config", "user.name", "Fixture"]);
+        run(&["config", "user.email", "fixture@example.invalid"]);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        run(&["add", ".gitignore"]);
+        run(&["commit", "-m", "Establish disposable fixture"]);
+        let cache = root.join("node_modules");
+        fs::create_dir_all(&cache).unwrap();
+        let payload = cache.join("owned-fixture.bin");
+        fs::write(&payload, vec![0u8; 4096]).unwrap();
+        let resource = ResourceId::new(
+            ResourceKind::NodeModules,
+            ResourceLocator::Path(cache.clone()),
+        );
+        let fingerprint = fingerprint_of(&cache);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::AutoSafe,
+            reasons: vec![
+                ReasonCode::EvidenceFreshAndComplete,
+                ReasonCode::NoActiveUseObserved,
+            ],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 5,
+        };
+        let approval = authorize(decision, fingerprint.clone(), None).unwrap();
+        let unique = root.join("unique-owner.txt");
+        fs::write(&unique, "preserve").unwrap();
+        assert_eq!(fingerprint_of(&cache), fingerprint);
+        let report = execute(
+            &NodeCleanNodeModules,
+            &approval,
+            &FreshGitCollector(root.clone()),
+            &PolicyConfig::default(),
+            now,
+            None,
+        );
+        assert_eq!(
+            report.outcome,
+            ExecutionOutcome::AbortedByRevalidation(AbortReason::PolicyClassDowngraded)
+        );
+        assert_eq!(fs::read_to_string(&unique).unwrap(), "preserve");
+        assert!(payload.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn execute_real_deletion_removes_node_modules_and_reports_actual_bytes() {
         let root = make_temp_dir("execute-real-node");
         let node_modules = root.join("node_modules");

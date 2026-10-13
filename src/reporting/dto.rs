@@ -266,6 +266,9 @@ pub fn active_use_signals(ev: &Evidence) -> Vec<String> {
         if git.dirty {
             signals.push("git: working tree dirty".to_string());
         }
+        if git.untracked {
+            signals.push("git: untracked files present".to_string());
+        }
         if git.worktree {
             signals.push("git: is a linked worktree".to_string());
         }

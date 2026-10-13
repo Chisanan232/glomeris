@@ -56,8 +56,9 @@ part of the safety guarantee:
 4. **Completeness** — `Failed` → `Ask` + `EvidenceProbeFailed`; `Partial` →
    `Ask` + `EvidenceIncomplete`.
 5. **Active-use signals** (most-significant first) — an open file handle or
-   matching process cwd → `ResourceInActiveUse`; a dirty or linked git
-   worktree → `GitWorktreeDirty`; a live owning-tool daemon →
+   matching process cwd → `ResourceInActiveUse`; tracked changes, an
+   untracked owner file, or a linked git worktree → `GitWorktreeDirty`; a
+   live owning-tool daemon →
    `OwningToolLive`; a running process's executable mapping inside the
    resource (HORO-1825) → `ExecutableRunningFromResource`; a
    `SourceUnreadable` entry on an executable-bearing kind (HORO-1825,
@@ -68,9 +69,10 @@ part of the safety guarantee:
 7. Otherwise → `AutoSafe`, with reasons `EvidenceFreshAndComplete` (+
    `RegenerableByTool` if applicable) + `NoActiveUseObserved`.
 
-`policy_version` is `4` as of HORO-1868 (1825→2, 1824→3, 1868→4) — an
+`policy_version` is `5` as of HORO-1873 (1825→2, 1824→3, 1868→4, 1873→5) — an
 outstanding `explain`→`execute` consent now meets these new reasons, and the
-executor aborts with `PolicyReasonsWidened` (safe) rather than silently
+executor aborts with `PolicyClassDowngraded` when the class changes, or
+`PolicyReasonsWidened` when an existing ASK gains a veto (safe) rather than silently
 applying old consent to a decision shaped by rules it never saw.
 
 Neither new `Ask` reason (`ExecutableRunningFromResource`,
@@ -79,6 +81,25 @@ Neither new `Ask` reason (`ExecutableRunningFromResource`,
 as of HORO-1868) can be pre-authorized by Autopilot —
 `autopilot::envelope::is_preauthorizable` refuses all of them unconditionally,
 same as every other live-use/absence-of-knowledge reason on this page.
+
+## Git untracked files and automatic cleanup
+
+An ignored generated cache such as `node_modules/` can still be `AUTO_SAFE`
+when its containing repository is clean and the cache is reconstructable. A
+separate untracked file or directory anywhere in that repository makes the
+Git evidence active: `explain` reports `dirty: false`, `untracked: true`, and
+the untracked-use signal, while policy returns `ASK` with
+`GitWorktreeDirty`. The automatic cleanup path therefore requires Git to
+report no tracked changes, untracked owner files, or linked-worktree state.
+An untracked owner file is preserved when `execute` runs without matching
+consent.
+
+This check does not establish ownership of ignored data. Git omits ignored
+files from ordinary untracked status, so a generated cache can still contain
+unique ignored files mixed with reconstructable output. That ownership
+question remains unresolved; this rule only prevents automatic cleanup when
+Git reports untracked owner content elsewhere in the worktree. It is not a
+claim that every unknown or ignored file is protected.
 
 ## The `PROTECTED` matcher
 

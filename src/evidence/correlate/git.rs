@@ -29,19 +29,28 @@ impl GitProbe for GitCliProbe {
         };
 
         if !toplevel.status.success() {
-            // `git rev-parse --show-toplevel` fails with a non-zero exit
-            // whenever `path` is not inside any git working tree at all.
-            // That's a legitimate, fully-determined answer — never
-            // Unavailable, which is reserved for the probe itself
-            // failing to run.
-            return ProbeOutcome::Observed(None);
+            // Only a confirmed absence of repository markers is a negative.
+            // Permission, ownership, corruption and discovery-boundary errors
+            // must not erase Git protections.
+            return if genuine_non_repository(path, &toplevel) {
+                ProbeOutcome::Observed(None)
+            } else {
+                ProbeOutcome::Unavailable(ProbeReason::Failed)
+            };
         }
         let Ok(repo_root_str) = String::from_utf8(toplevel.stdout) else {
             return ProbeOutcome::Unavailable(ProbeReason::Failed);
         };
         let repo_root = PathBuf::from(repo_root_str.trim());
+        if !repo_root.is_absolute() || repo_root_str.trim().contains('\n') {
+            return ProbeOutcome::Unavailable(ProbeReason::Failed);
+        }
 
-        let status = match run_git(&repo_root, &["status", "--porcelain"], timeout) {
+        let status = match run_git(
+            &repo_root,
+            &["status", "--porcelain", "--untracked-files=normal"],
+            timeout,
+        ) {
             Ok(output) if output.status.success() => output,
             Ok(_) => return ProbeOutcome::Unavailable(ProbeReason::Failed),
             Err(outcome) => return outcome,
@@ -82,12 +91,48 @@ type GitRunResult = Result<Output, ProbeOutcome<Option<GitState>>>;
 fn run_git(path: &Path, args: &[&str], timeout: Duration) -> GitRunResult {
     let mut command = Command::new("git");
     command.arg("-C").arg(path).args(args);
+    command.env("LC_ALL", "C").env("GIT_OPTIONAL_LOCKS", "0");
+    // Ambient invocation overrides describe another repository, not this path.
+    for variable in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+    ] {
+        command.env_remove(variable);
+    }
     match run_with_timeout(command, timeout) {
         CommandOutcome::NotFound => Err(ProbeOutcome::Unavailable(ProbeReason::ToolAbsent)),
         CommandOutcome::TimedOut => Err(ProbeOutcome::Unavailable(ProbeReason::TimedOut)),
         CommandOutcome::SpawnFailed => Err(ProbeOutcome::Unavailable(ProbeReason::Failed)),
         CommandOutcome::Completed(output) => Ok(output),
     }
+}
+
+fn genuine_non_repository(path: &Path, output: &Output) -> bool {
+    if output.status.code() != Some(128)
+        || !output.stdout.is_empty()
+        || !String::from_utf8_lossy(&output.stderr).starts_with("fatal: not a git repository ")
+    {
+        return false;
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    if !canonical.is_dir() {
+        return false;
+    }
+    for ancestor in canonical.ancestors().take(256) {
+        match std::fs::symlink_metadata(ancestor.join(".git")) {
+            Ok(_) => return false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
+        }
+        if ancestor.parent().is_none() {
+            return true;
+        }
+    }
+    false
 }
 
 /// `dirty` is true if any tracked change (staged or unstaged) is
@@ -233,5 +278,57 @@ mod tests {
             }
             other => panic!("expected Observed(Some(_)) against this repo, got {other:?}"),
         }
+    }
+    #[test]
+    fn genuinely_outside_git_is_observed_but_invalid_repository_is_unavailable() {
+        let root =
+            std::env::temp_dir().join(format!("glomeris-git-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let probe = GitCliProbe;
+        assert!(matches!(
+            probe.state_of(&root, Duration::from_secs(2)),
+            ProbeOutcome::Observed(None)
+        ));
+        std::fs::write(
+            root.join(".git"),
+            "gitdir: /does-not-exist/glomeris-git-fixture",
+        )
+        .unwrap();
+        assert!(matches!(
+            probe.state_of(&root, Duration::from_secs(2)),
+            ProbeOutcome::Unavailable(ProbeReason::Failed)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn untracked_status_cannot_be_suppressed_by_repository_config() {
+        let root =
+            std::env::temp_dir().join(format!("glomeris-git-untracked-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            ["init"].as_slice(),
+            ["config", "status.showUntrackedFiles", "no"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
+        std::fs::create_dir_all(root.join("unique-data")).unwrap();
+        std::fs::write(root.join("unique-data/owner.txt"), "preserve").unwrap();
+        let state = GitCliProbe.state_of(&root, Duration::from_secs(2));
+        assert!(matches!(
+            state,
+            ProbeOutcome::Observed(Some(GitState {
+                dirty: false,
+                untracked: true,
+                ..
+            }))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

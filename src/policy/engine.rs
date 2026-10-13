@@ -28,14 +28,10 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         reasons,
         evidence_collected_at: ev.collected_at,
         evaluated_at: now,
-        // HORO-1868: bumped 3 -> 4 for the new step 2c
-        // (`ProtectedUnresolvedExecutableDependency`) and the narrowing of
-        // `ExecutableDependencyUnknown` to source-read failures only. An
-        // outstanding explain->execute consent now meets new reasons, and
-        // the executor aborts with `PolicyReasonsWidened` (safe) rather
-        // than silently applying old consent to a decision shaped by
-        // rules it never saw.
-        policy_version: 4,
+        // HORO-1873: untracked work now vetoes unattended reclamation.
+        // Fresh class/reason revalidation, rather than this version alone,
+        // invalidates an approval collected before the work appeared.
+        policy_version: 5,
     };
 
     // 1. Unknown resource kind is an unconditional, fail-closed Protected
@@ -144,7 +140,7 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
 
     let git_active = matches!(
         ev.git_state.observed(),
-        Some(Some(g)) if g.dirty || g.worktree
+        Some(Some(g)) if g.dirty || g.untracked || g.worktree
     );
     if git_active {
         active_use_reasons.push(ReasonCode::GitWorktreeDirty);
@@ -636,6 +632,24 @@ mod tests {
     }
 
     #[test]
+    fn untracked_only_git_data_vetoes_auto_safe() {
+        let mut ev = complete_evidence(ResourceKind::NodeModules, NOW);
+        ev.git_state = ProbeOutcome::Observed(Some(GitState {
+            repo_root: PathBuf::from("/tmp"),
+            common_dir: PathBuf::from("/tmp/.git"),
+            dirty: false,
+            untracked: true,
+            worktree: false,
+        }));
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::GitWorktreeDirty]);
+        assert_eq!(decision.policy_version, 5);
+        assert!(crate::reporting::dto::active_use_signals(&ev)
+            .contains(&"git: untracked files present".to_string()));
+    }
+
+    #[test]
     fn dirty_git_worktree_is_ask() {
         let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         ev.git_state = ProbeOutcome::Observed(Some(GitState {
@@ -991,12 +1005,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_version_is_four() {
+    fn policy_version_is_five() {
         // HORO-1868: bumped 3 -> 4. See the `classify()` comment at
         // the `policy_version` literal for what changed.
         let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         let decision = classify(&ev, &cfg(), NOW);
-        assert_eq!(decision.policy_version, 4);
+        assert_eq!(decision.policy_version, 5);
     }
 
     // ---- HORO-1825 §13 anti-vacuity + AC tests ----
