@@ -38,6 +38,18 @@ part of the safety guarantee:
    staleness-immunity as step 2: a hook/daemon/LaunchAgent config or a PATH
    entry references a file inside this resource, so it is an installed
    runtime dependency regardless of how old that observation is.
+2c. **Examined-but-unresolved executable dependency (HORO-1868)** — for an
+   executable-bearing resource kind, `executable_dependency` observed with
+   any `unresolved` entry whose `UnresolvedRef::is_examined_reference()` is
+   true → unconditionally `Protected` +
+   `ProtectedUnresolvedExecutableDependency`. Placed *before* staleness and
+   completeness deliberately: an examined-but-unresolved reference (a bare
+   hook command not currently on PATH, a symlink loop, a malformed config
+   entry, …) is never allowed to reach `Ask` through a Partial-evidence or
+   stale-evidence shortcut. Only `UnresolvedRef::SourceUnreadable` — a
+   whole recognized source failed to read or parse, so no individual
+   reference was ever examined — is excluded here and still reaches step 6
+   below as `ExecutableDependencyUnknown`.
 3. **Staleness** — evidence older than `PolicyConfig::max_evidence_age`
    (default 5 minutes), or whose `collected_at` is somehow in the future →
    `Ask` + `EvidenceStale`.
@@ -47,26 +59,26 @@ part of the safety guarantee:
    matching process cwd → `ResourceInActiveUse`; a dirty or linked git
    worktree → `GitWorktreeDirty`; a live owning-tool daemon →
    `OwningToolLive`; a running process's executable mapping inside the
-   resource (HORO-1825) → `ExecutableRunningFromResource`; an unresolved
-   executable-dependency reference on an executable-bearing kind
-   (`CargoTargetDir`/`NodeModules`/`SwiftPackageManagerBuildDir`/
-   `XcodeDerivedData`) (HORO-1825) → `ExecutableDependencyUnknown`. Any of
-   these → `Ask`.
+   resource (HORO-1825) → `ExecutableRunningFromResource`; a
+   `SourceUnreadable` entry on an executable-bearing kind (HORO-1825,
+   narrowed by HORO-1868 to source-read failures only — see step 2c
+   above) → `ExecutableDependencyUnknown`. Any of these → `Ask`.
 6. **Per-instance regenerability** — `NotRegenerable` → `Ask` +
    `RebuildCostHigh`, regardless of how clean the rest of the evidence looks.
 7. Otherwise → `AutoSafe`, with reasons `EvidenceFreshAndComplete` (+
    `RegenerableByTool` if applicable) + `NoActiveUseObserved`.
 
-`policy_version` is `2` as of HORO-1825 (was `1`) — an outstanding
-`explain`→`execute` consent now meets these new reasons, and the executor
-aborts with `PolicyReasonsWidened` (safe) rather than silently applying old
-consent to a decision shaped by rules it never saw.
+`policy_version` is `4` as of HORO-1868 (1825→2, 1824→3, 1868→4) — an
+outstanding `explain`→`execute` consent now meets these new reasons, and the
+executor aborts with `PolicyReasonsWidened` (safe) rather than silently
+applying old consent to a decision shaped by rules it never saw.
 
 Neither new `Ask` reason (`ExecutableRunningFromResource`,
-`ExecutableDependencyUnknown`) nor the new `Protected` reason can be
-pre-authorized by Autopilot — `autopilot::envelope::is_preauthorizable`
-refuses all three unconditionally, same as every other live-use/absence-of-
-knowledge reason on this page.
+`ExecutableDependencyUnknown`) nor either new `Protected` reason
+(`ProtectedExecutableDependency`, and `ProtectedUnresolvedExecutableDependency`
+as of HORO-1868) can be pre-authorized by Autopilot —
+`autopilot::envelope::is_preauthorizable` refuses all of them unconditionally,
+same as every other live-use/absence-of-knowledge reason on this page.
 
 ## The `PROTECTED` matcher
 

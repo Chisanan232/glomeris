@@ -300,18 +300,57 @@ rc files) are unaffected by that fix and are still named here honestly.
   a resource is still caught by the existing `running_inside`/`Executable`
   relation; a next-invocation reference from one of these is not.
 
-Every one of these degrades to `unresolved`/`ASK` or is named in
+Every one of these degrades to `unresolved` or is named in
 `sources_examined` for display — the probe never claims a source was
 checked when it wasn't, and an executable-bearing kind
 (`CargoTargetDir`/`NodeModules`/`SwiftPackageManagerBuildDir`/
 `XcodeDerivedData`) with any unresolved finding cannot reach `AUTO_SAFE`.
+**HORO-1868 update:** an `unresolved` entry is no longer uniformly `ASK`.
+Only `SourceUnreadable` (the Codex `hooks.json`/`config.toml` deferrals
+above, and any other whole-source read/parse failure) stays `Ask
+ExecutableDependencyUnknown`. Every other unresolved shape — including a
+bare command name that did resolve against Glomeris's own PATH
+(`PathResolutionDivergent`) — is an EXAMINED reference whose target merely
+couldn't be confirmed, and is `Protected
+ProtectedUnresolvedExecutableDependency` instead, never consentable (see
+`UnresolvedRef::is_examined_reference`, `classify` step 2c).
 
 A real-host consequence worth stating plainly: on a machine with Claude Code
 hooks configured via bare command names (resolved only through that
 machine's own shell `PATH`, which this probe cannot observe), essentially
-every executable-bearing resource becomes `ASK` rather than `AUTO_SAFE` —
-this is the intended, fail-closed behavior of the PATH-shadowing amendment
-(§4.3), not a bug to be "fixed" by loosening the match rule.
+every executable-bearing resource becomes `ASK` or `PROTECTED` rather than
+`AUTO_SAFE` — this is the intended, fail-closed behavior of the
+PATH-shadowing amendment (§4.3) and its HORO-1868 strengthening, not a bug
+to be "fixed" by loosening the match rule.
+
+## Examined-but-unresolved executable dependencies are now `PROTECTED`, never consentable (HORO-1868)
+
+Before HORO-1868, an executable-dependency reference that was examined but
+could not be resolved to a confirmed in/out verdict — e.g. a bare hook
+command not on PATH (`UnresolvedRef::NotOnPath`) — classified `Ask
+ExecutableDependencyUnknown`, which a human could consent past. Found during
+HORO-1829 QA: this under-protected a real case (a hook binary that had
+simply moved, or whose PATH differs between Glomeris's probe and the hook
+runtime) that carries the same risk as a *confirmed* reference. It is now
+`Protected ProtectedUnresolvedExecutableDependency` (`classify` step 2c,
+`UnresolvedRef::is_examined_reference`) — unconditional, never
+pre-authorizable, never consentable. Only a genuine whole-source read/parse
+failure (`UnresolvedRef::SourceUnreadable`) stays the consentable `Ask
+ExecutableDependencyUnknown`.
+
+**A side effect worth stating plainly, not hiding as a footnote:** more than
+256 `.plist` files under `~/Library/LaunchAgents` trips the existing
+`MAX_LAUNCH_AGENTS` bound, which already recorded
+`UnresolvedRef::PathResolutionIndeterminate` for the truncated-away tail
+(a hook defined only in a plist past the bound might exist, and this was
+never silently dropped). As of HORO-1868,
+`PathResolutionIndeterminate`'s `is_examined_reference` is `true`, so this
+case now classifies `Protected` rather than the previous consentable `Ask`.
+This is the safe direction for an already-documented gap in observational
+coverage, not a new bug: a machine with an unusually large LaunchAgents
+directory becomes *more* conservative about any executable-bearing
+resource, exactly matching the fail-closed posture the rest of this probe
+already has for every other observation gap.
 
 **HORO-1865 residual, stated plainly:** a project-level hook `command`
 written as `$CLAUDE_PROJECT_DIR/...`, a relative (non-absolute, non-`~/`)

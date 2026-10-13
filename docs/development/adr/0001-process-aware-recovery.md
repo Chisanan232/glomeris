@@ -613,3 +613,59 @@ Fixtures live under `tests/fixtures/` or temp directories. Never read the develo
    - Invalid/unrecognized security-relevant configuration is rejected, not guessed at (fail-closed, consistent with §8).
    - Positive, malformed, adversarial and fail-closed tests are added (folds into HORO-1825's existing §13 anti-vacuity test obligations).
    - If these checks pass, the crate may be added without a further approval round-trip. If it introduces a material new security risk, HORO-1825 keeps the existing fail-closed fallback (Codex `config.toml` present ⇒ `unresolved` ⇒ ASK, per §4.3/§8) and escalates the finding instead of merging it.
+
+## 17. Amendment — HORO-1868 (2026-10-13)
+
+**Does not reopen §5's Accepted classification table or §3.3's "unresolved
+⇒ UNKNOWN" summary as a design decision.** It records a founder-decided
+reclassification found during HORO-1829 QA, superseding one specific row
+of §5 and one specific clause of §8.
+
+- **What changed.** §5's `ExecutableDependencyUnknown` row previously
+  covered every entry in `ExecutableDependencyReport::unresolved` for an
+  executable-bearing kind (§8: "Non-inspectable command, bare name not on
+  PATH, symlink loop ⇒ `unresolved` ⇒ ASK `ExecutableDependencyUnknown`").
+  HORO-1829 QA found this under-protective: an EXAMINED reference whose
+  target could not be confirmed (a bare hook command not currently on
+  PATH being the concrete case — the `HOOK_BIN_B` finding in §1.1) carries
+  the same risk as a *confirmed* reference (§5's `ProtectedExecutableDependency`
+  row), yet a human could consent past it. §7's step 6.2 is superseded for
+  this split: a new step 2c (immediately after 2b, before staleness/
+  completeness — same placement rationale as 2b) now sends every
+  EXAMINED-but-unresolved entry to `Protected
+  ProtectedUnresolvedExecutableDependency` unconditionally, never
+  pre-authorizable, never consentable. Only `UnresolvedRef::SourceUnreadable`
+  — a whole recognized source failed to read or parse, so no individual
+  reference was ever examined — keeps the original `Ask
+  ExecutableDependencyUnknown` path (§8's clause above now reads as
+  describing `SourceUnreadable` specifically, not every unresolved shape).
+- **No new authority.** Still three policy classes, still no new
+  `ActionStep` variant, still no new deletion primitive — this amendment
+  only moves evidence that already existed (`UnresolvedRef`) from one
+  existing class's veto set to the other's. §3's "no path widens ASK or
+  PROTECTED to AUTO_SAFE" is unaffected; this amendment widens in the
+  opposite, safe direction (ASK → PROTECTED for a subset of cases), never
+  the reverse.
+- **Founder decision.** The founder reclassified this ASK→PROTECTED on
+  2026-10-13, on the evidence that HORO-1073's own dogfood machine had a
+  live example of exactly this gap (§1.1's `HOOK_BIN_B`) — see the
+  HORO-1868 PR description for the real-host blast-radius capture taken
+  before and after this change.
+- **A real related gap, fixed alongside (not itself a founder decision,
+  an engineering correction).** `resolve_command`'s and the PATH-entry
+  equivalent's `ChainMatch::Yes` branch (§4.3) collapsed a candidate
+  CONFIRMED to resolve inside the resource, whose `exe_identity_of` stat
+  then failed, into `SourceUnreadable` — the same bucket as a genuine
+  whole-source read failure, which after the reclassification above would
+  have left a confirmed-inside-resource reference *less* protected than a
+  bare unresolvable name. Fixed with a new `UnresolvedRef::ReferenceIdentityUnconfirmed{source,
+  pointer, resolved}` variant, following the `RestatFailed` precedent
+  (§4.4) exactly.
+- **Compatibility.** `policy_version` 3 → 4 (HORO-1824 took it 2 → 3; see
+  §15's pattern). An outstanding `explain`→`execute` consent now meets
+  this new reason and the executor aborts with `PolicyReasonsWidened`
+  (safe), per §15's existing contract — nothing new here, restated for
+  the version bump's own record.
+- **Not reopened.** §4.3's closed recognized-source list, §9's ownership
+  model, §10's rejected alternatives, and §16's three founder-resolved
+  decisions stand as this ADR already recorded them.
