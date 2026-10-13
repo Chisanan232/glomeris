@@ -5,6 +5,60 @@
 > Chat context will be lost across sessions; this file will not.
 
 - **Owning Epic:** HORO-1043 — Glomeris MVP 2.0 — Interactive Daily Driver / Trustworthy Recovery UX
+- **Campaign status (2026-10-13): `WAITING_ON_OS_PERMISSION`.** Not RELEASE_READY. The
+  only remaining release-gate work is the real menu-bar-app operator journey
+  (Scan → Evidence → Consent → Cleanup → Restore) required by both HORO-1829 and
+  HORO-1073, and it is blocked on a one-time macOS Accessibility permission grant
+  — see the handoff block immediately below. Everything else independently
+  actionable this session is done.
+
+### Resume handoff (read this first)
+
+- **Tested/verified commit:** `main`@`82808ae` (includes HORO-1865, HORO-1868, and
+  HORO-1873 — a real safety fix from a concurrent peer session on this same
+  multi-session host, confirmed merged via `gh pr view 173`, not this session's
+  work but now part of the verified baseline).
+- **Staged CLI binary:** already real-built and running live at
+  `~/.local/share/coding-agent-environment/storage/glomeris/16f90df6.../bin/glomeris`
+  (`glomeris --version` → `0.2.0-1163-g82808ae`, ad-hoc codesigned, matches
+  current `main` exactly — verified via `codesign -dv`). This session did
+  **not** separately build the `.app` GUI bundle: this host currently runs 10
+  concurrent peer Claude Code sessions, several actively building/mutating this
+  same repo and its shared build infra (`~/.cargo/shared-target`,
+  `~/Library/Developer/Xcode/DerivedData`) — a redundant `xcodebuild clean` here
+  risked real resource contention for no benefit, so it was deliberately skipped
+  rather than attempted blind.
+- **Completed independent QA this session:** N9(c) and N9(d) re-verified fixed
+  against `main`@`e076a67` via real subprocess (not unit tests) — PROTECTED now
+  genuinely unbypassable in both cases; N9(a)/(b)/(e)/(f) sanity-re-passed; N1-N8
+  not re-run (unaffected, already verified). Full evidence logged as a comment on
+  HORO-1829 (2026-10-13).
+- **Exact remaining GUI acceptance:** drive the real installed app via
+  AppleScript/System Events through scan/discovery, evidence display (cross-check
+  against real `detect --json`), a PROTECTED resource's refusal, an ASK resource's
+  consent flow, cleanup preview + execution, post-cleanup integrity check, and
+  restore/recovery — all against disposable fixtures only, never a real active
+  worktree/cache. User has explicitly authorized this automation.
+- **Required permission:** macOS Accessibility must be granted to whichever
+  process actually issues `osascript` (this session runs under iTerm via tmux —
+  grant it to **iTerm.app**: System Settings → Privacy & Security → Accessibility
+  → + → `/Applications/iTerm.app` → toggle on). The user is currently remote and
+  could not grant this as of 2026-10-13; do not ask again until they say it's
+  done.
+- **Next command to resume:** once granted, re-run the Accessibility probe
+  (`osascript -e 'tell application "System Events" to get name of every menu bar
+  item of menu bar 1 of process "Finder"'`) to confirm, then resume the UI-driven
+  journey described above.
+- **Correction to an earlier note in this file:** HORO-1073's literal AC (see
+  Jira) requires the journey to happen "through the actual menu-bar app" with at
+  least one ASK/UNKNOWN_INCOMPLETE execution through the UI — it does **not**
+  textually require the founder to personally operate it. This session's
+  instructions explicitly separate "complete the installed-app operator journey"
+  (assigned to this session, Accessibility-gated) from "founder personal
+  acceptance" (a distinct, separately-tracked act, not yet scheduled/ticketed).
+  An earlier note below calling HORO-1073 purely "human-in-the-loop, cannot be
+  agent-simulated" overstated this — correcting here rather than deleting, per
+  this file's own no-silent-rewrite convention.
 - **Active ticket:** HORO-1829 (independent QA — now fully unblocked, every other ticket in the dependency DAG, including HORO-1865 and HORO-1868, is Done).
 - **HORO-1865 — Done.** PR #170 merged, `main`@`dd59338`. Project-level
   `.claude/settings.json`/`settings.local.json` hook sources now actually wired into
