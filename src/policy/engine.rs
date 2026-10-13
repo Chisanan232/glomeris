@@ -1177,6 +1177,337 @@ mod tests {
         );
     }
 
+    // ---- HORO-1868: step 2c, ProtectedUnresolvedExecutableDependency ----
+
+    fn unresolved_report(unresolved: UnresolvedRef) -> ExecutableDependencyReport {
+        ExecutableDependencyReport {
+            references_inside: Vec::new(),
+            running_inside: Vec::new(),
+            unresolved: vec![unresolved],
+            sources_examined: vec![SourceTag::ClaudeUserSettings],
+        }
+    }
+
+    /// Table test: every `UnresolvedRef` variant for which
+    /// `is_examined_reference()` is `true` must classify `Protected`
+    /// `[ProtectedUnresolvedExecutableDependency]` on an executable-bearing
+    /// kind, and nothing else.
+    #[test]
+    fn each_examined_unresolved_variant_on_executable_bearing_kind_is_protected() {
+        let pointer = "hooks.PostToolUse[0].hooks[0]".to_string();
+        let variants = [
+            UnresolvedRef::NotOnPath {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+            },
+            UnresolvedRef::PathResolutionDivergent {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+            },
+            UnresolvedRef::NonInspectable {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+            },
+            UnresolvedRef::SymlinkLoopOrTooDeep {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+            },
+            UnresolvedRef::PathResolutionIndeterminate {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+            },
+            UnresolvedRef::MalformedSchema {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+            },
+            UnresolvedRef::RestatFailed {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: pointer.clone(),
+                resolved: PathBuf::from("/tmp/x/debug/hook"),
+            },
+        ];
+
+        for variant in variants {
+            let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+            ev.executable_dependency = ProbeOutcome::Observed(unresolved_report(variant.clone()));
+
+            let decision = classify(&ev, &cfg(), NOW);
+
+            assert_eq!(
+                decision.class,
+                PolicyClass::Protected,
+                "{variant:?} must classify Protected"
+            );
+            assert_eq!(
+                decision.reasons,
+                vec![ReasonCode::ProtectedUnresolvedExecutableDependency],
+                "{variant:?} must carry exactly one reason"
+            );
+        }
+    }
+
+    /// `SourceUnreadable` (a whole source failed to read/parse, never
+    /// examined at the reference level) stays the consentable `Ask
+    /// ExecutableDependencyUnknown` — on every kind of source-read
+    /// failure, including the N7 lsof-failure shape
+    /// (`SourceTag::RunningProcesses`).
+    #[test]
+    fn source_unreadable_variants_stay_ask_executable_dependency_unknown() {
+        for tag in [
+            SourceTag::ClaudeUserSettings,
+            SourceTag::RunningProcesses,
+            SourceTag::CodexHooks,
+        ] {
+            let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+            ev.executable_dependency =
+                ProbeOutcome::Observed(unresolved_report(UnresolvedRef::SourceUnreadable {
+                    source: tag.clone(),
+                }));
+
+            let decision = classify(&ev, &cfg(), NOW);
+
+            assert_eq!(
+                decision.class,
+                PolicyClass::Ask,
+                "SourceUnreadable({tag:?}) must stay Ask"
+            );
+            assert_eq!(
+                decision.reasons,
+                vec![ReasonCode::ExecutableDependencyUnknown]
+            );
+        }
+    }
+
+    /// Precedence: step 2c wins over a `Partial` completeness gap on an
+    /// unrelated field (`git_state` unavailable) — never falls through to
+    /// the generic `EvidenceIncomplete` ASK.
+    #[test]
+    fn examined_unresolved_wins_over_partial_git_state_unavailable() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.git_state = ProbeOutcome::Unavailable(crate::evidence::ProbeReason::ToolAbsent);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(unresolved_report(UnresolvedRef::NotOnPath {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            }));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedUnresolvedExecutableDependency]
+        );
+    }
+
+    /// Precedence: step 2c wins over staleness — never falls through to
+    /// `EvidenceStale`.
+    #[test]
+    fn examined_unresolved_wins_over_stale_evidence() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, SystemTime::UNIX_EPOCH);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(unresolved_report(UnresolvedRef::NotOnPath {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            }));
+        let far_future = NOW + Duration::from_secs(10_000);
+
+        let decision = classify(&ev, &cfg(), far_future);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedUnresolvedExecutableDependency]
+        );
+    }
+
+    /// Precedence: step 2c wins over the `cargo_target_scope`-unavailable
+    /// Partial (`TargetOwnershipUnknown`'s own specific gap) — never falls
+    /// through to that reason either.
+    #[test]
+    fn examined_unresolved_wins_over_cargo_target_scope_unavailable() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(
+            crate::evidence::ProbeReason::ToolAbsent,
+        ));
+        ev.executable_dependency =
+            ProbeOutcome::Observed(unresolved_report(UnresolvedRef::NotOnPath {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            }));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedUnresolvedExecutableDependency]
+        );
+    }
+
+    /// Precedence: a confirmed `references_inside` (step 2b) alongside an
+    /// examined-unresolved entry must still carry exactly one reason — step
+    /// 2b wins outright, no double-reason.
+    #[test]
+    fn confirmed_reference_plus_examined_unresolved_is_step_2b_reason_only() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        let mut report = report_with_reference("/tmp/x/debug/hook");
+        report.unresolved.push(UnresolvedRef::NotOnPath {
+            source: SourceTag::ClaudeUserSettings,
+            pointer: "hooks.Stop[0].hooks[0]".to_string(),
+        });
+        ev.executable_dependency = ProbeOutcome::Observed(report);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedExecutableDependency]
+        );
+    }
+
+    /// A mix of an examined-unresolved entry AND a `SourceUnreadable` entry
+    /// still classifies `Protected` (step 2c's `.any()` fires on the first
+    /// examined entry, regardless of what else is present).
+    #[test]
+    fn examined_unresolved_mixed_with_source_unreadable_is_still_protected() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.executable_dependency = ProbeOutcome::Observed(ExecutableDependencyReport {
+            references_inside: Vec::new(),
+            running_inside: Vec::new(),
+            unresolved: vec![
+                UnresolvedRef::NotOnPath {
+                    source: SourceTag::ClaudeUserSettings,
+                    pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+                },
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::CodexHooks,
+                },
+            ],
+            sources_examined: vec![SourceTag::ClaudeUserSettings, SourceTag::CodexHooks],
+        });
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectedUnresolvedExecutableDependency]
+        );
+    }
+
+    /// Unbypassable: `authorize` must refuse a `Protected
+    /// ProtectedUnresolvedExecutableDependency` decision even with a
+    /// matching consent — there is no override path for `Protected`.
+    #[test]
+    fn examined_unresolved_decision_is_unbypassable_even_with_matching_consent() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(unresolved_report(UnresolvedRef::NotOnPath {
+                source: SourceTag::ClaudeUserSettings,
+                pointer: "hooks.PostToolUse[0].hooks[0]".to_string(),
+            }));
+        let decision = classify(&ev, &cfg(), NOW);
+        let fingerprint = ev.fingerprint.clone();
+        let consent = crate::policy::approval::UserConsent::new(
+            ev.resource.clone(),
+            fingerprint.clone(),
+            NOW,
+        );
+
+        let approval = crate::policy::approval::authorize(decision, fingerprint, Some(&consent));
+
+        assert!(approval.is_none());
+    }
+
+    /// Unaffected (critical — proves no over-scoping): the
+    /// `cargo_target_scope`-unavailable-alone `TargetOwnershipUnknown` path
+    /// stays `Ask` and consentable when no executable-dependency unresolved
+    /// entry is present at all.
+    #[test]
+    fn cargo_target_scope_unavailable_alone_stays_ask_and_consentable() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(
+            crate::evidence::ProbeReason::ToolAbsent,
+        ));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::TargetOwnershipUnknown]);
+
+        let fingerprint = ev.fingerprint.clone();
+        let consent = crate::policy::approval::UserConsent::new(
+            ev.resource.clone(),
+            fingerprint.clone(),
+            NOW,
+        );
+        let approval = crate::policy::approval::authorize(decision, fingerprint, Some(&consent));
+        assert!(approval.is_some());
+    }
+
+    /// Unaffected: a lone `SourceUnreadable(RunningProcesses)` (the N7
+    /// lsof-failure shape) stays `Ask` and consentable.
+    #[test]
+    fn source_unreadable_running_processes_alone_stays_ask_and_consentable() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(unresolved_report(UnresolvedRef::SourceUnreadable {
+                source: SourceTag::RunningProcesses,
+            }));
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ExecutableDependencyUnknown]
+        );
+
+        let fingerprint = ev.fingerprint.clone();
+        let consent = crate::policy::approval::UserConsent::new(
+            ev.resource.clone(),
+            fingerprint.clone(),
+            NOW,
+        );
+        let approval = crate::policy::approval::authorize(decision, fingerprint, Some(&consent));
+        assert!(approval.is_some());
+    }
+
+    /// Unaffected: `open_by_process` unavailable alone (an unrelated
+    /// completeness gap) stays the generic `Ask EvidenceIncomplete` and
+    /// consentable — step 2c's gate never fires with a clean
+    /// `executable_dependency` report.
+    #[test]
+    fn open_by_process_unavailable_alone_stays_ask_evidence_incomplete_and_consentable() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.open_by_process = ProbeOutcome::Unavailable(crate::evidence::ProbeReason::ToolAbsent);
+
+        let decision = classify(&ev, &cfg(), NOW);
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::EvidenceIncomplete]);
+
+        let fingerprint = ev.fingerprint.clone();
+        let consent = crate::policy::approval::UserConsent::new(
+            ev.resource.clone(),
+            fingerprint.clone(),
+            NOW,
+        );
+        let approval = crate::policy::approval::authorize(decision, fingerprint, Some(&consent));
+        assert!(approval.is_some());
+    }
+
+    /// `is_preauthorizable(ProtectedUnresolvedExecutableDependency) ==
+    /// false`.
+    #[test]
+    fn protected_unresolved_executable_dependency_cannot_be_preauthorized() {
+        assert!(!crate::autopilot::envelope::is_preauthorizable(
+            ReasonCode::ProtectedUnresolvedExecutableDependency
+        ));
+    }
+
     // ---- HORO-1824 §13 anti-vacuity + AC tests ----
 
     /// §13 item 6 ("Map Redirected to no veto -> the shared-target
