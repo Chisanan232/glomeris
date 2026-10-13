@@ -2214,6 +2214,12 @@ enum GlomerisVocabulary {
                 "A post-action re-check of this one dependency's own path "
                     + "failed for a reason that is not a confirmed absence."
             )
+        case "identity_unconfirmed":
+            return prose(
+                token, unresolvedKindAxis, "Confirmed, but identity unconfirmed",
+                "This reference resolved to a file inside the resource, but "
+                    + "that file's own identity could not be checked."
+            )
         default:
             return unrecognised(
                 token, unresolvedKindAxis, "Unrecognised unresolved reason",

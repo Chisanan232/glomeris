@@ -211,7 +211,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     private static let unresolvedKindTokens = [
         "non_inspectable", "not_on_path", "path_resolution_divergent", "source_unreadable",
         "symlink_loop_or_too_deep", "path_resolution_indeterminate", "malformed_schema",
-        "restat_failed",
+        "restat_failed", "identity_unconfirmed",
     ]
 
     /// The four developer-workspace axes that share a token (`unknown`)

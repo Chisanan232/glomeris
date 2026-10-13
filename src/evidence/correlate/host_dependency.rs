@@ -858,8 +858,20 @@ fn resolve_command(
                                 next_invocation: true,
                             });
                         } else {
-                            unresolved.push(UnresolvedRef::SourceUnreadable {
+                            // HORO-1868: this chain already resolved and
+                            // matched inside the resource — a CONFIRMED
+                            // reference whose identity merely couldn't be
+                            // stat'd, not a source-read failure. Using
+                            // `SourceUnreadable` here would lump it with
+                            // genuine source-read failures and let it
+                            // classify no more protected than a bare
+                            // unresolvable name, which is backwards (see
+                            // `UnresolvedRef::ReferenceIdentityUnconfirmed`'s
+                            // doc comment).
+                            unresolved.push(UnresolvedRef::ReferenceIdentityUnconfirmed {
                                 source: source.clone(),
+                                pointer: raw.pointer.clone(),
+                                resolved: final_path,
                             });
                         }
                     }
@@ -1280,9 +1292,19 @@ impl HostDependencyProbe for LiveHostDependencyProbe {
                                 // identity (dev/ino) couldn't be stat'd —
                                 // fail closed, same as `resolve_command`'s
                                 // handling of the same `exe_identity_of`
-                                // failure, never a silent skip.
-                                unresolved.push(UnresolvedRef::SourceUnreadable {
+                                // failure, never a silent skip. HORO-1868:
+                                // uses `ReferenceIdentityUnconfirmed`, not
+                                // `SourceUnreadable` — this chain already
+                                // resolved and matched inside the
+                                // resource, a CONFIRMED reference whose
+                                // identity merely couldn't be stat'd (see
+                                // that variant's doc comment for why
+                                // `SourceUnreadable` would be backwards
+                                // here).
+                                unresolved.push(UnresolvedRef::ReferenceIdentityUnconfirmed {
                                     source: SourceTag::PathEntry,
+                                    pointer: "PATH".to_string(),
+                                    resolved: final_path,
                                 });
                             }
                         }

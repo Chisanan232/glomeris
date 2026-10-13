@@ -1069,6 +1069,31 @@ pub enum UnresolvedRef {
         pointer: String,
         resolved: PathBuf,
     },
+    /// HORO-1868 (commit 2, a real gap found during this ticket's design
+    /// pass): a candidate's symlink chain resolved successfully AND
+    /// matched inside the resource (`ChainMatch::Yes` in
+    /// `resolve_command`/the PATH-entry equivalent), but the follow-up
+    /// `exe_identity_of` stat call on the final resolved path then
+    /// failed. Previously this collapsed into the pointer-less
+    /// [`UnresolvedRef::SourceUnreadable`], which is wrong: a reference
+    /// CONFIRMED inside the resource whose identity merely couldn't be
+    /// stat'd is a stronger finding than "the whole source failed to
+    /// read" — lumping it with genuine source-read failures let a bare
+    /// unresolvable name (`NotOnPath`, now `Protected` via
+    /// `is_examined_reference`) become MORE protected than a reference
+    /// already confirmed to resolve inside the resource, which is
+    /// backwards. This variant follows the [`Self::RestatFailed`]
+    /// precedent exactly (same three fields, same reasoning for why
+    /// `resolved` is needed to avoid masking a sibling dependency sharing
+    /// one `(source, pointer)` — see that variant's doc comment).
+    /// `is_examined_reference` is `true` for this variant, so it
+    /// classifies `Protected ProtectedUnresolvedExecutableDependency`,
+    /// consistent with a confirmed-inside-resource reference's risk.
+    ReferenceIdentityUnconfirmed {
+        source: SourceTag,
+        pointer: String,
+        resolved: PathBuf,
+    },
 }
 
 impl UnresolvedRef {
@@ -1081,7 +1106,8 @@ impl UnresolvedRef {
             | UnresolvedRef::SymlinkLoopOrTooDeep { source, .. }
             | UnresolvedRef::PathResolutionIndeterminate { source, .. }
             | UnresolvedRef::MalformedSchema { source, .. }
-            | UnresolvedRef::RestatFailed { source, .. } => source,
+            | UnresolvedRef::RestatFailed { source, .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { source, .. } => source,
         }
     }
 
@@ -1103,7 +1129,8 @@ impl UnresolvedRef {
             | UnresolvedRef::SymlinkLoopOrTooDeep { pointer, .. }
             | UnresolvedRef::PathResolutionIndeterminate { pointer, .. }
             | UnresolvedRef::MalformedSchema { pointer, .. }
-            | UnresolvedRef::RestatFailed { pointer, .. } => Some(pointer),
+            | UnresolvedRef::RestatFailed { pointer, .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { pointer, .. } => Some(pointer),
             UnresolvedRef::SourceUnreadable { .. } => None,
         }
     }
@@ -1128,7 +1155,8 @@ impl UnresolvedRef {
     /// failure actually concerns.
     pub fn resolved(&self) -> Option<&std::path::Path> {
         match self {
-            UnresolvedRef::RestatFailed { resolved, .. } => Some(resolved),
+            UnresolvedRef::RestatFailed { resolved, .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { resolved, .. } => Some(resolved),
             _ => None,
         }
     }
@@ -1171,7 +1199,8 @@ impl UnresolvedRef {
             | UnresolvedRef::SymlinkLoopOrTooDeep { .. }
             | UnresolvedRef::PathResolutionIndeterminate { .. }
             | UnresolvedRef::MalformedSchema { .. }
-            | UnresolvedRef::RestatFailed { .. } => true,
+            | UnresolvedRef::RestatFailed { .. }
+            | UnresolvedRef::ReferenceIdentityUnconfirmed { .. } => true,
             UnresolvedRef::SourceUnreadable { .. } => false,
         }
     }
