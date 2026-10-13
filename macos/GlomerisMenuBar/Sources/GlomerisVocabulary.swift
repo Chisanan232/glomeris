@@ -886,7 +886,7 @@ enum GlomerisVocabulary {
                          "A hook config, or the check for programs running from here, "
                              + "could not be read, so Glomeris will not assume it is safe.")
         case "protected_unresolved_executable_dependency":
-            return prose(token, reasonAxis, "A hook's target could not be confirmed",
+            return prose(token, reasonAxis, "Hook target could not be confirmed",
                          "A configured hook, daemon or LaunchAgent command could not be "
                              + "traced to a definite file, so it may run something inside "
                              + "here. This cannot be overridden. Pointing that command at "
@@ -2216,7 +2216,7 @@ enum GlomerisVocabulary {
             )
         case "identity_unconfirmed":
             return prose(
-                token, unresolvedKindAxis, "Confirmed, but identity unconfirmed",
+                token, unresolvedKindAxis, "Confirmed, identity unconfirmed",
                 "This reference resolved to a file inside the resource, but "
                     + "that file's own identity could not be checked."
             )
