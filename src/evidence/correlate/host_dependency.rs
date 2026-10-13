@@ -29,13 +29,6 @@
 //!
 //! # Deliberately out of scope for this ticket (see the HORO-1825 PR body)
 //!
-//! - **Per-configured-project `claude_project(<root>)` sources** (§4.3):
-//!   deferred — wiring the detector-discovered project-root list into
-//!   this collector would touch every `DefaultEvidenceCollector::default()`
-//!   call site, which is a larger blast radius than this ticket's scope.
-//!   Not silently dropped: every executable-bearing kind still gets the
-//!   home-scoped sources, and the gap is named in `sources_examined`
-//!   never implicitly claiming completeness it doesn't have.
 //! - **Codex `~/.codex/hooks.json`**: its schema could not be confirmed
 //!   from the installed Codex version available while writing this probe,
 //!   so a present file is reported `unresolved` (fail-closed), never
@@ -95,12 +88,27 @@ pub struct HostDependencyRoots {
     /// settings.json), when the platform defines one. `None` is a normal,
     /// absent-source outcome, not a probe failure.
     pub managed_settings: Option<PathBuf>,
+    /// Every configured project root (HORO-957's `--project-root`), used
+    /// to examine each root's own `.claude/settings.json` and
+    /// `.claude/settings.local.json` (HORO-1865 / ADR-0001 §4.3). Used
+    /// exactly as given — no tilde expansion or canonicalization — to
+    /// match what the cargo/node/etc. detectors already treat each root
+    /// as. There is no `Default` impl for this struct (by design, so
+    /// every construction site lists every field explicitly — see the
+    /// module header), so every caller, including every test, must
+    /// decide this list on purpose rather than inherit an empty one.
+    pub project_roots: Vec<PathBuf>,
 }
 
 impl HostDependencyRoots {
     /// Reads the real environment. Called exactly once, at a production
     /// entrypoint — never from inside a probe's per-call logic.
-    pub fn from_env() -> Option<Self> {
+    /// `project_roots` is the same configured-root list the detectors
+    /// already scan (HORO-957); passing a different or stale list here
+    /// would silently narrow which project-level settings files this
+    /// probe examines, so callers must pass the actual roots in scope at
+    /// the call site, not a re-derived or cached copy.
+    pub fn from_env(project_roots: Vec<PathBuf>) -> Option<Self> {
         let home = std::env::var_os("HOME").map(PathBuf::from)?;
         let path_dirs = std::env::var_os("PATH")
             .map(|p| std::env::split_paths(&p).collect())
@@ -111,6 +119,7 @@ impl HostDependencyRoots {
             plutil_bin: PathBuf::from("/usr/bin/plutil"),
             lsof_bin: PathBuf::from("lsof"),
             managed_settings: None,
+            project_roots,
         })
     }
 }
@@ -145,6 +154,24 @@ fn recognized_sources(roots: &HostDependencyRoots) -> Vec<ConfigSource> {
         sources.push(ConfigSource {
             tag: SourceTag::ClaudeManaged,
             path: managed.clone(),
+        });
+    }
+    // Every configured project root's own `.claude/settings.json` and
+    // `.claude/settings.local.json` (ADR-0001 §4.3, HORO-1865). The alias
+    // is an index, never the real path (`SourceTag::ClaudeProject`'s own
+    // doc comment; HORO-1826 requires distinct aliases per source so
+    // host-integrity before/after matching never collides two different
+    // files under one key). Checked against every resource below, not
+    // just a resource's own `source_project_root` — a hook in one root
+    // can reference a shared or cross-root target.
+    for (i, root) in roots.project_roots.iter().enumerate() {
+        sources.push(ConfigSource {
+            tag: SourceTag::ClaudeProject(format!("root-{i}")),
+            path: root.join(".claude").join("settings.json"),
+        });
+        sources.push(ConfigSource {
+            tag: SourceTag::ClaudeProject(format!("root-{i}-local")),
+            path: root.join(".claude").join("settings.local.json"),
         });
     }
     sources
@@ -1394,6 +1421,7 @@ mod tests {
             plutil_bin: PathBuf::from("/usr/bin/plutil"),
             lsof_bin: PathBuf::from("lsof"),
             managed_settings: None,
+            project_roots: Vec::new(),
         }
     }
 
@@ -2862,6 +2890,397 @@ mod tests {
         );
 
         fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    // ---- HORO-1865: project-level `.claude/settings.json` sources ----
+
+    fn roots_with_projects(home: &Path, project_roots: Vec<PathBuf>) -> HostDependencyRoots {
+        HostDependencyRoots {
+            home: home.to_path_buf(),
+            path_dirs: Vec::new(),
+            plutil_bin: PathBuf::from("/usr/bin/plutil"),
+            lsof_bin: PathBuf::from("lsof"),
+            managed_settings: None,
+            project_roots,
+        }
+    }
+
+    /// The exact HORO-1829 QA repro, at the unit level: a hook defined in
+    /// one configured root (`root-1`) pointing into a DIFFERENT
+    /// configured root's target (`root-0`) must still be caught — proving
+    /// every resource is checked against every configured root's
+    /// settings, not just the resource's own root.
+    #[test]
+    fn cross_root_hook_is_caught_against_every_configured_root() {
+        let home = unique_temp_dir("home-cross-root");
+        let root0 = unique_temp_dir("root0");
+        let root1 = unique_temp_dir("root1");
+        let target0 = root0.join("target");
+        let hook_bin = target0.join("debug").join("hook");
+        fs::create_dir_all(hook_bin.parent().unwrap()).unwrap();
+        fs::write(&hook_bin, b"#!/bin/sh\n").unwrap();
+
+        // The hook is configured in root-1's settings, not root-0's.
+        fs::create_dir_all(root1.join(".claude")).unwrap();
+        fs::write(
+            root1.join(".claude").join("settings.json"),
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"hooks":[{{"command":"{}"}}]}}]}}}}"#,
+                hook_bin.display()
+            ),
+        )
+        .unwrap();
+
+        let roots = roots_with_projects(&home, vec![root0.clone(), root1.clone()]);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&target0, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert_eq!(report.references_inside.len(), 1);
+        assert_eq!(
+            report.references_inside[0].source,
+            SourceTag::ClaudeProject("root-1".to_string()),
+            "a hook in root-1 referencing root-0's target must be attributed to root-1, \
+             proving every resource is checked against every configured root"
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&root1).ok();
+    }
+
+    /// A configured root with no `.claude` directory at all is a normal,
+    /// fully-examined negative — not silently dropped from
+    /// `sources_examined`.
+    #[test]
+    fn project_root_with_no_claude_directory_is_clean_and_examined() {
+        let home = unique_temp_dir("home-no-claude-dir");
+        let root0 = unique_temp_dir("root0-no-claude");
+        let resource = unique_temp_dir("target-no-claude");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(&root0).unwrap();
+
+        let roots = roots_with_projects(&home, vec![root0.clone()]);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(report.references_inside.is_empty());
+        assert!(report.unresolved.is_empty());
+        assert!(
+            report
+                .sources_examined
+                .contains(&SourceTag::ClaudeProject("root-0".to_string())),
+            "a project root with no .claude directory must still appear in \
+             sources_examined, got {:?}",
+            report.sources_examined
+        );
+        assert!(report
+            .sources_examined
+            .contains(&SourceTag::ClaudeProject("root-0-local".to_string())));
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// An unreadable project settings file (e.g. `chmod 000`) must fail
+    /// closed as `SourceUnreadable`, never read as "missing -> clean".
+    #[test]
+    fn unreadable_project_settings_file_is_source_unreadable() {
+        let home = unique_temp_dir("home-unreadable-project");
+        let root0 = unique_temp_dir("root0-unreadable");
+        let resource = unique_temp_dir("target-unreadable-project");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(root0.join(".claude")).unwrap();
+        let settings_path = root0.join(".claude").join("settings.json");
+        fs::write(&settings_path, "{}").unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let roots = roots_with_projects(&home, vec![root0.clone()]);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::SourceUnreadable {
+                    source: SourceTag::ClaudeProject(alias)
+                } if alias == "root-0"
+            )),
+            "expected SourceUnreadable(ClaudeProject(\"root-0\")), got {:?}",
+            report.unresolved
+        );
+
+        // Restore permissions so cleanup can actually remove the file.
+        fs::set_permissions(&settings_path, fs::Permissions::from_mode(0o644)).ok();
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// A malformed `hooks` structure in a project settings file is
+    /// recorded as `MalformedSchema`, never silently skipped.
+    #[test]
+    fn malformed_project_hooks_structure_is_malformed_schema() {
+        let home = unique_temp_dir("home-malformed-project");
+        let root0 = unique_temp_dir("root0-malformed");
+        let resource = unique_temp_dir("target-malformed-project");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(root0.join(".claude")).unwrap();
+        fs::write(
+            root0.join(".claude").join("settings.json"),
+            r#"{"hooks": "not-an-object"}"#,
+        )
+        .unwrap();
+
+        let roots = roots_with_projects(&home, vec![root0.clone()]);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::MalformedSchema {
+                    source: SourceTag::ClaudeProject(alias),
+                    pointer
+                } if alias == "root-0" && pointer == "hooks"
+            )),
+            "expected MalformedSchema(ClaudeProject(\"root-0\"), \"hooks\"), got {:?}",
+            report.unresolved
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// A `$CLAUDE_PROJECT_DIR/...`-style command is a shell-metacharacter
+    /// form (`$`) — fail-closed `NonInspectable`, the same convention
+    /// every other recognized source already follows for anything not
+    /// safely tokenizable (§4.3).
+    #[test]
+    fn claude_project_dir_style_command_is_non_inspectable() {
+        let home = unique_temp_dir("home-project-dir-var");
+        let root0 = unique_temp_dir("root0-project-dir-var");
+        let resource = unique_temp_dir("target-project-dir-var");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(root0.join(".claude")).unwrap();
+        fs::write(
+            root0.join(".claude").join("settings.json"),
+            r#"{"hooks":{"PostToolUse":[{"hooks":[{"command":"$CLAUDE_PROJECT_DIR/hook.sh"}]}]}}"#,
+        )
+        .unwrap();
+
+        let roots = roots_with_projects(&home, vec![root0.clone()]);
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        assert!(
+            report.unresolved.iter().any(|u| matches!(
+                u,
+                UnresolvedRef::NonInspectable {
+                    source: SourceTag::ClaudeProject(alias),
+                    ..
+                } if alias == "root-0"
+            )),
+            "expected NonInspectable(ClaudeProject(\"root-0\")), got {:?}",
+            report.unresolved
+        );
+        assert!(
+            report.references_inside.is_empty(),
+            "a non-inspectable command must never be silently treated as a clean negative"
+        );
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&resource).ok();
+    }
+
+    /// `root-0`, `root-0-local` and `root-1` must never collide: each
+    /// alias is distinct, which is what lets HORO-1826 host-integrity
+    /// matching key dependencies by their full `SourceTag` (including the
+    /// alias) without two different files ever sharing a key.
+    #[test]
+    fn project_source_aliases_are_unique_across_roots_and_files() {
+        let home = unique_temp_dir("home-alias-uniqueness");
+        let root0 = unique_temp_dir("root0-alias");
+        let root1 = unique_temp_dir("root1-alias");
+        fs::create_dir_all(&root0).unwrap();
+        fs::create_dir_all(&root1).unwrap();
+
+        let roots = roots_with_projects(&home, vec![root0.clone(), root1.clone()]);
+        let sources = recognized_sources(&roots);
+        let aliases: Vec<&String> = sources
+            .iter()
+            .filter_map(|s| match &s.tag {
+                SourceTag::ClaudeProject(alias) => Some(alias),
+                _ => None,
+            })
+            .collect();
+
+        let mut deduped = aliases.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            aliases.len(),
+            deduped.len(),
+            "expected unique ClaudeProject aliases, got {aliases:?}"
+        );
+        assert!(aliases.contains(&&"root-0".to_string()));
+        assert!(aliases.contains(&&"root-0-local".to_string()));
+        assert!(aliases.contains(&&"root-1".to_string()));
+        assert!(aliases.contains(&&"root-1-local".to_string()));
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
+        fs::remove_dir_all(&root1).ok();
+    }
+
+    /// Structural guard (the "variant defined but never wired" bug class
+    /// this ticket is about): an exhaustive match over every `SourceTag`
+    /// variant. If a future variant is added to the enum without this
+    /// match (and, by extension, without being wired into a real probe
+    /// call site), this test FAILS TO COMPILE, not just at runtime.
+    #[test]
+    fn every_recognized_source_variant_is_actually_produced_by_the_real_probe() {
+        // Exhaustive match, no wildcard arm: a future `SourceTag` variant
+        // fails THIS to compile, which is the structural half of the
+        // guard. The runtime half below then proves the variant is not
+        // merely matched here but actually wired into a real probe call
+        // site — exactly the "defined but never constructed" bug class
+        // HORO-1865 fixes (`ClaudeProject` sat in an exhaustive match
+        // just like this one for its entire time unconstructed, which is
+        // precisely why a hand-built-literal version of this guard would
+        // have passed throughout the whole bug and caught nothing).
+        fn index_of(tag: &SourceTag) -> usize {
+            match tag {
+                SourceTag::ClaudeUserSettings => 0,
+                SourceTag::ClaudeUserLocal => 1,
+                SourceTag::ClaudeManaged => 2,
+                SourceTag::ClaudeProject(_) => 3,
+                SourceTag::CodexHooks => 4,
+                SourceTag::CodexNotify => 5,
+                SourceTag::LaunchAgent(_) => 6,
+                SourceTag::PathEntry => 7,
+                SourceTag::RunningProcesses => 8,
+            }
+        }
+        const NAMES: [&str; 9] = [
+            "claude_user_settings",
+            "claude_user_local",
+            "claude_managed",
+            "claude_project",
+            "codex_hooks",
+            "codex_notify",
+            "launch_agent",
+            "path_entry",
+            "running_processes",
+        ];
+
+        let home = unique_temp_dir("exhaustive-home");
+        let root0 = unique_temp_dir("exhaustive-root0");
+        let resource = unique_temp_dir("exhaustive-target");
+        fs::create_dir_all(&resource).unwrap();
+        fs::create_dir_all(&root0).unwrap();
+
+        // LaunchAgent: at least one plist must be present to be examined
+        // at all.
+        fs::create_dir_all(home.join("Library").join("LaunchAgents")).unwrap();
+        fs::write(
+            home.join("Library")
+                .join("LaunchAgents")
+                .join("com.example.guard.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.guard</string>
+    <key>Program</key>
+    <string>/usr/bin/true</string>
+</dict>
+</plist>
+"#,
+        )
+        .unwrap();
+
+        // PathEntry: a PATH directory that is itself inside the resource
+        // (`references_inside`, never `sources_examined` — see the
+        // module's own probe loop, which never pushes `PathEntry` there).
+        let path_dir = resource.join("bin");
+        fs::create_dir_all(&path_dir).unwrap();
+
+        // ClaudeManaged: examined as soon as `managed_settings` is
+        // `Some`, whether or not the file actually exists on disk.
+        let managed = home.join("managed-settings.json");
+
+        let roots = HostDependencyRoots {
+            home: home.clone(),
+            path_dirs: vec![path_dir],
+            plutil_bin: PathBuf::from("/usr/bin/plutil"),
+            lsof_bin: PathBuf::from("lsof"),
+            managed_settings: Some(managed),
+            project_roots: vec![root0.clone()],
+        };
+        let probe = LiveHostDependencyProbe::new(roots);
+        let report = probe
+            .probe(&resource, Duration::from_secs(5))
+            .observed()
+            .cloned()
+            .expect("probe should observe");
+
+        let mut seen = [false; 9];
+        for tag in &report.sources_examined {
+            seen[index_of(tag)] = true;
+        }
+        for dep in &report.references_inside {
+            seen[index_of(&dep.source)] = true;
+        }
+        for u in &report.unresolved {
+            seen[index_of(u.source())] = true;
+        }
+
+        for (i, was_seen) in seen.iter().enumerate() {
+            assert!(
+                *was_seen,
+                "SourceTag variant '{}' was never produced anywhere by the real probe \
+                 against a fixture configured with every recognized source — sources_examined={:?}, \
+                 references_inside sources={:?}, unresolved sources={:?}",
+                NAMES[i],
+                report.sources_examined,
+                report
+                    .references_inside
+                    .iter()
+                    .map(|d| &d.source)
+                    .collect::<Vec<_>>(),
+                report.unresolved.iter().map(|u| u.source()).collect::<Vec<_>>(),
+            );
+        }
+
+        fs::remove_dir_all(&home).ok();
+        fs::remove_dir_all(&root0).ok();
         fs::remove_dir_all(&resource).ok();
     }
 }

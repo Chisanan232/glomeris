@@ -137,6 +137,62 @@ This file tracks the HORO-1822 post-incident sub-campaign, which is the dependen
 
 HORO-1073 itself says "Blocked by: everything — this is the last ticket in the Epic." Do not treat HORO-1829's completion as release-readiness; HORO-1073's human dogfood pass is the actual final gate, and items 1-3 above may need dedicated verification work this DAG never covered.
 
+## HORO-1865 — project-level `.claude/settings.json` hook source wired in (PR #170 opened, not yet merged)
+
+HORO-1829's QA pass found that ADR-0001 §4.3's closed recognized-source list
+names each configured root's own `.claude/settings.json`/`settings.local.json`,
+but `SourceTag::ClaudeProject` was never actually constructed anywhere — a
+Cargo target dir referenced only by a project-level hook got `AUTO_SAFE` and
+was deleted with zero consent. This is exactly the fail-open bug-class this
+campaign's review lessons (above) describe: a recognized source named in the
+design doc but never wired into the real probe call sites.
+
+Fix, following an `opus-architect` design pass that read the real code
+first: `HostDependencyRoots` gained a `project_roots: Vec<PathBuf>` field
+(no `Default` impl, by design — every construction site lists every field
+explicitly); `recognized_sources()` examines every configured root's own
+settings files under index-based aliases (`root-N`/`root-N-local`, never a
+real path, reusing the existing generic per-source loop unchanged);
+`DefaultEvidenceCollector::live(project_roots)` replaces `::default()`; all
+six `main.rs` production call sites now pass the real configured-root list
+in scope (the emergency-mode site passes `&[]` explicitly, documented as a
+residual since it takes no arguments and cannot reach a target without a
+root). Mutation-tested (M1: remove the project-sources push — RED, including
+the new structural guard test that runs the real probe against a fixture
+with every recognized source configured; M2: pass `&[]` at the two
+`detect`/`explain` discovery call sites in `main.rs` — RED; M3: pass `&[]`
+at the `free` recovery-loop site — RED, and with the mutation in place the
+loop actually executed and deleted the real fixture target dir, concretely
+proving the deletion risk; all GREEN once restored). The `execute` revalidation and `autopilot run` collector call
+sites were NOT separately mutation-tested in this pass — both route through
+the same single `live_evidence_collector` helper the two RED-confirmed sites
+use, so they share the fix mechanically, but that is not the same as direct
+evidence for those two sites. Correcting the original design note: both of
+these are actually deterministic (`autopilot run` re-correlates evidence via
+`collector.collect()` then `classify()`s it per candidate before executing —
+the same straightforward path as `detect`/`explain`, not a timing-dependent
+race), so a follow-up mutation test (M4/M5) for them is a cheap, direct
+addition, not something that needs a flaky subprocess race to force.
+
+The Swift app side needed no change — `ProjectRootsStore`/
+`GlomerisCliProjectRootScope` already scope every configured root to
+`detect`/`explain`/`llm-plan`/`execute`/`free`, and `claude_project` was
+already in `GlomerisVocabulary.swift`'s table — verified by reading the
+three files, not assumed from the design doc.
+
+Full validation (fmt, clippy -D warnings, full `cargo test` — 1890 passed,
+0 failed, isolated clean run — `cargo deny`, the read-only-probe shell
+guard, the vocabulary guard, `check-no-policy-label-branching.sh`) all
+green. Branch pushed, PR #170 opened
+(https://github.com/Chisanan232/glomeris/pull/170). **Not merged** —
+flagged for independent adversarial review per this campaign's standing
+practice (every merged ticket in this DAG found something real on
+review), with explicit reviewer attention requested on: every
+collector-construction site including any added since this design, alias
+uniqueness against
+HORO-1826 host-integrity matching, and that a missing/unreadable/malformed
+project settings file can never come out "clean".
+
 ## Status line
 
 > HORO-1822 through HORO-1629 — the entire dependency DAG — complete, merged,
