@@ -2250,6 +2250,7 @@ fn explain_evidence(kind: ResourceKind, path: &str) -> Evidence {
         // `policy::engine::tests::complete_evidence`: every fixture below
         // overrides this explicitly where the scenario needs to.
         executable_dependency: ProbeOutcome::Observed(ExecutableDependencyReport::empty()),
+        managed_ownership: None,
         cargo_target_scope: if kind == ResourceKind::CargoTargetDir {
             Some(ProbeOutcome::Observed(CargoTargetScope {
                 resolved_target: PathBuf::from(path),

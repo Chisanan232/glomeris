@@ -3,12 +3,13 @@ glomeris daemon — Install, remove, inspect or run the background monitor.
 usage: glomeris daemon <install [--force]|uninstall|status [--json]|run>
 
 Safety depends on the subcommand; each is labelled below. The strongest of
-them: Writes only Glomeris's own state — never your files.
+them: Can delete data — every deletion is policy-gated.
 
 Manages the launch agent that watches disk pressure and notifies you. The
-monitor observes and notifies; it does not delete anything on its own, so
-installing it cannot cost you data. `daemon run` is the foreground entry point
-launchd itself calls — you rarely need it by hand.
+monitor observes and notifies. Explicit per-class managed-resource policy can
+authorize bounded source-free artifact reclamation; absent policy deletes
+nothing. `daemon run` is the foreground entry point launchd itself calls —
+you rarely need it by hand.
 
 Subcommands
   install [--force]
@@ -22,7 +23,7 @@ Subcommands
       Read-only — changes nothing.
       Whether the agent is installed, loaded and recently alive.
   run
-      Writes only Glomeris's own state — never your files.
+      Can delete data — every deletion is policy-gated.
       Run the monitor in the foreground, recording pressure history and a
       heartbeat under Library/Application Support/Glomeris. Normally
       launchd's job.

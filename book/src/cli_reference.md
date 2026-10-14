@@ -1668,3 +1668,8 @@ consequences.
 See `glomeris llm-plan`'s and `glomeris llm-check`'s own sections above for
 those subcommands' exit codes in full detail — `llm-check`'s `1`/`2` split in
 particular carries a meaning this list cannot: whether a report exists.
+
+## resource
+
+`glomeris resource` manages the [managed-resource lifecycle](managed_resources.md).
+Acquisition, source-free reconstruction and per-class inactivity gates remain mandatory.

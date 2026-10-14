@@ -965,6 +965,7 @@ mod select_candidate_tests {
             // HORO-1824: same "clean default" rationale as
             // `executable_dependency` above — only CargoTargetDir
             // carries the concept at all.
+            managed_ownership: None,
             cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
                 ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
                     resolved_target: PathBuf::from(path),
@@ -1737,6 +1738,18 @@ pub struct RecoveryRunRequest<'a> {
 /// bypasses, and the ticket's loop steps 1-12 for the per-iteration shape this
 /// implements.
 pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
+    run_inner(request, None)
+}
+pub fn run_owned(
+    request: RecoveryRunRequest<'_>,
+    authority: &crate::executor::lock::ExecutionLockGuard,
+) -> RecoveryReport {
+    run_inner(request, Some(authority))
+}
+fn run_inner(
+    request: RecoveryRunRequest<'_>,
+    authority: Option<&crate::executor::lock::ExecutionLockGuard>,
+) -> RecoveryReport {
     let RecoveryRunRequest {
         config,
         fs_stat,
@@ -2095,14 +2108,25 @@ pub fn run(request: RecoveryRunRequest<'_>) -> RecoveryReport {
             policy_label,
             estimated_bytes,
         });
-        let report = execute(
-            action,
-            &approval,
-            collector,
-            policy_cfg,
-            now,
-            Some(&crate::executor::MacosVolumeDelta),
-        );
+        let report = match authority {
+            Some(lock) => crate::executor::execute_owned(
+                action,
+                &approval,
+                collector,
+                policy_cfg,
+                now,
+                Some(&crate::executor::MacosVolumeDelta),
+                lock,
+            ),
+            None => execute(
+                action,
+                &approval,
+                collector,
+                policy_cfg,
+                now,
+                Some(&crate::executor::MacosVolumeDelta),
+            ),
+        };
 
         // HORO-1057: best-effort audit-log append, AFTER the real outcome
         // above is already known. `append_recovery_audit_record` never
@@ -2369,6 +2393,7 @@ mod run_tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            managed_ownership: None,
             cargo_target_scope: None,
             collected_at: SystemTime::now(),
             sources: Vec::new(),

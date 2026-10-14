@@ -170,6 +170,7 @@ fn candidate_for(target: &Path, in_use: bool) -> (Evidence, PolicyDecision) {
         tool_liveness: ProbeOutcome::Observed(false),
         docker_lifecycle: None,
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        managed_ownership: None,
         cargo_target_scope: None,
         collected_at: collected_at(),
         sources: Vec::new(),

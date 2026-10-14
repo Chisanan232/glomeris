@@ -213,6 +213,13 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         return decision(PolicyClass::Ask, active_use_reasons);
     }
 
+    if ev.resource.kind == ResourceKind::ManagedGenerated {
+        match ev.managed_ownership.as_ref().and_then(|p| p.observed()) {
+            Some(evidence) if evidence.reclaimable => {}
+            _ => return decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]),
+        }
+    }
+
     // 7. Recoverability: a detector that has positively established that
     // deleting this resource is permanent — no tool can refetch it, no
     // rebuild can recreate it — has said the one thing that must reach a
@@ -313,6 +320,7 @@ mod tests {
             // result for CargoTargetDir, so every existing fixture built
             // on it stays Complete unless a test explicitly overrides
             // this field to exercise Redirected/Orphan/Unavailable.
+            managed_ownership: None,
             cargo_target_scope: if kind == ResourceKind::CargoTargetDir {
                 Some(ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
                     resolved_target: PathBuf::from("/tmp/x"),

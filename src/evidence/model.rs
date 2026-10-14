@@ -22,6 +22,7 @@ use crate::detectors::DetectorId;
 /// through to some default treated as safe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceKind {
+    ManagedGenerated,
     XcodeDerivedData,
     HomebrewCache,
     CargoTargetDir,
@@ -112,7 +113,7 @@ impl ResourceKind {
             ResourceKind::SwiftPackageManagerCache | ResourceKind::SwiftPackageManagerBuildDir => {
                 OwningTool::SwiftPm
             }
-            ResourceKind::Unknown => OwningTool::None,
+            ResourceKind::ManagedGenerated | ResourceKind::Unknown => OwningTool::None,
         }
     }
 
@@ -120,7 +121,9 @@ impl ResourceKind {
     /// not of any single observed instance.
     pub fn regenerability(&self) -> Regenerability {
         match self {
-            ResourceKind::XcodeDerivedData => Regenerability::RegenerableByRebuild,
+            ResourceKind::ManagedGenerated | ResourceKind::XcodeDerivedData => {
+                Regenerability::RegenerableByRebuild
+            }
             ResourceKind::HomebrewCache => Regenerability::RegenerableByTool,
             ResourceKind::CargoTargetDir => Regenerability::RegenerableByRebuild,
             ResourceKind::CargoRegistryCache => Regenerability::RegenerableByTool,
@@ -238,9 +241,9 @@ impl ResourceKind {
             | ResourceKind::DockerContainer
             | ResourceKind::DockerVolume => DOCKER_OBJECT,
             ResourceKind::CargoTargetDir => CARGO_TARGET_DIR_FIELDS,
-            ResourceKind::NodeModules | ResourceKind::SwiftPackageManagerBuildDir => {
-                WITHOUT_TOOL_LIVENESS_EXEC_DEP
-            }
+            ResourceKind::ManagedGenerated
+            | ResourceKind::NodeModules
+            | ResourceKind::SwiftPackageManagerBuildDir => WITHOUT_TOOL_LIVENESS_EXEC_DEP,
             ResourceKind::HomebrewCache
             | ResourceKind::CargoRegistryCache
             | ResourceKind::NodePackageManagerCache
@@ -263,7 +266,8 @@ impl ResourceKind {
     pub fn is_executable_bearing(&self) -> bool {
         matches!(
             self,
-            ResourceKind::CargoTargetDir
+            ResourceKind::ManagedGenerated
+                | ResourceKind::CargoTargetDir
                 | ResourceKind::NodeModules
                 | ResourceKind::SwiftPackageManagerBuildDir
                 | ResourceKind::XcodeDerivedData
@@ -277,6 +281,7 @@ impl ResourceKind {
     /// [`ResourceKind`] values, not a full [`ResourceId`]).
     pub fn tag(&self) -> &'static str {
         match self {
+            ResourceKind::ManagedGenerated => "managed_generated",
             ResourceKind::XcodeDerivedData => "xcode_derived_data",
             ResourceKind::HomebrewCache => "homebrew_cache",
             ResourceKind::CargoTargetDir => "cargo_target_dir",
@@ -305,6 +310,7 @@ impl ResourceKind {
     /// [`from_tag`](Self::from_tag)'s own match arms and this list are
     /// checked against each other.
     pub const ALL: &'static [ResourceKind] = &[
+        ResourceKind::ManagedGenerated,
         ResourceKind::XcodeDerivedData,
         ResourceKind::HomebrewCache,
         ResourceKind::CargoTargetDir,
@@ -1517,6 +1523,7 @@ pub struct Evidence {
     /// "unknown". `Some(Unavailable(_))` is the fail-closed shape for a
     /// `cargo metadata` resolver that is absent, timed out, or failed —
     /// see [`crate::detectors::cargo::resolve_cargo_target_scope`].
+    pub managed_ownership: Option<ProbeOutcome<crate::ownership::OwnershipEvidence>>,
     pub cargo_target_scope: Option<ProbeOutcome<CargoTargetScope>>,
     pub collected_at: SystemTime,
     /// Bounded provenance notes (capped at `MAX_SOURCES` entries).
@@ -1622,25 +1629,26 @@ mod tests {
     fn all_lists_every_variant_exactly_once_in_declaration_order() {
         for (index, kind) in ResourceKind::ALL.iter().enumerate() {
             let expected_index = match kind {
-                ResourceKind::XcodeDerivedData => 0,
-                ResourceKind::HomebrewCache => 1,
-                ResourceKind::CargoTargetDir => 2,
-                ResourceKind::CargoRegistryCache => 3,
-                ResourceKind::NodeModules => 4,
-                ResourceKind::NodePackageManagerCache => 5,
-                ResourceKind::DockerBuildCache => 6,
-                ResourceKind::DockerImage => 7,
-                ResourceKind::DockerContainer => 8,
-                ResourceKind::DockerVolume => 9,
-                ResourceKind::PipCache => 10,
-                ResourceKind::UvCache => 11,
-                ResourceKind::GoBuildCache => 12,
-                ResourceKind::GoModuleCache => 13,
-                ResourceKind::GradleCache => 14,
-                ResourceKind::MavenLocalRepository => 15,
-                ResourceKind::SwiftPackageManagerCache => 16,
-                ResourceKind::SwiftPackageManagerBuildDir => 17,
-                ResourceKind::Unknown => 18,
+                ResourceKind::ManagedGenerated => 0,
+                ResourceKind::XcodeDerivedData => 1,
+                ResourceKind::HomebrewCache => 2,
+                ResourceKind::CargoTargetDir => 3,
+                ResourceKind::CargoRegistryCache => 4,
+                ResourceKind::NodeModules => 5,
+                ResourceKind::NodePackageManagerCache => 6,
+                ResourceKind::DockerBuildCache => 7,
+                ResourceKind::DockerImage => 8,
+                ResourceKind::DockerContainer => 9,
+                ResourceKind::DockerVolume => 10,
+                ResourceKind::PipCache => 11,
+                ResourceKind::UvCache => 12,
+                ResourceKind::GoBuildCache => 13,
+                ResourceKind::GoModuleCache => 14,
+                ResourceKind::GradleCache => 15,
+                ResourceKind::MavenLocalRepository => 16,
+                ResourceKind::SwiftPackageManagerCache => 17,
+                ResourceKind::SwiftPackageManagerBuildDir => 18,
+                ResourceKind::Unknown => 19,
             };
             assert_eq!(
                 index,
@@ -1651,7 +1659,7 @@ mod tests {
         }
         assert_eq!(
             ResourceKind::ALL.len(),
-            19,
+            20,
             "ResourceKind::ALL has gained, lost, or duplicated an entry"
         );
     }
@@ -1715,6 +1723,7 @@ mod tests {
             tool_liveness: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             docker_lifecycle: None,
             executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            managed_ownership: None,
             cargo_target_scope: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),

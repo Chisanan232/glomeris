@@ -159,6 +159,7 @@ fn cleanest_evidence(kind: ResourceKind) -> Evidence {
         // HORO-1824: same "clean default" shape as `executable_dependency`
         // above — only CargoTargetDir carries the concept at all, and a
         // Local scope is its cleanest honest answer.
+        managed_ownership: None,
         cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
             ProbeOutcome::Observed(glomeris::evidence::CargoTargetScope {
                 resolved_target: unprotected_path(kind),
@@ -184,6 +185,7 @@ fn cleanest_evidence(kind: ResourceKind) -> Evidence {
 /// while proving the classifier never read its regenerability.
 fn expected_cleanest_class(kind: ResourceKind) -> (PolicyClass, ReasonCode) {
     match kind {
+        ResourceKind::ManagedGenerated => (PolicyClass::Ask, ReasonCode::EvidenceIncomplete),
         // Fail-closed sink. Refused before any evidence is consulted.
         ResourceKind::Unknown => (
             PolicyClass::Protected,

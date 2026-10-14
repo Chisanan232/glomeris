@@ -385,6 +385,18 @@ pub fn order_candidates(
 
 /// Runs Autopilot once, bounded by the envelope.
 pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
+    run_autopilot_inner(request, None)
+}
+pub fn run_autopilot_owned(
+    request: AutopilotRunRequest<'_>,
+    authority: &crate::executor::lock::ExecutionLockGuard,
+) -> AutopilotReport {
+    run_autopilot_inner(request, Some(authority))
+}
+fn run_autopilot_inner(
+    request: AutopilotRunRequest<'_>,
+    authority: Option<&crate::executor::lock::ExecutionLockGuard>,
+) -> AutopilotReport {
     let AutopilotRunRequest {
         envelope,
         candidates,
@@ -577,7 +589,12 @@ pub fn run_autopilot(request: AutopilotRunRequest<'_>) -> AutopilotReport {
         // flagged in that ticket's PR rather than silently assumed done.
         // `None` reports `Unavailable(NotAttempted)`, never a fabricated
         // measurement.
-        let exec = execute(action, &approval, collector, policy, now, None);
+        let exec = match authority {
+            Some(lock) => crate::executor::execute_owned(
+                action, &approval, collector, policy, now, None, lock,
+            ),
+            None => execute(action, &approval, collector, policy, now, None),
+        };
         let actual = exec.actual_reclaimed_bytes.observed().copied();
         let outcome = match exec.outcome {
             ExecutionOutcome::Succeeded => {

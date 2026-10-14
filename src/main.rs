@@ -42,6 +42,16 @@ fn main() {
         Some("--version") | Some("-V") => {
             println!("{}", version_line());
         }
+        Some("resource") => {
+            if let Err(e) = glomeris::ownership::cli(&args[1..]) {
+                eprintln!("glomeris resource: {e}");
+                std::process::exit(if e.kind() == std::io::ErrorKind::WouldBlock {
+                    75
+                } else {
+                    2
+                });
+            }
+        }
         Some("daemon") => run_daemon_command(&args[1..]),
         Some("actions") => run_actions_command(&args[1..]),
         Some("scan") => {
@@ -1435,7 +1445,7 @@ fn run_execute_command(args: &[String]) {
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
 
-    let resolution = glomeris::cli::resolve_and_execute(
+    let resolution = glomeris::cli::resolve_and_execute_owned(
         &candidates,
         &actions,
         resource_id,
@@ -1445,6 +1455,7 @@ fn run_execute_command(args: &[String]) {
         &cfg,
         now,
         &actions_jsonl_path(),
+        &_execution_lock,
     );
 
     render_execute_resolution(resolution, json);
@@ -2316,7 +2327,8 @@ fn autopilot_run(args: &[String]) {
     let collector = live_evidence_collector(&project_roots);
     let policy = PolicyConfig::default();
 
-    let report = run_autopilot(AutopilotRunRequest {
+    let audit_log_path = actions_jsonl_path();
+    let request = AutopilotRunRequest {
         envelope: &envelope,
         candidates,
         model_order: &model_order,
@@ -2326,9 +2338,13 @@ fn autopilot_run(args: &[String]) {
         observed_pressure,
         now: SystemTime::now(),
         started_at: Instant::now(),
-        audit_log_path: &actions_jsonl_path(),
+        audit_log_path: &audit_log_path,
         dry_run,
-    });
+    };
+    let report = match _execution_lock.as_ref() {
+        Some(lock) => glomeris::autopilot::run::run_autopilot_owned(request, lock),
+        None => run_autopilot(request),
+    };
 
     print!("{report}");
 
@@ -3422,6 +3438,9 @@ fn daemon_run() {
             }
 
             episode_step(state_path, &settings, &outcome);
+            if sample_tick.is_multiple_of(15) {
+                glomeris::ownership::monitor_sweep();
+            }
 
             sample_tick += 1;
             if settings.pressure_history_sampling_enabled()
@@ -3646,8 +3665,8 @@ fn free_run(
     use glomeris::cli::recovery::NdjsonProgressObserver;
     use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
     use glomeris::executor::recovery_loop::{
-        run as run_recovery_loop, NeverStops, RecoveryConfig, RecoveryObserver, RecoveryRunRequest,
-        SilentObserver, StopFile, StopSignal, SystemWallClock,
+        NeverStops, RecoveryConfig, RecoveryObserver, RecoveryRunRequest, SilentObserver, StopFile,
+        StopSignal, SystemWallClock,
     };
     use glomeris::monitor::{FsStat, SystemClock, ThresholdConfig};
     use glomeris::platform::macos::MacosFsStat;
@@ -3830,7 +3849,7 @@ fn free_run(
     };
 
     let audit_log_path = actions_jsonl_path();
-    let report = run_recovery_loop(RecoveryRunRequest {
+    let request = RecoveryRunRequest {
         config: &config,
         fs_stat: &fs_stat,
         collector: &collector,
@@ -3854,7 +3873,8 @@ fn free_run(
                 observed_pressure: observed_pressure.flatten(),
             }
         }),
-    });
+    };
+    let report = glomeris::executor::recovery_loop::run_owned(request, &_execution_lock);
 
     if json {
         // `total_bytes` is re-read rather than remembered from the

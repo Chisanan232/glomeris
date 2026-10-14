@@ -2248,6 +2248,58 @@ pub fn resolve_and_execute(
     now: SystemTime,
     audit_log_path: &Path,
 ) -> ExecuteResolution {
+    resolve_and_execute_inner(
+        candidates,
+        actions,
+        resource_id,
+        action_id,
+        observed_fingerprint_from_token,
+        collector,
+        cfg,
+        now,
+        audit_log_path,
+        None,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_and_execute_owned(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    resource_id: &str,
+    action_id: &str,
+    observed_fingerprint_from_token: Option<ResourceFingerprint>,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+    audit_log_path: &Path,
+    authority: &crate::executor::lock::ExecutionLockGuard,
+) -> ExecuteResolution {
+    resolve_and_execute_inner(
+        candidates,
+        actions,
+        resource_id,
+        action_id,
+        observed_fingerprint_from_token,
+        collector,
+        cfg,
+        now,
+        audit_log_path,
+        Some(authority),
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn resolve_and_execute_inner(
+    candidates: &[(Evidence, PolicyDecision)],
+    actions: &ActionRegistry,
+    resource_id: &str,
+    action_id: &str,
+    observed_fingerprint_from_token: Option<ResourceFingerprint>,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+    audit_log_path: &Path,
+    authority: Option<&crate::executor::lock::ExecutionLockGuard>,
+) -> ExecuteResolution {
     let Some((ev, decision)) = find_candidate(resource_id, candidates) else {
         return ExecuteResolution::ResourceNotFound;
     };
@@ -2268,14 +2320,25 @@ pub fn resolve_and_execute(
 
     match authorize(decision.clone(), ev.fingerprint.clone(), consent.as_ref()) {
         Some(approval) => {
-            let report = execute(
-                action,
-                &approval,
-                collector,
-                cfg,
-                now,
-                Some(&crate::executor::MacosVolumeDelta),
-            );
+            let report = match authority {
+                Some(lock) => crate::executor::execute_owned(
+                    action,
+                    &approval,
+                    collector,
+                    cfg,
+                    now,
+                    Some(&crate::executor::MacosVolumeDelta),
+                    lock,
+                ),
+                None => execute(
+                    action,
+                    &approval,
+                    collector,
+                    cfg,
+                    now,
+                    Some(&crate::executor::MacosVolumeDelta),
+                ),
+            };
             // HORO-1057: best-effort audit-log append, AFTER the real
             // outcome is already known. `record_audit`'s `Result` is
             // never inspected here — see that function's doc comment for
@@ -2492,6 +2555,7 @@ mod tests {
             // HORO-1824: same "clean default" rationale as
             // `executable_dependency` above — only CargoTargetDir
             // carries the concept at all.
+            managed_ownership: None,
             cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
                 ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
                     resolved_target: PathBuf::from(path),
@@ -4531,6 +4595,7 @@ mod execute_tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            managed_ownership: None,
             cargo_target_scope: None,
             collected_at: now,
             sources: Vec::new(),
