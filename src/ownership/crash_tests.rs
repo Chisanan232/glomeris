@@ -53,15 +53,18 @@ fn send(stream: &mut UnixStream, value: &Value) {
     stream.flush().expect("flush control message");
 }
 
-fn receive(stream: &mut BufReader<UnixStream>) -> Value {
+fn receive(stream: &mut BufReader<UnixStream>, boundary: &str) -> Value {
     let deadline = Instant::now() + WAIT;
     let mut line = Vec::new();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "control message deadline exceeded");
+        assert!(
+            !remaining.is_zero(),
+            "control message deadline exceeded at {boundary}"
+        );
         stream.get_ref().set_read_timeout(Some(remaining)).unwrap();
         match stream.read_until(b'\n', &mut line) {
-            Ok(0) => panic!("child closed control channel before reporting the required boundary"),
+            Ok(0) => panic!("control channel closed before reporting {boundary}"),
             Ok(_) if line.last() == Some(&b'\n') => {
                 return serde_json::from_slice(&line).expect("decode control message");
             }
@@ -78,7 +81,7 @@ fn receive(stream: &mut BufReader<UnixStream>) -> Value {
                         .min(deadline.saturating_duration_since(Instant::now())),
                 );
             }
-            Err(e) => panic!("read control message: {e}"),
+            Err(e) => panic!("read control message at {boundary}: {e}"),
         }
     }
 }
@@ -154,7 +157,16 @@ impl Fixture {
     }
     fn child(&self, request: Value) -> (OwnedChild, BufReader<UnixStream>) {
         let mut command = Command::new(std::env::current_exe().unwrap());
+        // Other library tests mutate process-wide HOME. Resolve the installed
+        // toolchain from the build environment, never that racing runtime state.
+        let rustup_home = option_env!("RUSTUP_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("HOME")).join(".rustup"));
         command
+            .env_clear()
+            .env("PATH", env!("PATH"))
+            .env("RUSTUP_HOME", rustup_home)
+            .env("RUSTUP_AUTO_INSTALL", "0")
             .args(["--exact", DRIVER, "--nocapture", "--test-threads=1"])
             .env("HOME", &self.home)
             .env(CONTROL_SOCKET, self.home.join("control.sock"))
@@ -163,27 +175,14 @@ impl Fixture {
             .current_dir(&self.home)
             .stdin(Stdio::null())
             .stdout(Stdio::piped());
+        if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
+            command.env("RUSTUP_TOOLCHAIN", toolchain);
+        }
         if request["op"] == "interrupt" {
             let point: Checkpoint = serde_json::from_value(request["point"].clone()).unwrap();
             command.env(CRASH_PHASE, point.phase());
         } else {
             command.env_remove(CRASH_PHASE);
-        }
-        for name in [
-            "GIT_DIR",
-            "GIT_WORK_TREE",
-            "GIT_INDEX_FILE",
-            "GIT_OBJECT_DIRECTORY",
-            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-            "GIT_CONFIG_COUNT",
-        ] {
-            command.env_remove(name);
-        }
-        // Reuse the installed toolchain read-only under the isolated child HOME.
-        if std::env::var_os("RUSTUP_HOME").is_none() {
-            if let Some(home) = std::env::var_os("HOME") {
-                command.env("RUSTUP_HOME", PathBuf::from(home).join(".rustup"));
-            }
         }
         let mut process = command.spawn().unwrap();
         let stdout = process.stdout.take().unwrap();
@@ -297,7 +296,7 @@ fn child_process_driver() {
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.set_write_timeout(Some(WAIT)).unwrap();
     let mut reader = BufReader::new(stream);
-    let request = receive(&mut reader);
+    let request = receive(&mut reader, "child request");
     let store = Store::current().unwrap();
     match request["op"].as_str().unwrap() {
         "interrupt" => {
@@ -352,6 +351,19 @@ fn child_process_driver() {
                 &json!({"event":"recovered", "inspections":inspections, "reconciled":reconciled, "first":first, "second":second}),
             );
         }
+        "poison_parent_environment" => {
+            // This exact helper runs alone in its own process. No sibling unit
+            // test can observe these changes, and no production hook is used.
+            let missing = store.root.join("missing-toolchain-home");
+            unsafe {
+                for key in ["HOME", "RUSTUP_HOME", "CARGO_HOME", "PATH"] {
+                    std::env::set_var(key, &missing);
+                }
+                std::env::set_var("RUSTUP_TOOLCHAIN", "missing-crash-test-toolchain");
+            }
+            interrupted_retirement(Checkpoint::IntentDurable, RecoveryCase::RevokedAuthority);
+            send(reader.get_mut(), &json!({"event":"environment_isolated"}));
+        }
         other => panic!("unknown child request: {other}"),
     }
 }
@@ -359,7 +371,7 @@ fn child_process_driver() {
 fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
     let fixture = Fixture::new();
     let (mut child, mut control) = fixture.child(json!({"op":"interrupt", "point":point}));
-    let prepared = receive(&mut control);
+    let prepared = receive(&mut control, "prepared producer");
     assert_eq!(prepared["event"], "prepared", "{prepared}");
     let id = prepared["id"].as_str().unwrap();
     child.expect_checkpoint(point);
@@ -432,7 +444,7 @@ fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
     }
     let (mut recovery, mut control) =
         fixture.child(json!({"op":"recover", "id":id, "point":point, "scenario":scenario}));
-    let result = receive(&mut control);
+    let result = receive(&mut control, "reconciled and swept");
     assert_eq!(result["event"], "recovered", "{result}");
     assert!(recovery.wait().success());
     let after = store.read(id).unwrap();
@@ -557,4 +569,15 @@ fn revoked_authority_preserves_artifact_after_intent_reconciliation() {
 #[test]
 fn changed_contents_keep_interrupted_intent_protected() {
     interrupted_retirement(Checkpoint::IntentDurable, RecoveryCase::ChangedContents);
+}
+
+#[test]
+fn crash_fixture_ignores_parent_home_and_toolchain_environment() {
+    let fixture = Fixture::new();
+    let (mut child, mut control) = fixture.child(json!({"op":"poison_parent_environment"}));
+    assert_eq!(
+        receive(&mut control, "poisoned environment scenario")["event"],
+        "environment_isolated"
+    );
+    assert!(child.wait().success());
 }
