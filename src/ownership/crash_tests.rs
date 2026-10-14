@@ -19,6 +19,14 @@ enum Checkpoint {
     DeletedBeforeOutcome,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RecoveryCase {
+    Unchanged,
+    RevokedAuthority,
+    ChangedContents,
+}
+
 impl Checkpoint {
     fn phase(self) -> &'static str {
         match self {
@@ -308,19 +316,47 @@ fn child_process_driver() {
             panic!("real sweep never reached {point:?}");
         }
         "recover" => {
+            let id = request["id"].as_str().unwrap();
+            let point: Checkpoint = serde_json::from_value(request["point"].clone()).unwrap();
+            let scenario: RecoveryCase =
+                serde_json::from_value(request["scenario"].clone()).unwrap();
+            if scenario == RecoveryCase::RevokedAuthority {
+                let mut envelope = crate::autopilot::load_envelope().unwrap();
+                envelope.revoke();
+                crate::autopilot::save_envelope(&envelope).unwrap();
+            }
+            let before = store.read(id).unwrap();
+            let artifact = store.path(&before).join("artifact.o");
+            let bytes = match point {
+                Checkpoint::IntentDurable => Some(fs::read(&artifact).unwrap()),
+                Checkpoint::DeletedBeforeOutcome => {
+                    assert!(verified_absent(&store.path(&before)).unwrap());
+                    None
+                }
+            };
             let inspections = store.reconcile().unwrap();
+            let reconciled = store.read(id).unwrap();
+            if let Some(bytes) = bytes {
+                assert_eq!(
+                    fs::read(&artifact).unwrap(),
+                    bytes,
+                    "reconcile must preserve the whole artifact before any retry"
+                );
+            } else {
+                assert!(verified_absent(&store.path(&reconciled)).unwrap());
+            }
             let first = sweep(&store).unwrap();
             let second = sweep(&store).unwrap();
             send(
                 reader.get_mut(),
-                &json!({"event":"recovered", "inspections":inspections, "first":first, "second":second}),
+                &json!({"event":"recovered", "inspections":inspections, "reconciled":reconciled, "first":first, "second":second}),
             );
         }
         other => panic!("unknown child request: {other}"),
     }
 }
 
-fn interrupted_retirement(point: Checkpoint) {
+fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
     let fixture = Fixture::new();
     let (mut child, mut control) = fixture.child(json!({"op":"interrupt", "point":point}));
     let prepared = receive(&mut control);
@@ -355,7 +391,7 @@ fn interrupted_retirement(point: Checkpoint) {
     let retained_source = fs::read(&input).unwrap();
     assert!(!retained_source.is_empty());
     let artifact = store.path(&before).join("artifact.o");
-    let expected_artifact = match point {
+    let mut expected_artifact = match point {
         Checkpoint::IntentDurable => {
             let bytes = fs::read(&artifact).expect("deletion must not yet have happened");
             assert!(bytes.len() >= 1048576);
@@ -373,7 +409,29 @@ fn interrupted_retirement(point: Checkpoint) {
     drop(control);
     let persisted = store.read(id).unwrap();
     assert!(persisted.retirement_started && !persisted.reclaimed);
-    let (mut recovery, mut control) = fixture.child(json!({"op":"recover"}));
+    let original_record = serde_json::to_value(&persisted).unwrap();
+    let history = original_record["retirement_history"]
+        .as_array()
+        .expect("the actual interrupted attempt must retain its history");
+    assert_eq!(history.len(), 1);
+    assert!(valid_id(history[0]["attempt_id"].as_str().unwrap()));
+    assert_eq!(history[0]["generation"], original_record["generation"]);
+    assert_eq!(history[0]["dev"], original_record["dev"]);
+    assert_eq!(history[0]["ino"], original_record["ino"]);
+    assert!(history[0]["intent_at"].as_u64().unwrap() > 0);
+    assert!(history[0]["retry_queued_at"].is_null());
+    assert!(history[0]["completed_at"].is_null());
+    if scenario == RecoveryCase::ChangedContents {
+        assert_eq!(point, Checkpoint::IntentDurable);
+        let changed = expected_artifact.as_mut().unwrap();
+        let extra = b"unique state written after interrupted retirement";
+        let mut file = OpenOptions::new().append(true).open(&artifact).unwrap();
+        file.write_all(extra).unwrap();
+        file.sync_all().unwrap();
+        changed.extend_from_slice(extra);
+    }
+    let (mut recovery, mut control) =
+        fixture.child(json!({"op":"recover", "id":id, "point":point, "scenario":scenario}));
     let result = receive(&mut control);
     assert_eq!(result["event"], "recovered", "{result}");
     assert!(recovery.wait().success());
@@ -384,24 +442,67 @@ fn interrupted_retirement(point: Checkpoint) {
         retained_source,
         "recovery source survives both crash windows"
     );
-    for pass in ["first", "second"] {
-        assert_eq!(result[pass].as_array().unwrap().len(), 1, "{result}");
-        assert_eq!(
-            result[pass][0]["logical_bytes_removed"], 0,
-            "no repeat deletion: {result}"
-        );
-        assert_ne!(result[pass][0]["status"], "reclaimed", "{result}");
+    let reconciled_history = result["reconciled"]["retirement_history"]
+        .as_array()
+        .unwrap();
+    assert_eq!(reconciled_history.len(), 1);
+    let final_record = serde_json::to_value(&after).unwrap();
+    let final_history = final_record["retirement_history"].as_array().unwrap();
+    for field in ["attempt_id", "generation", "dev", "ino", "intent_at"] {
+        assert_eq!(reconciled_history[0][field], history[0][field], "{field}");
+        assert_eq!(final_history[0][field], history[0][field], "{field}");
     }
-    match expected_artifact {
-        Some(bytes) => {
+    assert_eq!(final_history[0], reconciled_history[0]);
+    match (point, scenario) {
+        (Checkpoint::IntentDurable, RecoveryCase::Unchanged) => {
+            assert_eq!(result["reconciled"]["retirement_started"], false);
+            assert_eq!(result["reconciled"]["reclaimed"], false);
+            assert_eq!(result["inspections"][0]["eligible"], true);
+            assert_eq!(result["first"].as_array().unwrap().len(), 1);
+            assert_eq!(result["first"][0]["status"], "reclaimed", "{result}");
+            assert_eq!(
+                result["first"][0]["logical_bytes_removed"]
+                    .as_u64()
+                    .unwrap(),
+                expected_artifact.unwrap().len() as u64
+            );
+            assert!(after.reclaimed && !after.retirement_started);
+            assert!(verified_absent(&store.path(&after)).unwrap());
+            assert_eq!(final_history.len(), 2, "one original attempt and one retry");
+            assert!(reconciled_history[0]["retry_queued_at"].is_u64());
+            assert!(reconciled_history[0]["completed_at"].is_null());
+            assert_ne!(final_history[1]["attempt_id"], history[0]["attempt_id"]);
+            for field in ["generation", "dev", "ino"] {
+                assert_eq!(final_history[1][field], history[0][field], "{field}");
+            }
+            assert!(final_history[1]["completed_at"].is_u64());
+        }
+        (Checkpoint::IntentDurable, RecoveryCase::RevokedAuthority) => {
+            assert_eq!(result["reconciled"]["retirement_started"], false);
+            assert_eq!(result["inspections"][0]["eligible"], true);
+            assert!(!after.retirement_started && !after.reclaimed);
+            assert_eq!(result["first"], json!([]), "{result}");
+            assert_eq!(result["second"], json!([]), "{result}");
+            assert_eq!(fs::read(&artifact).unwrap(), expected_artifact.unwrap());
+            assert_eq!(after.observed_free_delta, None);
+            assert_eq!(final_history.len(), 1, "revocation must prevent a retry");
+            assert!(reconciled_history[0]["retry_queued_at"].is_u64());
+            assert!(reconciled_history[0]["completed_at"].is_null());
+            return;
+        }
+        (Checkpoint::IntentDurable, RecoveryCase::ChangedContents) => {
             assert!(
                 after.retirement_started && !after.reclaimed,
-                "uncompleted intent stays protected"
+                "changed producer contents must keep the intent protected"
             );
-            assert_eq!(fs::read(artifact).unwrap(), bytes);
+            assert_eq!(result["reconciled"]["retirement_started"], true);
+            assert_eq!(fs::read(&artifact).unwrap(), expected_artifact.unwrap());
             assert_eq!(result["inspections"][0]["eligible"], false);
+            assert_eq!(after.observed_free_delta, None);
+            assert_eq!(final_history.len(), 1);
+            assert_eq!(final_history, history);
         }
-        None => {
+        (Checkpoint::DeletedBeforeOutcome, RecoveryCase::Unchanged) => {
             assert!(
                 after.reclaimed && !after.retirement_started,
                 "reconcile completes the absent generation"
@@ -412,16 +513,48 @@ fn interrupted_retirement(point: Checkpoint) {
                 after.observed_free_delta, None,
                 "crashed measurement must not be invented"
             );
+            assert_eq!(
+                final_history.len(),
+                1,
+                "absence cannot trigger another attempt"
+            );
+            assert!(reconciled_history[0]["retry_queued_at"].is_null());
+            assert!(reconciled_history[0]["completed_at"].is_u64());
         }
+        _ => panic!("unsupported recovery scenario"),
+    }
+    for pass in ["first", "second"] {
+        if pass == "first"
+            && point == Checkpoint::IntentDurable
+            && scenario == RecoveryCase::Unchanged
+        {
+            continue;
+        }
+        assert_eq!(result[pass].as_array().unwrap().len(), 1, "{result}");
+        assert_eq!(
+            result[pass][0]["logical_bytes_removed"], 0,
+            "no additional deletion: {result}"
+        );
+        assert_ne!(result[pass][0]["status"], "reclaimed", "{result}");
     }
 }
 
 #[test]
-fn kill_after_durable_intent_preserves_artifact_on_recovery() {
-    interrupted_retirement(Checkpoint::IntentDurable);
+fn kill_after_durable_intent_reconciles_then_retries_once() {
+    interrupted_retirement(Checkpoint::IntentDurable, RecoveryCase::Unchanged);
 }
 
 #[test]
 fn kill_after_deletion_reconciles_without_repeating_cleanup() {
-    interrupted_retirement(Checkpoint::DeletedBeforeOutcome);
+    interrupted_retirement(Checkpoint::DeletedBeforeOutcome, RecoveryCase::Unchanged);
+}
+
+#[test]
+fn revoked_authority_preserves_artifact_after_intent_reconciliation() {
+    interrupted_retirement(Checkpoint::IntentDurable, RecoveryCase::RevokedAuthority);
+}
+
+#[test]
+fn changed_contents_keep_interrupted_intent_protected() {
+    interrupted_retirement(Checkpoint::IntentDurable, RecoveryCase::ChangedContents);
 }

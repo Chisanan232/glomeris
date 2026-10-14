@@ -762,3 +762,32 @@ fn cas_rejects_oversized_matching_prefix_with_different_suffix() {
     assert!(!out.status.success());
     assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
 }
+
+#[test]
+fn corrupt_record_does_not_block_other_verified_reconciliation_and_cleanup() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let first = f.create();
+    let second = f.create();
+    let (bad, good) = if first["id"].as_str().unwrap() < second["id"].as_str().unwrap() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    f.object(&good);
+    f.seal(&good);
+    fs::write(f.record(&bad), b"invalid fixture record").unwrap();
+    let reconciliation = f.call(&["reconcile"]);
+    assert!(reconciliation
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == bad["id"] && row["lifecycle"] == "UNKNOWN"));
+    let rows = f.call(&["sweep", "--unattended"]);
+    assert!(rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == good["id"] && row["status"] == "reclaimed"));
+    assert!(f.record(&bad).exists());
+}

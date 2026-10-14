@@ -72,8 +72,14 @@ manifest, meaningful inactivity, no valid consumers and full native policy check
 Other unknown resources retain a specific blocker, including native consumer
 coverage after an unconfirmed release. There is no unconditional age-only cleanup.
 
-Interrupted retirement retains durable intent. Verified absence with recorded
-intent is reconciled without deleting a replacement or executing again. Corruption,
+Interrupted retirement retains bounded attempt history and durable intent.
+Verified absence with recorded intent is terminal without another deletion.
+A complete unchanged producer-only generation with matching recorded identity
+can clear its pending intent without deleting anything; a later sweep requires
+fresh policy, pressure, budget and permit admission. Partial/changed generations
+and legacy intents lacking a verified attempt snapshot remain protected.
+An unrelated corrupt record does not prevent other verified generations from
+being reconciled or retired. Corruption,
 unconfirmed children and changed identities preserve data. Power, network and
 session termination are not recovery prerequisites. Only filesystem free-space
 delta is physical recovery; logical removed bytes are separate and concurrent

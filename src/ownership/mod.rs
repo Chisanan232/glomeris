@@ -106,6 +106,18 @@ struct TraversalCursor {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RetirementAttempt {
+    pub attempt_id: String,
+    pub generation: String,
+    pub dev: u64,
+    pub ino: u64,
+    pub intent_at: u64,
+    pub retry_queued_at: Option<u64>,
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Record {
     pub schema: u32,
     pub id: String,
@@ -122,6 +134,8 @@ pub struct Record {
     pub producer: Option<ProducerProof>,
     pub production_started: bool,
     pub retirement_started: bool,
+    #[serde(default)]
+    pub retirement_history: Vec<RetirementAttempt>,
     pub reclaimed: bool,
     pub observed_free_delta: Option<i64>,
 }
@@ -329,6 +343,10 @@ impl Store {
             || r.id != id
             || !valid_id(&r.generation)
             || r.class != "managed_generated"
+            || r.retirement_history.len() > 64
+            || r.retirement_history
+                .iter()
+                .any(|a| !valid_id(&a.attempt_id) || !valid_id(&a.generation))
             || r.recipe.trim().is_empty()
             || !r.source_root.is_absolute()
             || r.source_head.len() != 40
@@ -397,6 +415,7 @@ impl Store {
             producer: None,
             production_started: false,
             retirement_started: false,
+            retirement_history: vec![],
             reclaimed: false,
             observed_free_delta: None,
         };
@@ -582,7 +601,22 @@ impl Store {
                 break;
             }
             self.advance_cursor("reconcile", &id, &_l)?;
-            let mut r = self.read(&id)?;
+            let mut r = match self.read(&id) {
+                Ok(r) => r,
+                Err(e) => {
+                    rows.push(Inspection {
+                        id: id.clone(),
+                        generation: String::new(),
+                        path: self.record_path(&id)?,
+                        lifecycle: Lifecycle::Unknown,
+                        eligible: false,
+                        blockers: vec![format!("managed record unavailable: {e}")],
+                        last_meaningful_use: 0,
+                        inactivity_eligible: false,
+                    });
+                    continue;
+                }
+            };
             let _barrier = match self.barrier(&id, true) {
                 Ok(lock) => lock,
                 Err(_) => {
@@ -590,9 +624,33 @@ impl Store {
                     continue;
                 }
             };
+            r = self.read(&id)?;
             if r.retirement_started && verified_absent(&self.path(&r))? {
                 r.reclaimed = true;
                 r.retirement_started = false;
+                if let Some(attempt) = r.retirement_history.last_mut() {
+                    attempt.completed_at = Some(now());
+                }
+                self.save(&r)?;
+            } else if r.retirement_started
+                && r.claims.is_empty()
+                && r.retirement_history.last().is_some_and(|a| {
+                    a.generation == r.generation
+                        && a.dev == r.dev
+                        && a.ino == r.ino
+                        && a.completed_at.is_none()
+                })
+                && r.sealed.as_ref() == r.producer.as_ref().map(|p| &p.outputs)
+                && self.identity(&r).is_ok()
+                && verify_producer(&r).is_ok()
+                && source_revision(&r.source_root, Some(&r.source_head)).is_ok()
+            {
+                // Only a complete unchanged generation can re-enter admission.
+                // No deletion/permit is performed here; subsequent policy is fresh.
+                r.retirement_started = false;
+                if let Some(attempt) = r.retirement_history.last_mut() {
+                    attempt.retry_queued_at = Some(now());
+                }
                 self.save(&r)?;
             }
             if !r.reclaimed && !r.retirement_started && r.sealed.is_none() {
@@ -723,14 +781,29 @@ pub fn eligible_path(path: &Path, time: SystemTime) -> io::Result<()> {
     Ok(())
 }
 fn record_for_path(store: &Store, path: &Path) -> io::Result<Record> {
-    for id in store.ids()? {
-        let r = store.read(&id)?;
-        if store.path(&r) == path {
-            return Ok(r);
-        }
+    let base = store.root.join("data");
+    let relative = path.strip_prefix(&base).map_err(error)?;
+    let mut components = relative.components();
+    let normal = |part: Option<std::path::Component<'_>>| match part {
+        Some(std::path::Component::Normal(value)) => value
+            .to_str()
+            .filter(|value| valid_id(value))
+            .map(str::to_owned),
+        _ => None,
+    };
+    let id = normal(components.next()).ok_or_else(|| error("invalid enrolled resource path"))?;
+    let generation =
+        normal(components.next()).ok_or_else(|| error("invalid enrolled generation path"))?;
+    if components.next().is_some() {
+        return Err(error("resource path outside exact generation"));
     }
-    Err(error("resource enrollment missing"))
+    let record = store.read(&id)?;
+    if record.generation != generation || store.path(&record) != path {
+        return Err(error("resource enrollment identity changed"));
+    }
+    Ok(record)
 }
+
 /// Single-use admission minted only by the policy-authorized managed sweep.
 /// Private fields prevent a generic execution-lock holder granting managed authority.
 pub(crate) struct ManagedRetirementPermit<'a> {
@@ -787,6 +860,20 @@ impl RetirementGuard {
         })
     }
     pub fn intent(&mut self) -> io::Result<()> {
+        if self.record.retirement_history.len() >= 64 {
+            return Err(error(
+                "retirement attempt bound reached; preserve recovery history",
+            ));
+        }
+        self.record.retirement_history.push(RetirementAttempt {
+            attempt_id: random()?,
+            generation: self.record.generation.clone(),
+            dev: self.record.dev,
+            ino: self.record.ino,
+            intent_at: now(),
+            retry_queued_at: None,
+            completed_at: None,
+        });
         self.record.retirement_started = true;
         self.store.save(&self.record)
     }
@@ -794,6 +881,9 @@ impl RetirementGuard {
         if verified_absent(&self.store.path(&self.record))? {
             self.record.reclaimed = true;
             self.record.retirement_started = false;
+            if let Some(attempt) = self.record.retirement_history.last_mut() {
+                attempt.completed_at = Some(now());
+            }
             self.record.observed_free_delta = delta;
             self.store.save(&self.record)?;
         }
@@ -1878,6 +1968,7 @@ mod permit_tests {
             }),
             production_started: true,
             retirement_started: false,
+            retirement_history: vec![],
             reclaimed: false,
             observed_free_delta: None,
         };
