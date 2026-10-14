@@ -159,8 +159,12 @@ impl Fixture {
     /// what this fixture's claim of host isolation requires.
     fn command(&self) -> Command {
         let mut cmd = Command::new(glomeris_bin());
-        cmd.env("HOME", &self.home)
-            .env("PATH", format!("{}:/usr/bin:/bin", self.shim_dir.display()))
+        // /usr/bin/pip3 on macOS can initialize SDK Python and exceed the
+        // production probe deadline. Only fixture tools and shell builtins
+        // belong in this discovery fixture; inherited cache variables do not.
+        cmd.env_clear()
+            .env("HOME", &self.home)
+            .env("PATH", format!("{}:/bin", self.shim_dir.display()))
             .env("CARGO_HOME", self.home.join(".cargo"))
             .env("GRADLE_USER_HOME", self.home.join(".gradle"))
             .stdin(Stdio::null());
