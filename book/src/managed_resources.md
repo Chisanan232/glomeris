@@ -47,6 +47,9 @@ meaningful verified use. Renewal, CPU utilization, creation age and silent logs
 never establish completion. STALLED needs distinct health faults and remains
 protected; no stalled-worker termination category is enabled.
 
+Managed retirement is available only through `resource sweep --unattended`.
+Generic execute, free, Autopilot and emergency paths cannot mint its single-use
+path/generation/fingerprint/action/byte-bound permit. Discovery remains shared.
 Both per-class retention and the existing Autopilot envelope must authorize
 unattended execution. Action, byte, duration and pressure budgets remain in
 force; revoking Autopilot also revokes managed sweeps. The existing monitor

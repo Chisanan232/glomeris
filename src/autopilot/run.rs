@@ -459,6 +459,12 @@ fn run_autopilot_inner(
             outcome,
         };
 
+        if kind == ResourceKind::ManagedGenerated {
+            report.items.push(item(AutopilotItemOutcome::Ineligible {
+                reason: "managed_sweep_required".into(),
+            }));
+            continue;
+        }
         let admission = admit(
             envelope,
             &ledger,

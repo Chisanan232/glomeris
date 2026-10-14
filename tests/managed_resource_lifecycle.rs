@@ -659,3 +659,106 @@ fn exposure_before_production_cannot_restore_closed_consumer_authority() {
     assert!(!out.status.success());
     assert!(!f.call(&["inspect"])[0]["eligible"].as_bool().unwrap());
 }
+
+#[test]
+fn generic_execution_and_free_cannot_bypass_managed_class_authority() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    f.seal(&r);
+    f.policy(0, false); // envelope stays enabled; class authorization is withdrawn
+    let path = r["path"].as_str().unwrap();
+    let resource = format!("managed_generated:{path}");
+    let direct = f
+        .cmd()
+        .args([
+            "execute",
+            "--action-id",
+            "managed.clean.generated",
+            "--resource-id",
+            &resource,
+            "--json",
+        ])
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(
+        PathBuf::from(path).exists(),
+        "generic execution deleted managed data: {}",
+        String::from_utf8_lossy(&direct.stdout)
+    );
+    let out = f
+        .cmd()
+        .args([
+            "free",
+            "--goal-used-percent",
+            "60",
+            "--autopilot",
+            "--unattended",
+            "--json",
+        ])
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+        panic!(
+            "free report: {} / {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+    assert_eq!(report["actions_executed"], 0, "{report}");
+    assert_eq!(report["remaining"]["not_executable_count"], 1, "{report}");
+    assert!(PathBuf::from(path).exists());
+    assert_eq!(f.call(&["sweep", "--unattended"]), json!([]));
+}
+#[test]
+fn class_byte_budget_preserves_oversized_real_generation() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    f.seal(&r);
+    let policy = f.home.join("tiny-policy.json");
+    fs::write(&policy,json!({"schema":1,"classes":{"managed_generated":{"idle_threshold_secs":0,"unattended":true}},"max_actions":3,"max_bytes":1}).to_string()).unwrap();
+    f.call(&["policy", "apply", policy.to_str().unwrap()]);
+    let rows = f.call(&["sweep", "--unattended"]);
+    assert_eq!(rows[0]["logical_bytes_removed"], 0);
+    assert!(PathBuf::from(r["path"].as_str().unwrap()).exists());
+}
+#[test]
+fn cas_rejects_oversized_matching_prefix_with_different_suffix() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    f.policy(0, true);
+    let path = f
+        .home
+        .join("Library/Application Support/Glomeris/autopilot.conf");
+    let original = format!("#{}\\nversion = 1\\nenabled = true\\n", "x".repeat(1048576));
+    fs::write(&path, original.as_bytes()).unwrap();
+    let expected = f.home.join("oversized.snapshot");
+    fs::write(
+        &expected,
+        original.replace("enabled = true", "enabled = false"),
+    )
+    .unwrap();
+    fs::set_permissions(&expected, fs::Permissions::from_mode(0o600)).unwrap();
+    let absent = f.home.join("absent.snapshot");
+    fs::write(&absent, b"").unwrap();
+    fs::set_permissions(&absent, fs::Permissions::from_mode(0o600)).unwrap();
+    let out = f
+        .cmd()
+        .args([
+            "resource",
+            "authority",
+            "apply",
+            absent.to_str().unwrap(),
+            "--expected-current",
+            expected.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+}

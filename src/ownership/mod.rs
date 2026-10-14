@@ -731,6 +731,40 @@ fn record_for_path(store: &Store, path: &Path) -> io::Result<Record> {
     }
     Err(error("resource enrollment missing"))
 }
+/// Single-use admission minted only by the policy-authorized managed sweep.
+/// Private fields prevent a generic execution-lock holder granting managed authority.
+pub(crate) struct ManagedRetirementPermit<'a> {
+    resource: crate::evidence::ResourceId,
+    generation: String,
+    fingerprint: crate::evidence::ResourceFingerprint,
+    action: crate::actions::ActionId,
+    admitted_bytes: u64,
+    guard: RetirementGuard,
+    _authority: &'a crate::executor::lock::ExecutionLockGuard,
+}
+impl ManagedRetirementPermit<'_> {
+    pub(crate) fn into_guard(
+        self,
+        action: &dyn crate::actions::Action,
+        approval: &crate::policy::approval::Approval,
+    ) -> io::Result<RetirementGuard> {
+        let size = self
+            .guard
+            .record
+            .producer
+            .as_ref()
+            .map(|p| p.outputs.values().map(|a| a.len).sum::<u64>());
+        if approval.decision().resource != self.resource
+            || approval.fingerprint() != &self.fingerprint
+            || action.id() != self.action
+            || self.guard.record.generation != self.generation
+            || size != Some(self.admitted_bytes)
+        {
+            return Err(error("managed retirement admission identity mismatch"));
+        }
+        Ok(self.guard)
+    }
+}
 pub struct RetirementGuard {
     _barrier: Flock<File>,
     store: Store,
@@ -1064,6 +1098,14 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                 ResourceKind::ManagedGenerated,
                 ResourceLocator::Path(store.path(&r)),
             );
+            let retirement = match RetirementGuard::acquire(&store.path(&r), &_lock) {
+                Ok(g) => g,
+                Err(e) => {
+                    item.blockers.push(e.to_string());
+                    rows.push(item);
+                    continue;
+                }
+            };
             let t = SystemTime::now();
             let ev = crate::executor::build_fresh_evidence(&resource, &action, &collector, t);
             let size = ev.logical_bytes.observed().copied();
@@ -1084,29 +1126,38 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                     let approval =
                         crate::policy::approval::authorize(decision, ev.fingerprint.clone(), None)
                             .ok_or_else(|| error("policy authorization refused"))?;
+                    ledger.charge(size, size);
+                    actions += 1;
+                    bytes += size;
+                    let permit = ManagedRetirementPermit {
+                        resource: ev.resource.clone(),
+                        generation: r.generation.clone(),
+                        fingerprint: ev.fingerprint.clone(),
+                        action: crate::actions::ActionId("managed.clean.generated"),
+                        admitted_bytes: size,
+                        guard: retirement,
+                        _authority: &_lock,
+                    };
                     #[cfg(target_os = "macos")]
-                    let report = crate::executor::execute_owned(
+                    let report = crate::executor::execute_managed_owned(
                         &action,
                         &approval,
                         &collector,
                         &cfg,
                         SystemTime::now(),
                         Some(&crate::executor::MacosVolumeDelta),
-                        &_lock,
+                        permit,
                     );
                     #[cfg(not(target_os = "macos"))]
-                    let report = crate::executor::execute_owned(
+                    let report = crate::executor::execute_managed_owned(
                         &action,
                         &approval,
                         &collector,
                         &cfg,
                         SystemTime::now(),
                         None,
-                        &_lock,
+                        permit,
                     );
-                    ledger.charge(size, size);
-                    actions += 1;
-                    bytes += size;
                     item.physical_free_delta = report.volume_free_delta.observed().copied();
                     if matches!(report.outcome, crate::executor::ExecutionOutcome::Succeeded) {
                         item.status = "reclaimed".into();
@@ -1650,7 +1701,10 @@ fn compare_snapshot(path: &Path, snapshot: &Path) -> io::Result<()> {
         .custom_flags(nix::libc::O_NOFOLLOW)
         .open(snapshot)?;
     let mut bytes = vec![];
-    expected.take(1024 * 1024).read_to_end(&mut bytes)?;
+    expected.take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(error("expected native configuration too large"));
+    }
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound && bytes.is_empty() => Ok(()),
         Err(e) => Err(e),
@@ -1664,8 +1718,11 @@ fn compare_snapshot(path: &Path, snapshot: &Path) -> io::Result<()> {
                 .read(true)
                 .custom_flags(nix::libc::O_NOFOLLOW)
                 .open(path)?
-                .take(1024 * 1024)
+                .take(1024 * 1024 + 1)
                 .read_to_end(&mut actual)?;
+            if actual.len() > 1024 * 1024 {
+                return Err(error("current native configuration too large"));
+            }
             if actual == bytes {
                 Ok(())
             } else {
@@ -1771,6 +1828,124 @@ mod traversal_tests {
             a,
             "independent phases must not starve each other"
         );
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod permit_tests {
+    use super::*;
+    #[test]
+    fn single_use_permit_rejects_each_binding_mismatch() {
+        use crate::evidence::{ResourceFingerprint, ResourceId, ResourceKind, ResourceLocator};
+        use crate::policy::{PolicyClass, PolicyDecision, ReasonCode};
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("glomeris-permit-{}", random().unwrap()));
+        let store = Store { root: root.clone() };
+        store.init().unwrap();
+        let lock =
+            crate::executor::lock::acquire_execution_lock_at(&root.join("execution.lock")).unwrap();
+        let id = "00000000000000000000000000000001";
+        let artifact = Artifact {
+            dev: 1,
+            ino: 2,
+            len: 10,
+            mtime: 0,
+            mtime_nsec: 0,
+        };
+        let record = Record {
+            schema: 1,
+            id: id.into(),
+            generation: id.into(),
+            class: "managed_generated".into(),
+            recipe: "fixture".into(),
+            source_root: root.clone(),
+            source_head: "0".repeat(40),
+            dev: 1,
+            ino: 2,
+            last_meaningful_use: 0,
+            claims: vec![],
+            sealed: None,
+            producer: Some(ProducerProof {
+                input: root.join("input.rs"),
+                input_metadata: artifact.clone(),
+                compiler_version: "fixture".into(),
+                outputs: BTreeMap::from([("output.o".into(), artifact)]),
+                closed_consumers: true,
+            }),
+            production_started: true,
+            retirement_started: false,
+            reclaimed: false,
+            observed_free_delta: None,
+        };
+        let resource = ResourceId::new(
+            ResourceKind::ManagedGenerated,
+            ResourceLocator::Path(store.path(&record)),
+        );
+        let fingerprint = ResourceFingerprint {
+            dev_ino: Some((1, 2)),
+            mtime: None,
+            tool_revision: None,
+        };
+        let approval = crate::policy::approval::authorize(
+            PolicyDecision {
+                resource: resource.clone(),
+                class: PolicyClass::AutoSafe,
+                reasons: vec![ReasonCode::EvidenceFreshAndComplete],
+                evidence_collected_at: UNIX_EPOCH,
+                evaluated_at: UNIX_EPOCH,
+                policy_version: 1,
+            },
+            fingerprint.clone(),
+            None,
+        )
+        .unwrap();
+        for mismatch in [
+            "resource",
+            "generation",
+            "fingerprint",
+            "action",
+            "bytes",
+            "matching",
+        ] {
+            let guard = RetirementGuard {
+                _barrier: store.barrier(id, true).unwrap(),
+                store: Store { root: root.clone() },
+                record: record.clone(),
+            };
+            let mut permit = ManagedRetirementPermit {
+                resource: resource.clone(),
+                generation: record.generation.clone(),
+                fingerprint: fingerprint.clone(),
+                action: crate::actions::ActionId("managed.clean.generated"),
+                admitted_bytes: 10,
+                guard,
+                _authority: &lock,
+            };
+            match mismatch {
+                "resource" => {
+                    permit.resource = ResourceId::new(
+                        ResourceKind::ManagedGenerated,
+                        ResourceLocator::Path(root.join("other")),
+                    )
+                }
+                "generation" => permit.generation = "0".repeat(32),
+                "fingerprint" => permit.fingerprint.dev_ino = Some((3, 4)),
+                "action" => permit.action = crate::actions::ActionId("other"),
+                "bytes" => permit.admitted_bytes = 9,
+                _ => {}
+            }
+            assert_eq!(
+                permit
+                    .into_guard(&crate::actions::ManagedGeneratedClean, &approval)
+                    .is_ok(),
+                mismatch == "matching",
+                "{mismatch}"
+            );
+        }
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }

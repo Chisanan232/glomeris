@@ -188,17 +188,30 @@ pub(crate) fn execute_owned(
     cfg: &PolicyConfig,
     now: SystemTime,
     volume: Option<&dyn VolumeDelta>,
-    authority: &crate::executor::lock::ExecutionLockGuard,
+    _authority: &crate::executor::lock::ExecutionLockGuard,
 ) -> ExecutionReport {
-    execute_inner(
-        action,
-        approval,
-        collector,
-        cfg,
-        now,
-        volume,
-        Some(authority),
-    )
+    execute_inner(action, approval, collector, cfg, now, volume, None)
+}
+pub(crate) fn execute_managed_owned(
+    action: &dyn Action,
+    approval: &Approval,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+    volume: Option<&dyn VolumeDelta>,
+    permit: crate::ownership::ManagedRetirementPermit<'_>,
+) -> ExecutionReport {
+    let guard = match permit.into_guard(action, approval) {
+        Ok(g) => g,
+        Err(_) => {
+            return aborted_report(
+                action.id(),
+                approval.decision().resource.clone(),
+                AbortReason::EvidenceDegraded,
+            )
+        }
+    };
+    execute_inner(action, approval, collector, cfg, now, volume, Some(guard))
 }
 fn execute_inner(
     action: &dyn Action,
@@ -207,22 +220,18 @@ fn execute_inner(
     cfg: &PolicyConfig,
     now: SystemTime,
     volume: Option<&dyn VolumeDelta>,
-    authority: Option<&crate::executor::lock::ExecutionLockGuard>,
+    admitted_guard: Option<crate::ownership::RetirementGuard>,
 ) -> ExecutionReport {
     let resource = approval.decision().resource.clone();
     let mut managed_guard = if resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
         let crate::evidence::ResourceLocator::Path(path) = &resource.locator else {
             return aborted_report(action.id(), resource, AbortReason::ResourceIdentityChanged);
         };
-        let Some(authority) = authority else {
+        let _ = path;
+        let Some(guard) = admitted_guard else {
             return aborted_report(action.id(), resource, AbortReason::EvidenceDegraded);
         };
-        match crate::ownership::RetirementGuard::acquire(path, authority) {
-            Ok(guard) => Some(guard),
-            Err(_) => {
-                return aborted_report(action.id(), resource, AbortReason::PolicyReasonsWidened)
-            }
-        }
+        Some(guard)
     } else {
         if let crate::evidence::ResourceLocator::Path(path) = &resource.locator {
             if crate::ownership::protects_other_kind(path) {
