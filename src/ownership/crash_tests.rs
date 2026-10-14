@@ -17,6 +17,8 @@ const WAIT: Duration = Duration::from_secs(90);
 enum Checkpoint {
     IntentDurable,
     DeletedBeforeOutcome,
+    AccessAcquired,
+    ExportPartial,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +34,8 @@ impl Checkpoint {
         match self {
             Self::IntentDurable => "intent",
             Self::DeletedBeforeOutcome => "deleted",
+            Self::AccessAcquired => "access",
+            Self::ExportPartial => "partial_export",
         }
     }
 }
@@ -178,7 +182,7 @@ impl Fixture {
         if let Some(toolchain) = option_env!("RUSTUP_TOOLCHAIN") {
             command.env("RUSTUP_TOOLCHAIN", toolchain);
         }
-        if request["op"] == "interrupt" {
+        if request["op"] == "interrupt" || request["op"] == "interrupt_export" {
             let point: Checkpoint = serde_json::from_value(request["point"].clone()).unwrap();
             command.env(CRASH_PHASE, point.phase());
         } else {
@@ -299,6 +303,55 @@ fn child_process_driver() {
     let request = receive(&mut reader, "child request");
     let store = Store::current().unwrap();
     match request["op"].as_str().unwrap() {
+        "interrupt_export" => {
+            let record = prepare(&store);
+            send(
+                reader.get_mut(),
+                &json!({"event":"prepared", "id":record.id}),
+            );
+            super::access::export(
+                &store,
+                &record.id,
+                &record.generation,
+                "artifact.o",
+                &store.root.parent().unwrap().join("copy.o"),
+            )
+            .unwrap();
+            panic!("export did not reach access checkpoint");
+        }
+        "recover_export" => {
+            let id = request["id"].as_str().unwrap();
+            let before = store.read(id).unwrap();
+            assert!(!before.read_claims[0].ended);
+            store.reconcile().unwrap();
+            let after = store.read(id).unwrap();
+            assert!(after.read_claims[0].ended);
+            assert!(!after.read_claims[0].exported);
+            assert!(after.producer.as_ref().unwrap().closed_consumers);
+            let first = sweep(&store).unwrap();
+            let second = sweep(&store).unwrap();
+            send(
+                reader.get_mut(),
+                &json!({"event":"export_recovered", "first":first,"second":second}),
+            );
+        }
+        "concurrent_export" => {
+            let record = store.read(request["id"].as_str().unwrap()).unwrap();
+            let bytes = super::access::export(
+                &store,
+                &record.id,
+                &record.generation,
+                "artifact.o",
+                &store.root.parent().unwrap().join("second-copy.o"),
+            )
+            .unwrap();
+            let sweep = sweep(&store).unwrap();
+            let inspection = store.inspect(&store.read(&record.id).unwrap(), now());
+            send(
+                reader.get_mut(),
+                &json!({"event":"concurrent_exported", "bytes":bytes,"sweep":sweep,"inspection":inspection}),
+            );
+        }
         "interrupt" => {
             let point: Checkpoint = serde_json::from_value(request["point"].clone()).unwrap();
             let record = prepare(&store);
@@ -332,6 +385,7 @@ fn child_process_driver() {
                     assert!(verified_absent(&store.path(&before)).unwrap());
                     None
                 }
+                _ => unreachable!("separate export recovery driver"),
             };
             let inspections = store.reconcile().unwrap();
             let reconciled = store.read(id).unwrap();
@@ -415,6 +469,9 @@ fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
                 "real executor must already have deleted"
             );
             None
+        }
+        Checkpoint::AccessAcquired | Checkpoint::ExportPartial => {
+            unreachable!("separate export recovery driver")
         }
     };
     child.interrupt();
@@ -554,6 +611,74 @@ fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
 #[test]
 fn kill_after_durable_intent_reconciles_then_retries_once() {
     interrupted_retirement(Checkpoint::IntentDurable, RecoveryCase::Unchanged);
+}
+
+#[test]
+fn core_export_crash_and_live_access_barriers_preserve_consumers() {
+    for point in [Checkpoint::AccessAcquired, Checkpoint::ExportPartial] {
+        let fixture = Fixture::new();
+        let (mut child, mut control) =
+            fixture.child(json!({"op":"interrupt_export", "point":point}));
+        let prepared = receive(&mut control, "prepared export");
+        let id = prepared["id"].as_str().unwrap();
+        child.expect_checkpoint(point);
+        let store = fixture.store();
+        assert_eq!(
+            store.barrier(id, true).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let before = store.read(id).unwrap();
+        assert!(!before.read_claims[0].ended);
+        let (mut second, mut second_control) =
+            fixture.child(json!({"op":"concurrent_export", "id":id}));
+        let second_result = receive(
+            &mut second_control,
+            "second core export and concurrent sweep",
+        );
+        assert_eq!(second_result["event"], "concurrent_exported");
+        assert!(second_result["bytes"].as_u64().unwrap() >= 1048576);
+        let sweep_rows = second_result["sweep"].as_array().unwrap();
+        let row = sweep_rows
+            .iter()
+            .find(|r| r["id"] == id)
+            .expect("exact live resource must be examined");
+        assert_eq!(row["status"], "preserved", "{second_result}");
+        assert_eq!(row["logical_bytes_removed"], 0);
+        assert!(!row["blockers"].as_array().unwrap().is_empty());
+        // The isolated child supplies current-HOME-sensitive producer evidence.
+        assert_eq!(second_result["inspection"]["lifecycle"], "IDLE");
+        assert_eq!(second_result["inspection"]["eligible"], false);
+        assert!(second_result["inspection"]["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("valid live owner")));
+        assert!(second.wait().success());
+        let combined = store.read(id).unwrap();
+        assert_eq!(combined.read_claims.len(), 2);
+        assert!(!combined.read_claims[0].ended);
+        assert!(combined.read_claims[1].ended && combined.read_claims[1].exported);
+        assert!(store.path(&combined).exists());
+        let copy = store.root.parent().unwrap().join("copy.o");
+        let partial = if point == Checkpoint::ExportPartial {
+            let bytes = fs::read(&copy).unwrap();
+            assert!(!bytes.is_empty() && bytes.len() < 1048576);
+            Some(bytes)
+        } else {
+            assert!(!copy.exists());
+            None
+        };
+        child.interrupt();
+        drop(control);
+        let (mut recovery, mut control) = fixture.child(json!({"op":"recover_export", "id":id}));
+        let outcome = receive(&mut control, "export recovery");
+        assert_eq!(outcome["first"][0]["status"], "reclaimed");
+        assert_eq!(outcome["second"][0]["logical_bytes_removed"], 0);
+        assert!(recovery.wait().success());
+        if let Some(bytes) = partial {
+            assert_eq!(fs::read(&copy).unwrap(), bytes);
+        }
+    }
 }
 
 #[test]

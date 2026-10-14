@@ -19,6 +19,10 @@ Subcommands
       Writes only Glomeris's own state — never your files.
       Create a bounded standalone compiler object from retained committed
       input; reject external/environment dependencies.
+  export <id> <generation> --artifact <name> --destination <absolute-path>
+      Creates an explicitly named file — never overwrites.
+      Copy a sealed artifact through core-only source access. Exported
+      copies stay outside cleanup authority.
   hold <id> <generation> --host <host> --session <session> --owner-pid <pid>
       Writes only Glomeris's own state — never your files.
       Persist acquisition and hold a shared kernel barrier through native
