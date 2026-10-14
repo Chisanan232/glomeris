@@ -6,6 +6,142 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 static FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[test]
+fn core_export_releases_source_access_without_native_exposure() {
+    use std::os::unix::fs::MetadataExt;
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    let destination = f.home.join("exported.o");
+    let result = f.call(&[
+        "export",
+        r["id"].as_str().unwrap(),
+        r["generation"].as_str().unwrap(),
+        "--artifact",
+        "artifact.o",
+        "--destination",
+        destination.to_str().unwrap(),
+    ]);
+    assert_eq!(result["status"], "exported");
+    let source = PathBuf::from(r["path"].as_str().unwrap()).join("artifact.o");
+    assert_eq!(fs::read(&source).unwrap(), fs::read(&destination).unwrap());
+    assert_ne!(
+        source.metadata().unwrap().ino(),
+        destination.metadata().unwrap().ino()
+    );
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    assert_eq!(record["producer"]["closed_consumers"], true);
+    assert_eq!(record["read_claims"][0]["ended"], true);
+    assert_eq!(record["read_claims"][0]["exported"], true);
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], true);
+    let sweep = f.call(&["sweep", "--unattended"]);
+    assert_eq!(sweep[0]["status"], "reclaimed");
+    assert!(
+        destination.exists(),
+        "export belongs to its owner, not this cleanup authority"
+    );
+    assert_eq!(
+        f.call(&["sweep", "--unattended"])[0]["logical_bytes_removed"],
+        0
+    );
+}
+
+#[test]
+fn export_refuses_overwrite_and_reconciles_ended_access_not_success() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    let destination = f.home.join("unique.o");
+    fs::write(&destination, "unique user-created contents").unwrap();
+    let result = f
+        .cmd()
+        .args([
+            "resource",
+            "export",
+            r["id"].as_str().unwrap(),
+            r["generation"].as_str().unwrap(),
+            "--artifact",
+            "artifact.o",
+            "--destination",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(
+        fs::read_to_string(&destination).unwrap(),
+        "unique user-created contents"
+    );
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    f.call(&["reconcile"]);
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    assert_eq!(record["read_claims"][0]["ended"], true);
+    assert_eq!(record["read_claims"][0]["exported"], false);
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], true);
+}
+
+#[test]
+fn export_refuses_redirected_destination_and_unknown_artifact() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    let r = f.create();
+    f.object(&r);
+    symlink(&f.source, f.home.join("redirect")).unwrap();
+    for (artifact, destination) in [
+        ("artifact.o", f.home.join("redirect/copy.o")),
+        ("../artifact.o", f.home.join("copy.o")),
+        ("unregistered.o", f.home.join("copy.o")),
+        (
+            "artifact.o",
+            PathBuf::from(r["path"].as_str().unwrap()).join("copy.o"),
+        ),
+    ] {
+        let result = f
+            .cmd()
+            .args([
+                "resource",
+                "export",
+                r["id"].as_str().unwrap(),
+                r["generation"].as_str().unwrap(),
+                "--artifact",
+                artifact,
+                "--destination",
+                destination.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        assert!(!destination.exists());
+    }
+}
+
+#[test]
+fn export_cannot_restore_closure_after_native_hold() {
+    let f = Fixture::new();
+    let r = f.create();
+    f.object(&r);
+    f.holder(&r, "claude", std::process::id()).release();
+    let destination = f.home.join("copy.o");
+    let result = f
+        .cmd()
+        .args([
+            "resource",
+            "export",
+            r["id"].as_str().unwrap(),
+            r["generation"].as_str().unwrap(),
+            "--artifact",
+            "artifact.o",
+            "--destination",
+            destination.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(!destination.exists());
+}
 struct Fixture {
     home: PathBuf,
     source: PathBuf,

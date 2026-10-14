@@ -1,5 +1,6 @@
 //! Managed generated-resource authority. Existing resources are never implicitly enrolled.
 //! Live holders retain shared kernel barriers; retirement uses the same barrier exclusively.
+mod access;
 #[cfg(test)]
 pub(crate) mod crash_tests;
 
@@ -118,6 +119,16 @@ pub struct RetirementAttempt {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReadClaim {
+    pub token: String,
+    pub holder: Identity,
+    pub artifact: String,
+    pub ended: bool,
+    pub exported: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Record {
     pub schema: u32,
     pub id: String,
@@ -130,6 +141,8 @@ pub struct Record {
     pub ino: u64,
     pub last_meaningful_use: u64,
     pub claims: Vec<Claim>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_claims: Vec<ReadClaim>,
     pub sealed: Option<BTreeMap<String, Artifact>>,
     pub producer: Option<ProducerProof>,
     pub production_started: bool,
@@ -411,6 +424,7 @@ impl Store {
             ino: m.ino(),
             last_meaningful_use: now(),
             claims: vec![],
+            read_claims: vec![],
             sealed: None,
             producer: None,
             production_started: false,
@@ -491,6 +505,9 @@ impl Store {
                 "native agent consumer coverage incomplete after an unconfirmed release".into(),
             );
         }
+        if r.read_claims.iter().any(|c| !c.ended) {
+            blockers.push("core artifact access has not ended; reconciliation required".into());
+        }
         let identities: Vec<_> = r
             .claims
             .iter()
@@ -500,8 +517,20 @@ impl Store {
                     .chain(std::iter::once(&c.owner))
                     .chain(c.children.iter())
             })
+            .chain(r.read_claims.iter().filter(|c| !c.ended).map(|c| &c.holder))
             .collect();
         let snapshot = process_snapshot(&identities);
+        for c in r.read_claims.iter().filter(|c| !c.ended) {
+            match snapshot.as_ref().map(|map| {
+                map.get(&c.holder.pid).is_some_and(|current| {
+                    current.start == c.holder.start && current.boot == c.holder.boot
+                })
+            }) {
+                Ok(true) => has_live = true,
+                Ok(false) => {}
+                Err(e) => blockers.push(e.to_string()),
+            }
+        }
         for c in r.claims.iter().filter(|c| !c.released) {
             if c.pending_children > 0 {
                 blockers.push("unconfirmed child launch; recovery information preserved".into());
@@ -625,6 +654,22 @@ impl Store {
                 }
             };
             r = self.read(&id)?;
+            let mut access_changed = false;
+            for claim in r.read_claims.iter_mut().filter(|c| !c.ended) {
+                if matches!(live(&claim.holder), Ok(false)) {
+                    // This core-only operation never launches children or transfers source
+                    // descriptors. Death ends source access, not successful export.
+                    claim.ended = true;
+                    access_changed = true;
+                }
+            }
+            if access_changed {
+                // Exact final access time is unavailable after interruption.
+                // This one-time observed end is a conservative inactivity bound,
+                // not a renewable heartbeat or an invented export success.
+                r.last_meaningful_use = r.last_meaningful_use.max(now());
+                self.save(&r)?;
+            }
             if r.retirement_started && verified_absent(&self.path(&r))? {
                 r.reclaimed = true;
                 r.retirement_started = false;
@@ -634,6 +679,7 @@ impl Store {
                 self.save(&r)?;
             } else if r.retirement_started
                 && r.claims.is_empty()
+                && r.read_claims.iter().all(|c| c.ended)
                 && r.retirement_history.last().is_some_and(|a| {
                     a.generation == r.generation
                         && a.dev == r.dev
@@ -731,8 +777,7 @@ fn artifacts(root: &Path, dev: u64) -> io::Result<BTreeMap<String, Artifact>> {
                 return Err(error("unique, linked or executable output protected"));
             }
             let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
-            let mut header = [0u8; 8];
-            let n = File::open(&p)?.read(&mut header)?;
+            let (header, n) = artifact_header(&p, &m)?;
             let object = ext == "o"
                 && n >= 4
                 && (*b"\x7fELF" == header[..4]
@@ -767,6 +812,24 @@ fn artifacts(root: &Path, dev: u64) -> io::Result<BTreeMap<String, Artifact>> {
         }
     }
     Ok(out)
+}
+fn artifact_header(path: &Path, expected: &fs::Metadata) -> io::Result<([u8; 8], usize)> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)?;
+    let identity = Artifact {
+        dev: expected.dev(),
+        ino: expected.ino(),
+        len: expected.len(),
+        mtime: expected.mtime(),
+        mtime_nsec: expected.mtime_nsec(),
+    };
+    access::validate_open_artifact(&file, &identity)?;
+    let mut header = [0u8; 8];
+    let count = file.read(&mut header)?;
+    access::validate_open_artifact(&file, &identity)?;
+    Ok((header, count))
 }
 pub fn eligible_path(path: &Path, time: SystemTime) -> io::Result<()> {
     let store = Store::current()?;
@@ -1311,6 +1374,13 @@ pub fn cli(args: &[String]) -> io::Result<()> {
             }
             produce(&store, &args[1], &args[2], Path::new(&args[4]))?;
             write_reply(&serde_json::json!({"status":"produced"}))
+        }
+        Some("export") => {
+            if args.len() != 7 || args[3] != "--artifact" || args[5] != "--destination" {
+                return Err(error("export ID GENERATION --artifact NAME --destination ABSOLUTE_PATH"));
+            }
+            let bytes = access::export(&store, &args[1], &args[2], &args[4], Path::new(&args[6]))?;
+            write_reply(&serde_json::json!({"status":"exported","id":args[1],"generation":args[2],"bytes":bytes}))
         }
         Some("seal") => {
             if args.len() != 3 {
@@ -1958,6 +2028,7 @@ mod permit_tests {
             ino: 2,
             last_meaningful_use: 0,
             claims: vec![],
+            read_claims: vec![],
             sealed: None,
             producer: Some(ProducerProof {
                 input: root.join("input.rs"),

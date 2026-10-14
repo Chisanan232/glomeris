@@ -109,6 +109,8 @@ pub enum Safety {
     /// Calling it destructive would be a false warning, and a reader who has
     /// been warned once for nothing discounts the next warning too.
     WritesOwnState,
+    /// Creates only the explicitly named destination; existing files are preserved.
+    CreatesFile,
     /// Can delete data, under policy control and never unconditionally.
     Destructive,
 }
@@ -121,6 +123,7 @@ impl Safety {
         Safety::ConsultsInstalledTools,
         Safety::Advisory,
         Safety::WritesOwnState,
+        Safety::CreatesFile,
         Safety::Destructive,
     ];
 
@@ -134,6 +137,7 @@ impl Safety {
             }
             Safety::Advisory => "Advisory — proposes, never executes.",
             Safety::WritesOwnState => "Writes only Glomeris's own state — never your files.",
+            Safety::CreatesFile => "Creates an explicitly named file — never overwrites.",
             Safety::Destructive => "Can delete data — every deletion is policy-gated.",
         }
     }
@@ -156,6 +160,7 @@ impl Safety {
             Safety::ConsultsInstalledTools
             | Safety::Advisory
             | Safety::WritesOwnState
+            | Safety::CreatesFile
             | Safety::Destructive => false,
         }
     }
@@ -352,6 +357,7 @@ pub const COMMANDS: &[CommandSpec] = &[
         subcommands: &[
             SubcommandSpec{name:"create",args:"--source-root <workspace> --recipe <recipe>",safety:Safety::WritesOwnState,description:"Create one private generation with committed reconstruction source."},
             SubcommandSpec{name:"produce",args:"<id> <generation> --input <tracked-rs-file>",safety:Safety::WritesOwnState,description:"Create a bounded standalone compiler object from retained committed input; reject external/environment dependencies."},
+            SubcommandSpec{name:"export",args:"<id> <generation> --artifact <name> --destination <absolute-path>",safety:Safety::CreatesFile,description:"Copy a sealed artifact through core-only source access. Exported copies stay outside cleanup authority."},
             SubcommandSpec{name:"hold",args:"<id> <generation> --host <host> --session <session> --owner-pid <pid>",safety:Safety::WritesOwnState,description:"Persist acquisition and hold a shared kernel barrier through native use."},
             SubcommandSpec{name:"seal",args:"<id> <generation>",safety:Safety::WritesOwnState,description:"Verify source-free compiler outputs after all consumers release."},
             SubcommandSpec{name:"inspect",args:"",safety:Safety::ConsultsInstalledTools,description:"Read lifecycle and safety blockers; no resource mutation."},
