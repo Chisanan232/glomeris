@@ -1669,7 +1669,10 @@ See `glomeris llm-plan`'s and `glomeris llm-check`'s own sections above for
 those subcommands' exit codes in full detail — `llm-check`'s `1`/`2` split in
 particular carries a meaning this list cannot: whether a report exists.
 
-## resource
+## `glomeris resource`
 
 `glomeris resource` manages the [managed-resource lifecycle](managed_resources.md).
-Acquisition, source-free reconstruction and per-class inactivity gates remain mandatory.
+Commands are `create`, `produce`, `hold`, `seal`, `inspect`, `reconcile`,
+`sweep`, `authority` and `policy`. Acquisition, verified producer reconstruction
+and per-class inactivity gates remain mandatory. See the linked chapter for
+capability limits, CAS installation and crash recovery.

@@ -45,4 +45,10 @@ Subcommands
       Inspect or CAS-update per-class retention; authorization still
       requires the existing Autopilot envelope.
 
+Examples
+  glomeris resource inspect
+      Report ownership, meaningful inactivity and preservation blockers.
+  glomeris resource sweep --unattended
+      Reclaim verified generations within retention and Autopilot grants.
+
 See also: daemon, actions
