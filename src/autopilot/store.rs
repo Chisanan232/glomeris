@@ -190,6 +190,8 @@ pub fn load_envelope() -> Result<AutopilotEnvelope, StoreError> {
 
 /// Saves `envelope` to [`default_envelope_path`].
 pub fn save_envelope(envelope: &AutopilotEnvelope) -> Result<(), StoreError> {
+    let _guard = crate::executor::lock::acquire_execution_lock()
+        .map_err(|e| StoreError::Io(std::io::Error::other(e.to_string())))?;
     save_envelope_at(&default_envelope_path()?, envelope)
 }
 

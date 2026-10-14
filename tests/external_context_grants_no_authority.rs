@@ -210,6 +210,7 @@ fn candidate(target: &Path, repo_root: &Path, local: &Local) -> (Evidence, Polic
         // HORO-1824: CargoTargetDir carries this concept — a Local
         // scope is this fixture's clean default, matching every other
         // field's "nothing wrong" baseline above.
+        managed_ownership: None,
         cargo_target_scope: Some(ProbeOutcome::Observed(
             glomeris::evidence::CargoTargetScope {
                 resolved_target: target.to_path_buf(),

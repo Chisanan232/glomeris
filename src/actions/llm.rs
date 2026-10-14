@@ -1150,6 +1150,7 @@ mod tests {
             // HORO-1824: same "clean default" rationale as
             // `executable_dependency` above — only CargoTargetDir
             // carries the concept at all.
+            managed_ownership: None,
             cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
                 ProbeOutcome::Observed(crate::evidence::CargoTargetScope {
                     resolved_target: PathBuf::from(path),

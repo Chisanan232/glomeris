@@ -344,6 +344,23 @@ pub struct CommandSpec {
 /// caught by `tests/shared_command_table.rs`, which asserts the two agree in both
 /// directions by spawning the real binary.
 pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "resource", group: Group::Act, safety: Safety::Destructive,
+        summary: "Manage ownership and reclaim enrolled generated artifacts.",
+        usage: &["resource <operation>", "[operation arguments]"],
+        details: "Glomeris-created source-free compiler artifacts only. Acquiring owners hold a shared barrier; retirement holds it exclusively and uses the existing policy and executor. Default inactivity is 24 hours since meaningful use, not lease renewal. Existing unknown worktrees and user data are never enrolled. All operations render JSON; unattended sweep requires explicit per-class policy.",
+        subcommands: &[
+            SubcommandSpec{name:"create",args:"--source-root <workspace> --recipe <recipe>",safety:Safety::WritesOwnState,description:"Create one private generation with committed reconstruction source."},
+            SubcommandSpec{name:"produce",args:"<id> <generation> --input <tracked-rs-file>",safety:Safety::WritesOwnState,description:"Create a bounded standalone compiler object from retained committed input; reject external/environment dependencies."},
+            SubcommandSpec{name:"hold",args:"<id> <generation> --host <host> --session <session> --owner-pid <pid>",safety:Safety::WritesOwnState,description:"Persist acquisition and hold a shared kernel barrier through native use."},
+            SubcommandSpec{name:"seal",args:"<id> <generation>",safety:Safety::WritesOwnState,description:"Verify source-free compiler outputs after all consumers release."},
+            SubcommandSpec{name:"inspect",args:"",safety:Safety::ConsultsInstalledTools,description:"Read lifecycle and safety blockers; no resource mutation."},
+            SubcommandSpec{name:"reconcile",args:"",safety:Safety::WritesOwnState,description:"Recover persisted intent without repeating destructive actions."},
+            SubcommandSpec{name:"sweep",args:"--unattended",safety:Safety::Destructive,description:"Execute only enrolled, independently verified, policy-authorized generations."},
+            SubcommandSpec{name:"authority",args:"<apply|grant-managed> --expected-current <snapshot>",safety:Safety::WritesOwnState,description:"CAS-update the existing Autopilot authority without overwriting intervening changes."},
+            SubcommandSpec{name:"policy",args:"<show|apply file>",safety:Safety::WritesOwnState,description:"Inspect or CAS-update per-class retention; authorization still requires the existing Autopilot envelope."},
+        ], options:&[],examples:&[ExampleSpec {command:"glomeris resource inspect",purpose:"Report ownership, meaningful inactivity and preservation blockers."},ExampleSpec {command:"glomeris resource sweep --unattended",purpose:"Reclaim verified generations within retention and Autopilot grants."}],exit_codes:&[],see_also:&["daemon","actions"],
+    },
     // ----------------------------------------------------------------- Inspect
     CommandSpec {
         name: "status",
@@ -1345,12 +1362,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "daemon",
         group: Group::Service,
-        safety: Safety::WritesOwnState,
+        safety: Safety::Destructive,
         summary: "Install, remove, inspect or run the background monitor.",
         usage: &["daemon <install [--force]|uninstall|status [--json]|run>"],
         details: "Manages the launch agent that watches disk pressure and notifies you. The \
-                  monitor observes and notifies; it does not delete anything on its own, so \
-                  installing it cannot cost you data. `daemon run` is the foreground entry \
+                  monitor observes and notifies. Explicit per-class managed-resource policy can authorize bounded source-free artifact reclamation; absent policy deletes nothing. `daemon run` is the foreground entry \
                   point launchd itself calls — you rarely need it by hand.",
         subcommands: &[
             SubcommandSpec {
@@ -1375,7 +1391,7 @@ pub const COMMANDS: &[CommandSpec] = &[
             SubcommandSpec {
                 name: "run",
                 args: "",
-                safety: Safety::WritesOwnState,
+                safety: Safety::Destructive,
                 description: "Run the monitor in the foreground, recording pressure history and \
                               a heartbeat under Library/Application Support/Glomeris. Normally \
                               launchd's job.",
@@ -1783,9 +1799,8 @@ pub fn render_top_level_help(version: &str) -> String {
     // Wrapped rather than hand-broken: a hand-broken paragraph is how the
     // 80-column guarantee gets lost the next time someone edits a word in it.
     out.push_str(&wrap(
-        "Finds reclaimable developer storage, shows the evidence for why each candidate is \
-         safe or not, and acts only under policy control. AI can recommend; policy decides; \
-         the executor verifies.",
+        "Finds developer storage, explains evidence and acts under safety policy. \
+         AI recommends; policy decides; the executor verifies.",
         78,
         "",
     ));
@@ -2241,7 +2256,14 @@ mod tests {
 
         assert_eq!(
             destructive,
-            vec!["execute", "free", "emergency", "autopilot"]
+            vec![
+                "resource",
+                "execute",
+                "free",
+                "emergency",
+                "autopilot",
+                "daemon"
+            ]
         );
     }
 
@@ -2343,7 +2365,10 @@ mod tests {
                     sub.name
                 );
                 assert!(
-                    sub.args.is_empty() || sub.args.starts_with('[') || sub.args.starts_with('<'),
+                    sub.args.is_empty()
+                        || sub.args.starts_with('[')
+                        || sub.args.starts_with('<')
+                        || sub.args.starts_with("--"),
                     "{} {}'s argument hint should be bracketed or empty: {:?}",
                     command.name,
                     sub.name,

@@ -14,7 +14,12 @@
 //! probe never leaves a zombie process behind.
 
 use std::io::Read;
+use std::os::fd::AsRawFd;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -44,22 +49,13 @@ pub(crate) fn run_with_timeout(mut command: Command, timeout: Duration) -> Comma
         Err(_) => return CommandOutcome::SpawnFailed,
     };
 
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(s) = stdout.as_mut() {
-            let _ = s.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(s) = stderr.as_mut() {
-            let _ = s.read_to_end(&mut buf);
-        }
-        buf
-    });
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stdout_cancel = cancel.clone();
+    let stderr_cancel = cancel.clone();
+    let stdout_thread = std::thread::spawn(move || drain(stdout, stdout_cancel));
+    let stderr_thread = std::thread::spawn(move || drain(stderr, stderr_cancel));
 
     let deadline = Instant::now() + timeout;
     let exit_status: Option<ExitStatus> = loop {
@@ -71,26 +67,67 @@ pub(crate) fn run_with_timeout(mut command: Command, timeout: Duration) -> Comma
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
-            Err(_) => return CommandOutcome::SpawnFailed,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                cancel.store(true, Ordering::Release);
+                return CommandOutcome::SpawnFailed;
+            }
         }
     };
 
+    // Reap before pipe joins: a living child (or descendant) otherwise keeps EOF away.
+    if exit_status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        cancel.store(true, Ordering::Release);
+    }
+    cancel.store(true, Ordering::Release);
     let (Ok(stdout), Ok(stderr)) = (stdout_thread.join(), stderr_thread.join()) else {
         return CommandOutcome::SpawnFailed;
     };
-
+    if exit_status.is_none() {
+        return CommandOutcome::TimedOut;
+    }
+    let (Ok(stdout), Ok(stderr)) = (stdout, stderr) else {
+        return CommandOutcome::SpawnFailed;
+    };
     match exit_status {
         Some(status) => CommandOutcome::Completed(Output {
             status,
             stdout,
             stderr,
         }),
-        None => {
-            // Timed out: kill and reap so the child never becomes a
-            // zombie.
-            let _ = child.kill();
-            let _ = child.wait();
-            CommandOutcome::TimedOut
+        None => CommandOutcome::TimedOut,
+    }
+}
+
+fn drain(mut pipe: impl Read + AsRawFd, cancel: Arc<AtomicBool>) -> std::io::Result<Vec<u8>> {
+    let fd = pipe.as_raw_fd();
+    let flags = unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFL) };
+    if flags < 0
+        || unsafe { nix::libc::fcntl(fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => return Ok(buffer),
+            Ok(n) => {
+                if buffer.len() + n > 8 * 1024 * 1024 {
+                    return Err(std::io::Error::other("probe output budget exceeded"));
+                }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if cancel.load(Ordering::Acquire) {
+                    return Err(std::io::Error::other("probe pipes did not reach EOF"));
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -125,5 +162,31 @@ mod tests {
             CommandOutcome::TimedOut => {}
             _ => panic!("expected TimedOut"),
         }
+    }
+}
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn enforced_deadline_does_not_wait_for_child_pipe_eof() {
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", "exec sleep 3"]);
+        let start = Instant::now();
+        assert!(matches!(
+            run_with_timeout(c, Duration::from_millis(100)),
+            CommandOutcome::TimedOut
+        ));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+    #[test]
+    fn surviving_descendant_pipe_is_incomplete_not_a_success() {
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", "sleep 1 & exit 0"]);
+        let start = Instant::now();
+        assert!(matches!(
+            run_with_timeout(c, Duration::from_millis(100)),
+            CommandOutcome::SpawnFailed
+        ));
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

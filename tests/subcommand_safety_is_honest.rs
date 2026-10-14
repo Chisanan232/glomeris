@@ -128,8 +128,26 @@ fn glomeris_bin() -> &'static str {
 }
 
 fn main_source() -> String {
-    fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
-        .expect("failed to read src/main.rs")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut source = fs::read_to_string(root.join("src/main.rs")).expect("read main dispatcher");
+    assert!(
+        source.contains("glomeris::ownership::cli(&args[1..])"),
+        "managed dispatcher delegation changed; update the source trace"
+    );
+    let shared = fs::read_to_string(root.join("src/ownership/mod.rs"))
+        .expect("read shared managed dispatcher");
+    let body = lines_by_enclosing_fn(&shared)
+        .filter(|(name, _)| *name == "cli")
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        body.contains("args.first().map(String::as_str)"),
+        "shared dispatcher trace is empty"
+    );
+    source.push_str("\nfn run_resource_command(args: &[String]) {\n");
+    source.push_str(&body);
+    source
 }
 
 /// The handler `main` routes this command's remaining arguments to.
@@ -148,7 +166,8 @@ fn dispatch_arm_literal(line: &str) -> Option<&str> {
     let after_some = trimmed.strip_prefix("Some(").unwrap_or(trimmed);
     let (literal, rest) = after_some.strip_prefix('"')?.split_once('"')?;
     let rest = rest.strip_prefix(')').unwrap_or(rest);
-    rest.starts_with(" =>").then_some(literal)
+    let rest = rest.trim_start();
+    (rest.starts_with("=>") || rest.starts_with("if ")).then_some(literal)
 }
 
 /// Walks `source` a line at a time, reporting the name of the innermost
@@ -174,11 +193,26 @@ fn lines_by_enclosing_fn(source: &str) -> impl Iterator<Item = (&str, &str)> {
 
 /// Sorted, deduplicated verbs `fn <handler>` dispatches on.
 fn dispatched_verbs(source: &str, handler: &str) -> Vec<String> {
-    let mut verbs: Vec<String> = lines_by_enclosing_fn(source)
+    let lines: Vec<_> = lines_by_enclosing_fn(source)
         .filter(|(name, _)| *name == handler)
-        .filter_map(|(_, line)| dispatch_arm_literal(line))
-        .filter(|verb| !verb.starts_with('-'))
-        .map(str::to_string)
+        .map(|(_, line)| line)
+        .collect();
+    let mut arms = vec![];
+    for (index, line) in lines.iter().enumerate() {
+        let joined = format!(
+            "{} {}",
+            line,
+            lines.get(index + 1).map_or("", |next| next.trim_start())
+        );
+        if let Some(verb) = dispatch_arm_literal(&joined).filter(|verb| !verb.starts_with('-')) {
+            arms.push((line.len() - line.trim_start().len(), verb.to_owned()));
+        }
+    }
+    let depth = arms.iter().map(|(indent, _)| *indent).min();
+    let mut verbs: Vec<String> = arms
+        .into_iter()
+        .filter(|(indent, _)| Some(*indent) == depth)
+        .map(|(_, verb)| verb)
         .collect();
     verbs.sort();
     verbs.dedup();
@@ -290,7 +324,7 @@ fn make_temp_dir(prefix: &str) -> PathBuf {
         n
     ));
     fs::create_dir_all(&dir).expect("create temp dir");
-    dir
+    dir.canonicalize().expect("canonical fixture directory")
 }
 
 /// Every path under `root`, with file contents, for byte-for-byte comparison.
@@ -440,6 +474,10 @@ fn inspect_invocations(scratch: &Path) -> Vec<(String, Vec<String>)> {
         ("status".to_string(), argv(&["status"])),
         ("status".to_string(), argv(&["status", "--json"])),
         ("scan".to_string(), argv(&["scan"])),
+        (
+            "resource inspect".to_string(),
+            argv(&["resource", "inspect"]),
+        ),
         ("detect".to_string(), argv(&["detect"])),
         ("detect".to_string(), argv(&["detect", "--json"])),
         (
@@ -739,12 +777,30 @@ fn a_tool_consulting_surface_writes_no_glomeris_state_and_its_foreign_writes_are
 /// for the test to reason about. An empty answer reaches the detector as a
 /// failed probe, and a failed probe is not what is under test here — *that the
 /// program started at all* is.
+fn seed_inspectable_managed_record(home: &Path) {
+    use std::os::unix::fs::MetadataExt;
+    let store = glomeris::ownership::Store {
+        root: home.join("Library/Application Support/Glomeris/resources"),
+    };
+    store.init().unwrap();
+    let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let generation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let path = store.root.join("data").join(id).join(generation);
+    fs::create_dir_all(&path).unwrap();
+    let source = home.join("retained-source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("Cargo.toml"), "fixture").unwrap();
+    let m = fs::metadata(path).unwrap();
+    let record:glomeris::ownership::Record=serde_json::from_value(serde_json::json!({"schema":1,"id":id,"generation":generation,"class":"managed_generated","recipe":"read-only fixture","source_root":source,"source_head":"a".repeat(40),"dev":m.dev(),"ino":m.ino(),"last_meaningful_use":0,"claims":[],"sealed":null,"producer":null,"production_started":false,"retirement_started":false,"reclaimed":false,"observed_free_delta":null})).unwrap();
+    store.save(&record).unwrap();
+}
+
 fn recording_stub_path(dir: &Path, log: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).expect("create stub bin dir");
-    for program in SPAWNED_PROGRAMS {
+    for program in SPAWNED_PROGRAMS.iter().copied().chain(["git"]) {
         let stub = bin.join(program);
         fs::write(
             &stub,
@@ -788,6 +844,9 @@ fn only_the_tool_consulting_surfaces_start_another_program() {
         let home = make_temp_dir("horo1560-spawn-home");
         fs::write(&log, "").expect("truncate the invocation log");
 
+        if surface == "resource inspect" {
+            seed_inspectable_managed_record(&home);
+        }
         let output = Command::new(glomeris_bin())
             .args(args)
             .env("HOME", &home)

@@ -12,6 +12,7 @@
 - [Emergency Mode](emergency_mode.md)
 - [BYOK LLM Planner](byok.md)
 - [Autopilot](autopilot.md)
+- [Managed Resources](managed_resources.md)
 - [Daemon Lifecycle](daemon_lifecycle.md)
 - [Architecture](architecture.md)
 - [Troubleshooting](troubleshooting.md)

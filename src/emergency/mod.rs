@@ -569,6 +569,12 @@ fn process_candidate(
     report: &mut EmergencyReport,
     audit_log_path: &Path,
 ) {
+    // Managed retirement requires the normal execution-lock capability and
+    // its per-class authority. The degraded emergency path cannot supply it.
+    if evidence.resource.kind == ResourceKind::ManagedGenerated {
+        report.denied_candidates += 1;
+        return;
+    }
     let correlation = collector.collect(
         &evidence.resource,
         ProbeBudget {
@@ -805,6 +811,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            managed_ownership: None,
             cargo_target_scope: None,
             collected_at,
             sources: Vec::new(),

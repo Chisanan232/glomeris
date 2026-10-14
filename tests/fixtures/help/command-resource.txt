@@ -1,0 +1,54 @@
+glomeris resource — Manage ownership and reclaim enrolled generated artifacts.
+
+usage: glomeris resource <operation> [operation arguments]
+
+Safety depends on the subcommand; each is labelled below. The strongest of
+them: Can delete data — every deletion is policy-gated.
+
+Glomeris-created source-free compiler artifacts only. Acquiring owners hold a
+shared barrier; retirement holds it exclusively and uses the existing policy
+and executor. Default inactivity is 24 hours since meaningful use, not lease
+renewal. Existing unknown worktrees and user data are never enrolled. All
+operations render JSON; unattended sweep requires explicit per-class policy.
+
+Subcommands
+  create --source-root <workspace> --recipe <recipe>
+      Writes only Glomeris's own state — never your files.
+      Create one private generation with committed reconstruction source.
+  produce <id> <generation> --input <tracked-rs-file>
+      Writes only Glomeris's own state — never your files.
+      Create a bounded standalone compiler object from retained committed
+      input; reject external/environment dependencies.
+  hold <id> <generation> --host <host> --session <session> --owner-pid <pid>
+      Writes only Glomeris's own state — never your files.
+      Persist acquisition and hold a shared kernel barrier through native
+      use.
+  seal <id> <generation>
+      Writes only Glomeris's own state — never your files.
+      Verify source-free compiler outputs after all consumers release.
+  inspect
+      Read-only, and runs installed build tools to locate their caches.
+      Read lifecycle and safety blockers; no resource mutation.
+  reconcile
+      Writes only Glomeris's own state — never your files.
+      Recover persisted intent without repeating destructive actions.
+  sweep --unattended
+      Can delete data — every deletion is policy-gated.
+      Execute only enrolled, independently verified, policy-authorized
+      generations.
+  authority <apply|grant-managed> --expected-current <snapshot>
+      Writes only Glomeris's own state — never your files.
+      CAS-update the existing Autopilot authority without overwriting
+      intervening changes.
+  policy <show|apply file>
+      Writes only Glomeris's own state — never your files.
+      Inspect or CAS-update per-class retention; authorization still
+      requires the existing Autopilot envelope.
+
+Examples
+  glomeris resource inspect
+      Report ownership, meaningful inactivity and preservation blockers.
+  glomeris resource sweep --unattended
+      Reclaim verified generations within retention and Autopilot grants.
+
+See also: daemon, actions

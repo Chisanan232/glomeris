@@ -94,6 +94,7 @@ fn docker_evidence(kind: ResourceKind, lifecycle: DockerLifecycle) -> Evidence {
         tool_liveness: ProbeOutcome::Observed(true),
         docker_lifecycle: Some(lifecycle),
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        managed_ownership: None,
         cargo_target_scope: None,
         collected_at: NOW,
         sources: Vec::new(),

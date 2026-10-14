@@ -1,8 +1,7 @@
 glomeris {VERSION} — evidence-first developer storage cleanup.
 
-Finds reclaimable developer storage, shows the evidence for why each candidate
-is safe or not, and acts only under policy control. AI can recommend; policy
-decides; the executor verifies.
+Finds developer storage, explains evidence and acts under safety policy. AI
+recommends; policy decides; the executor verifies.
 
 usage: glomeris <command> [options]
 
@@ -19,6 +18,7 @@ PLAN — decide what to do. Nothing is executed.
   llm-check           Test the configured LLM endpoint, credential and model.
 
 ACT — change this machine. Policy decides every deletion.
+  resource            Manage ownership and reclaim enrolled generated artifacts.
   execute             Run one action against one resource, under policy.
   free                Reclaim space until a recovery goal is reached.
   emergency           Degraded-path recovery with no network and no LLM.

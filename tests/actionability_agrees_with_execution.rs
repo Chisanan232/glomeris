@@ -90,6 +90,12 @@ fn auto_safe_evidence(kind: ResourceKind, path: &Path, reclaimable: u64) -> Evid
         // HORO-1824: same "clean default" rationale as
         // `executable_dependency` above — only CargoTargetDir carries
         // the concept at all.
+        managed_ownership: (kind == ResourceKind::ManagedGenerated).then(|| {
+            ProbeOutcome::Observed(glomeris::ownership::OwnershipEvidence {
+                reclaimable: true,
+                blockers: vec![],
+            })
+        }),
         cargo_target_scope: (kind == ResourceKind::CargoTargetDir).then(|| {
             ProbeOutcome::Observed(glomeris::evidence::CargoTargetScope {
                 resolved_target: path.to_path_buf(),
@@ -132,6 +138,11 @@ fn cargo_project(root: &Path) -> PathBuf {
 /// are never passed in, so they panic if they ever are.
 fn fixture_for(kind: ResourceKind, root: &Path) -> PathBuf {
     match kind {
+        ResourceKind::ManagedGenerated => {
+            let path = root.join("managed_generated");
+            fs::create_dir(&path).unwrap();
+            path
+        }
         ResourceKind::NodeModules => {
             let p = root.join("proj/node_modules");
             fs::create_dir_all(&p).expect("create node_modules");

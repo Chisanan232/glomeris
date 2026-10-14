@@ -12,6 +12,7 @@
 mod cargo;
 mod homebrew;
 pub mod llm;
+mod managed;
 mod node;
 
 use std::fmt;
@@ -19,6 +20,7 @@ use std::path::PathBuf;
 
 pub use cargo::CargoCleanTargetDir;
 pub use homebrew::HomebrewCleanupCache;
+pub use managed::ManagedGeneratedClean;
 pub use node::NodeCleanNodeModules;
 
 // Reuse the exact `ActionId` type `evidence::model` already defines for
@@ -187,6 +189,7 @@ impl ActionRegistry {
     pub fn builtin() -> Self {
         Self {
             actions: vec![
+                Box::new(ManagedGeneratedClean),
                 Box::new(CargoCleanTargetDir),
                 Box::new(NodeCleanNodeModules),
                 Box::new(HomebrewCleanupCache),
@@ -314,9 +317,9 @@ mod tests {
     }
 
     #[test]
-    fn builtin_registry_registers_three_actions() {
+    fn builtin_registry_registers_four_actions() {
         let registry = ActionRegistry::builtin();
-        assert_eq!(registry.actions.len(), 3);
+        assert_eq!(registry.actions.len(), 4);
     }
 
     /// Every variant's `Display` has to be a sentence, because all three

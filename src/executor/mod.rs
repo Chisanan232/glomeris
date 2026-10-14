@@ -179,7 +179,67 @@ pub fn execute(
     now: SystemTime,
     volume: Option<&dyn VolumeDelta>,
 ) -> ExecutionReport {
+    execute_inner(action, approval, collector, cfg, now, volume, None)
+}
+pub(crate) fn execute_owned(
+    action: &dyn Action,
+    approval: &Approval,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+    volume: Option<&dyn VolumeDelta>,
+    _authority: &crate::executor::lock::ExecutionLockGuard,
+) -> ExecutionReport {
+    execute_inner(action, approval, collector, cfg, now, volume, None)
+}
+pub(crate) fn execute_managed_owned(
+    action: &dyn Action,
+    approval: &Approval,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+    volume: Option<&dyn VolumeDelta>,
+    permit: crate::ownership::ManagedRetirementPermit<'_>,
+) -> ExecutionReport {
+    let guard = match permit.into_guard(action, approval) {
+        Ok(g) => g,
+        Err(_) => {
+            return aborted_report(
+                action.id(),
+                approval.decision().resource.clone(),
+                AbortReason::EvidenceDegraded,
+            )
+        }
+    };
+    execute_inner(action, approval, collector, cfg, now, volume, Some(guard))
+}
+fn execute_inner(
+    action: &dyn Action,
+    approval: &Approval,
+    collector: &dyn EvidenceCollector,
+    cfg: &PolicyConfig,
+    now: SystemTime,
+    volume: Option<&dyn VolumeDelta>,
+    admitted_guard: Option<crate::ownership::RetirementGuard>,
+) -> ExecutionReport {
     let resource = approval.decision().resource.clone();
+    let mut managed_guard = if resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
+        let crate::evidence::ResourceLocator::Path(path) = &resource.locator else {
+            return aborted_report(action.id(), resource, AbortReason::ResourceIdentityChanged);
+        };
+        let _ = path;
+        let Some(guard) = admitted_guard else {
+            return aborted_report(action.id(), resource, AbortReason::EvidenceDegraded);
+        };
+        Some(guard)
+    } else {
+        if let crate::evidence::ResourceLocator::Path(path) = &resource.locator {
+            if crate::ownership::protects_other_kind(path) {
+                return aborted_report(action.id(), resource, AbortReason::PolicyReasonsWidened);
+            }
+        }
+        None
+    };
 
     // 0. Snapshot the resource's live filesystem identity via
     // `symlink_metadata` (never `metadata` — a symlink must be detected as
@@ -270,7 +330,18 @@ pub fn execute(
     let sample = |p: &Path| -> Option<(u64, u64)> { volume?.sample(p).ok() };
     let before = mount_path.as_deref().and_then(sample);
 
+    if let Some(guard) = &mut managed_guard {
+        if guard.intent().is_err() {
+            return aborted_report(action.id(), resource, AbortReason::EvidenceDegraded);
+        }
+        #[cfg(test)]
+        crate::ownership::crash_tests::checkpoint("intent");
+    }
     let mut report = execute_plan(plan, identity_snapshot);
+    #[cfg(test)]
+    if managed_guard.is_some() {
+        crate::ownership::crash_tests::checkpoint("deleted");
+    }
 
     // HORO-1826 §4.4: a pre/post host-dependency integrity check, taken
     // AFTER whatever `execute_plan` just did (successfully or not — a
@@ -289,6 +360,13 @@ pub fn execute(
     let after = mount_path.as_deref().and_then(sample);
     report.volume_free_delta =
         compute_volume_delta(identity_snapshot.map(|s| s.dev), before, after);
+    if let Some(guard) = &mut managed_guard {
+        let delta = report.volume_free_delta.observed().copied();
+        if let Err(e) = guard.finish(delta) {
+            report.outcome =
+                ExecutionOutcome::Failed(format!("cleanup outcome persistence failed: {e}"));
+        }
+    }
 
     report
 }
@@ -421,7 +499,7 @@ fn completeness_rank_from_decision(decision: &PolicyDecision) -> u8 {
 /// then merges in a fresh correlation pass via `collector`. Used only for
 /// deletion-time revalidation — never a substitute for a real detector
 /// pass.
-fn build_fresh_evidence(
+pub(crate) fn build_fresh_evidence(
     resource: &ResourceId,
     action: &dyn Action,
     collector: &dyn EvidenceCollector,
@@ -523,6 +601,13 @@ fn build_fresh_evidence(
         },
     );
     merge_into(&mut evidence, correlation);
+
+    if resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
+        evidence.managed_ownership = Some(match path {
+            Some(path) => crate::ownership::collect_ownership(path, now),
+            None => ProbeOutcome::Unavailable(ProbeReason::Failed),
+        });
+    }
 
     // Stamp `collected_at` with the same injected clock `execute` was
     // given, rather than `discovery_evidence`'s internal
@@ -1286,6 +1371,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            managed_ownership: None,
             cargo_target_scope,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
@@ -2459,6 +2545,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Observed(
                 crate::evidence::ExecutableDependencyReport::empty(),
             ),
+            managed_ownership: None,
             cargo_target_scope: None,
             collected_at: now,
             sources: Vec::new(),

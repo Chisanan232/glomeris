@@ -14,6 +14,7 @@ mod docker_objects;
 mod go;
 mod gradle;
 mod homebrew;
+mod managed;
 mod maven;
 mod node;
 mod python;
@@ -619,6 +620,7 @@ pub(crate) fn discovery_evidence(
         // `crate::evidence::correlate` (not this discovery stage) is
         // responsible for actually attempting this probe.
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        managed_ownership: None,
         cargo_target_scope: None,
         collected_at: SystemTime::now(),
         sources: Vec::new(),
@@ -1241,6 +1243,7 @@ impl DetectorRegistry {
     pub fn builtin() -> Self {
         Self {
             detectors: vec![
+                Box::new(managed::ManagedGeneratedDetector),
                 Box::new(xcode::XcodeDetector),
                 Box::new(homebrew::HomebrewDetector),
                 Box::new(cargo::CargoDetector),
@@ -1483,6 +1486,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "managed_generated",
                 "xcode_derived_data",
                 "homebrew_cache",
                 "cargo_target_dir",
