@@ -5,7 +5,12 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Component;
 
-fn open_at(parent: &File, name: &std::ffi::OsStr, flags: i32, mode: u32) -> io::Result<File> {
+pub(super) fn open_at(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    flags: i32,
+    mode: u32,
+) -> io::Result<File> {
     let name = CString::new(name.as_bytes()).map_err(error)?;
     // The parent descriptor anchors resolution even if its pathname is replaced.
     let fd = unsafe {
@@ -23,7 +28,7 @@ fn open_at(parent: &File, name: &std::ffi::OsStr, flags: i32, mode: u32) -> io::
     }
 }
 
-fn directory(path: &Path) -> io::Result<File> {
+pub(super) fn directory(path: &Path) -> io::Result<File> {
     if !path.is_absolute() {
         return Err(error("absolute export destination required"));
     }
@@ -86,7 +91,7 @@ pub(super) fn export(
     store.identity(&record)?;
     verify_producer(&record)?;
     if record.sealed.as_ref() != record.producer.as_ref().map(|p| &p.outputs)
-        || artifacts(&store.path(&record), record.dev)? != record.producer.as_ref().unwrap().outputs
+        || record_artifacts(&record)? != record.producer.as_ref().unwrap().outputs
     {
         return Err(error("export requires unchanged sealed producer outputs"));
     }
