@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -208,10 +210,13 @@ fn secure(path: &Path, directory: bool) -> io::Result<()> {
     Ok(())
 }
 fn private_dir(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
+    // Publish newly created components as private. mkdir-then-chmod exposes a
+    // nonprivate interval to concurrent Claude/Codex initializers. Never chmod
+    // an existing destination: it may be foreign or have changed identity.
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
     secure(path, true)
 }
 fn durable(path: &Path, value: &impl Serialize) -> io::Result<()> {
