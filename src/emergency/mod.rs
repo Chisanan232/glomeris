@@ -571,7 +571,7 @@ fn process_candidate(
 ) {
     // Managed retirement requires the normal execution-lock capability and
     // its per-class authority. The degraded emergency path cannot supply it.
-    if evidence.resource.kind == ResourceKind::ManagedGenerated {
+    if evidence.resource.kind.is_managed_resource() {
         report.denied_candidates += 1;
         return;
     }
