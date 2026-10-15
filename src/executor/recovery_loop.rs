@@ -759,7 +759,7 @@ fn select_candidate(request: Selecting<'_>) -> Selection {
         if excluded.contains(&ev.resource) {
             continue;
         }
-        if ev.resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
+        if ev.resource.kind.is_managed_resource() {
             // This runner has no class-budget admission capability. The managed
             // sweep reports the per-resource blocker and reserves class budgets.
             not_executable += 1;

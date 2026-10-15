@@ -213,7 +213,7 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         return decision(PolicyClass::Ask, active_use_reasons);
     }
 
-    if ev.resource.kind == ResourceKind::ManagedGenerated {
+    if ev.resource.kind.is_managed_resource() {
         match ev.managed_ownership.as_ref().and_then(|p| p.observed()) {
             Some(evidence) if evidence.reclaimable => {}
             _ => return decision(PolicyClass::Ask, vec![ReasonCode::EvidenceIncomplete]),
@@ -341,6 +341,41 @@ mod tests {
         PolicyConfig {
             max_evidence_age: Duration::from_secs(300),
         }
+    }
+
+    #[test]
+    fn managed_cargo_library_requires_positive_enrollment_ownership_evidence() {
+        let cfg = cfg();
+        let mut ev = complete_evidence(ResourceKind::ManagedCargoLibrary, NOW);
+        assert_eq!(
+            classify(&ev, &cfg, NOW).reasons,
+            vec![ReasonCode::EvidenceIncomplete]
+        );
+
+        ev.managed_ownership = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+        assert_eq!(
+            classify(&ev, &cfg, NOW).reasons,
+            vec![ReasonCode::EvidenceIncomplete]
+        );
+
+        ev.managed_ownership = Some(ProbeOutcome::Observed(
+            crate::ownership::OwnershipEvidence {
+                reclaimable: true,
+                blockers: Vec::new(),
+            },
+        ));
+        assert_eq!(classify(&ev, &cfg, NOW).class, PolicyClass::AutoSafe);
+
+        ev.managed_ownership = Some(ProbeOutcome::Observed(
+            crate::ownership::OwnershipEvidence {
+                reclaimable: false,
+                blockers: vec!["consumer is active".into()],
+            },
+        ));
+        assert_eq!(
+            classify(&ev, &cfg, NOW).reasons,
+            vec![ReasonCode::EvidenceIncomplete]
+        );
     }
 
     /// HORO-1049's critical AC: `reclaimable_bytes_is_lower_bound` is
