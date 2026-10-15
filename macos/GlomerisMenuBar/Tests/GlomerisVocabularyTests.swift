@@ -85,7 +85,7 @@ final class GlomerisVocabularyTests: XCTestCase {
 
     /// `src/evidence/model.rs` — `ResourceKind::tag`.
     private static let kindTokens = [
-        "managed_generated",
+        "managed_generated", "managed_cargo_library",
         "xcode_derived_data", "homebrew_cache", "cargo_target_dir", "cargo_registry_cache",
         "node_modules", "node_package_manager_cache", "docker_build_cache",
         "docker_image", "docker_container", "docker_volume",
@@ -357,6 +357,13 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// visible rather than an accident of the filter above.
     func testNodeModulesKeepsItsLiteralNameOnPurpose() {
         XCTAssertEqual(GlomerisVocabulary.kind("node_modules").title, "node_modules")
+    }
+
+    func testManagedCargoLibraryIsDistinctFromNativeTargets() {
+        XCTAssertNotEqual(
+            GlomerisVocabulary.kind("managed_cargo_library").title,
+            GlomerisVocabulary.kind("cargo_target_dir").title
+        )
     }
 
     func testUnrecognisedTokenIsNeverPresentedAsReassurance() {
