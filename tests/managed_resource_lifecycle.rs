@@ -7,6 +7,409 @@ use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 static FIXTURE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+fn cargo_fixture() -> Fixture {
+    let f = Fixture::new();
+    fs::create_dir(f.source.join("src")).unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&f.source)
+        .args(["mv", "lib.rs", "src/lib.rs"])
+        .status()
+        .unwrap()
+        .success());
+    fs::write(
+        f.source.join("src/lib.rs"),
+        "pub static ARTIFACT: [u8; 1048576] = [42;1048576];\npub fn double(x:u32)->u32{x*2}\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&f.source)
+        .args(["commit", "-am", "standalone library"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    f
+}
+fn cargo_produce(f: &Fixture, r: &Value) -> std::process::Output {
+    f.cmd()
+        .env(
+            "RUSTUP_HOME",
+            std::env::var_os("RUSTUP_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup")
+                }),
+        )
+        .args([
+            "resource",
+            "produce-cargo",
+            r["id"].as_str().unwrap(),
+            r["generation"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+fn cargo_create(f: &Fixture) -> Value {
+    f.call(&[
+        "create-cargo",
+        "--source-root",
+        f.source.to_str().unwrap(),
+        "--recipe",
+        "fixed offline standalone Cargo library",
+    ])
+}
+fn cargo_policy(f: &Fixture, enabled: bool, threshold: u64) {
+    let p = f.home.join("cargo-policy.json");
+    fs::write(&p,json!({"schema":1,"classes":{"managed_cargo_library":{"idle_threshold_secs":threshold,"unattended":enabled}},"max_actions":3,"max_bytes":5368709120u64}).to_string()).unwrap();
+    f.call(&["policy", "apply", p.to_str().unwrap()]);
+    if enabled {
+        assert!(f
+            .cmd()
+            .args([
+                "autopilot",
+                "enable",
+                "--kinds",
+                "managed_cargo_library",
+                "--respond-to-alerts"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+}
+
+#[test]
+fn closed_cargo_generation_exports_and_reclaims_only_under_its_own_grant() {
+    let f = cargo_fixture();
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    assert_eq!(record["schema"], 2);
+    assert_eq!(record["producer"]["closed_consumers"], true);
+    assert!(
+        !f.call(&["inspect"])[0]["eligible"].as_bool().unwrap(),
+        "24h default protects fresh production"
+    );
+    let export = f.home.join("retained.rlib");
+    f.call(&[
+        "export",
+        r["id"].as_str().unwrap(),
+        r["generation"].as_str().unwrap(),
+        "--artifact",
+        "artifact.rlib",
+        "--destination",
+        export.to_str().unwrap(),
+    ]);
+    // A grant for the old class must not authorize Cargo, even with a zero test threshold.
+    cargo_policy(&f, true, 0);
+    assert!(f
+        .cmd()
+        .args(["autopilot", "revoke"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(f
+        .cmd()
+        .args([
+            "autopilot",
+            "enable",
+            "--kinds",
+            "managed_generated",
+            "--respond-to-alerts"
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+    assert!(PathBuf::from(r["path"].as_str().unwrap()).exists());
+    assert!(f
+        .cmd()
+        .args(["autopilot", "revoke"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    cargo_policy(&f, true, 0);
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "reclaimed");
+    assert!(!PathBuf::from(r["path"].as_str().unwrap()).exists());
+    assert!(export.exists());
+    let after: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    for p in after["cargo_proof"]["inputs"].as_object().unwrap().keys() {
+        assert!(PathBuf::from(p).exists());
+    }
+    assert_eq!(
+        f.call(&["sweep", "--unattended"])[0]["logical_bytes_removed"],
+        0
+    );
+}
+
+#[test]
+fn cargo_generation_tampering_and_external_links_prevent_reclamation() {
+    let f = cargo_fixture();
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    cargo_policy(&f, true, 0);
+    let root = PathBuf::from(r["path"].as_str().unwrap());
+    fs::hard_link(root.join("artifact.rlib"), f.home.join("external.rlib")).unwrap();
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+    fs::remove_file(f.home.join("external.rlib")).unwrap();
+    fs::create_dir(root.join("unexpected-empty-dir")).unwrap();
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+}
+
+#[test]
+fn cargo_source_requiring_dependencies_fails_without_closure() {
+    let f = cargo_fixture();
+    fs::write(
+        f.source.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.0.0'\nedition='2021'\n[dependencies]\nserde='1'\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&f.source)
+        .args(["commit", "-am", "unsupported dependency"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    fs::write(
+        f.source.join("src/lib.rs"),
+        "pub fn needs_external() -> serde::Value { serde::Value::Null }\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&f.source)
+        .args(["commit", "-am", "external dependency use"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(!out.status.success());
+
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+}
+
+#[test]
+fn native_cargo_exposure_cannot_be_resealed_after_release() {
+    let f = cargo_fixture();
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    cargo_policy(&f, true, 0);
+    let first = f.holder(&r, "claude", std::process::id());
+    let second = f.holder(&r, "codex", std::process::id());
+    first.release();
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    second.release();
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    assert!(!f
+        .cmd()
+        .args([
+            "resource",
+            "seal",
+            r["id"].as_str().unwrap(),
+            r["generation"].as_str().unwrap()
+        ])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+}
+
+#[test]
+fn cargo_interrupted_production_is_not_recovered_as_closed_ownership() {
+    let f = cargo_fixture();
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // State persisted before a producer finishes is deliberately insufficient,
+    // even when its outputs happen to look exactly like a successful build.
+    let mut record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    record["producer"] = Value::Null;
+    record["cargo_proof"] = Value::Null;
+    record["sealed"] = Value::Null;
+    fs::write(f.record(&r), serde_json::to_vec(&record).unwrap()).unwrap();
+    cargo_policy(&f, true, 0);
+    f.call(&["reconcile"]);
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+    assert!(PathBuf::from(r["path"].as_str().unwrap())
+        .join("artifact.rlib")
+        .exists());
+}
+
+#[test]
+fn cargo_rejects_unique_files_and_reconstruction_input_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = cargo_fixture();
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    cargo_policy(&f, true, 0);
+    let root = PathBuf::from(r["path"].as_str().unwrap());
+    fs::write(root.join("unique-notes.txt"), "must preserve").unwrap();
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+    assert_eq!(
+        fs::read_to_string(root.join("unique-notes.txt")).unwrap(),
+        "must preserve"
+    );
+    fs::remove_file(root.join("unique-notes.txt")).unwrap();
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    let input = PathBuf::from(record["producer"]["input"].as_str().unwrap());
+    fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(&input, "pub fn unique_state() {}\n").unwrap();
+    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
+}
+
+#[test]
+fn cargo_source_binding_ignores_inherited_git_routing() {
+    let f = cargo_fixture();
+    let other = cargo_fixture();
+    fs::write(
+        other.source.join("src/lib.rs"),
+        "pub fn wrong_repository() {}\n",
+    )
+    .unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&other.source)
+        .args(["commit", "-am", "other source"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let created = f
+        .cmd()
+        .env("GIT_DIR", other.source.join(".git"))
+        .env("GIT_WORK_TREE", &other.source)
+        .args([
+            "resource",
+            "create-cargo",
+            "--source-root",
+            f.source.to_str().unwrap(),
+            "--recipe",
+            "committed declared source only",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let r: Value = serde_json::from_slice(&created.stdout).unwrap();
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&f.source)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        record["source_head"].as_str().unwrap(),
+        String::from_utf8(head.stdout).unwrap().trim()
+    );
+    let home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".rustup"));
+    let out = f
+        .cmd()
+        .env("RUSTUP_HOME", home)
+        .env("GIT_DIR", other.source.join(".git"))
+        .env("GIT_WORK_TREE", &other.source)
+        .args([
+            "resource",
+            "produce-cargo",
+            r["id"].as_str().unwrap(),
+            r["generation"].as_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    assert_eq!(
+        fs::read(record["producer"]["input"].as_str().unwrap()).unwrap(),
+        fs::read(f.source.join("src/lib.rs")).unwrap()
+    );
+}
+
+#[test]
+fn original_package_patch_and_workspace_are_not_extracted_library_inputs() {
+    let f = cargo_fixture();
+    let external = f.home.join("external");
+    fs::create_dir(&external).unwrap();
+    let sentinel = external.join("Cargo.toml");
+    fs::write(&sentinel, "not valid TOML; must never be resolved").unwrap();
+    let original=format!("[package]\nname='original'\nversion='0.0.0'\nedition='2021'\nbuild={:?}\n[workspace]\nmembers=[{:?}]\n[patch.crates-io]\nunused={{path={:?}}}\n",external.join("build.rs"),external,external);
+    fs::write(f.source.join("Cargo.toml"), original).unwrap();
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&f.source)
+        .args(["commit", "-am", "external package configuration"])
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let r = cargo_create(&f);
+    let out = cargo_produce(&f, &r);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(sentinel).unwrap(),
+        "not valid TOML; must never be resolved"
+    );
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    let input = PathBuf::from(record["producer"]["input"].as_str().unwrap());
+    let effective =
+        fs::read_to_string(input.parent().unwrap().parent().unwrap().join("Cargo.toml")).unwrap();
+    assert!(effective.contains("name='glomeris_managed_library'"));
+    assert!(!effective.contains("patch"));
+    assert!(!effective.contains("workspace"));
+    assert!(!effective.contains("external"));
+}
+
 #[test]
 fn core_export_releases_source_access_without_native_exposure() {
     use std::os::unix::fs::MetadataExt;
