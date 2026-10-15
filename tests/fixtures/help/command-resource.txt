@@ -5,13 +5,19 @@ usage: glomeris resource <operation> [operation arguments]
 Safety depends on the subcommand; each is labelled below. The strongest of
 them: Can delete data — every deletion is policy-gated.
 
-Glomeris-created source-free compiler artifacts only. Acquiring owners hold a
-shared barrier; retirement holds it exclusively and uses the existing policy
-and executor. Default inactivity is 24 hours since meaningful use, not lease
-renewal. Existing unknown worktrees and user data are never enrolled. All
-operations render JSON; unattended sweep requires explicit per-class policy.
+Unattended reclamation is limited to Glomeris-created source-free compiler
+artifacts. Native Cargo, worktree and Docker scopes may be registered for
+protective evidence only, without deletion authority. Acquiring owners and
+retirement share kernel barriers. Default inactivity is 24 hours since
+meaningful use, not lease renewal. All operations render JSON; unattended
+sweep requires explicit per-class policy.
 
 Subcommands
+  native <request|inspect|reconcile> --json
+      Writes only Glomeris's own state — never your files.
+      Track native task entitlements. Requests use bounded stdin;
+      inspection exposes no capabilities and never grants cleanup
+      authority.
   create --source-root <workspace> --recipe <recipe>
       Writes only Glomeris's own state — never your files.
       Create one private generation with committed reconstruction source.
