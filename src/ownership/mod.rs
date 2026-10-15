@@ -2120,4 +2120,40 @@ mod permit_tests {
         drop(lock);
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn concurrent_initialization_creates_private_components_without_chmod_adoption() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("gl-private-init-{}", random().unwrap()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path = root.join("new/parent/state");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+        std::thread::scope(|scope| {
+            let mut workers = vec![];
+            for _ in 0..16 {
+                let path = path.clone();
+                let start = start.clone();
+                workers.push(scope.spawn(move || {
+                    start.wait();
+                    private_dir(&path)
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap().unwrap();
+            }
+        });
+        for part in [root.join("new"), root.join("new/parent"), path] {
+            assert_eq!(fs::symlink_metadata(part).unwrap().mode() & 0o777, 0o700);
+        }
+        let foreign = root.join("existing");
+        fs::create_dir(&foreign).unwrap();
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_dir(&foreign).is_err());
+        assert_eq!(
+            fs::symlink_metadata(&foreign).unwrap().mode() & 0o777,
+            0o755,
+            "never repair/adopt foreign permissions"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
