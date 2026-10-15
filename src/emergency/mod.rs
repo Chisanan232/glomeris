@@ -856,6 +856,41 @@ mod tests {
     /// the shape a detector still reports whenever its own size probe
     /// fails) is correctly denied, never executed.
     #[test]
+    fn emergency_never_admits_managed_generations_without_retirement_authority() {
+        struct NoProbe;
+        impl EvidenceCollector for NoProbe {
+            fn collect(&self, _: &ResourceId, _: ProbeBudget) -> CorrelationResult {
+                panic!("degraded emergency must refuse managed custody before probing or charging");
+            }
+        }
+        let dir = make_temp_dir("managed-emergency-denial");
+        fs::write(dir.join("sentinel"), "preserve").unwrap();
+        for kind in [
+            ResourceKind::ManagedGenerated,
+            ResourceKind::ManagedCargoLibrary,
+        ] {
+            let mut report = EmergencyReport::default();
+            process_candidate(
+                autosafe_evidence(dir.clone(), kind, SystemTime::now()),
+                &NoProbe,
+                &ActionRegistry::builtin(),
+                SystemTime::now(),
+                &mut report,
+                &dir.join("audit.jsonl"),
+            );
+            assert_eq!(report.denied_candidates, 1);
+            assert_eq!(report.actions_attempted, 0);
+            assert!(report.errors.is_empty());
+            assert_eq!(
+                fs::read_to_string(dir.join("sentinel")).unwrap(),
+                "preserve"
+            );
+            assert!(!dir.join("audit.jsonl").exists());
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn process_candidate_denies_incomplete_evidence_without_executing() {
         let dir = make_temp_dir("candidate-denied");
         let target = dir.join("target");
