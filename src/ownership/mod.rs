@@ -3,6 +3,7 @@
 mod access;
 #[cfg(test)]
 pub(crate) mod crash_tests;
+pub mod native;
 
 use crate::evidence::correlate::timeout::{run_with_timeout, CommandOutcome};
 use nix::fcntl::{Flock, FlockArg};
@@ -275,6 +276,7 @@ impl Store {
     pub fn current() -> io::Result<Self> {
         Ok(Self {
             root: PathBuf::from(std::env::var_os("HOME").ok_or_else(|| error("HOME unavailable"))?)
+                .canonicalize()?
                 .join("Library/Application Support/Glomeris/resources"),
         })
     }
@@ -1336,6 +1338,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
 pub fn cli(args: &[String]) -> io::Result<()> {
     let store = Store::current()?;
     match args.first().map(String::as_str) {
+        Some("native") => native::cli(&store, &args[1..]),
         Some("--help") | Some("help") => {
             println!("glomeris resource: create --source-root GIT_WORKSPACE --recipe RECIPE; hold ID GENERATION --host HOST --session SESSION --owner-pid PID; seal ID GENERATION; inspect; reconcile; sweep --unattended; policy show|apply FILE. All persisted ownership/policy is private. Only source-free generated compiler objects in core-created namespaces can be sealed; existing/unknown user paths are never enrolled.");
             Ok(())
@@ -1392,8 +1395,9 @@ pub fn cli(args: &[String]) -> io::Result<()> {
         Some("inspect") => {
             let mut v = vec![];
             for id in store.ids()? {
-                v.push(store.inspect(&store.read(&id)?, now()));
+                v.push(serde_json::to_value(store.inspect(&store.read(&id)?, now())).map_err(error)?);
             }
+            v.extend(store.native_inspect()?);
             write_reply(&v)
         }
         Some("reconcile") => write_reply(&store.reconcile()?),

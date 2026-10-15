@@ -84,3 +84,33 @@ unconfirmed children and changed identities preserve data. Power, network and
 session termination are not recovery prerequisites. Only filesystem free-space
 delta is physical recovery; logical removed bytes are separate and concurrent
 allocation can make the measured physical delta negative.
+
+## Native consumer evidence
+
+`resource native request --json` accepts one bounded stdin request: register a
+Cargo target, registered Git worktree, or local Docker socket/builder scope;
+acquire before native use; then update a revision-bound task entitlement.
+The existing resource Store, execution lock and durable writes are reused.
+Capabilities travel over stdin/stdout and private records only, never command
+arguments or ordinary inspection. `native inspect --json` and `native reconcile
+--json` report protection without inferring release from process death.
+
+Waiting and suspended claims protect future use after lease expiry. Renewal is
+not progress. Authenticated handover rotates the claimant epoch and capability;
+stale callers cannot reopen a released claim. Child launch intent precedes
+launch, and child entitlement needs explicit authenticated relinquishment.
+Unconfirmed launches, dead owners and unknown legacy consumers remain evidence
+gaps. They are not fabricated completion signals.
+Cancellation is an authenticated **owner-attested** non-dispatch declaration,
+not an independent observation that a child never launched. It cannot promote
+coverage or authorize retirement.
+
+All native coverage remains incomplete in this evidence bridge. Host/session and
+Docker builder labels are caller declarations, not verified canonical Host SPI
+lineage or historical-consumer closure. No native retirement permit or class
+grant is minted. The executor holds a shared namespace barrier through mutation
+and refuses paths overlapping enrolled scopes; native admission takes that barrier
+exclusively. Registering a scope therefore cannot race an already admitted action.
+Existing generated-resource sweep skips native records. Native adoption does not
+change the configured 24-hour threshold, permit age-only cleanup, or attest that
+Cargo contents, ignored worktree files, or Docker records are reconstructable.

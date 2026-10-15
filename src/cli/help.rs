@@ -353,8 +353,9 @@ pub const COMMANDS: &[CommandSpec] = &[
         name: "resource", group: Group::Act, safety: Safety::Destructive,
         summary: "Manage ownership and reclaim enrolled generated artifacts.",
         usage: &["resource <operation>", "[operation arguments]"],
-        details: "Glomeris-created source-free compiler artifacts only. Acquiring owners hold a shared barrier; retirement holds it exclusively and uses the existing policy and executor. Default inactivity is 24 hours since meaningful use, not lease renewal. Existing unknown worktrees and user data are never enrolled. All operations render JSON; unattended sweep requires explicit per-class policy.",
+        details: "Unattended reclamation is limited to Glomeris-created source-free compiler artifacts. Native Cargo, worktree and Docker scopes may be registered for protective evidence only, without deletion authority. Acquiring owners and retirement share kernel barriers. Default inactivity is 24 hours since meaningful use, not lease renewal. All operations render JSON; unattended sweep requires explicit per-class policy.",
         subcommands: &[
+            SubcommandSpec{name:"native",args:"<request|inspect|reconcile> --json",safety:Safety::WritesOwnState,description:"Track native task entitlements. Requests use bounded stdin; inspection exposes no capabilities and never grants cleanup authority."},
             SubcommandSpec{name:"create",args:"--source-root <workspace> --recipe <recipe>",safety:Safety::WritesOwnState,description:"Create one private generation with committed reconstruction source."},
             SubcommandSpec{name:"produce",args:"<id> <generation> --input <tracked-rs-file>",safety:Safety::WritesOwnState,description:"Create a bounded standalone compiler object from retained committed input; reject external/environment dependencies."},
             SubcommandSpec{name:"export",args:"<id> <generation> --artifact <name> --destination <absolute-path>",safety:Safety::CreatesFile,description:"Copy a sealed artifact through core-only source access. Exported copies stay outside cleanup authority."},

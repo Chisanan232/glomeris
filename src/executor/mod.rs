@@ -223,6 +223,10 @@ fn execute_inner(
     admitted_guard: Option<crate::ownership::RetirementGuard>,
 ) -> ExecutionReport {
     let resource = approval.decision().resource.clone();
+    let _native_guard = match crate::ownership::native::execution_guard(&resource) {
+        Ok(guard) => guard,
+        Err(_) => return aborted_report(action.id(), resource, AbortReason::EvidenceDegraded),
+    };
     let mut managed_guard = if resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
         let crate::evidence::ResourceLocator::Path(path) = &resource.locator else {
             return aborted_report(action.id(), resource, AbortReason::ResourceIdentityChanged);
