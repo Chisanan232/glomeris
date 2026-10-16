@@ -38,7 +38,6 @@
 //! [`Regenerability::NotRegenerable`]. Staleness can therefore only ever move
 //! one of these between two flavours of `Ask`.
 
-use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
@@ -78,28 +77,35 @@ fn snapshot() -> Result<Value, DetectorStatus> {
     // What Docker does when asked: `docker system df -v` is the same reporting
     // command as in [`super::docker`] with per-object detail added. It reads
     // the daemon's state and prints it; it removes nothing.
-    let output = match Command::new(super::docker::DOCKER_PROGRAM)
-        .args(["system", "df", "-v", "--format", "{{json .}}"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(DetectorStatus::ToolAbsent);
-        }
-        Err(e) => {
+    //
+    // HORO-1911: bounded via `run_bounded_tool`, not a bare
+    // `Command::output()` — see `super::docker`'s identical fix for why.
+    let (status, stdout, stderr) = match super::run_bounded_tool(
+        super::docker::DOCKER_PROGRAM,
+        &["system", "df", "-v", "--format", "{{json .}}"],
+    ) {
+        super::BoundedToolOutput::Exited {
+            status,
+            stdout,
+            stderr,
+        } => (status, stdout, stderr),
+        super::BoundedToolOutput::ToolAbsent => return Err(DetectorStatus::ToolAbsent),
+        super::BoundedToolOutput::TimedOut => {
             return Err(DetectorStatus::Failed(format!(
-                "failed to spawn docker: {e}"
-            )))
+                "docker system df -v did not answer within {:?}",
+                super::PROBE_DEADLINE
+            )));
         }
+        super::BoundedToolOutput::SpawnFailed(msg) => return Err(DetectorStatus::Failed(msg)),
     };
 
-    if !output.status.success() {
+    if !status.success() {
         return Err(super::docker::failure_status(&String::from_utf8_lossy(
-            &output.stderr,
+            &stderr,
         )));
     }
 
-    serde_json::from_slice(&output.stdout).map_err(|e| {
+    serde_json::from_slice(&stdout).map_err(|e| {
         DetectorStatus::Failed(format!(
             "docker system df -v returned unparseable JSON: {e}"
         ))

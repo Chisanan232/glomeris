@@ -693,6 +693,11 @@ pub(crate) const SPAWNING_DETECTORS: &[&str] = &[
     "uv_cache",
     "go_build_cache",
     "go_module_cache",
+    // HORO-1911: docker.rs/docker_objects.rs moved off the unbounded
+    // `Command::output()` onto `run_bounded_tool`, so they now belong in
+    // this accounting the same as every other spawning detector.
+    "docker_build_cache",
+    "docker_objects",
 ];
 
 /// Worst case wall-clock one discovery pass can spend waiting on spawned
@@ -833,6 +838,97 @@ pub(crate) fn query_tool_lines_with_deadline(
     }
 
     ToolQuery::Lines(lines)
+}
+
+/// Outcome of [`run_bounded_tool`] (HORO-1911).
+///
+/// Deliberately not [`ToolQuery`]: that type collapses a non-zero exit and
+/// empty output into one `Failed` string, which is correct for a tool asked
+/// to *name a path* but wrong for `docker`, whose callers (`failure_status`,
+/// HORO-1562) distinguish "the daemon is unreachable" from "a real error"
+/// from stderr content a `ToolQuery::Failed`'s single `String` has already
+/// discarded. This keeps the raw status/stdout/stderr so that distinction
+/// can still be made by the caller, the same as the unbounded
+/// `Command::output()` this replaces did.
+#[derive(Debug)]
+pub(crate) enum BoundedToolOutput {
+    /// The process exited (zero or non-zero) within the deadline.
+    Exited {
+        status: std::process::ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    },
+    ToolAbsent,
+    /// Spawned and did not finish within the deadline. Distinct from
+    /// `Exited` with any status, for the same HORO-1559 reason
+    /// [`ToolQuery::TimedOut`] is distinct from `Failed`: a caller must not
+    /// read "we stopped waiting" as "the tool answered and said nothing".
+    TimedOut,
+    SpawnFailed(String),
+}
+
+/// [`Command::new(program).args(args).output()`], but bounded by
+/// [`PROBE_DEADLINE`] and reusing [`wait_bounded`]/[`drain_on_thread`] —
+/// the same leak-free kill-and-reap guarantee [`query_tool_lines_with_deadline`]
+/// already has, exercised by this module's own
+/// `an_abandoned_probe_leaves_no_running_child`-shaped tests.
+///
+/// HORO-1911: `docker.rs`/`docker_objects.rs` called the unbounded
+/// `.output()` directly, so a wedged or slow-starting Docker daemon could
+/// hang `detect`/`explain` indefinitely with zero partial output — exactly
+/// the class of bug HORO-1559 fixed for every *other* spawned tool via
+/// [`query_tool_lines_with_deadline`]. This is that same fix, for a caller
+/// that needs the exit status and stderr rather than a filtered line list.
+pub(crate) fn run_bounded_tool(program: &str, args: &[&str]) -> BoundedToolOutput {
+    run_bounded_tool_with_deadline(program, args, PROBE_DEADLINE)
+}
+
+/// [`run_bounded_tool`] with the deadline supplied, so tests can assert the
+/// timeout path without waiting a real [`PROBE_DEADLINE`].
+pub(crate) fn run_bounded_tool_with_deadline(
+    program: &str,
+    args: &[&str],
+    deadline: Duration,
+) -> BoundedToolOutput {
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return BoundedToolOutput::ToolAbsent,
+        Err(e) => return BoundedToolOutput::SpawnFailed(format!("failed to spawn {program}: {e}")),
+    };
+
+    // Same reasoning as query_tool_lines_with_deadline: drain on separate
+    // threads so a tool that prints more than its pipe buffer holds is
+    // never blocked on us, and a deadline expiring on *that* wait is never
+    // misreported as the tool stalling.
+    let stdout = child.stdout.take().map(drain_on_thread);
+    let stderr = child.stderr.take().map(drain_on_thread);
+
+    let status = match wait_bounded(&mut child, deadline) {
+        Ok(Some(status)) => status,
+        Ok(None) => return BoundedToolOutput::TimedOut,
+        Err(e) => {
+            return BoundedToolOutput::SpawnFailed(format!("failed to wait for {program}: {e}"))
+        }
+    };
+
+    let stdout_bytes = stdout
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr_bytes = stderr
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    BoundedToolOutput::Exited {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    }
 }
 
 /// Waits for `child` for at most `deadline`, returning `Ok(None)` if it is
@@ -2398,6 +2494,79 @@ mod probe_deadline_tests {
         );
     }
 
+    // -- run_bounded_tool (HORO-1911) ------------------------------------
+
+    /// The positive control this bound exists for: `docker system df`'s
+    /// unbounded `.output()` could hang forever on a wedged daemon. A
+    /// `TimedOut` result — not `Exited` with any status, and not a panic
+    /// or an indefinite hang — is what replacing it with this helper must
+    /// produce.
+    #[test]
+    fn run_bounded_tool_times_out_on_a_stalled_process() {
+        let outcome = run_bounded_tool_with_deadline("sleep", &["30"], TEST_DEADLINE);
+        assert!(matches!(outcome, BoundedToolOutput::TimedOut));
+    }
+
+    /// Mirrors [`an_abandoned_probe_leaves_no_running_child`]: abandoning the
+    /// wait must not abandon the process this helper is used for, same as
+    /// the `ToolQuery` path it sits beside.
+    #[test]
+    fn run_bounded_tool_leaves_no_running_child_on_timeout() {
+        let before = own_children_matching(STALL_MARKER_SECONDS);
+        let outcome =
+            run_bounded_tool_with_deadline("sleep", &[STALL_MARKER_SECONDS], TEST_DEADLINE);
+        let after = own_children_matching(STALL_MARKER_SECONDS);
+
+        assert_eq!(
+            before, 0,
+            "{STALL_MARKER_SECONDS} is supposed to be unique to this test"
+        );
+        assert!(matches!(outcome, BoundedToolOutput::TimedOut));
+        assert_eq!(
+            after, 0,
+            "a timed-out run_bounded_tool call left its child running"
+        );
+    }
+
+    /// Negative control: a process that exits well inside the deadline must
+    /// report its real status and real stdout, not be mistaken for a
+    /// timeout. Exercises the success path with a non-trivial exit code so
+    /// this is not confused with "spawn failed".
+    #[test]
+    fn run_bounded_tool_reports_real_exit_status_and_stdout() {
+        let outcome = run_bounded_tool_with_deadline(
+            "sh",
+            &["-c", "echo hello; exit 3"],
+            Duration::from_secs(5),
+        );
+        match outcome {
+            BoundedToolOutput::Exited {
+                status,
+                stdout,
+                stderr: _,
+            } => {
+                assert_eq!(status.code(), Some(3));
+                assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
+            }
+            other => panic!("expected Exited, got a variant that is not it: {other:?}"),
+        }
+    }
+
+    /// An absent program must be distinguishable from one that ran and
+    /// failed — the same `ToolAbsent` vs `Failed` distinction
+    /// [`query_tool_lines`] already makes, carried over here so
+    /// `failure_status` (HORO-1562) keeps telling a stopped Docker daemon
+    /// apart from Docker not being installed at all.
+    #[test]
+    fn run_bounded_tool_reports_tool_absent_for_a_missing_program() {
+        let outcome = run_bounded_tool_with_deadline(
+            "glomeris-definitely-not-a-real-program-horo-1911",
+            &[],
+            TEST_DEADLINE,
+        );
+        assert!(matches!(outcome, BoundedToolOutput::ToolAbsent));
+    }
+
     /// The other half of the bound: a tool that answers must not be slowed or
     /// truncated by the machinery that bounds one that does not.
     #[test]
@@ -2484,6 +2653,13 @@ mod probe_deadline_tests {
             "src/detectors/homebrew.rs",
             "src/detectors/node.rs",
             "src/detectors/python.rs",
+            // HORO-1911: these call `run_bounded_tool`, not
+            // `query_tool_single_path`, so the needle scan below would not
+            // have caught them anyway — listed for the same reason the
+            // others are, so a reader sees every spawning module accounted
+            // for in one place.
+            "src/detectors/docker.rs",
+            "src/detectors/docker_objects.rs",
         ];
         // Split so this test's own source does not contain the needle.
         let needle = format!("{}{}", "query_tool_", "single_path(");
