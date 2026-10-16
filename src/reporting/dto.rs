@@ -1308,6 +1308,25 @@ pub struct DetectReport {
     /// completeness signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scan_coverage_note: Option<String>,
+    /// Whether every candidate in `candidates` was actually correlated
+    /// (HORO-1912), as opposed to being merged with
+    /// [`crate::evidence::correlate::CorrelationResult::unavailable`]
+    /// because the correlation-pass budget ran out before reaching it.
+    ///
+    /// `Default` gives `false`, the safe direction for a report nobody has
+    /// filled in — same reasoning as `discovery_complete`. Deliberately
+    /// does NOT itself change `discovery_complete` or `eligibility`: a
+    /// skipped candidate already carries its own policy consequence
+    /// (`UNKNOWN_INCOMPLETE`, via its individual `PolicyDecision`), so this
+    /// field is purely additive "how much of the picture is this" context,
+    /// the same role `scan_coverage_note` plays for project-root scoping.
+    pub correlation_complete: bool,
+    /// How many of `candidates` were skipped by the correlation-pass
+    /// budget — `0` on every report where `correlation_complete` is
+    /// `true`. Never changes which candidates appear in `candidates`; a
+    /// skipped one is still present, still classified, just not
+    /// individually probed this pass.
+    pub uncorrelated_candidates: usize,
 }
 
 /// `glomeris explain <resource>` report: the full evidence-and-policy

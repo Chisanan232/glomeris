@@ -32,17 +32,18 @@ pub use project_root_check::{
 };
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::actions::llm::{build_request_payload, plan_with_llm, LlmProvider};
 use crate::actions::{Action, ActionRegistry};
 use crate::detectors::{
     DetectorId, DetectorProgress, DetectorRegistry, DetectorStatus, DiscoveryContext,
 };
-use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
+use crate::evidence::correlate::{merge_into, CorrelationResult, EvidenceCollector, ProbeBudget};
 use crate::evidence::model::{
     ActionId, Evidence, NativeCleanup, ResourceFingerprint, ResourceId, ResourceLocator,
 };
+use crate::evidence::ProbeReason;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{
     ActionSource, AuditRecord, FsUsage, Heartbeat, HistoryEntry, ThresholdConfig,
@@ -76,6 +77,31 @@ use crate::workspace::{
 /// intentionally short budget for an interactive CLI command rather than
 /// a background recovery loop).
 const CLI_CORRELATION_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Wall-clock budget for the WHOLE correlation loop inside
+/// [`discover_and_classify_pass`] (HORO-1912) — not a per-candidate bound,
+/// which [`CLI_CORRELATION_TIMEOUT`] already is and stays unchanged.
+///
+/// Checked once before each candidate's [`EvidenceCollector::collect`]
+/// call, and anchored at the start of correlation (the first check), not
+/// at the start of discovery — a slow detection phase does not eat into
+/// this budget. The real worst-case wall time for the loop is therefore
+/// this budget plus one more `collect()` call, which can itself spend up
+/// to roughly `CLI_CORRELATION_TIMEOUT * 4` (see that constant's doc) —
+/// the budget stops the loop from STARTING another candidate, it does not
+/// preempt one already in flight.
+///
+/// Exists because a real host with many real resources (a live Docker
+/// install returning 180 objects, in the dogfood run that found this) can
+/// make the per-candidate loop's *aggregate* cost unbounded even though
+/// every individual probe inside it is bounded — `detect`/`explain` would
+/// hang with zero partial output until every single candidate had been
+/// probed. A candidate the budget is exhausted before reaching is still
+/// returned and classified, via [`CorrelationResult::unavailable`] — never
+/// silently dropped, never silently treated as clean. 20s is an
+/// engineering default, not a measured number; retune if real usage shows
+/// it's wrong in either direction.
+const CLI_CORRELATION_PASS_BUDGET: Duration = Duration::from_secs(20);
 
 /// Builds a [`StatusReport`] from a raw [`FsUsage`] reading and the
 /// pressure thresholds it's classified against. Pure — no I/O.
@@ -382,6 +408,13 @@ pub struct DiscoveryPass {
     /// the ones that contributed no candidates.
     pub detectors: Vec<(DetectorId, DetectorOutcome)>,
     pub candidates: Vec<(Evidence, PolicyDecision)>,
+    /// How many of `candidates` the correlation-pass budget
+    /// ([`CLI_CORRELATION_PASS_BUDGET`], HORO-1912) was exhausted before
+    /// reaching. Each is still present in `candidates`, still classified —
+    /// via [`CorrelationResult::unavailable`], never dropped and never
+    /// silently read as clean — just not individually probed this pass.
+    /// `0` on every pass that finished within budget.
+    pub uncorrelated: usize,
 }
 
 /// The discover-refresh-classify pipeline itself: runs every detector in
@@ -397,9 +430,33 @@ pub fn discover_and_classify_pass(
     collector: &dyn EvidenceCollector,
     policy_cfg: &PolicyConfig,
     now: SystemTime,
-    mut on_event: impl FnMut(ProgressEvent),
+    on_event: impl FnMut(ProgressEvent),
 ) -> DiscoveryPass {
-    let discovered = registry.discover_all_with_progress(ctx, |id, progress| match progress {
+    // Lazily anchored: the deadline starts counting from the first check
+    // inside the correlation loop below, not from whenever this function
+    // was entered — a slow discovery phase (the detectors loop, run by
+    // `discover_all_with_progress` inside `discover_and_classify_pass_with`)
+    // must not eat into the correlation budget.
+    let mut deadline: Option<Instant> = None;
+    discover_and_classify_pass_with(registry, ctx, collector, policy_cfg, now, on_event, || {
+        let n = Instant::now();
+        n >= *deadline.get_or_insert_with(|| n + CLI_CORRELATION_PASS_BUDGET)
+    })
+}
+
+/// Runs `registry.discover_all_with_progress` and projects its
+/// [`crate::detectors::DetectorProgress`] callback into [`ProgressEvent`]
+/// (HORO-1052), exactly once. Shared by [`discover_and_classify_pass_with`]
+/// and [`discover_and_explain_one`] (HORO-1912) so `detect`'s full pass and
+/// `explain`'s single-candidate pass emit identical progress events for
+/// the discovery phase they both still run in full — only correlation
+/// differs between the two.
+fn run_discovery_with_progress(
+    registry: &DetectorRegistry,
+    ctx: &DiscoveryContext,
+    on_event: &mut impl FnMut(ProgressEvent),
+) -> Vec<(DetectorId, DetectorStatus)> {
+    registry.discover_all_with_progress(ctx, |id, progress| match progress {
         DetectorProgress::Started => {
             on_event(ProgressEvent::DetectorStarted { detector: id.0 });
         }
@@ -418,10 +475,29 @@ pub fn discover_and_classify_pass(
                 reason: outcome.failure_reason().map(str::to_string),
             });
         }
-    });
+    })
+}
+
+/// [`discover_and_classify_pass`]'s real implementation, with the
+/// pass-budget check pulled out as `budget_exhausted` (HORO-1912) so a
+/// test can inject an exact predicate (always/never/after-k-calls)
+/// instead of racing a real [`CLI_CORRELATION_PASS_BUDGET`].
+fn discover_and_classify_pass_with(
+    registry: &DetectorRegistry,
+    ctx: &DiscoveryContext,
+    collector: &dyn EvidenceCollector,
+    policy_cfg: &PolicyConfig,
+    now: SystemTime,
+    mut on_event: impl FnMut(ProgressEvent),
+    mut budget_exhausted: impl FnMut() -> bool,
+) -> DiscoveryPass {
+    let discovered = run_discovery_with_progress(registry, ctx, &mut on_event);
 
     let mut detectors = Vec::with_capacity(discovered.len());
-    let mut candidates = Vec::new();
+    // Flattened in registration order first, so the ids above and the
+    // evidences below are built from the exact same `discovered` pass —
+    // never a second, independent walk that could disagree with it.
+    let mut flattened: Vec<Evidence> = Vec::new();
 
     for (id, status) in discovered {
         // Counted before the evidences are consumed, through the same
@@ -430,20 +506,7 @@ pub fn discover_and_classify_pass(
         let outcome = DetectorOutcome::from(&status);
         detectors.push((id, outcome));
         match status {
-            DetectorStatus::Found(evidences) => {
-                for mut ev in evidences {
-                    let correlation = collector.collect(
-                        &ev.resource,
-                        ProbeBudget {
-                            timeout: CLI_CORRELATION_TIMEOUT,
-                        },
-                    );
-                    merge_into(&mut ev, correlation);
-                    ev.collected_at = now;
-                    let decision = classify(&ev, policy_cfg, now);
-                    candidates.push((ev, decision));
-                }
-            }
+            DetectorStatus::Found(evidences) => flattened.extend(evidences),
             // Nothing further to do for any of them: the outcome recorded
             // above already carries which one it was, and a failure's reason.
             DetectorStatus::ToolAbsent
@@ -453,10 +516,92 @@ pub fn discover_and_classify_pass(
         }
     }
 
+    // Correlate project-scoped candidates first (HORO-1912): without this,
+    // a host-wide detector registered earlier (e.g. 180 real Docker
+    // objects) would exhaust the whole budget before a project-scoped
+    // detector registered later — such as `swiftpm_build_dir` — got
+    // correlated at all, which is exactly backwards for a `--project-root`
+    // caller asking about their own project. A stable sort, so candidates
+    // within each group keep their relative registration order.
+    let mut order: Vec<usize> = (0..flattened.len()).collect();
+    order.sort_by_key(|&i| !PROJECT_SCOPED_DETECTOR_IDS.contains(&flattened[i].detector.0));
+
+    // `Option<Evidence>` so each one can be moved out by `.take()` exactly
+    // once, in priority order, rather than cloned.
+    let mut flattened: Vec<Option<Evidence>> = flattened.into_iter().map(Some).collect();
+
+    // Filled by priority order, read out below in original (registration)
+    // order — a budget-driven correlation order must never become a
+    // reported-order change; nothing downstream expects the two to be the
+    // same thing.
+    let mut results: Vec<Option<(Evidence, PolicyDecision)>> =
+        (0..flattened.len()).map(|_| None).collect();
+    let mut uncorrelated = 0usize;
+
+    for i in order {
+        let ev = flattened[i]
+            .take()
+            .expect("each index appears exactly once in `order`");
+        if budget_exhausted() {
+            uncorrelated += 1;
+            results[i] = Some(classify_uncorrelated(ev, policy_cfg, now));
+        } else {
+            results[i] = Some(correlate_and_classify(ev, collector, policy_cfg, now));
+        }
+    }
+
+    let candidates = results
+        .into_iter()
+        .map(|r| r.expect("every index was filled exactly once above"))
+        .collect();
+
     DiscoveryPass {
         detectors,
         candidates,
+        uncorrelated,
     }
+}
+
+/// Runs the real, bounded [`EvidenceCollector::collect`] for one
+/// candidate, merges it in, and classifies the result. The normal,
+/// correlated path — see [`classify_uncorrelated`] for the budget-skip
+/// path this sits beside.
+fn correlate_and_classify(
+    mut ev: Evidence,
+    collector: &dyn EvidenceCollector,
+    policy_cfg: &PolicyConfig,
+    now: SystemTime,
+) -> (Evidence, PolicyDecision) {
+    let correlation = collector.collect(
+        &ev.resource,
+        ProbeBudget {
+            timeout: CLI_CORRELATION_TIMEOUT,
+        },
+    );
+    merge_into(&mut ev, correlation);
+    ev.collected_at = now;
+    let decision = classify(&ev, policy_cfg, now);
+    (ev, decision)
+}
+
+/// A candidate the correlation-pass budget was exhausted before reaching
+/// (HORO-1912): merges `CorrelationResult::unavailable(TimedOut)` instead
+/// of calling the collector at all, then classifies exactly as the
+/// correlated path does — the same honest-incomplete-evidence treatment
+/// `classify` already gives a probe that genuinely failed, never a
+/// fabricated "found nothing" or "looks clean".
+fn classify_uncorrelated(
+    mut ev: Evidence,
+    policy_cfg: &PolicyConfig,
+    now: SystemTime,
+) -> (Evidence, PolicyDecision) {
+    merge_into(
+        &mut ev,
+        CorrelationResult::unavailable(ProbeReason::TimedOut),
+    );
+    ev.collected_at = now;
+    let decision = classify(&ev, policy_cfg, now);
+    (ev, decision)
 }
 
 /// Extracts every repeatable, valued `--project-root <path>` occurrence
@@ -494,6 +639,24 @@ pub fn extract_project_roots(args: &[String]) -> Result<(Vec<PathBuf>, Vec<Strin
     Ok((roots, remaining))
 }
 
+/// Whether `ev`'s [`crate::evidence::ResourceId::to_string`] output, or its
+/// raw filesystem path, matches `query` exactly. Accepts either form per
+/// this ticket's `glomeris explain`/`clean --target` AC.
+///
+/// Matching happens on `Evidence::resource`, never touched by
+/// [`merge_into`] — so matching before or after correlation gives the
+/// identical answer, which is what lets [`discover_and_explain_one`]
+/// correlate only the one match it finds rather than every candidate.
+fn matches_query(ev: &Evidence, query: &str) -> bool {
+    if ev.resource.to_string() == query {
+        return true;
+    }
+    match &ev.resource.locator {
+        ResourceLocator::Path(p) => p.to_string_lossy() == query,
+        ResourceLocator::Tool { .. } => false,
+    }
+}
+
 /// Finds the candidate whose [`crate::evidence::ResourceId::to_string`]
 /// output, or whose raw filesystem path, matches `query` exactly. Accepts
 /// either form per this ticket's `glomeris explain`/`clean --target` AC.
@@ -501,15 +664,41 @@ pub fn find_candidate<'a>(
     query: &str,
     candidates: &'a [(Evidence, PolicyDecision)],
 ) -> Option<&'a (Evidence, PolicyDecision)> {
-    candidates.iter().find(|(ev, _)| {
-        if ev.resource.to_string() == query {
-            return true;
+    candidates.iter().find(|(ev, _)| matches_query(ev, query))
+}
+
+/// `glomeris explain`'s own discovery pass (HORO-1912): runs every
+/// detector exactly as [`discover_and_classify_pass`] does — same progress
+/// events, same candidate universe — but correlates only the first
+/// discovered candidate matching `query`, in detector-registration order,
+/// rather than every candidate the way `detect`'s full pass does.
+///
+/// This is why HORO-1912's pass-level correlation budget does not also
+/// need routing into `explain`: on a host where `detect` would spend its
+/// whole budget correlating unrelated candidates (e.g. 180 real Docker
+/// objects) before perhaps reaching the one `explain` was asked about,
+/// `explain` here pays for exactly one `collect()` call, regardless of
+/// how many other candidates exist. Returns `None` with zero `collect()`
+/// calls if nothing matches.
+pub fn discover_and_explain_one(
+    registry: &DetectorRegistry,
+    ctx: &DiscoveryContext,
+    collector: &dyn EvidenceCollector,
+    policy_cfg: &PolicyConfig,
+    now: SystemTime,
+    query: &str,
+    mut on_event: impl FnMut(ProgressEvent),
+) -> Option<(Evidence, PolicyDecision)> {
+    let discovered = run_discovery_with_progress(registry, ctx, &mut on_event);
+
+    for (_, status) in discovered {
+        if let DetectorStatus::Found(evidences) = status {
+            if let Some(ev) = evidences.into_iter().find(|ev| matches_query(ev, query)) {
+                return Some(correlate_and_classify(ev, collector, policy_cfg, now));
+            }
         }
-        match &ev.resource.locator {
-            ResourceLocator::Path(p) => p.to_string_lossy() == query,
-            ResourceLocator::Tool { .. } => false,
-        }
-    })
+    }
+    None
 }
 
 /// Builds a [`DetectReport`] from already discovered-and-classified
@@ -549,6 +738,11 @@ pub fn find_candidate<'a>(
 /// discovered from (HORO-1629 §11/§16.1, option 2) — used only to decide
 /// whether [`DetectReport::scan_coverage_note`] is populated, never to
 /// change `discovery_complete` or any candidate.
+///
+/// `uncorrelated_candidates` is [`DiscoveryPass::uncorrelated`] (HORO-1912)
+/// — pass `0` for a caller (a test, `clean --dry-run`) that built
+/// `candidates` through some path other than [`discover_and_classify_pass`]
+/// and so never skipped correlating anything.
 pub fn build_detect_report(
     candidates: &[(Evidence, PolicyDecision)],
     detectors: &[(DetectorId, DetectorOutcome)],
@@ -556,6 +750,7 @@ pub fn build_detect_report(
     impact: ImpactContext,
     workspaces: &[WorkspaceFamily],
     known_project_root_count: usize,
+    uncorrelated_candidates: usize,
 ) -> DetectReport {
     let mut candidates: Vec<DetectCandidateReport> = candidates
         .iter()
@@ -610,6 +805,8 @@ pub fn build_detect_report(
             .collect(),
         eligibility,
         scan_coverage_note,
+        correlation_complete: uncorrelated_candidates == 0,
+        uncorrelated_candidates,
     }
 }
 
@@ -1735,6 +1932,7 @@ pub fn print_detect_report(report: &DetectReport) {
         if let Some(note) = &report.scan_coverage_note {
             println!("{note}");
         }
+        print_uncorrelated_note(report);
         return;
     }
     for c in &report.candidates {
@@ -1753,6 +1951,20 @@ pub fn print_detect_report(report: &DetectReport) {
     }
     if let Some(note) = &report.scan_coverage_note {
         println!("{note}");
+    }
+    print_uncorrelated_note(report);
+}
+
+/// Prints the HORO-1912 pass-budget note — only when something was
+/// actually skipped, same "silence unless there's something to say"
+/// convention [`DetectReport::scan_coverage_note`] already follows.
+fn print_uncorrelated_note(report: &DetectReport) {
+    if report.uncorrelated_candidates > 0 {
+        println!(
+            "{} candidate(s) were not correlated within the time budget and are \
+             reported as UNKNOWN_INCOMPLETE.",
+            report.uncorrelated_candidates
+        );
     }
 }
 
@@ -2752,6 +2964,174 @@ mod tests {
         assert!(report.events.is_empty());
     }
 
+    // -- discover_and_classify_pass_with's correlation-pass budget (HORO-1912) --
+
+    /// Records, in call order, the resource id of every candidate it was
+    /// asked to correlate — so a test can assert not just *how many* times
+    /// the collector ran, but *which* candidates it ran for, which is what
+    /// proves the project-scoped-first ordering.
+    struct CountingCollector {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl CountingCollector {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    impl EvidenceCollector for CountingCollector {
+        fn collect(&self, id: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
+            self.calls.lock().unwrap().push(id.to_string());
+            CorrelationResult {
+                open_by_process: ProbeOutcome::Observed(Vec::new()),
+                process_cwd_match: ProbeOutcome::Observed(Vec::new()),
+                git_state: ProbeOutcome::Observed(None::<GitState>),
+                tool_liveness: ProbeOutcome::Observed(false),
+                executable_dependency: ProbeOutcome::Observed(
+                    crate::evidence::ExecutableDependencyReport::empty(),
+                ),
+            }
+        }
+    }
+
+    /// Gives `ev` a specific detector id, overriding the `"test"` the
+    /// `evidence()` helper hardcodes — needed here because the
+    /// project-scoped-first ordering keys on exactly that field.
+    fn with_detector(mut ev: Evidence, id: &'static str) -> Evidence {
+        ev.detector = DetectorId(id);
+        ev
+    }
+
+    /// A `budget_exhausted` predicate that always returns `true` must skip
+    /// every candidate: none correlated, every one still present and
+    /// classified via `CorrelationResult::unavailable`, none `AutoSafe`.
+    #[test]
+    fn exhausted_from_the_start_skips_every_candidate_without_dropping_any() {
+        let evs = vec![
+            evidence("/tmp/a", ResourceKind::CargoTargetDir, Some(1024)),
+            evidence("/tmp/b", ResourceKind::CargoTargetDir, Some(2048)),
+        ];
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(FakeDetector(evs))]);
+        let collector = CountingCollector::new();
+        let cfg = PolicyConfig::default();
+        let now = SystemTime::UNIX_EPOCH;
+
+        let pass = discover_and_classify_pass_with(
+            &registry,
+            &ctx(),
+            &collector,
+            &cfg,
+            now,
+            |_| {},
+            || true,
+        );
+
+        assert_eq!(pass.candidates.len(), 2, "no candidate may be dropped");
+        assert_eq!(collector.call_count(), 0);
+        assert_eq!(pass.uncorrelated, 2);
+        for (ev, decision) in &pass.candidates {
+            assert_ne!(decision.class, PolicyClass::AutoSafe);
+            assert!(matches!(
+                ev.open_by_process,
+                ProbeOutcome::Unavailable(ProbeReason::TimedOut)
+            ));
+            assert!(matches!(
+                ev.tool_liveness,
+                ProbeOutcome::Unavailable(ProbeReason::TimedOut)
+            ));
+        }
+    }
+
+    /// A `budget_exhausted` predicate that never returns `true` must
+    /// produce exactly today's behavior: every candidate correlated,
+    /// `uncorrelated == 0`.
+    #[test]
+    fn never_exhausted_correlates_every_candidate_as_before() {
+        let evs = vec![
+            evidence("/tmp/a", ResourceKind::CargoTargetDir, Some(1024)),
+            evidence("/tmp/b", ResourceKind::CargoTargetDir, Some(2048)),
+        ];
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(FakeDetector(evs))]);
+        let collector = CountingCollector::new();
+        let cfg = PolicyConfig::default();
+        let now = SystemTime::UNIX_EPOCH;
+
+        let pass = discover_and_classify_pass_with(
+            &registry,
+            &ctx(),
+            &collector,
+            &cfg,
+            now,
+            |_| {},
+            || false,
+        );
+
+        assert_eq!(collector.call_count(), 2);
+        assert_eq!(pass.uncorrelated, 0);
+        for (_, decision) in &pass.candidates {
+            assert_eq!(decision.class, PolicyClass::AutoSafe);
+        }
+    }
+
+    /// The priority-ordering fix this ticket exists for: a host-wide
+    /// detector's candidate, registered FIRST (mirroring `docker_objects`
+    /// in the real registry), must not starve a project-scoped candidate
+    /// registered SECOND out of its one correlation slot. With a budget
+    /// exhausted after exactly 1 call, the project-scoped one must be the
+    /// one actually correlated.
+    #[test]
+    fn project_scoped_candidates_are_correlated_before_host_wide_ones() {
+        let host_wide = with_detector(
+            evidence("docker-object-1", ResourceKind::DockerImage, Some(1024)),
+            "docker_objects",
+        );
+        let project_scoped = with_detector(
+            evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(2048)),
+            "cargo_target_dir",
+        );
+        // Registration order deliberately puts the host-wide one first —
+        // the exact shape that starved `swiftpm_build_dir` in the real
+        // dogfood repro.
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(FakeDetector(vec![
+            host_wide,
+            project_scoped,
+        ]))]);
+        let collector = CountingCollector::new();
+        let cfg = PolicyConfig::default();
+        let now = SystemTime::UNIX_EPOCH;
+
+        let calls_before = std::sync::atomic::AtomicUsize::new(0);
+        let pass = discover_and_classify_pass_with(
+            &registry,
+            &ctx(),
+            &collector,
+            &cfg,
+            now,
+            |_| {},
+            || calls_before.fetch_add(1, AtomicOrdering::Relaxed) >= 1,
+        );
+
+        assert_eq!(pass.candidates.len(), 2);
+        assert_eq!(
+            collector.call_count(),
+            1,
+            "exactly one correlation call should have happened before the budget exhausted"
+        );
+        assert_eq!(
+            collector.calls.lock().unwrap().first().map(String::as_str),
+            Some("cargo_target_dir:/tmp/proj/target"),
+            "the project-scoped candidate must be the one actually correlated, \
+             not the host-wide one registered ahead of it"
+        );
+    }
+
     #[test]
     fn discover_and_classify_correlates_and_classifies_every_candidate() {
         let ev = evidence("/tmp/proj/target", ResourceKind::CargoTargetDir, Some(1024));
@@ -3030,8 +3410,15 @@ mod tests {
         ];
 
         let actions = ActionRegistry::builtin();
-        let report =
-            build_detect_report(&candidates, &[], &actions, ImpactContext::default(), &[], 0);
+        let report = build_detect_report(
+            &candidates,
+            &[],
+            &actions,
+            ImpactContext::default(),
+            &[],
+            0,
+            0,
+        );
         assert_eq!(report.candidates.len(), 2);
     }
 
@@ -3157,6 +3544,7 @@ mod tests {
             ImpactContext::default(),
             &[],
             0,
+            0,
         );
         let candidate = &detect_report.candidates[0];
         assert!(candidate.reclaimable_bytes_is_lower_bound);
@@ -3212,6 +3600,7 @@ mod tests {
             &actions,
             ImpactContext::default(),
             &[],
+            0,
             0,
         );
         let candidate = &detect_report.candidates[0];

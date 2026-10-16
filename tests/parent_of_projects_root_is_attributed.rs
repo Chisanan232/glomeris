@@ -162,6 +162,7 @@ fn a_parent_of_projects_root_is_attributed_rather_than_a_silent_clean_bill_of_he
         ImpactContext::default(),
         &[],
         known_project_root_count,
+        pass.uncorrelated,
     );
 
     // This is still an honest, complete search (HORO-1576) — AC2/option 2's
@@ -223,6 +224,7 @@ fn a_correctly_configured_root_reports_unchanged_candidates_and_bytes() {
         ImpactContext::default(),
         &[],
         1,
+        pass.uncorrelated,
     );
 
     let cargo_candidate = report
