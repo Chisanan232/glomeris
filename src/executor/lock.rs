@@ -433,11 +433,18 @@ mod tests {
             .spawn()
             .expect("failed to spawn the lock-holding child process");
 
-        // Negative control: poll briefly for the child to actually have the
-        // lock (it must open/flock before this parent can observe
-        // contention) before asserting AlreadyHeld, rather than racing it.
+        // Negative control: poll for the child to actually have the lock
+        // (it must open/flock before this parent can observe contention)
+        // before asserting AlreadyHeld, rather than racing it. The budget
+        // is generous (10s) because the child is a fresh `cargo test`
+        // process re-launching the WHOLE test binary filtered to one test
+        // — its own process/symbol-table startup, not the lock itself, is
+        // what this is actually waiting out, and that startup cost was
+        // observed to exceed 1s on a cold CI runner (CI_FAILED, PR #180,
+        // first push: this test failed with the original 1s budget for
+        // exactly this reason).
         let mut observed_contention = false;
-        for _ in 0..50 {
+        for _ in 0..500 {
             match acquire_execution_lock_at(&path) {
                 Err(LockError::AlreadyHeld) => {
                     observed_contention = true;
@@ -459,7 +466,7 @@ mod tests {
         child.wait().ok();
 
         let mut reacquired = false;
-        for _ in 0..50 {
+        for _ in 0..500 {
             if acquire_execution_lock_at(&path).is_ok() {
                 reacquired = true;
                 break;
