@@ -50,6 +50,117 @@ pub fn default_lock_path() -> io::Result<PathBuf> {
         .join("execution.lock"))
 }
 
+/// Resolves the daemon's single-instance lock file path (HORO-1907).
+///
+/// A separate file from [`default_lock_path`], deliberately: that lock
+/// guards real destructive EXECUTE operations, and `daemon run` must never
+/// contend with — or be mistaken for a holder of — that lock. The monitor
+/// loop never executes anything (ADR-0001 §14: statvfs sampling only), so
+/// its own lock exists purely to stop two overlapping `daemon run`
+/// processes from both writing `history.tsv`/`monitor.log` at once.
+///
+/// What is actually known, versus assumed: `daemon_run()` has never had any
+/// instance guard, and `~/Library/Logs/Glomeris/monitor.log` was observed
+/// (2026-10-16 incident) with word-level interleaving consistent with two
+/// writers racing on the same file offset. The EXACT mechanism that put two
+/// `daemon run` processes in flight at once — a launchd restart racing a
+/// slow-exiting prior instance, an unload/reload during a plist edit, a
+/// manual invocation overlapping the loaded agent, or something else — was
+/// NOT reproduced or captured live, and this fix does not depend on which
+/// one it was: a single-instance guard is the correct defense against any
+/// of them, not only the specific one first guessed.
+pub fn default_daemon_lock_path() -> io::Result<PathBuf> {
+    let home = std::env::var("HOME")
+        .map_err(|_| io::Error::other("HOME environment variable is not set"))?;
+    Ok(PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("Glomeris")
+        .join("daemon.lock"))
+}
+
+/// Outcome of [`acquire_daemon_guard`] (HORO-1907).
+///
+/// Four, not two, because "the lock could not be taken" is not one outcome:
+/// a disk that is out of space (the exact condition this daemon exists to
+/// report) must not be confused with a permissions error, a read-only
+/// filesystem, or a locking-table exhaustion — only the first of those may
+/// run unguarded. See [`is_fail_open_lock_error`].
+#[derive(Debug)]
+pub enum DaemonGuardOutcome {
+    /// Acquired. Holds this for the daemon's lifetime; dropping it releases
+    /// the lock (see [`ExecutionLockGuard`]).
+    Held(ExecutionLockGuard),
+    /// Could not be taken for a reason where running unguarded is the
+    /// correct call anyway (see [`is_fail_open_lock_error`]), or `HOME` was
+    /// unset — the same degraded-but-keep-monitoring posture `daemon_run`
+    /// already takes elsewhere (episode state, `history_path`) rather than
+    /// a new, stricter failure mode introduced only for this lock.
+    ProceedUnguarded(io::Error),
+    /// Another `daemon run` already holds the lock. The caller should exit
+    /// rather than start a second monitor loop.
+    ExitAlreadyRunning,
+    /// Could not be taken for a reason that is NOT disk-space-related —
+    /// permissions, a read-only filesystem, a locking-table exhaustion.
+    /// Failing open here would silently let an unbounded number of
+    /// unguarded monitors accumulate for as long as the underlying
+    /// condition persists, which is exactly what this guard exists to
+    /// prevent. The caller should exit non-zero instead, so launchd's own
+    /// restart/backoff — not a second concurrent monitor — is what happens
+    /// next.
+    ExitLockError(io::Error),
+}
+
+/// True only for the disk-space-exhaustion errnos (`ENOSPC`, `EDQUOT`).
+///
+/// The daemon's entire purpose is reporting a disk that is running out of
+/// space, and creating [`default_daemon_lock_path`]'s parent directory or
+/// the lock file itself can fail for that exact reason on a first run (an
+/// already-existing lock file's directory needs no further allocation to
+/// open and `flock`, so this case is narrower than it may look — it is a
+/// first-run/missing-directory condition, not a steady-state one). Every
+/// other I/O error is a configuration or environment problem that
+/// ENOSPC-style fail-open reasoning does not apply to.
+pub fn is_fail_open_lock_error(e: &io::Error) -> bool {
+    matches!(
+        e.raw_os_error().map(Errno::from_raw),
+        Some(Errno::ENOSPC) | Some(Errno::EDQUOT)
+    )
+}
+
+/// Acquires the daemon's single-instance guard at
+/// [`default_daemon_lock_path`]. Pure dispatch over [`acquire_execution_lock_at`]
+/// and [`is_fail_open_lock_error`], so the decision logic is testable
+/// without `cfg(macos)` and without spawning the real daemon loop — see
+/// this module's tests for the positive (second acquire busy) and negative
+/// (acquire after release) controls, and `tests::classifier` for the
+/// errno split.
+pub fn acquire_daemon_guard() -> DaemonGuardOutcome {
+    let path = match default_daemon_lock_path() {
+        Ok(p) => p,
+        // HOME unset: not disk-space-related, but `daemon_run` already
+        // tolerates a missing HOME everywhere else by degrading rather
+        // than refusing to monitor (see its `episode_state_path`/
+        // `history_path` handling) — this lock follows the same posture
+        // rather than introducing a new, stricter one.
+        Err(e) => return DaemonGuardOutcome::ProceedUnguarded(e),
+    };
+    acquire_daemon_guard_at(&path)
+}
+
+/// [`acquire_daemon_guard`] against a caller-supplied path — the seam this
+/// module's tests use to stay hermetic.
+pub fn acquire_daemon_guard_at(path: &Path) -> DaemonGuardOutcome {
+    match acquire_execution_lock_at(path) {
+        Ok(guard) => DaemonGuardOutcome::Held(guard),
+        Err(LockError::AlreadyHeld) => DaemonGuardOutcome::ExitAlreadyRunning,
+        Err(LockError::Io(e)) if is_fail_open_lock_error(&e) => {
+            DaemonGuardOutcome::ProceedUnguarded(e)
+        }
+        Err(LockError::Io(e)) => DaemonGuardOutcome::ExitLockError(e),
+    }
+}
+
 /// A held execution lock. Dropping this releases it (via `nix::fcntl::Flock`'s
 /// own `Drop` impl, which issues `flock(fd, LOCK_UN)`).
 #[derive(Debug)]
@@ -225,5 +336,171 @@ mod tests {
         let rendered = path.to_string_lossy();
         assert!(rendered.contains("Library/Application Support/Glomeris"));
         assert!(rendered.ends_with("execution.lock"));
+    }
+
+    #[test]
+    fn default_daemon_lock_path_is_distinct_from_the_execution_lock_path() {
+        let daemon = default_daemon_lock_path().expect("HOME should be set in test environment");
+        let execution = default_lock_path().expect("HOME should be set in test environment");
+
+        assert_ne!(
+            daemon, execution,
+            "the daemon's single-instance lock must never be the same file as the \
+             real-execution lock, or the monitor loop would contend with (or be \
+             mistaken for a holder of) a destructive-operation guard"
+        );
+        let rendered = daemon.to_string_lossy();
+        assert!(rendered.contains("Library/Application Support/Glomeris"));
+        assert!(rendered.ends_with("daemon.lock"));
+    }
+
+    // -- acquire_daemon_guard_at / DaemonGuardOutcome (HORO-1907) --------
+
+    /// Mutation target: deleting the `Err(LockError::AlreadyHeld) =>
+    /// ExitAlreadyRunning` arm in [`acquire_daemon_guard_at`] turns this red
+    /// (it would instead return `Held`, which this test's `matches!` would
+    /// reject). This is the regression test the single-instance guard
+    /// exists for — the real `daemon_run` wiring is a thin, untested call
+    /// site on top of this.
+    #[test]
+    fn daemon_guard_reports_another_instance_while_first_is_held() {
+        let path = make_temp_lock_path("daemon-guard-busy");
+
+        let first = acquire_daemon_guard_at(&path);
+        assert!(matches!(first, DaemonGuardOutcome::Held(_)));
+
+        let second = acquire_daemon_guard_at(&path);
+        assert!(
+            matches!(second, DaemonGuardOutcome::ExitAlreadyRunning),
+            "expected ExitAlreadyRunning while the first guard is held, got {second:?}"
+        );
+
+        drop(first);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn daemon_guard_succeeds_again_after_the_holder_is_dropped() {
+        let path = make_temp_lock_path("daemon-guard-release-reacquire");
+
+        let first = acquire_daemon_guard_at(&path);
+        assert!(matches!(first, DaemonGuardOutcome::Held(_)));
+        drop(first);
+
+        let second = acquire_daemon_guard_at(&path);
+        assert!(
+            matches!(second, DaemonGuardOutcome::Held(_)),
+            "expected Held after the prior guard dropped, got {second:?}"
+        );
+
+        drop(second);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// The crash/PID-reuse/stale-lock control: a lock held by a process
+    /// that is then `SIGKILL`ed — not dropped cleanly — must still release,
+    /// because `flock(2)` is tied to the open file description and the
+    /// kernel closes every fd of a killed process. There is no PID or
+    /// liveness check anywhere in this module because none is needed; this
+    /// test proves that rather than asserting it. Spawns this same test
+    /// binary as the "holder" process via [`std::env::current_exe`] with an
+    /// env var telling it to hold the lock and sleep instead of running the
+    /// normal test harness.
+    #[test]
+    fn daemon_guard_releases_automatically_when_the_holder_is_killed() {
+        const HOLD_LOCK_ENV: &str = "GLOMERIS_TEST_HOLD_DAEMON_LOCK_AT";
+        if let Ok(path) = std::env::var(HOLD_LOCK_ENV) {
+            // Re-entered as the child: hold the lock and sleep until killed.
+            // Never reached by the normal `cargo test` run (the env var is
+            // only set by the parent branch below, for its one child).
+            let guard = acquire_daemon_guard_at(Path::new(&path));
+            assert!(matches!(guard, DaemonGuardOutcome::Held(_)));
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            return;
+        }
+
+        let path = make_temp_lock_path("daemon-guard-crash-recovery");
+        let exe = std::env::current_exe().expect("current_exe must resolve in a test binary");
+
+        let mut child = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg(format!(
+                "{}::daemon_guard_releases_automatically_when_the_holder_is_killed",
+                module_path!()
+            ))
+            .arg("--nocapture")
+            .env(HOLD_LOCK_ENV, &path)
+            .spawn()
+            .expect("failed to spawn the lock-holding child process");
+
+        // Negative control: poll briefly for the child to actually have the
+        // lock (it must open/flock before this parent can observe
+        // contention) before asserting AlreadyHeld, rather than racing it.
+        let mut observed_contention = false;
+        for _ in 0..50 {
+            match acquire_execution_lock_at(&path) {
+                Err(LockError::AlreadyHeld) => {
+                    observed_contention = true;
+                    break;
+                }
+                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        }
+        assert!(
+            observed_contention,
+            "expected the child process to hold the lock before it was killed"
+        );
+
+        // Positive control: SIGKILL the child (not a graceful exit) and
+        // confirm the lock becomes acquirable again without any staleness
+        // check on our part — the kernel's own fd cleanup is what releases
+        // it.
+        child.kill().expect("failed to SIGKILL the holder process");
+        child.wait().ok();
+
+        let mut reacquired = false;
+        for _ in 0..50 {
+            if acquire_execution_lock_at(&path).is_ok() {
+                reacquired = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            reacquired,
+            "expected the lock to be acquirable again after the holder was killed"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    // -- is_fail_open_lock_error (HORO-1907) ------------------------------
+
+    #[test]
+    fn enospc_is_classified_as_fail_open() {
+        let e = io::Error::from_raw_os_error(Errno::ENOSPC as i32);
+        assert!(is_fail_open_lock_error(&e));
+    }
+
+    #[test]
+    fn edquot_is_classified_as_fail_open() {
+        let e = io::Error::from_raw_os_error(Errno::EDQUOT as i32);
+        assert!(is_fail_open_lock_error(&e));
+    }
+
+    /// The founder's explicit concern: a permissions problem (or any other
+    /// non-disk-space I/O error) must NOT fail open, or an unrelated
+    /// misconfiguration would silently let unguarded monitors accumulate
+    /// for as long as it persists.
+    #[test]
+    fn permission_denied_is_not_classified_as_fail_open() {
+        let e = io::Error::from_raw_os_error(Errno::EACCES as i32);
+        assert!(!is_fail_open_lock_error(&e));
+    }
+
+    #[test]
+    fn read_only_filesystem_is_not_classified_as_fail_open() {
+        let e = io::Error::from_raw_os_error(Errno::EROFS as i32);
+        assert!(!is_fail_open_lock_error(&e));
     }
 }
