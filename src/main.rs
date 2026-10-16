@@ -3335,55 +3335,45 @@ fn daemon_status(args: &[String]) {
 
 #[cfg(target_os = "macos")]
 fn daemon_run() {
-    use glomeris::executor::lock::{
-        acquire_execution_lock_at, default_daemon_lock_path, LockError,
-    };
+    use glomeris::executor::lock::{acquire_daemon_guard, DaemonGuardOutcome};
     use monitor::{FilePersistence, PollConfig, SystemClock, ThresholdConfig};
     use platform::macos::{MacosFsStat, MacosNotifier};
 
-    // HORO-1907. A second `daemon run` overlapping the first — observed via a
-    // launchd restart racing a still-exiting prior process after a reboot —
-    // both append to `history.tsv` and `monitor.log` unsynchronized, which is
-    // what produced the garbled "daemon daemon daemon run" lines in the
-    // incident evidence. This guard only ever stops a *second monitor loop*
-    // from starting; it is unrelated to, and never contends with, the
-    // real-execution lock (`executor::lock::default_lock_path`) that
-    // `free`/`emergency` hold — ADR-0001 §14 keeps this daemon statvfs-only,
-    // so it never reaches that lock at all.
+    // HORO-1907. `daemon_run()` never had an instance guard, and
+    // `~/Library/Logs/Glomeris/monitor.log` was observed (2026-10-16
+    // incident) with word-level interleaving consistent with two `daemon
+    // run` processes writing at once. This guard only ever stops a
+    // *second monitor loop* from starting; it is unrelated to, and never
+    // contends with, the real-execution lock
+    // (`executor::lock::default_lock_path`) that `free`/`emergency`
+    // hold — ADR-0001 §14 keeps this daemon statvfs-only, so it never
+    // reaches that lock at all. See `executor::lock`'s doc comments for
+    // the exit-vs-proceed decision per failure kind.
     //
     // Held for the lifetime of the process via `_daemon_lock`'s binding
     // (never an explicit `_` — that would drop it immediately and release
     // the lock before the loop below ever runs).
-    let _daemon_lock = match default_daemon_lock_path() {
-        Ok(path) => match acquire_execution_lock_at(&path) {
-            Ok(guard) => Some(guard),
-            Err(LockError::AlreadyHeld) => {
-                eprintln!(
-                    "glomeris daemon run: another instance already holds the daemon lock; exiting"
-                );
-                return;
-            }
-            Err(LockError::Io(e)) => {
-                // Deliberately NOT a reason to refuse to run. The daemon's whole
-                // purpose is reporting disk pressure, including the exact
-                // low-space condition that can make creating this lock file
-                // fail (ENOSPC). Refusing to monitor under that condition would
-                // silence the one thing meant to report it. Logged once, then
-                // proceeds unguarded — the historical single-writer behavior,
-                // not a regression, for this one degraded case.
-                eprintln!(
-                    "glomeris daemon run: failed to acquire the daemon lock, continuing \
-                     without single-instance protection: {e}"
-                );
-                None
-            }
-        },
-        Err(e) => {
+    let _daemon_lock = match acquire_daemon_guard() {
+        DaemonGuardOutcome::Held(guard) => Some(guard),
+        DaemonGuardOutcome::ProceedUnguarded(e) => {
             eprintln!(
-                "glomeris daemon run: could not resolve the daemon lock path, continuing \
+                "glomeris daemon run: failed to acquire the daemon lock, continuing \
                  without single-instance protection: {e}"
             );
             None
+        }
+        DaemonGuardOutcome::ExitAlreadyRunning => {
+            eprintln!(
+                "glomeris daemon run: another instance already holds the daemon lock; exiting"
+            );
+            std::process::exit(EXIT_EXECUTION_LOCK_BUSY);
+        }
+        DaemonGuardOutcome::ExitLockError(e) => {
+            eprintln!(
+                "glomeris daemon run: failed to acquire the daemon lock: {e}; exiting so \
+                 launchd can retry rather than running unguarded"
+            );
+            std::process::exit(1);
         }
     };
 
