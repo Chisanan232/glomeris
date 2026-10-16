@@ -36,7 +36,6 @@
 //! is [`crate::evidence::Completeness::Partial`] — `Ask`, for the true reason
 //! that nobody knows how old this is.
 
-use std::process::Command;
 use std::time::SystemTime;
 
 use crate::evidence::{
@@ -176,22 +175,36 @@ impl Detector for DockerDetector {
         // What Docker does when asked: `docker system df` asks the daemon for
         // its own usage totals and prints them. It reports; `docker system
         // prune` is what deletes, and nothing here is near it.
-        let output = match Command::new(DOCKER_PROGRAM)
-            .args(["system", "df", "--format", "{{json .}}"])
-            .output()
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return DetectorStatus::ToolAbsent;
+        //
+        // HORO-1911: bounded via `run_bounded_tool`, not a bare
+        // `Command::output()` — a wedged or slow-starting daemon used to
+        // hang this (and `detect`/`explain` with it) indefinitely.
+        let (status, stdout_bytes, stderr_bytes) = match super::run_bounded_tool(
+            DOCKER_PROGRAM,
+            &["system", "df", "--format", "{{json .}}"],
+        ) {
+            super::BoundedToolOutput::Exited {
+                status,
+                stdout,
+                stderr,
+            } => (status, stdout, stderr),
+            super::BoundedToolOutput::ToolAbsent => return DetectorStatus::ToolAbsent,
+            super::BoundedToolOutput::TimedOut => {
+                return DetectorStatus::Failed(format!(
+                    "docker system df did not answer within {:?}",
+                    super::PROBE_DEADLINE
+                ));
             }
-            Err(e) => return DetectorStatus::Failed(format!("failed to spawn docker: {e}")),
+            super::BoundedToolOutput::SpawnFailed(msg) => {
+                return DetectorStatus::Failed(msg);
+            }
         };
 
-        if !output.status.success() {
-            return failure_status(&String::from_utf8_lossy(&output.stderr));
+        if !status.success() {
+            return failure_status(&String::from_utf8_lossy(&stderr_bytes));
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
         let logical_bytes = match parse_build_cache_bytes(&stdout) {
             Some(bytes) => ProbeOutcome::Observed(bytes),
             None => ProbeOutcome::Unavailable(ProbeReason::Failed),
