@@ -402,73 +402,64 @@ mod tests {
     /// because `flock(2)` is tied to the open file description and the
     /// kernel closes every fd of a killed process. There is no PID or
     /// liveness check anywhere in this module because none is needed; this
-    /// test proves that rather than asserting it. Spawns this same test
-    /// binary as the "holder" process via [`std::env::current_exe`] with an
-    /// env var telling it to hold the lock and sleep instead of running the
-    /// normal test harness.
+    /// test proves that rather than asserting it.
+    ///
+    /// The external holder is a `python3 -c` one-liner, not this same test
+    /// binary re-invoked via [`std::env::current_exe`]. An earlier version
+    /// of this test did exactly that and failed twice in CI
+    /// (CI_FAILED, PR #180): once because `--exact`'s required test name
+    /// differs from `module_path!()`'s crate-prefixed output, and the fix
+    /// for *that* still left this parent polling `acquire_execution_lock_at`
+    /// before the child had synchronized anything — racing its own
+    /// transient successful acquires against the child's startup, with no
+    /// way to tell "child hasn't locked yet" apart from "child lost the
+    /// race to us" from the outside. `python3` is present on every runner
+    /// and dev machine this crate already requires for CI, needs no
+    /// `--exact` name to stay in sync with this function if it is ever
+    /// renamed, and its one `print("locked")` before sleeping gives a
+    /// deterministic handshake instead of a poll racing a cold start.
     #[test]
     fn daemon_guard_releases_automatically_when_the_holder_is_killed() {
-        const HOLD_LOCK_ENV: &str = "GLOMERIS_TEST_HOLD_DAEMON_LOCK_AT";
-        if let Ok(path) = std::env::var(HOLD_LOCK_ENV) {
-            // Re-entered as the child: hold the lock and sleep until killed.
-            // Never reached by the normal `cargo test` run (the env var is
-            // only set by the parent branch below, for its one child).
-            let guard = acquire_daemon_guard_at(Path::new(&path));
-            assert!(matches!(guard, DaemonGuardOutcome::Held(_)));
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            return;
-        }
+        use std::io::{BufRead, BufReader};
 
         let path = make_temp_lock_path("daemon-guard-crash-recovery");
-        let exe = std::env::current_exe().expect("current_exe must resolve in a test binary");
 
-        // `module_path!()` includes the crate name as its first segment
-        // ("glomeris::executor::lock::tests"), but the test harness prints
-        // and matches `--exact` names *without* it
-        // ("executor::lock::tests::..."), so the raw macro output would
-        // match zero tests and the child would exit instantly having
-        // acquired nothing — exactly what happened on this PR's first two
-        // CI_FAILED pushes (the parent's poll never observed contention
-        // because there was never a real child to observe). Stripped here
-        // rather than hardcoded, so a future module move still resolves.
-        let crate_relative_module = module_path!()
-            .split_once("::")
-            .map(|(_, rest)| rest)
-            .unwrap_or(module_path!());
-
-        let mut child = std::process::Command::new(exe)
-            .arg("--exact")
-            .arg(format!(
-                "{crate_relative_module}::daemon_guard_releases_automatically_when_the_holder_is_killed"
-            ))
-            .arg("--nocapture")
-            .env(HOLD_LOCK_ENV, &path)
+        let mut child = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import fcntl, sys, time\n\
+                 f = open(sys.argv[1], 'a')\n\
+                 fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n\
+                 print('locked', flush=True)\n\
+                 time.sleep(60)\n",
+            )
+            .arg(&path)
+            .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("failed to spawn the lock-holding child process");
+            .expect("failed to spawn the python3 lock-holding child");
 
-        // Negative control: poll for the child to actually have the lock
-        // (it must open/flock before this parent can observe contention)
-        // before asserting AlreadyHeld, rather than racing it. The budget
-        // is generous (10s) because the child is a fresh `cargo test`
-        // process re-launching the WHOLE test binary filtered to one test
-        // — its own process/symbol-table startup, not the lock itself, is
-        // what this is actually waiting out, and that startup cost was
-        // observed to exceed 1s on a cold CI runner (CI_FAILED, PR #180,
-        // first push: this test failed with the original 1s budget for
-        // exactly this reason).
-        let mut observed_contention = false;
-        for _ in 0..500 {
-            match acquire_execution_lock_at(&path) {
-                Err(LockError::AlreadyHeld) => {
-                    observed_contention = true;
-                    break;
-                }
-                _ => std::thread::sleep(std::time::Duration::from_millis(20)),
-            }
-        }
+        // Deterministic handshake: block until the child has actually
+        // taken the flock and said so, rather than polling for it.
+        let stdout = child.stdout.take().expect("child stdout must be piped");
+        let mut line = String::new();
+        BufReader::new(stdout)
+            .read_line(&mut line)
+            .expect("failed to read the child's handshake line");
+        assert_eq!(
+            line.trim(),
+            "locked",
+            "expected the child to report it acquired the lock before this \
+             test asserts contention against it"
+        );
+
+        // Negative control: our own guard must now see AlreadyHeld — a
+        // real flock(2) conflict against an independent process, not a
+        // simulated one.
+        let contended = acquire_daemon_guard_at(&path);
         assert!(
-            observed_contention,
-            "expected the child process to hold the lock before it was killed"
+            matches!(contended, DaemonGuardOutcome::ExitAlreadyRunning),
+            "expected ExitAlreadyRunning while the external holder's flock \
+             is held, got {contended:?}"
         );
 
         // Positive control: SIGKILL the child (not a graceful exit) and
@@ -479,8 +470,8 @@ mod tests {
         child.wait().ok();
 
         let mut reacquired = false;
-        for _ in 0..500 {
-            if acquire_execution_lock_at(&path).is_ok() {
+        for _ in 0..100 {
+            if matches!(acquire_daemon_guard_at(&path), DaemonGuardOutcome::Held(_)) {
                 reacquired = true;
                 break;
             }
