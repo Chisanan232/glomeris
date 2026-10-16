@@ -630,6 +630,7 @@ fn run_detect_command(args: &[String]) {
         // that says what may run.
         &glomeris::cli::group_workspaces_now(&pass.candidates),
         known_project_root_count,
+        pass.uncorrelated,
     );
 
     if flags.contains(&"--json") {
@@ -727,14 +728,45 @@ fn run_explain_command(args: &[String]) {
         std::process::exit(2);
     };
 
-    let candidates = discover_and_classify_now_with_progress(project_roots, progress_json);
-    let Some((ev, decision)) = glomeris::cli::find_candidate(query, &candidates) else {
+    // HORO-1912: correlates only the one matching candidate, not every
+    // candidate the way `detect`'s full pass does — see
+    // `discover_and_explain_one`'s doc comment for why this is the
+    // explain-specific fix alongside the pass-level budget `detect` gets.
+    use glomeris::detectors::{DetectorRegistry, DiscoveryContext};
+    use glomeris::policy::PolicyConfig;
+    use std::time::SystemTime;
+
+    let collector = live_evidence_collector(&project_roots);
+    let ctx =
+        DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
+    let registry = DetectorRegistry::builtin();
+    let cfg = PolicyConfig::default();
+    let now = SystemTime::now();
+
+    let Some((ev, decision)) = glomeris::cli::discover_and_explain_one(
+        &registry,
+        &ctx,
+        &collector,
+        &cfg,
+        now,
+        query,
+        |event| {
+            if progress_json {
+                match serde_json::to_string(&event) {
+                    Ok(line) => eprintln!("{line}"),
+                    Err(e) => {
+                        eprintln!("glomeris: failed to render progress event: {e}");
+                    }
+                }
+            }
+        },
+    ) else {
         eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
         std::process::exit(1);
     };
 
     let actions = glomeris::actions::ActionRegistry::builtin();
-    let report = glomeris::cli::build_explain_report(ev, decision, &actions);
+    let report = glomeris::cli::build_explain_report(&ev, &decision, &actions);
     if flags.contains(&"--json") {
         print_json_or_exit(&report);
     } else {
@@ -3658,6 +3690,7 @@ fn free_preview(
         // them still hold work.
         &glomeris::cli::group_workspaces_now(&pass.candidates),
         known_project_root_count,
+        pass.uncorrelated,
     );
 
     // HORO-1828. Same samples ring the daemon's opt-in sampling step writes

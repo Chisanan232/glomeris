@@ -70,5 +70,7 @@
     }
   ],
   "discovery_complete": false,
-  "eligibility": "discovery_incomplete"
+  "eligibility": "discovery_incomplete",
+  "correlation_complete": true,
+  "uncorrelated_candidates": 0
 }

@@ -1641,4 +1641,38 @@ mod tests {
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::EvidenceIncomplete]);
     }
+
+    /// HORO-1912's safety net: a candidate a correlation-pass budget ran
+    /// out before reaching is merged with
+    /// `CorrelationResult::unavailable(TimedOut)` rather than left at
+    /// whatever the detector set. This proves that merge, for every
+    /// `ResourceKind`, can never classify to `AutoSafe` — a future kind
+    /// whose `required_evidence()` somehow omits every correlation field
+    /// would otherwise let a skipped-but-unprobed candidate through as
+    /// clean. Starting from `complete_evidence` (every field `Observed`,
+    /// the most AutoSafe-favorable starting point this file has) and then
+    /// overwriting only the five correlation fields is what makes a pass
+    /// here mean the merge itself is sufficient, not that the rest of the
+    /// fixture happened to already be incomplete.
+    #[test]
+    fn correlation_unavailable_merge_never_classifies_any_kind_as_auto_safe() {
+        use crate::evidence::correlate::{merge_into, CorrelationResult};
+
+        for &kind in ResourceKind::ALL {
+            let mut ev = complete_evidence(kind, NOW);
+            merge_into(
+                &mut ev,
+                CorrelationResult::unavailable(ProbeReason::TimedOut),
+            );
+
+            let decision = classify(&ev, &cfg(), NOW);
+
+            assert_ne!(
+                decision.class,
+                PolicyClass::AutoSafe,
+                "{kind:?} classified AutoSafe despite every correlation field being \
+                 Unavailable(TimedOut) — a pass-budget skip must never read as clean"
+            );
+        }
+    }
 }

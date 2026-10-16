@@ -204,5 +204,7 @@
       ]
     }
   ],
-  "eligibility": "eligible"
+  "eligibility": "eligible",
+  "correlation_complete": true,
+  "uncorrelated_candidates": 0
 }

@@ -60,6 +60,25 @@ pub struct CorrelationResult {
     pub executable_dependency: ProbeOutcome<ExecutableDependencyReport>,
 }
 
+impl CorrelationResult {
+    /// All five fields `Unavailable(reason)` (HORO-1912) — the shape a
+    /// caller merges in for a candidate it chose not to probe at all, e.g.
+    /// one a pass-level time budget ran out before reaching. Never
+    /// `Observed`: a skipped candidate must read as incomplete evidence,
+    /// the same posture [`merge_into`]'s own doc comment already requires
+    /// for a revalidation that finds a probe failing, not as a resource
+    /// that was checked and found clean.
+    pub fn unavailable(reason: super::probe::ProbeReason) -> Self {
+        Self {
+            open_by_process: ProbeOutcome::Unavailable(reason),
+            process_cwd_match: ProbeOutcome::Unavailable(reason),
+            git_state: ProbeOutcome::Unavailable(reason),
+            tool_liveness: ProbeOutcome::Unavailable(reason),
+            executable_dependency: ProbeOutcome::Unavailable(reason),
+        }
+    }
+}
+
 /// A single-resource correlation collector. See the module docs for why
 /// this is single-resource rather than batch.
 pub trait EvidenceCollector {

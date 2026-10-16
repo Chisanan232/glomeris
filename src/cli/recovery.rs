@@ -377,6 +377,16 @@ pub fn build_recovery_preview_report(
     if let Some(note) = &detect.scan_coverage_note {
         caveats.push(note.clone());
     }
+    // HORO-1912: same forwarding as scan_coverage_note above — a person
+    // deciding whether to start a run needs to know the preview is
+    // incomplete, not just that some things are protected.
+    if detect.uncorrelated_candidates > 0 {
+        caveats.push(format!(
+            "{} candidate(s) were not correlated within the time budget and are \
+             reported as UNKNOWN_INCOMPLETE.",
+            detect.uncorrelated_candidates
+        ));
+    }
 
     RecoveryPreviewReport {
         goal: build_recovery_goal_report(goal),
@@ -945,6 +955,8 @@ mod tests {
             workspaces: Vec::new(),
             eligibility,
             scan_coverage_note: None,
+            correlation_complete: true,
+            uncorrelated_candidates: 0,
         }
     }
 

@@ -321,6 +321,8 @@ fn detect_report_matches_golden_fixture() {
         // `eligibility_verdict`'s precedence.
         eligibility: "discovery_incomplete",
         scan_coverage_note: None,
+        correlation_complete: true,
+        uncorrelated_candidates: 0,
     };
     assert_matches_fixture(&report, "detect_report.json");
 }
@@ -1256,6 +1258,8 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
         // (cargo_target_dir, homebrew_cache), so this is `eligible`.
         eligibility: "eligible",
         scan_coverage_note: None,
+        correlation_complete: true,
+        uncorrelated_candidates: 0,
     };
     assert_matches_fixture(&report, "detect_report_with_workspaces.json");
 }
@@ -1440,6 +1444,8 @@ fn recovery_discovery_pass() -> DetectReport {
         // `discovery_incomplete` regardless of the AUTO_SAFE candidate.
         eligibility: "discovery_incomplete",
         scan_coverage_note: None,
+        correlation_complete: true,
+        uncorrelated_candidates: 0,
     }
 }
 
@@ -1555,6 +1561,8 @@ fn recovery_preview_report_discovery_incomplete_matches_golden_fixture() {
         workspaces: vec![],
         eligibility: "discovery_incomplete",
         scan_coverage_note: None,
+        correlation_complete: true,
+        uncorrelated_candidates: 0,
     };
     let report = build_recovery_preview_report(
         &goal,
@@ -1665,6 +1673,8 @@ fn recovery_preview_report_target_unreachable_matches_golden_fixture() {
         workspaces: vec![],
         eligibility: "eligible",
         scan_coverage_note: None,
+        correlation_complete: true,
+        uncorrelated_candidates: 0,
     };
 
     let report = build_recovery_preview_report(
