@@ -422,11 +422,24 @@ mod tests {
         let path = make_temp_lock_path("daemon-guard-crash-recovery");
         let exe = std::env::current_exe().expect("current_exe must resolve in a test binary");
 
+        // `module_path!()` includes the crate name as its first segment
+        // ("glomeris::executor::lock::tests"), but the test harness prints
+        // and matches `--exact` names *without* it
+        // ("executor::lock::tests::..."), so the raw macro output would
+        // match zero tests and the child would exit instantly having
+        // acquired nothing — exactly what happened on this PR's first two
+        // CI_FAILED pushes (the parent's poll never observed contention
+        // because there was never a real child to observe). Stripped here
+        // rather than hardcoded, so a future module move still resolves.
+        let crate_relative_module = module_path!()
+            .split_once("::")
+            .map(|(_, rest)| rest)
+            .unwrap_or(module_path!());
+
         let mut child = std::process::Command::new(exe)
             .arg("--exact")
             .arg(format!(
-                "{}::daemon_guard_releases_automatically_when_the_holder_is_killed",
-                module_path!()
+                "{crate_relative_module}::daemon_guard_releases_automatically_when_the_holder_is_killed"
             ))
             .arg("--nocapture")
             .env(HOLD_LOCK_ENV, &path)
