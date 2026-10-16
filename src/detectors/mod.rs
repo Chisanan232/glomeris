@@ -2297,6 +2297,15 @@ mod probe_deadline_tests {
     /// other.
     const CONTROL_MARKER_SECONDS: &str = "27.1828";
 
+    /// Same role as [`STALL_MARKER_SECONDS`], for
+    /// [`run_bounded_tool_leaves_no_running_child_on_timeout`] specifically —
+    /// a distinct value so the two tests' own-child counts cannot be
+    /// confused with each other under parallel test execution, the exact
+    /// failure this module's doc comment on [`STALL_MARKER_SECONDS`]
+    /// already warns about (HORO-1911: discovered by CI_FAILED reusing
+    /// `STALL_MARKER_SECONDS` here on the first push).
+    const BOUNDED_TOOL_STALL_MARKER_SECONDS: &str = "41.4213";
+
     /// The duration argument of the child the reaping test kills without
     /// waiting for, to prove [`own_zombie_children`] can see an unreaped child.
     const ZOMBIE_MARKER_SECONDS: &str = "23.6067";
@@ -2512,14 +2521,17 @@ mod probe_deadline_tests {
     /// the `ToolQuery` path it sits beside.
     #[test]
     fn run_bounded_tool_leaves_no_running_child_on_timeout() {
-        let before = own_children_matching(STALL_MARKER_SECONDS);
-        let outcome =
-            run_bounded_tool_with_deadline("sleep", &[STALL_MARKER_SECONDS], TEST_DEADLINE);
-        let after = own_children_matching(STALL_MARKER_SECONDS);
+        let before = own_children_matching(BOUNDED_TOOL_STALL_MARKER_SECONDS);
+        let outcome = run_bounded_tool_with_deadline(
+            "sleep",
+            &[BOUNDED_TOOL_STALL_MARKER_SECONDS],
+            TEST_DEADLINE,
+        );
+        let after = own_children_matching(BOUNDED_TOOL_STALL_MARKER_SECONDS);
 
         assert_eq!(
             before, 0,
-            "{STALL_MARKER_SECONDS} is supposed to be unique to this test"
+            "{BOUNDED_TOOL_STALL_MARKER_SECONDS} is supposed to be unique to this test"
         );
         assert!(matches!(outcome, BoundedToolOutput::TimedOut));
         assert_eq!(
@@ -2849,6 +2861,10 @@ mod spawned_program_tests {
             format!("{}{}", "query_tool_", "lines_with_deadline("),
             format!("{}{}", "query_tool_", "single_path("),
             format!("{}{}", "Command", "::new("),
+            // HORO-1911: docker.rs/docker_objects.rs's bounded-wait sibling,
+            // for the same reason query_tool_lines(_with_deadline) is here.
+            format!("{}{}", "run_bounded_", "tool("),
+            format!("{}{}", "run_bounded_tool_with_", "deadline("),
         ];
         let declaration = format!("{}{}", "_PROGRAM: ", "&str = \"");
 
@@ -2938,6 +2954,8 @@ mod spawned_program_tests {
             format!("{}{}", "query_tool_", "lines_with_deadline("),
             format!("{}{}", "query_tool_", "single_path("),
             format!("{}{}", "Command", "::new("),
+            format!("{}{}", "run_bounded_", "tool("),
+            format!("{}{}", "run_bounded_tool_with_", "deadline("),
         ];
         let marker = format!("{}{}", "has to be ", "asked");
 
