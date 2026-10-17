@@ -608,8 +608,7 @@ impl Store {
                 .push("valid live owner or registered consumer (renewal is not progress)".into());
         } else if probe_uncertain {
             blockers.push(
-                "owner/holder liveness could not be confirmed; withholding orphaned status"
-                    .into(),
+                "owner/holder liveness could not be confirmed; withholding orphaned status".into(),
             );
         } else if orphaned_after_probe(has_live, probe_uncertain, !r.claims.is_empty()) {
             state = Lifecycle::Orphaned;
