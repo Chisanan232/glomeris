@@ -823,7 +823,15 @@ fn execution_guard_at(store: &Store, resource: &ResourceId) -> io::Result<Flock<
         }
         let overlaps = match &resource.locator {
             ResourceLocator::Path(p) => {
-                let p = p.canonicalize()?;
+                // A resource that vanished between policy approval and
+                // execution (the TOCTOU race `execute_inner` is designed to
+                // catch via its own fingerprint check) must not abort here
+                // with a generic I/O error that masks that more specific
+                // diagnosis. Fall back to the un-canonicalized path, same as
+                // the DockerBuilder branch above — `fs::metadata` below
+                // already degrades to `false` on a missing path, so this
+                // only changes behavior for a resource that no longer exists.
+                let p = p.canonicalize().unwrap_or_else(|_| p.clone());
                 p.starts_with(&record.scope.path)
                     || record.scope.path.starts_with(&p)
                     || fs::metadata(&p)
@@ -939,5 +947,47 @@ mod tests {
             &ResourceId::new(ResourceKind::CargoTargetDir, ResourceLocator::Path(renamed))
         )
         .is_err());
+    }
+
+    // HORO-1913: a non-empty native store (a real enrolled, non-overlapping
+    // scope — exactly what any host that has actually used native
+    // retirement will have) must not turn a vanished resource into a
+    // generic I/O failure here. The vanished-resource case belongs to
+    // `execute_inner`'s fingerprint check (`ResourceIdentityChanged`), not
+    // to this guard's `canonicalize()?` on a path that no longer exists.
+    #[test]
+    fn native_guard_tolerates_a_vanished_resource_even_with_an_unrelated_enrolled_scope() {
+        let fixture = Fixture::new();
+        let store = Store {
+            root: fixture.0.join("store"),
+        };
+        drop(store.native_lock(true).unwrap());
+        let enrolled_target = fixture.0.join("enrolled-target");
+        private_dir(&enrolled_target).unwrap();
+        let scope = observe(&Kind::CargoTarget, &enrolled_target, &None).unwrap();
+        let r = NativeRecord {
+            schema: 2,
+            id: random().unwrap(),
+            generation: random().unwrap(),
+            revision: 0,
+            scope,
+            last_meaningful_use: now(),
+            claims: vec![],
+            receipts: vec![],
+        };
+        durable(&store.native_path(&r.id).unwrap(), &r).unwrap();
+
+        let vanished = fixture.0.join("node_modules");
+        private_dir(&vanished).unwrap();
+        fs::remove_dir_all(&vanished).unwrap();
+
+        assert!(
+            execution_guard_at(
+                &store,
+                &ResourceId::new(ResourceKind::NodeModules, ResourceLocator::Path(vanished))
+            )
+            .is_ok(),
+            "a vanished, non-overlapping resource must not fail this guard with a generic I/O error"
+        );
     }
 }
