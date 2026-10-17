@@ -272,6 +272,36 @@ pub fn process(pid: u32) -> io::Result<Option<Identity>> {
 fn live(i: &Identity) -> io::Result<bool> {
     Ok(process(i.pid)?.is_some_and(|current| current.start == i.start && current.boot == i.boot))
 }
+/// HORO-1914: `Orphaned` may only be declared when liveness was
+/// conclusively checked and found absent — never merely because a `ps`/
+/// `sysctl` probe failed to answer (`probe_uncertain`), which is a real,
+/// observed outcome under genuine host contention (concurrent process
+/// spawns racing the probe's bounded timeout), not evidence the owner is
+/// gone.
+fn orphaned_after_probe(has_live: bool, probe_uncertain: bool, has_claims: bool) -> bool {
+    !has_live && !probe_uncertain && has_claims
+}
+#[cfg(test)]
+mod orphaned_after_probe_tests {
+    use super::orphaned_after_probe;
+    #[test]
+    fn confirmed_absence_with_claims_is_orphaned() {
+        assert!(orphaned_after_probe(false, false, true));
+    }
+    #[test]
+    fn inconclusive_probe_is_never_orphaned_even_with_claims() {
+        assert!(!orphaned_after_probe(false, true, true));
+    }
+    #[test]
+    fn a_live_owner_is_never_orphaned_regardless_of_probe_uncertainty() {
+        assert!(!orphaned_after_probe(true, true, true));
+        assert!(!orphaned_after_probe(true, false, true));
+    }
+    #[test]
+    fn no_claims_at_all_is_never_orphaned() {
+        assert!(!orphaned_after_probe(false, false, false));
+    }
+}
 impl Store {
     pub fn current() -> io::Result<Self> {
         Ok(Self {
@@ -481,6 +511,14 @@ impl Store {
         let mut state = Lifecycle::Unknown;
         let mut has_live = false;
         let mut stalled = false;
+        // HORO-1914: a probe failure (e.g. a transient `ps`/`sysctl` timeout
+        // under real host contention) must never be read as "the process is
+        // gone" — only a definitive `Ok(false)`/`Ok(None)` may say that. If
+        // any identity's liveness could not be determined, `Orphaned` below
+        // is withheld; the inconclusive claim stays `Unknown` (its already
+        // appended blocker records why) rather than becoming eligible for
+        // unattended reclaim on a false "nobody's using this" reading.
+        let mut probe_uncertain = false;
         if r.reclaimed {
             return Inspection {
                 id: r.id.clone(),
@@ -530,7 +568,10 @@ impl Store {
             }) {
                 Ok(true) => has_live = true,
                 Ok(false) => {}
-                Err(e) => blockers.push(e.to_string()),
+                Err(e) => {
+                    probe_uncertain = true;
+                    blockers.push(e.to_string());
+                }
             }
         }
         for c in r.claims.iter().filter(|c| !c.released) {
@@ -547,7 +588,10 @@ impl Store {
                 }) {
                     Ok(true) => has_live = true,
                     Ok(false) => {}
-                    Err(e) => blockers.push(e.to_string()),
+                    Err(e) => {
+                        probe_uncertain = true;
+                        blockers.push(e.to_string());
+                    }
                 }
             }
             stalled |= c.health_faults.len() >= 2;
@@ -562,7 +606,11 @@ impl Store {
             };
             blockers
                 .push("valid live owner or registered consumer (renewal is not progress)".into());
-        } else if !r.claims.is_empty() {
+        } else if probe_uncertain {
+            blockers.push(
+                "owner/holder liveness could not be confirmed; withholding orphaned status".into(),
+            );
+        } else if orphaned_after_probe(has_live, probe_uncertain, !r.claims.is_empty()) {
             state = Lifecycle::Orphaned;
         }
         let policy = match self.policy() {
