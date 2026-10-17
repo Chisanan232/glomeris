@@ -293,18 +293,26 @@ mod retry_tests {
         let outcome = run_with_timeout_retrying(
             || {
                 let mut c = Command::new("/bin/sh");
-                c.args(["-c", "sleep 5"]);
+                c.args(["-c", "sleep 30"]);
                 c
             },
-            Duration::from_millis(100),
             Duration::from_millis(300),
+            Duration::from_millis(500),
         );
         assert!(matches!(outcome, CommandOutcome::TimedOut));
-        // Bounded by overall_budget, not by 2x the per-attempt timeout
-        // (which would be 600ms+ here).
+        // The exact cap (bounded by overall_budget, never by 2x the
+        // per-attempt timeout) is already covered precisely and
+        // non-flakily by `exhausted_budget_skips_the_second_attempt` and
+        // `timeout_twice_is_still_an_error` above, via attempt counting
+        // rather than wall-clock comparison. This test only guards
+        // against a gross regression (e.g. no cap at all, or a retry
+        // that reuses the uncapped `timeout` regardless of budget). A
+        // loaded CI runner's own subprocess spawn/kill/reap overhead
+        // was observed to exceed 300ms on a contended shared runner, so
+        // the epsilon here is intentionally generous rather than tight.
         assert!(
-            start.elapsed() < Duration::from_millis(500),
-            "elapsed {:?} exceeded the overall budget plus a reasonable epsilon",
+            start.elapsed() < Duration::from_secs(3),
+            "elapsed {:?} grossly exceeded the overall budget",
             start.elapsed()
         );
     }
