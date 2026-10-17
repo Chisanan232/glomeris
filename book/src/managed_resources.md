@@ -114,3 +114,35 @@ exclusively. Registering a scope therefore cannot race an already admitted actio
 Existing generated-resource sweep skips native records. Native adoption does not
 change the configured 24-hour threshold, permit age-only cleanup, or attest that
 Cargo contents, ignored worktree files, or Docker records are reconstructable.
+
+
+## Fixed standalone Cargo libraries
+
+The separately authorized `managed_cargo_library` class compiles committed
+`src/lib.rs` under a fixed Glomeris package configuration. It is **not** a build
+of the original package: its edition, features, profiles, dependencies, workspace,
+patches and build scripts are not applied. Unsupported source inputs refuse
+production rather than expanding the reconstruction boundary.
+
+`resource create-cargo --source-root GIT_WORKSPACE --recipe RECIPE` creates a new
+private generation; `resource produce-cargo ID GENERATION` retains the exact
+source, effective manifest and lockfile outside the reclaimable generation.
+Installed Cargo/rustc are pinned for production, run offline with a controlled
+environment, one job, no incremental/debug data, bounded output and time, and an
+isolated process group. Failed or interrupted production never seals itself.
+No existing target directory is adopted. General native Cargo remains protected.
+
+This class has its own `managed.clean.cargo-library` action and grant. It defaults
+to disabled and retains the 24-hour meaningful inactivity threshold. The old
+`managed_generated` grant never authorizes it. The existing lifecycle, permit,
+locks, policy budgets and deletion executor are reused; no separate service is
+introduced. Complete directory/file identities and digests bind production.
+Hardlinks must form a complete internal linkset; external links refuse cleanup.
+
+Only independent exports of `artifact.rlib` may leave closed core custody.
+Native path exposure permanently invalidates automatic consumer closure, even
+when its observed holders later release. Reconstruction inputs and exported
+copies survive generation cleanup. Record schema 2 is deliberately refused by
+older readers; roll back to a compatible reader or preserve the generation.
+Logical removed bytes are not attributed physical recovery. Inspect the observed
+filesystem availability delta separately, including concurrent allocation.

@@ -90,7 +90,7 @@ fn auto_safe_evidence(kind: ResourceKind, path: &Path, reclaimable: u64) -> Evid
         // HORO-1824: same "clean default" rationale as
         // `executable_dependency` above — only CargoTargetDir carries
         // the concept at all.
-        managed_ownership: (kind == ResourceKind::ManagedGenerated).then(|| {
+        managed_ownership: kind.is_managed_resource().then(|| {
             ProbeOutcome::Observed(glomeris::ownership::OwnershipEvidence {
                 reclaimable: true,
                 blockers: vec![],
@@ -140,6 +140,11 @@ fn fixture_for(kind: ResourceKind, root: &Path) -> PathBuf {
     match kind {
         ResourceKind::ManagedGenerated => {
             let path = root.join("managed_generated");
+            fs::create_dir(&path).unwrap();
+            path
+        }
+        ResourceKind::ManagedCargoLibrary => {
+            let path = root.join("managed_cargo_library");
             fs::create_dir(&path).unwrap();
             path
         }

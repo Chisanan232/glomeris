@@ -459,7 +459,7 @@ fn run_autopilot_inner(
             outcome,
         };
 
-        if kind == ResourceKind::ManagedGenerated {
+        if kind.is_managed_resource() {
             report.items.push(item(AutopilotItemOutcome::Ineligible {
                 reason: "managed_sweep_required".into(),
             }));
@@ -818,6 +818,21 @@ mod tests {
         }
         envelope.enable();
         envelope
+    }
+
+    #[test]
+    fn managed_cargo_library_grant_is_distinct_from_legacy_and_cargo_target_grants() {
+        let default = AutopilotEnvelope::default();
+        assert!(!default.permits_kind(ResourceKind::ManagedCargoLibrary));
+
+        let cargo_library = enabled_envelope(&[ResourceKind::ManagedCargoLibrary]);
+        assert!(cargo_library.permits_kind(ResourceKind::ManagedCargoLibrary));
+        assert!(!cargo_library.permits_kind(ResourceKind::ManagedGenerated));
+        assert!(!cargo_library.permits_kind(ResourceKind::CargoTargetDir));
+
+        let legacy_generated = enabled_envelope(&[ResourceKind::ManagedGenerated]);
+        assert!(legacy_generated.permits_kind(ResourceKind::ManagedGenerated));
+        assert!(!legacy_generated.permits_kind(ResourceKind::ManagedCargoLibrary));
     }
 
     struct Fixture {

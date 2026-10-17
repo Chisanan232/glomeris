@@ -1,6 +1,7 @@
 //! Managed generated-resource authority. Existing resources are never implicitly enrolled.
 //! Live holders retain shared kernel barriers; retirement uses the same barrier exclusively.
 mod access;
+mod cargo_library;
 #[cfg(test)]
 pub(crate) mod crash_tests;
 pub mod native;
@@ -11,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -146,6 +149,8 @@ pub struct Record {
     pub read_claims: Vec<ReadClaim>,
     pub sealed: Option<BTreeMap<String, Artifact>>,
     pub producer: Option<ProducerProof>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cargo_proof: Option<cargo_library::CargoProof>,
     pub production_started: bool,
     pub retirement_started: bool,
     #[serde(default)]
@@ -208,10 +213,13 @@ fn secure(path: &Path, directory: bool) -> io::Result<()> {
     Ok(())
 }
 fn private_dir(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
+    // Publish newly created components as private. mkdir-then-chmod exposes a
+    // nonprivate interval to concurrent Claude/Codex initializers. Never chmod
+    // an existing destination: it may be foreign or have changed identity.
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
     secure(path, true)
 }
 fn durable(path: &Path, value: &impl Serialize) -> io::Result<()> {
@@ -354,10 +362,12 @@ impl Store {
                 .open(p)?,
         )
         .map_err(error)?;
-        if r.schema != 1
-            || r.id != id
+        if !matches!(
+            (r.schema, r.class.as_str()),
+            (1, "managed_generated") | (2, "managed_cargo_library")
+        ) || r.id != id
             || !valid_id(&r.generation)
-            || r.class != "managed_generated"
+            || (r.class == "managed_generated" && r.cargo_proof.is_some())
             || r.retirement_history.len() > 64
             || r.retirement_history
                 .iter()
@@ -400,6 +410,12 @@ impl Store {
         durable(&self.root.join("policy.json"), v)
     }
     pub fn create(&self, source: &Path, recipe: &str) -> io::Result<Record> {
+        self.create_class(source, recipe, "managed_generated")
+    }
+    fn create_class(&self, source: &Path, recipe: &str, class: &str) -> io::Result<Record> {
+        if !matches!(class, "managed_generated" | "managed_cargo_library") {
+            return Err(error("unsupported producer class"));
+        }
         if recipe.trim().is_empty() || recipe.len() > 512 {
             return Err(error("reconstruction recipe required (max512 characters)"));
         }
@@ -415,10 +431,10 @@ impl Store {
         private_dir(&path)?;
         let m = fs::symlink_metadata(&path)?;
         let r = Record {
-            schema: 1,
+            schema: if class == "managed_generated" { 1 } else { 2 },
             id,
             generation,
-            class: "managed_generated".into(),
+            class: class.into(),
             recipe: recipe.into(),
             source_root,
             source_head,
@@ -429,6 +445,7 @@ impl Store {
             read_claims: vec![],
             sealed: None,
             producer: None,
+            cargo_proof: None,
             production_started: false,
             retirement_started: false,
             retirement_history: vec![],
@@ -579,7 +596,7 @@ impl Store {
         if time < r.last_meaningful_use || time - r.last_meaningful_use < threshold {
             blockers.push("meaningful-use inactivity threshold not reached".into());
         }
-        match (&r.sealed, artifacts(&self.path(r), r.dev)) {
+        match (&r.sealed, record_artifacts(r)) {
             (Some(expected), Ok(actual)) if expected == &actual => {}
             (Some(_), Ok(_)) => {
                 blockers.push("artifact generation changed after reconstruction attestation".into())
@@ -717,7 +734,7 @@ impl Store {
                             && verify_producer(&r).is_ok()
                             && source_revision(&r.source_root, Some(&r.source_head)).is_ok()
                         {
-                            if let Ok(manifest) = artifacts(&self.path(&r), r.dev) {
+                            if let Ok(manifest) = record_artifacts(&r) {
                                 if let Some(last) =
                                     manifest.values().map(|a| a.mtime.max(0) as u64).max()
                                 {
@@ -741,7 +758,9 @@ fn validate_policy(p: &RetentionPolicy) -> io::Result<()> {
         || p.max_actions > 25
         || p.max_bytes == 0
         || p.max_bytes > 64 * 1024 * 1024 * 1024
-        || p.classes.keys().any(|s| s != "managed_generated")
+        || p.classes
+            .keys()
+            .any(|s| !matches!(s.as_str(), "managed_generated" | "managed_cargo_library"))
     {
         return Err(error(
             "unsupported class or budget; no blanket authorization",
@@ -1119,7 +1138,7 @@ pub fn hold(
                         store.identity(&r)?;
                         source_revision(&r.source_root, Some(&r.source_head))?;
                         if verify_producer(&r).is_ok() {
-                            r.sealed = Some(artifacts(&store.path(&r), r.dev)?);
+                            r.sealed = Some(record_artifacts(&r)?);
                         } else {
                             r.sealed = None;
                         }
@@ -1165,7 +1184,7 @@ pub fn seal(store: &Store, id: &str, generation: &str) -> io::Result<()> {
     }
     store.identity(&r)?;
     verify_producer(&r)?;
-    r.sealed = Some(artifacts(&store.path(&r), r.dev)?);
+    r.sealed = Some(record_artifacts(&r)?);
     r.last_meaningful_use = now();
     store.save(&r)
 }
@@ -1179,17 +1198,17 @@ pub struct SweepItem {
     pub physical_free_delta: Option<i64>,
 }
 pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
-    use crate::actions::ManagedGeneratedClean;
+    use crate::actions::{Action, ManagedCargoLibraryClean, ManagedGeneratedClean};
     use crate::evidence::correlate::DefaultEvidenceCollector;
     use crate::evidence::model::{ResourceId, ResourceKind, ResourceLocator};
     use crate::policy::{classify, PolicyClass, PolicyConfig};
     let _lock = crate::executor::lock::acquire_execution_lock().map_err(lock_error)?;
     let policy = store.policy()?;
     let envelope = crate::autopilot::load_envelope().map_err(error)?;
-    if !envelope.is_enabled()
-        || !envelope.starts_unprompted()
-        || !envelope.permits_kind(crate::evidence::ResourceKind::ManagedGenerated)
-    {
+    if !envelope.is_enabled() || !envelope.starts_unprompted() {
+        return Ok(vec![]);
+    }
+    if !policy.classes.values().any(|p| p.unattended) {
         return Ok(vec![]);
     }
     if let Err(reason) = crate::autopilot::admits_pressure(&envelope, observed_pressure()) {
@@ -1197,19 +1216,11 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
     }
     let started = std::time::Instant::now();
     let mut ledger = crate::autopilot::BudgetLedger::for_envelope(&envelope);
-    if !policy
-        .classes
-        .get("managed_generated")
-        .is_some_and(|p| p.unattended)
-    {
-        return Ok(vec![]);
-    }
     if store.ids()?.is_empty() {
         return Ok(vec![]);
     }
     let collector = DefaultEvidenceCollector::live(&[]);
     let cfg = PolicyConfig::default();
-    let action = ManagedGeneratedClean;
     let mut rows = vec![];
     let mut actions = 0;
     let mut bytes = 0;
@@ -1239,7 +1250,24 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                 continue;
             }
         };
-        let view = store.inspect(&r, now());
+        let kind = if r.class == "managed_cargo_library" {
+            ResourceKind::ManagedCargoLibrary
+        } else {
+            ResourceKind::ManagedGenerated
+        };
+        let action: &dyn Action = if kind == ResourceKind::ManagedCargoLibrary {
+            &ManagedCargoLibraryClean
+        } else {
+            &ManagedGeneratedClean
+        };
+        let mut view = store.inspect(&r, now());
+        if !current.permits_kind(kind)
+            || !policy.classes.get(&r.class).is_some_and(|p| p.unattended)
+        {
+            view.eligible = false;
+            view.blockers
+                .push("resource-class unattended authority disabled".into());
+        }
         let mut item = SweepItem {
             id: id.clone(),
             lifecycle: view.lifecycle,
@@ -1249,10 +1277,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
             physical_free_delta: None,
         };
         if view.eligible && actions < policy.max_actions {
-            let resource = ResourceId::new(
-                ResourceKind::ManagedGenerated,
-                ResourceLocator::Path(store.path(&r)),
-            );
+            let resource = ResourceId::new(kind, ResourceLocator::Path(store.path(&r)));
             let retirement = match RetirementGuard::acquire(&store.path(&r), &_lock) {
                 Ok(g) => g,
                 Err(e) => {
@@ -1262,7 +1287,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                 }
             };
             let t = SystemTime::now();
-            let ev = crate::executor::build_fresh_evidence(&resource, &action, &collector, t);
+            let ev = crate::executor::build_fresh_evidence(&resource, action, &collector, t);
             let size = ev.logical_bytes.observed().copied();
             if let Some(size) = size.filter(|s| bytes + s <= policy.max_bytes) {
                 let decision = classify(&ev, &cfg, t);
@@ -1288,14 +1313,14 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                         resource: ev.resource.clone(),
                         generation: r.generation.clone(),
                         fingerprint: ev.fingerprint.clone(),
-                        action: crate::actions::ActionId("managed.clean.generated"),
+                        action: action.id(),
                         admitted_bytes: size,
                         guard: retirement,
                         _authority: &_lock,
                     };
                     #[cfg(target_os = "macos")]
                     let report = crate::executor::execute_managed_owned(
-                        &action,
+                        action,
                         &approval,
                         &collector,
                         &cfg,
@@ -1305,7 +1330,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                     );
                     #[cfg(not(target_os = "macos"))]
                     let report = crate::executor::execute_managed_owned(
-                        &action,
+                        action,
                         &approval,
                         &collector,
                         &cfg,
@@ -1340,7 +1365,7 @@ pub fn cli(args: &[String]) -> io::Result<()> {
     match args.first().map(String::as_str) {
         Some("native") => native::cli(&store, &args[1..]),
         Some("--help") | Some("help") => {
-            println!("glomeris resource: create --source-root GIT_WORKSPACE --recipe RECIPE; hold ID GENERATION --host HOST --session SESSION --owner-pid PID; seal ID GENERATION; inspect; reconcile; sweep --unattended; policy show|apply FILE. All persisted ownership/policy is private. Only source-free generated compiler objects in core-created namespaces can be sealed; existing/unknown user paths are never enrolled.");
+            println!("glomeris resource: create --source-root GIT_WORKSPACE --recipe RECIPE; create-cargo --source-root GIT_WORKSPACE --recipe RECIPE; produce-cargo ID GENERATION (extract committed src/lib.rs under fixed standalone configuration, not original package settings); hold ID GENERATION --host HOST --session SESSION --owner-pid PID; seal ID GENERATION; inspect; reconcile; sweep --unattended; policy show|apply FILE. All persisted ownership/policy is private. Only source-free generated compiler objects in core-created namespaces can be sealed; existing/unknown user paths are never enrolled.");
             Ok(())
         }
         Some("create") => {
@@ -1351,6 +1376,15 @@ pub fn cli(args: &[String]) -> io::Result<()> {
             write_reply(
                 &serde_json::json!({"id":r.id,"generation":r.generation,"path":store.path(&r),"class":r.class}),
             )
+        }
+        Some("create-cargo") => {
+            if args.len() != 5 || args[1] != "--source-root" || args[3] != "--recipe" { return Err(error("create-cargo --source-root GIT_WORKSPACE --recipe RECIPE")); }
+            let r = store.create_class(Path::new(&args[2]), &args[4], "managed_cargo_library")?;
+            write_reply(&serde_json::json!({"id":r.id,"generation":r.generation,"path":store.path(&r),"class":r.class}))
+        }
+        Some("produce-cargo") => {
+            if args.len()!=3 { return Err(error("produce-cargo ID GENERATION")); }
+            cargo_library::produce(&store,&args[1],&args[2])?; write_reply(&serde_json::json!({"status":"produced"}))
         }
         Some("hold") => {
             if args.len() != 9
@@ -1445,6 +1479,26 @@ pub fn monitor_sweep() {
         Err(e) => eprintln!("managed resource reconciliation preserved data: {e}"),
     }
 }
+fn source_git(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .args([
+            "--no-optional-locks",
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+        ])
+        .arg(root);
+    command
+}
 fn source_revision(root: &Path, pinned: Option<&str>) -> io::Result<String> {
     if !root.is_absolute()
         || fs::symlink_metadata(root)?.file_type().is_symlink()
@@ -1457,8 +1511,8 @@ fn source_revision(root: &Path, pinned: Option<&str>) -> io::Result<String> {
     } else {
         vec!["rev-parse", "HEAD"]
     };
-    let mut c = Command::new("git");
-    c.arg("--no-optional-locks").arg("-C").arg(root).args(args);
+    let mut c = source_git(root);
+    c.args(args);
     match run_with_timeout(c, Duration::from_secs(3)) {
         CommandOutcome::Completed(o) if o.status.success() => {
             if let Some(head) = pinned {
@@ -1468,12 +1522,8 @@ fn source_revision(root: &Path, pinned: Option<&str>) -> io::Result<String> {
                 .map_err(error)?
                 .trim()
                 .to_owned();
-            let mut c = Command::new("git");
-            c.arg("--no-optional-locks").arg("-C").arg(root).args([
-                "status",
-                "--porcelain",
-                "--untracked-files=all",
-            ]);
+            let mut c = source_git(root);
+            c.args(["status", "--porcelain", "--untracked-files=all"]);
             match run_with_timeout(c, Duration::from_secs(3)) {
                 CommandOutcome::Completed(o) if o.status.success() && o.stdout.is_empty() => {
                     Ok(head)
@@ -1580,7 +1630,27 @@ fn artifact_identity(path: &Path) -> io::Result<Artifact> {
         mtime_nsec: m.mtime_nsec(),
     })
 }
+fn record_artifacts(r: &Record) -> io::Result<BTreeMap<String, Artifact>> {
+    if r.class == "managed_cargo_library" {
+        cargo_library::manifest(r).map(|m| {
+            m.into_iter()
+                .filter_map(|(p, e)| {
+                    if e.directory {
+                        None
+                    } else {
+                        Some((p, e.identity))
+                    }
+                })
+                .collect()
+        })
+    } else {
+        artifacts(&Store::current()?.path(r), r.dev)
+    }
+}
 fn verify_producer(r: &Record) -> io::Result<()> {
+    if r.class == "managed_cargo_library" {
+        return cargo_library::verify(r);
+    }
     let proof = r
         .producer
         .as_ref()
@@ -1616,6 +1686,7 @@ pub fn produce(store: &Store, id: &str, generation: &str, input: &Path) -> io::R
     if r.generation != generation
         || r.retirement_started
         || r.reclaimed
+        || r.class != "managed_generated"
         || r.production_started
         || r.producer.is_some()
         || !r.claims.is_empty()
@@ -1636,14 +1707,11 @@ pub fn produce(store: &Store, id: &str, generation: &str, input: &Path) -> io::R
     source_revision(&r.source_root, Some(&r.source_head))?;
     r.production_started = true;
     store.save(&r)?;
-    let mut git = Command::new("git");
-    git.arg("--no-optional-locks")
-        .arg("-C")
-        .arg(&r.source_root)
-        .args([
-            "show",
-            &format!("{}:{}", r.source_head, input.to_string_lossy()),
-        ]);
+    let mut git = source_git(&r.source_root);
+    git.args([
+        "show",
+        &format!("{}:{}", r.source_head, input.to_string_lossy()),
+    ]);
     let bytes = match run_with_timeout(git, Duration::from_secs(3)) {
         CommandOutcome::Completed(o) if o.status.success() && o.stdout.len() <= 65536 => o.stdout,
         _ => return Err(error("bounded pinned input unavailable")),
@@ -2041,6 +2109,7 @@ mod permit_tests {
                 outputs: BTreeMap::from([("output.o".into(), artifact)]),
                 closed_consumers: true,
             }),
+            cargo_proof: None,
             production_started: true,
             retirement_started: false,
             retirement_history: vec![],
@@ -2113,6 +2182,42 @@ mod permit_tests {
             );
         }
         drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn concurrent_initialization_creates_private_components_without_chmod_adoption() {
+        let root = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("gl-private-init-{}", random().unwrap()));
+        fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
+        let path = root.join("new/parent/state");
+        let start = std::sync::Arc::new(std::sync::Barrier::new(16));
+        std::thread::scope(|scope| {
+            let mut workers = vec![];
+            for _ in 0..16 {
+                let path = path.clone();
+                let start = start.clone();
+                workers.push(scope.spawn(move || {
+                    start.wait();
+                    private_dir(&path)
+                }));
+            }
+            for worker in workers {
+                worker.join().unwrap().unwrap();
+            }
+        });
+        for part in [root.join("new"), root.join("new/parent"), path] {
+            assert_eq!(fs::symlink_metadata(part).unwrap().mode() & 0o777, 0o700);
+        }
+        let foreign = root.join("existing");
+        fs::create_dir(&foreign).unwrap();
+        fs::set_permissions(&foreign, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_dir(&foreign).is_err());
+        assert_eq!(
+            fs::symlink_metadata(&foreign).unwrap().mode() & 0o777,
+            0o755,
+            "never repair/adopt foreign permissions"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

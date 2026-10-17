@@ -21,6 +21,14 @@ Subcommands
   create --source-root <workspace> --recipe <recipe>
       Writes only Glomeris's own state — never your files.
       Create one private generation with committed reconstruction source.
+  create-cargo --source-root <workspace> --recipe <recipe>
+      Writes only Glomeris's own state — never your files.
+      Create a new private standalone-library generation, never adopt a
+      native target.
+  produce-cargo <id> <generation>
+      Writes only Glomeris's own state — never your files.
+      Compile committed src/lib.rs with Glomeris's fixed standalone
+      manifest, not original package configuration.
   produce <id> <generation> --input <tracked-rs-file>
       Writes only Glomeris's own state — never your files.
       Create a bounded standalone compiler object from retained committed

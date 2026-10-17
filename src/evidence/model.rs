@@ -87,12 +87,21 @@ pub enum ResourceKind {
     SwiftPackageManagerCache,
     /// A per-project SwiftPM `.build` directory.
     SwiftPackageManagerBuildDir,
+    /// A source-pinned, ownership-core-produced Cargo library generation.
+    /// Ordinary Cargo target directories remain a separate resource kind.
+    ManagedCargoLibrary,
     /// Fail-closed sink: a resource kind that cannot be classified. Policy
     /// (later ticket) maps this to PROTECTED unconditionally.
     Unknown,
 }
 
 impl ResourceKind {
+    /// Kinds whose path authority comes from a validated core enrollment and
+    /// therefore require the managed retirement barrier at execution time.
+    pub fn is_managed_resource(&self) -> bool {
+        matches!(self, Self::ManagedGenerated | Self::ManagedCargoLibrary)
+    }
+
     /// Tool that owns/manages this resource, for display and future policy
     /// use.
     pub fn owning_tool(&self) -> OwningTool {
@@ -114,6 +123,7 @@ impl ResourceKind {
                 OwningTool::SwiftPm
             }
             ResourceKind::ManagedGenerated | ResourceKind::Unknown => OwningTool::None,
+            ResourceKind::ManagedCargoLibrary => OwningTool::None,
         }
     }
 
@@ -121,9 +131,9 @@ impl ResourceKind {
     /// not of any single observed instance.
     pub fn regenerability(&self) -> Regenerability {
         match self {
-            ResourceKind::ManagedGenerated | ResourceKind::XcodeDerivedData => {
-                Regenerability::RegenerableByRebuild
-            }
+            ResourceKind::ManagedGenerated
+            | ResourceKind::ManagedCargoLibrary
+            | ResourceKind::XcodeDerivedData => Regenerability::RegenerableByRebuild,
             ResourceKind::HomebrewCache => Regenerability::RegenerableByTool,
             ResourceKind::CargoTargetDir => Regenerability::RegenerableByRebuild,
             ResourceKind::CargoRegistryCache => Regenerability::RegenerableByTool,
@@ -254,6 +264,7 @@ impl ResourceKind {
             | ResourceKind::GradleCache
             | ResourceKind::MavenLocalRepository
             | ResourceKind::SwiftPackageManagerCache
+            | ResourceKind::ManagedCargoLibrary
             | ResourceKind::Unknown => WITHOUT_TOOL_LIVENESS,
         }
     }
@@ -282,6 +293,7 @@ impl ResourceKind {
     pub fn tag(&self) -> &'static str {
         match self {
             ResourceKind::ManagedGenerated => "managed_generated",
+            ResourceKind::ManagedCargoLibrary => "managed_cargo_library",
             ResourceKind::XcodeDerivedData => "xcode_derived_data",
             ResourceKind::HomebrewCache => "homebrew_cache",
             ResourceKind::CargoTargetDir => "cargo_target_dir",
@@ -329,6 +341,7 @@ impl ResourceKind {
         ResourceKind::MavenLocalRepository,
         ResourceKind::SwiftPackageManagerCache,
         ResourceKind::SwiftPackageManagerBuildDir,
+        ResourceKind::ManagedCargoLibrary,
         ResourceKind::Unknown,
     ];
 
@@ -1648,7 +1661,8 @@ mod tests {
                 ResourceKind::MavenLocalRepository => 16,
                 ResourceKind::SwiftPackageManagerCache => 17,
                 ResourceKind::SwiftPackageManagerBuildDir => 18,
-                ResourceKind::Unknown => 19,
+                ResourceKind::ManagedCargoLibrary => 19,
+                ResourceKind::Unknown => 20,
             };
             assert_eq!(
                 index,
@@ -1659,7 +1673,7 @@ mod tests {
         }
         assert_eq!(
             ResourceKind::ALL.len(),
-            20,
+            21,
             "ResourceKind::ALL has gained, lost, or duplicated an entry"
         );
     }
@@ -1674,6 +1688,14 @@ mod tests {
                 kind.tag()
             );
         }
+    }
+
+    #[test]
+    fn managed_resource_predicate_does_not_cover_ordinary_cargo_targets() {
+        assert!(ResourceKind::ManagedGenerated.is_managed_resource());
+        assert!(ResourceKind::ManagedCargoLibrary.is_managed_resource());
+        assert!(!ResourceKind::CargoTargetDir.is_managed_resource());
+        assert!(!ResourceKind::CargoRegistryCache.is_managed_resource());
     }
 
     /// `from_tag` is the parser an Autopilot allowlist is built through, so

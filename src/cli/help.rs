@@ -357,6 +357,8 @@ pub const COMMANDS: &[CommandSpec] = &[
         subcommands: &[
             SubcommandSpec{name:"native",args:"<request|inspect|reconcile> --json",safety:Safety::WritesOwnState,description:"Track native task entitlements. Requests use bounded stdin; inspection exposes no capabilities and never grants cleanup authority."},
             SubcommandSpec{name:"create",args:"--source-root <workspace> --recipe <recipe>",safety:Safety::WritesOwnState,description:"Create one private generation with committed reconstruction source."},
+            SubcommandSpec{name:"create-cargo",args:"--source-root <workspace> --recipe <recipe>",safety:Safety::WritesOwnState,description:"Create a new private standalone-library generation, never adopt a native target."},
+            SubcommandSpec{name:"produce-cargo",args:"<id> <generation>",safety:Safety::WritesOwnState,description:"Compile committed src/lib.rs with Glomeris's fixed standalone manifest, not original package configuration."},
             SubcommandSpec{name:"produce",args:"<id> <generation> --input <tracked-rs-file>",safety:Safety::WritesOwnState,description:"Create a bounded standalone compiler object from retained committed input; reject external/environment dependencies."},
             SubcommandSpec{name:"export",args:"<id> <generation> --artifact <name> --destination <absolute-path>",safety:Safety::CreatesFile,description:"Copy a sealed artifact through core-only source access. Exported copies stay outside cleanup authority."},
             SubcommandSpec{name:"hold",args:"<id> <generation> --host <host> --session <session> --owner-pid <pid>",safety:Safety::WritesOwnState,description:"Persist acquisition and hold a shared kernel barrier through native use."},
