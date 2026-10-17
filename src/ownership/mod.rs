@@ -5,7 +5,9 @@ mod access;
 pub(crate) mod crash_tests;
 pub mod native;
 
-use crate::evidence::correlate::timeout::{run_with_timeout, CommandOutcome};
+use crate::evidence::correlate::timeout::{
+    run_with_timeout, run_with_timeout_retrying, CommandOutcome,
+};
 use nix::fcntl::{Flock, FlockArg};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1593,12 +1595,31 @@ fn verified_absent(path: &Path) -> io::Result<bool> {
         Ok(_) => Ok(false),
     }
 }
+/// HORO-1916: per-attempt timeout for the `ps`/`sysctl` liveness probes
+/// behind [`Store::inspect`] — unchanged from the original 3s so an
+/// uncontended host sees no latency change.
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// HORO-1916: total wall-clock budget across the first attempt plus one
+/// retry. 5s (a 2s allowance beyond the 3s first attempt) was sized from
+/// measured evidence: under real contention, timeouts land right at the
+/// 3.0-3.05s boundary, not far past it, so a short second window is
+/// enough to let a transient scheduling spike clear. This stays well
+/// inside the 20s CLI correlation-pass budget (HORO-1912) even for a
+/// candidate whose probe needs the full retry.
+const LIVENESS_PROBE_RETRY_BUDGET: Duration = Duration::from_secs(5);
 fn boot_identity() -> io::Result<String> {
     #[cfg(target_os = "macos")]
     {
-        let mut c = Command::new("/usr/sbin/sysctl");
-        c.args(["-n", "kern.boottime"]);
-        match run_with_timeout(c, Duration::from_secs(3)) {
+        let outcome = run_with_timeout_retrying(
+            || {
+                let mut c = Command::new("/usr/sbin/sysctl");
+                c.args(["-n", "kern.boottime"]);
+                c
+            },
+            LIVENESS_PROBE_TIMEOUT,
+            LIVENESS_PROBE_RETRY_BUDGET,
+        );
+        match outcome {
             CommandOutcome::Completed(o) if o.status.success() => Ok(String::from_utf8(o.stdout)
                 .map_err(error)?
                 .split('}')
@@ -1861,11 +1882,18 @@ fn process_snapshot(identities: &[&Identity]) -> io::Result<BTreeMap<u32, Identi
         .into_iter()
         .collect::<Vec<_>>()
         .join(",");
-    let mut c = Command::new("/bin/ps");
-    c.args(["-p", &pids, "-o", "pid=,lstart=,comm="])
-        .env("LC_ALL", "C")
-        .env("TZ", "UTC");
-    let result = match run_with_timeout(c, Duration::from_secs(3)) {
+    let outcome = run_with_timeout_retrying(
+        || {
+            let mut c = Command::new("/bin/ps");
+            c.args(["-p", &pids, "-o", "pid=,lstart=,comm="])
+                .env("LC_ALL", "C")
+                .env("TZ", "UTC");
+            c
+        },
+        LIVENESS_PROBE_TIMEOUT,
+        LIVENESS_PROBE_RETRY_BUDGET,
+    );
+    let result = match outcome {
         CommandOutcome::Completed(o) if o.status.success() || o.status.code() == Some(1) => {
             String::from_utf8(o.stdout).map_err(error)?
         }
@@ -1890,9 +1918,16 @@ fn process_snapshot(identities: &[&Identity]) -> io::Result<BTreeMap<u32, Identi
         );
     }
     if identities.iter().any(|i| !map.contains_key(&i.pid)) {
-        let mut c = Command::new("/bin/ps");
-        c.args(["-axo", "pid="]);
-        let all = match run_with_timeout(c, Duration::from_secs(3)) {
+        let outcome = run_with_timeout_retrying(
+            || {
+                let mut c = Command::new("/bin/ps");
+                c.args(["-axo", "pid="]);
+                c
+            },
+            LIVENESS_PROBE_TIMEOUT,
+            LIVENESS_PROBE_RETRY_BUDGET,
+        );
+        let all = match outcome {
             CommandOutcome::Completed(o) if o.status.success() => {
                 String::from_utf8(o.stdout).map_err(error)?
             }
