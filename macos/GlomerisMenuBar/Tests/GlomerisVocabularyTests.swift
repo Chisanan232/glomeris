@@ -64,6 +64,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// never records it.
     private static let outcomeTokens = [
         "succeeded", "failed", "aborted_by_revalidation", "dry_run",
+        "attempted", "interrupted",
     ]
 
     /// `src/reporting/dto.rs` — `ExecuteRefusalReport::reason`, including

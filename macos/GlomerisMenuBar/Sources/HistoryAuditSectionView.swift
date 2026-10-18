@@ -174,7 +174,7 @@ struct ActionHistoryRowViewModel: Equatable, Identifiable {
     }
 
     init(_ dto: ActionHistoryEventReportDto) {
-        id = "\(dto.timestamp)-\(dto.actionId)-\(dto.resourceId)"
+        id = "\(dto.timestamp)-\(dto.actionId)-\(dto.resourceId)-\(dto.outcome)"
         timeText = Self.formatTimestamp(dto.timestamp)
         actionId = dto.actionId
         resourceId = dto.resourceId

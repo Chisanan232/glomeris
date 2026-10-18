@@ -2193,6 +2193,40 @@ fn authority(args: &[String]) -> io::Result<()> {
 }
 
 #[cfg(test)]
+mod audit_outcome_tests {
+    use super::*;
+
+    fn reclaimed_item() -> SweepItem {
+        SweepItem {
+            id: "abc".into(),
+            lifecycle: Lifecycle::Reclaimed,
+            status: "reclaimed".into(),
+            blockers: vec![],
+            logical_bytes_removed: 1,
+            physical_free_delta: None,
+        }
+    }
+
+    /// HORO-1920: a deletion whose outcome could not be recorded is reported,
+    /// not presented as a clean success. The deletion itself already happened,
+    /// so the status stays `reclaimed`; the blocker is what makes the missing
+    /// record explicit, and the log still holds `attempted` for reconcile.
+    #[test]
+    fn an_unrecorded_outcome_is_surfaced_not_swallowed() {
+        let mut item = reclaimed_item();
+        note_outcome_audit(&mut item, Err(error("disk full")));
+        assert_eq!(item.status, "reclaimed");
+        assert_eq!(item.blockers.len(), 1);
+        assert!(item.blockers[0].contains("audit outcome not recorded"));
+        assert!(item.blockers[0].contains("reconciliation will complete it"));
+
+        let mut clean = reclaimed_item();
+        note_outcome_audit(&mut clean, Ok(()));
+        assert!(clean.blockers.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod traversal_tests {
     use super::*;
     #[test]

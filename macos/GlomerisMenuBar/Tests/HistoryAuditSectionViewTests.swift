@@ -134,6 +134,32 @@ final class HistoryAuditSectionViewTests: XCTestCase {
         )
     }
 
+    /// HORO-1920: the background cleanup writes `attempted` and then its result
+    /// in the same second for the same resource. Rows must stay distinct, or
+    /// SwiftUI would collapse two audit records into one.
+    func testAttemptedAndItsOutcomeAreDistinctRowsEvenInTheSameSecond() {
+        func dto(_ outcome: String) -> ActionHistoryEventReportDto {
+            ActionHistoryEventReportDto(
+                timestamp: 1_700_000_000,
+                actionId: "managed.clean.generated",
+                resourceId: "managed_generated:/x/y",
+                policyLabel: "AUTO_SAFE",
+                outcome: outcome,
+                abortReason: nil,
+                actualReclaimedBytes: nil,
+                actualReclaimedHuman: nil,
+                source: "managed_sweep"
+            )
+        }
+        let attempted = ActionHistoryRowViewModel(dto("attempted"))
+        let succeeded = ActionHistoryRowViewModel(dto("succeeded"))
+        XCTAssertNotEqual(attempted.id, succeeded.id)
+        XCTAssertEqual(attempted.outcomeTerm.title, "Started")
+        XCTAssertNotEqual(attempted.outcomeTerm.tone, .positive)
+        XCTAssertNotEqual(attempted.outcomeTerm.tone, .critical)
+        XCTAssertEqual(succeeded.sourceTerm.title, "Background cleanup")
+    }
+
     func testAutoSafeSucceededRecordRendersPolicyOutcomeAndSource() {
         let row = ActionHistoryRowViewModel(autoSafeSucceededDto())
 

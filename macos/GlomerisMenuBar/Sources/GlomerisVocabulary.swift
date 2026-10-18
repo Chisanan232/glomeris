@@ -553,6 +553,23 @@ enum GlomerisVocabulary {
                     + "stopped before altering anything.",
                 "exclamationmark.triangle.fill", .caution
             )
+        // HORO-1920. The background cleanup writes the intent before it acts and the
+        // result after. A row that is still "Started" with nothing after it means the
+        // result was never recorded, which is different from "Failed".
+        case "attempted":
+            return term(
+                token, outcomeAxis, "Started",
+                "Glomeris recorded that it was about to act. If no result follows, "
+                    + "the result was not recorded.",
+                "hourglass", .caution
+            )
+        case "interrupted":
+            return term(
+                token, outcomeAxis, "Interrupted",
+                "The action started but did not finish. Glomeris re-checks the "
+                    + "resource before trying again.",
+                "pause.circle.fill", .caution
+            )
         case "dry_run":
             return term(
                 token, outcomeAxis, "Dry run only",
