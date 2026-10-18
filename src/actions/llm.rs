@@ -772,6 +772,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
             // opaque `NetworkError("http status: 401")` and the provider's
             // own explanation was discarded unread — HORO-1299.
             .http_status_as_error(false)
+            // HORO-1922: a redirect from the configured endpoint must never carry
+            // the bearer key or the prompt to another origin. ureq's defaults
+            // already strip Authorization on every redirect and do not replay a
+            // POST body on 307/308, but the guarantee is stated here rather than
+            // inherited, so a library default change cannot silently weaken it.
+            // Following nothing also means a 3xx surfaces as a provider status
+            // the user can act on instead of a request to somewhere unvetted.
+            .max_redirects(0)
+            .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .build()
             .header("Authorization", &auth_header)
             .header("Content-Type", "application/json")
