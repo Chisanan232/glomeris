@@ -2577,6 +2577,47 @@ mod tests {
         }
     }
 
+    /// HORO-1922: cleartext http to anything that is not provably loopback is
+    /// refused, including the spellings that defeat a prefix check.
+    #[test]
+    fn validate_base_url_rejects_non_loopback_http() {
+        for rejected in [
+            "http://api.openai.com/v1",
+            "http://192.168.1.10:8000/v1",
+            "http://10.0.0.5/v1",
+            "http://0.0.0.0:8080/v1",
+            "http://localhost.evil.example/v1",
+            "http://127.0.0.1.nip.io/v1",
+            "http://localhostx/v1",
+            "http://evil.example@127.0.0.1/v1",
+            "http://127.0.0.1@evil.example/v1",
+            "http://localhost@evil.example/v1",
+            "http://user:pw@localhost/v1",
+            "http://[::ffff:8.8.8.8]/v1",
+            "http://[2001:db8::1]/v1",
+            "http://[::1/v1",
+            "http://localhost:/v1",
+            "http://localhost:99999/v1",
+            "http://localhost:abc/v1",
+            "http://:8080/v1",
+            "HTTP://example.com/v1",
+        ] {
+            let message = validate_base_url(rejected)
+                .expect_err(&format!("must reject {rejected:?}"))
+                .to_lowercase();
+            assert!(
+                !message.contains(&rejected.to_lowercase()),
+                "a rejection must not echo the URL back: {message}"
+            );
+            assert!(
+                message.contains("loopback")
+                    || message.contains("no host")
+                    || message.contains("space"),
+                "message for {rejected:?} must say why: {message}"
+            );
+        }
+    }
+
     /// Each rejection must name what to change, since this is the error a user
     /// meets before anything has ever worked. Asserted on a distinguishing
     /// word rather than the whole sentence so rewording the guidance does not
