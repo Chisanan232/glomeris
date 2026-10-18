@@ -1589,17 +1589,40 @@ fn note_outcome_audit(item: &mut SweepItem, result: io::Result<()>) {
     }
 }
 
+/// What to record for an open `attempted` record, or `None` to leave it open
+/// (HORO-1920). Decided from what is on disk now, never from a flag that this
+/// same reconcile pass may not have reached yet (the ownership pass is capped at
+/// 64 records and 10 seconds, so `reclaimed` can lag a completed deletion):
+///
+/// * no ownership record for the resource, or presence cannot be established
+///   ⇒ unprovable, so the attempt stays open rather than being guessed;
+/// * the generation is gone ⇒ `succeeded`;
+/// * the generation is still there ⇒ `interrupted`. This is inferred from
+///   presence: it covers a deletion that never started and one cut off part-way.
+fn audit_close_outcome(found: bool, absent: io::Result<bool>) -> Option<&'static str> {
+    if !found {
+        return None;
+    }
+    match absent {
+        Ok(true) => Some("succeeded"),
+        Ok(false) => Some("interrupted"),
+        Err(_) => None,
+    }
+}
+
 /// HORO-1920: closes `attempted` records that no outcome ever followed (the
 /// process died, or the outcome append failed). Called with the execution lock
-/// held, so no sweep is in flight and any open attempt is stale. The ownership
-/// record decides: reclaimed means the deletion completed (`succeeded`);
-/// anything else means it did not, and the ownership reconcile has already
-/// queued a safe retry (`interrupted`). Idempotent: once closed, an attempt is
-/// no longer unmatched, so a second pass appends nothing.
+/// held, so no sweep is in flight and any open attempt is stale. Each pass
+/// closes the attempts it can prove from [`audit_close_outcome`]; the rest stay
+/// open and are retried on the next pass. Idempotent: once closed, an attempt is
+/// no longer unmatched, so a second pass appends nothing. The window is the last
+/// [`crate::monitor::UNMATCHED_ATTEMPT_WINDOW`] lines of the live and rotated
+/// log; an attempt older than that is not chased.
 fn reconcile_audit(
     store: &Store,
     _authority: &crate::executor::lock::ExecutionLockGuard,
 ) -> io::Result<()> {
+    use crate::evidence::model::{ResourceId, ResourceKind, ResourceLocator};
     let path = store.audit_path()?;
     let open = crate::monitor::unmatched_attempts(
         &path,
@@ -1611,17 +1634,22 @@ fn reconcile_audit(
     let mut records = vec![];
     for id in store.ids()? {
         if let Ok(r) = store.read(&id) {
-            records.push((store.path(&r).to_string_lossy().into_owned(), r));
+            let key = ResourceId::new(
+                ResourceKind::ManagedGenerated,
+                ResourceLocator::Path(store.path(&r)),
+            )
+            .to_string();
+            records.push((key, store.path(&r)));
         }
     }
     for attempt in open {
-        let reclaimed = records
-            .iter()
-            .any(|(p, r)| r.reclaimed && attempt.resource_id.ends_with(p.as_str()));
-        let outcome = if reclaimed {
-            "succeeded"
-        } else {
-            "interrupted"
+        let found = records.iter().find(|(key, _)| *key == attempt.resource_id);
+        let absent = match found {
+            Some((_, resource_path)) => verified_absent(resource_path),
+            None => Ok(false),
+        };
+        let Some(outcome) = audit_close_outcome(found.is_some(), absent) else {
+            continue;
         };
         let record = sweep_audit_record(attempt.resource_id, outcome, None);
         crate::monitor::append_audit_record_durable(&path, &record)?;
@@ -2205,6 +2233,23 @@ mod audit_outcome_tests {
             logical_bytes_removed: 1,
             physical_free_delta: None,
         }
+    }
+
+    fn io_err() -> io::Error {
+        error("probe failed")
+    }
+
+    /// HORO-1920 (review of #186): the close decision comes from what is on disk,
+    /// not from a `reclaimed` flag the ownership pass may not have reached. A
+    /// resource that is gone is `succeeded` whatever any record says; one that
+    /// is still there is `interrupted`; anything unprovable stays open.
+    #[test]
+    fn audit_close_outcome_is_decided_by_presence_and_leaves_the_unprovable_open() {
+        assert_eq!(audit_close_outcome(true, Ok(true)), Some("succeeded"));
+        assert_eq!(audit_close_outcome(true, Ok(false)), Some("interrupted"));
+        assert_eq!(audit_close_outcome(true, Err(io_err())), None);
+        assert_eq!(audit_close_outcome(false, Ok(true)), None);
+        assert_eq!(audit_close_outcome(false, Ok(false)), None);
     }
 
     /// HORO-1920: a deletion whose outcome could not be recorded is reported,

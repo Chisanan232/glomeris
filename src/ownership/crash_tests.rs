@@ -400,9 +400,16 @@ fn child_process_driver() {
             }
             let first = sweep(&store).unwrap();
             let second = sweep(&store).unwrap();
+            // HORO-1920: reconcile once more inside the fixture and report the audit
+            // sequence on both sides of it. Done here, not in the parent test
+            // process, because `Store::reconcile` takes the HOME-based execution
+            // lock, and the parent's HOME is the real user's.
+            let audit_before = audit_outcomes(&store);
+            store.reconcile().unwrap();
+            let audit_after = audit_outcomes(&store);
             send(
                 reader.get_mut(),
-                &json!({"event":"recovered", "inspections":inspections, "reconciled":reconciled, "first":first, "second":second}),
+                &json!({"event":"recovered", "inspections":inspections, "reconciled":reconciled, "first":first, "second":second, "audit_before":audit_before, "audit_after":audit_after}),
             );
         }
         "poison_parent_environment" => {
@@ -528,12 +535,24 @@ fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
         (Checkpoint::DeletedBeforeOutcome, _) => &["attempted", "succeeded"],
         _ => unreachable!("separate export recovery driver"),
     };
-    assert_eq!(audit_outcomes(&store), expected_audit, "after recovery");
-    store.reconcile().expect("a second reconcile must succeed");
+    let as_strings = |key: &str| -> Vec<String> {
+        result[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(as_strings("audit_before"), expected_audit, "after recovery");
+    assert_eq!(
+        as_strings("audit_after"),
+        expected_audit,
+        "reconciling the audit log twice must append nothing the second time"
+    );
     assert_eq!(
         audit_outcomes(&store),
         expected_audit,
-        "reconciling the audit log twice must append nothing the second time"
+        "as persisted on disk"
     );
     let after = store.read(id).unwrap();
     assert_eq!(after.generation, before.generation);
