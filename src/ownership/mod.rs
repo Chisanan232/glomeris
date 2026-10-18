@@ -1331,6 +1331,17 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                     let approval =
                         crate::policy::approval::authorize(decision, ev.fingerprint.clone(), None)
                             .ok_or_else(|| error("policy authorization refused"))?;
+                    // HORO-1920: nobody is watching this deletion, so a deletion
+                    // that cannot be recorded must not happen. The durable
+                    // `attempted` record is both the intent and the proof that the
+                    // log accepts writes right now; nothing is charged to the
+                    // budget and nothing is retired if it cannot be written.
+                    if let Err(e) = audit_attempt(store, &ev.resource.to_string()) {
+                        item.blockers
+                            .push(format!("audit log not writable ({e}); nothing was deleted"));
+                        rows.push(item);
+                        continue;
+                    }
                     ledger.charge(size, size);
                     actions += 1;
                     bytes += size;
@@ -1364,7 +1375,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                         permit,
                     );
                     item.physical_free_delta = report.volume_free_delta.observed().copied();
-                    record_sweep_audit(&report);
+                    note_outcome_audit(&mut item, record_sweep_audit(store, &report));
                     if matches!(report.outcome, crate::executor::ExecutionOutcome::Succeeded) {
                         item.status = "reclaimed".into();
                         item.lifecycle = Lifecycle::Reclaimed;
@@ -1474,13 +1485,58 @@ pub fn cli(args: &[String]) -> io::Result<()> {
         _ => Err(error("unknown managed resource operation")),
     }
 }
-/// Called only from the existing monitor; absent/disabled policy does not initialize new state.
-/// HORO-1920: every other deleting path appends to `actions.jsonl`; without
-/// this the monitor's unattended reclamation was the one deletion that
-/// `glomeris actions history` and the History panel could not show.
-/// Best-effort like the other writers: a failed append never undoes or blocks
-/// a deletion that already happened.
-fn record_sweep_audit(report: &crate::executor::ExecutionReport) {
+impl Store {
+    /// Where `actions.jsonl` lives: beside the resource store, which is the same
+    /// file every other deleting path appends to. Derived from the store's own
+    /// root rather than from `HOME`, so a store under test or in a fixture can
+    /// never write to the real user's log.
+    fn audit_path(&self) -> io::Result<PathBuf> {
+        self.root
+            .parent()
+            .map(|dir| dir.join("actions.jsonl"))
+            .ok_or_else(|| error("audit log location unavailable"))
+    }
+}
+
+fn sweep_audit_record(
+    resource_id: String,
+    outcome: &str,
+    abort_reason: Option<String>,
+) -> crate::monitor::AuditRecord {
+    crate::monitor::AuditRecord {
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: "managed.clean.generated".to_string(),
+        resource_id,
+        policy_label: crate::reporting::policy_label::PolicyLabel::AutoSafe
+            .as_str()
+            .to_string(),
+        outcome: outcome.to_string(),
+        abort_reason,
+        actual_reclaimed_bytes: None,
+        source: crate::monitor::ActionSource::ManagedSweep.to_string(),
+        model_rank: None,
+        host_integrity_status: None,
+        volume_free_delta: None,
+    }
+}
+
+/// HORO-1920: the durable intent written before a deletion starts. An `Err`
+/// means the audit log cannot be relied on, and the caller must not delete.
+fn audit_attempt(store: &Store, resource_id: &str) -> io::Result<()> {
+    crate::monitor::append_audit_record_durable(
+        &store.audit_path()?,
+        &sweep_audit_record(resource_id.to_string(), "attempted", None),
+    )
+}
+
+/// The outcome record for a finished sweep deletion attempt, or `None` for an
+/// outcome that is not a real execution.
+fn sweep_outcome_record(
+    report: &crate::executor::ExecutionReport,
+) -> Option<crate::monitor::AuditRecord> {
     use crate::executor::ExecutionOutcome;
     let (outcome, abort_reason) = match &report.outcome {
         ExecutionOutcome::Succeeded => ("succeeded", None),
@@ -1488,38 +1544,47 @@ fn record_sweep_audit(report: &crate::executor::ExecutionReport) {
         ExecutionOutcome::AbortedByRevalidation(reason) => {
             ("aborted_by_revalidation", Some(format!("{reason:?}")))
         }
-        ExecutionOutcome::DryRun => return,
+        ExecutionOutcome::DryRun => return None,
     };
-    let Some(home) = std::env::var_os("HOME") else {
-        return;
+    let mut record = sweep_audit_record(report.resource.to_string(), outcome, abort_reason);
+    record.actual_reclaimed_bytes = match report.outcome {
+        ExecutionOutcome::Succeeded => report.actual_reclaimed_bytes.observed().copied(),
+        _ => None,
     };
-    let path = PathBuf::from(home).join("Library/Application Support/Glomeris/actions.jsonl");
-    let record = crate::monitor::AuditRecord {
-        timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-        action_id: report.action.0.to_string(),
-        resource_id: report.resource.to_string(),
-        policy_label: crate::reporting::policy_label::PolicyLabel::AutoSafe
-            .as_str()
-            .to_string(),
-        outcome: outcome.to_string(),
-        abort_reason,
-        actual_reclaimed_bytes: match report.outcome {
-            ExecutionOutcome::Succeeded => report.actual_reclaimed_bytes.observed().copied(),
-            _ => None,
-        },
-        source: crate::monitor::ActionSource::ManagedSweep.to_string(),
-        model_rank: None,
-        host_integrity_status: report
-            .host_integrity
-            .as_ref()
-            .map(|h| h.status.as_str().to_string()),
-        volume_free_delta: report.volume_free_delta.observed().copied(),
-    };
-    let _ = crate::monitor::append_audit_record(&path, &record);
+    record.host_integrity_status = report
+        .host_integrity
+        .as_ref()
+        .map(|h| h.status.as_str().to_string());
+    record.volume_free_delta = report.volume_free_delta.observed().copied();
+    Some(record)
 }
+
+/// Appends the outcome after the `attempted` intent. Strict: the result is
+/// reported, because the caller must not present an unrecorded deletion as a
+/// clean success.
+fn record_sweep_audit(store: &Store, report: &crate::executor::ExecutionReport) -> io::Result<()> {
+    match sweep_outcome_record(report) {
+        Some(record) => crate::monitor::append_audit_record_durable(&store.audit_path()?, &record),
+        None => Ok(()),
+    }
+}
+
+/// Makes an outcome-append failure visible instead of silent. The deletion
+/// already happened and is not undone; the log now holds `attempted` with no
+/// outcome, which is the honest record, and the next reconcile closes it.
+fn note_outcome_audit(item: &mut SweepItem, result: io::Result<()>) {
+    if let Err(e) = result {
+        eprintln!(
+            "managed resource {} deleted but its audit outcome was not recorded: {e}",
+            item.id
+        );
+        item.blockers.push(format!(
+            "audit outcome not recorded ({e}); reconciliation will complete it"
+        ));
+    }
+}
+
+/// Called only from the existing monitor; absent/disabled policy does not initialize new state.
 pub fn monitor_sweep() {
     match Store::current().and_then(|s| {
         if !s.root.exists() {
