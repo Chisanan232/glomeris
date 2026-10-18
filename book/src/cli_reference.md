@@ -963,6 +963,22 @@ ever appears alongside `outcome: "aborted_by_revalidation"`. That is a known
 limitation with a named cause and a pinning test, not the intended end state:
 see [Known Limitations](known_limitations.md).
 
+`managed_sweep` is the one source that writes two records per deletion,
+because nobody is watching it: an `attempted` record, flushed to disk *before*
+anything is deleted, and then the outcome (`succeeded`, `failed` or
+`aborted_by_revalidation`). If the `attempted` record cannot be written the
+sweep deletes nothing and reports the resource as preserved with the blocker
+"audit log not writable". If the outcome cannot be written after a deletion,
+the sweep says so (a blocker on that row and a line in the monitor log) and the
+log keeps `attempted` with nothing after it — which is exactly what an
+unrecorded outcome looks like. The next reconcile (run by the monitor and by
+`glomeris resource reconcile`) closes every such record exactly once, from the
+resource's own ownership record: `succeeded` if the generation is gone,
+`interrupted` if the deletion did not complete (a safe retry is already
+queued). An `attempted` line with no later line for the same resource is
+therefore always either in flight or awaiting reconciliation, never a silent
+success.
+
 ```sh
 glomeris actions history --json --limit 2
 ```
