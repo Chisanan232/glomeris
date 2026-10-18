@@ -481,7 +481,13 @@ pub const UNMATCHED_ATTEMPT_WINDOW: usize = 1024;
 /// deletion; with no outcome after it, the log is honest that it does not know
 /// how that deletion ended, and a reconcile pass is expected to close it.
 pub fn unmatched_attempts(path: &Path, source: &str) -> Vec<AuditRecord> {
-    let tail = read_audit_tail(path, UNMATCHED_ATTEMPT_WINDOW);
+    // The rotated file first: rotation can move an `attempted` record out of the
+    // live file before its outcome arrives (or before a crash), and ignoring it
+    // would strand that attempt for good.
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    let mut tail = read_audit_tail(Path::new(&rotated), UNMATCHED_ATTEMPT_WINDOW);
+    tail.extend(read_audit_tail(path, UNMATCHED_ATTEMPT_WINDOW));
     let mut open: Vec<AuditRecord> = Vec::new();
     for record in tail.into_iter().filter(|r| r.source == source) {
         open.retain(|a| a.resource_id != record.resource_id);
@@ -926,6 +932,33 @@ mod tests {
             "a FIFO must fail fast, not block"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// HORO-1920: rotation can move an `attempted` record into `.1` before its
+    /// outcome arrives. An attempt there with no outcome is still open, and an
+    /// outcome in the live file still closes an attempt in `.1`.
+    #[test]
+    fn unmatched_attempts_look_into_the_rotated_file() {
+        let path = unique_audit_test_path("rotated");
+        let mut rotated = path.as_os_str().to_os_string();
+        rotated.push(".1");
+        let rotated = PathBuf::from(rotated);
+        let record = |resource: &str, outcome: &str| AuditRecord {
+            resource_id: resource.to_string(),
+            outcome: outcome.to_string(),
+            source: "managed_sweep".to_string(),
+            ..sample_audit_record("managed.clean.generated")
+        };
+        append_audit_record(&rotated, &record("stranded", "attempted")).unwrap();
+        append_audit_record(&rotated, &record("closed_later", "attempted")).unwrap();
+        append_audit_record(&path, &record("closed_later", "succeeded")).unwrap();
+        let open: Vec<String> = unmatched_attempts(&path, "managed_sweep")
+            .into_iter()
+            .map(|r| r.resource_id)
+            .collect();
+        assert_eq!(open, ["stranded"]);
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
