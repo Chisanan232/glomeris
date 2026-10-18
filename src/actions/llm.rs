@@ -715,6 +715,11 @@ fn http_host_is_loopback(after_scheme: &str) -> bool {
         let Some((inside, rest)) = bracketed.split_once(']') else {
             return false;
         };
+        // Nothing but an optional `:port` may follow the bracket; `[::1]evil.com`
+        // and `[::1]%25eth0` are not a plain loopback authority.
+        if !(rest.is_empty() || rest.starts_with(':')) {
+            return false;
+        }
         (inside, rest.strip_prefix(':'))
     } else {
         match authority.split_once(':') {
@@ -2605,6 +2610,8 @@ mod tests {
             "http://[::ffff:8.8.8.8]/v1",
             "http://[2001:db8::1]/v1",
             "http://[::1/v1",
+            "http://[::1]evil.example/v1",
+            "http://[::1]%25eth0/v1",
             "http://localhost:/v1",
             "http://localhost:99999/v1",
             "http://localhost:abc/v1",
