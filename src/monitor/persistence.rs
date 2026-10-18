@@ -256,8 +256,8 @@ pub struct AuditRecord {
     pub actual_reclaimed_bytes: Option<u64>,
     /// Which real-execution path produced this record, and — for
     /// `autopilot` — under what authority: `"execute"`, `"free"`,
-    /// `"emergency"`, `"autopilot_auto_safe"`, or
-    /// `"autopilot_preauthorized_ask"`. The two `autopilot_*` values are
+    /// `"emergency"`, `"autopilot_auto_safe"`,
+    /// `"autopilot_preauthorized_ask"`, or `"managed_sweep"`. The two `autopilot_*` values are
     /// distinct on purpose (HORO-1310): "Autopilot did this" and "Autopilot
     /// did this to an `ASK` resource under a pre-authorization the user
     /// granted in advance" are different facts, and an audit trail that
@@ -344,6 +344,10 @@ pub enum ActionSource {
     /// "Autopilot did this" and "Autopilot did this under a standing consent"
     /// are the two different facts someone auditing the log is looking for.
     AutopilotPreauthorizedAsk,
+    /// The background monitor's managed-resource sweep (`glomeris resource
+    /// sweep --unattended`, HORO-1920). It deletes through its own path, not
+    /// `autopilot run`, so it needs its own word in the audit trail.
+    ManagedSweep,
 }
 
 impl ActionSource {
@@ -354,6 +358,7 @@ impl ActionSource {
             ActionSource::Emergency => "emergency",
             ActionSource::AutopilotAutoSafe => "autopilot_auto_safe",
             ActionSource::AutopilotPreauthorizedAsk => "autopilot_preauthorized_ask",
+            ActionSource::ManagedSweep => "managed_sweep",
         }
     }
 }
@@ -494,6 +499,7 @@ mod tests {
             ActionSource::Emergency,
             ActionSource::AutopilotAutoSafe,
             ActionSource::AutopilotPreauthorizedAsk,
+            ActionSource::ManagedSweep,
         ];
         let mut seen = std::collections::BTreeSet::new();
         for source in all {
@@ -509,7 +515,7 @@ mod tests {
                 "Display must agree with as_str, or the two writing paths diverge"
             );
         }
-        assert_eq!(seen.len(), 5);
+        assert_eq!(seen.len(), 6);
     }
 
     #[test]

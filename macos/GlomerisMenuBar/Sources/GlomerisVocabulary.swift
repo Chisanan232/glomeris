@@ -687,6 +687,18 @@ enum GlomerisVocabulary {
                 """,
                 "checkmark.shield.fill", .warning
             )
+        // HORO-1920. The background monitor's managed-resource sweep deletes
+        // without Autopilot's `run` path, so it needs its own word: a reader
+        // auditing the log must be able to tell it from a person's request.
+        case "managed_sweep":
+            return term(
+                token, sourceAxis, "Background cleanup",
+                """
+                Run by the background monitor on a Glomeris-created generated \
+                artifact, under the Autopilot grant and the managed-resource policy.
+                """,
+                "externaldrive.badge.minus", .neutral
+            )
         default:
             return unrecognised(
                 token, sourceAxis, "Unrecognised trigger",

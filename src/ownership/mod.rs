@@ -1364,6 +1364,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                         permit,
                     );
                     item.physical_free_delta = report.volume_free_delta.observed().copied();
+                    record_sweep_audit(&report, size);
                     if matches!(report.outcome, crate::executor::ExecutionOutcome::Succeeded) {
                         item.status = "reclaimed".into();
                         item.lifecycle = Lifecycle::Reclaimed;
@@ -1474,6 +1475,57 @@ pub fn cli(args: &[String]) -> io::Result<()> {
     }
 }
 /// Called only from the existing monitor; absent/disabled policy does not initialize new state.
+/// HORO-1920: every other deleting path appends to `actions.jsonl`; without
+/// this the monitor's unattended reclamation was the one deletion that
+/// `glomeris actions history` and the History panel could not show.
+/// Best-effort like the other writers: a failed append never undoes or blocks
+/// a deletion that already happened.
+fn record_sweep_audit(report: &crate::executor::ExecutionReport, requested_bytes: u64) {
+    use crate::executor::ExecutionOutcome;
+    let (outcome, abort_reason) = match &report.outcome {
+        ExecutionOutcome::Succeeded => ("succeeded", None),
+        ExecutionOutcome::Failed(_) => ("failed", None),
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            ("aborted_by_revalidation", Some(format!("{reason:?}")))
+        }
+        ExecutionOutcome::DryRun => return,
+    };
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let path = PathBuf::from(home).join("Library/Application Support/Glomeris/actions.jsonl");
+    let record = crate::monitor::AuditRecord {
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: report.action.0.to_string(),
+        resource_id: report.resource.to_string(),
+        policy_label: crate::reporting::policy_label::PolicyLabel::AutoSafe
+            .as_str()
+            .to_string(),
+        outcome: outcome.to_string(),
+        abort_reason,
+        actual_reclaimed_bytes: match report.outcome {
+            ExecutionOutcome::Succeeded => Some(
+                report
+                    .actual_reclaimed_bytes
+                    .observed()
+                    .copied()
+                    .unwrap_or(requested_bytes),
+            ),
+            _ => None,
+        },
+        source: crate::monitor::ActionSource::ManagedSweep.to_string(),
+        model_rank: None,
+        host_integrity_status: report
+            .host_integrity
+            .as_ref()
+            .map(|h| h.status.as_str().to_string()),
+        volume_free_delta: report.volume_free_delta.observed().copied(),
+    };
+    let _ = crate::monitor::append_audit_record(&path, &record);
+}
 pub fn monitor_sweep() {
     match Store::current().and_then(|s| {
         if !s.root.exists() {
