@@ -251,6 +251,22 @@ jobs:
       - name: Check no policy_label branching in Swift
         run: bash scripts/check-no-policy-label-branching.sh
 
+  swift-has-no-deletion-authority:
+    # HORO-1922: the menu-bar app is a thin client; deleting, moving or
+    # trashing files, and starting any process other than the one glomeris
+    # invocation point, are the Rust CLI's authority alone. HORO-1313's AC2
+    # audit found this true only by inspection, so a future FileManager delete
+    # of a resource path would have passed CI. `--self-test` first proves the
+    # guard still rejects each planted violation, so a regex that silently stops
+    # matching fails here instead of passing forever.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prove the guard rejects planted violations
+        run: bash scripts/check-swift-has-no-deletion-authority.sh --self-test
+      - name: Check Swift sources hold no deletion authority
+        run: bash scripts/check-swift-has-no-deletion-authority.sh
+
   workspace-aggregation-has-no-authority:
     # HORO-1511: `crate::workspace` groups discovered resources into git
     # worktree families so a person can see that one project accounts for
