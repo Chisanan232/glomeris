@@ -393,6 +393,36 @@ fn managed_sweep_reclamation_is_bracketed_in_the_audit_log() {
     );
 }
 
+// HORO-1920: if the log cannot be written, nothing is deleted.
+#[test]
+fn managed_sweep_refuses_to_delete_when_the_audit_log_is_unwritable() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    f.seal(&r);
+    // A directory where the log should be makes every open for append fail.
+    fs::create_dir_all(f.audit_path()).unwrap();
+    let v = f.call(&["sweep", "--unattended"]);
+    assert_eq!(v[0]["status"], "preserved", "{v}");
+    assert!(
+        v[0]["blockers"]
+            .to_string()
+            .contains("audit log not writable"),
+        "{v}"
+    );
+    assert!(
+        PathBuf::from(r["path"].as_str().unwrap()).exists(),
+        "an unauditable deletion must not happen"
+    );
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    assert_eq!(record["retirement_started"], false);
+    assert_eq!(record["reclaimed"], false);
+    // Once the log is writable again the same generation is reclaimed normally.
+    fs::remove_dir_all(f.audit_path()).unwrap();
+    let again = f.call(&["sweep", "--unattended"]);
+    assert_eq!(again[0]["status"], "reclaimed", "{again}");
+}
 #[test]
 fn possible_unique_data_and_unsealed_generation_preserve() {
     let f = Fixture::new();
