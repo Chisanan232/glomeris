@@ -10,7 +10,8 @@
 use crate::monitor::pressure::PressureState;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -254,8 +255,10 @@ pub struct AuditRecord {
     /// The `"managed_sweep"` source (HORO-1920) also writes two bracketing
     /// tokens: `"attempted"`, the durable intent recorded before the deletion
     /// starts, and `"interrupted"`, written by reconciliation when an
-    /// `attempted` record was never followed by an outcome and the deletion
-    /// is known not to have completed.
+    /// `attempted` record was never followed by an outcome and the resource
+    /// was still present when reconciliation looked. That is inferred from
+    /// presence: it covers a deletion that never started and one that was
+    /// cut off part-way.
     pub outcome: String,
     /// Populated only when `outcome == "aborted_by_revalidation"`.
     pub abort_reason: Option<String>,
@@ -426,7 +429,37 @@ pub fn append_audit_record_durable(path: &Path, record: &AuditRecord) -> io::Res
     line.push('\n');
 
     let existed = path.exists();
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    // A symlink is refused (O_NOFOLLOW) and a FIFO fails to open rather than
+    // blocking forever while the execution lock is held (O_NONBLOCK, ENXIO);
+    // anything that is not a regular file is rejected below. A new file is
+    // private: the log names local paths.
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit log is not a regular file",
+        ));
+    }
+    // A previous write that failed part-way (ENOSPC is this tool's native
+    // situation) leaves a line with no newline. Appending straight after it
+    // would glue this record onto the fragment, and the reader skips the whole
+    // malformed line: the append would report success for a record nobody can
+    // read. Start a fresh line instead.
+    let len = file.metadata()?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.insert(0, '\n');
+        }
+    }
     file.write_all(line.as_bytes())?;
     file.sync_all()?;
     if !existed {
@@ -845,6 +878,54 @@ mod tests {
             .collect();
         assert_eq!(open, ["open", "other_source", "again"]);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// HORO-1920: a previous append that failed part-way (ENOSPC) leaves a line
+    /// with no newline. The next durable record must not be glued onto it, or the
+    /// reader skips the whole line and the append reported success for a record
+    /// nobody can read.
+    #[test]
+    fn a_durable_append_after_a_torn_write_starts_a_fresh_line() {
+        let path = unique_audit_test_path("torn");
+        append_audit_record_durable(&path, &sample_audit_record("first")).unwrap();
+        // Simulate the torn write: a fragment with no trailing newline.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"timestamp\": 17000000").unwrap();
+        drop(file);
+        append_audit_record_durable(&path, &sample_audit_record("second")).unwrap();
+        let ids: Vec<String> = read_audit_tail(&path, 10)
+            .into_iter()
+            .map(|r| r.action_id)
+            .collect();
+        assert_eq!(ids, ["first", "second"], "the new record must be readable");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// HORO-1920: the log is opened without following a symlink and without
+    /// blocking on a FIFO, so a hostile or accidental file type cannot wedge the
+    /// monitor while it holds the execution lock, or redirect the audit trail.
+    #[test]
+    fn a_durable_append_refuses_a_symlink_and_a_fifo() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-audit-odd-{}-{}",
+            std::process::id(),
+            unix_now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("elsewhere.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.join("link.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(append_audit_record_durable(&link, &sample_audit_record("x")).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+
+        let fifo = dir.join("fifo.jsonl");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert!(
+            append_audit_record_durable(&fifo, &sample_audit_record("y")).is_err(),
+            "a FIFO must fail fast, not block"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
