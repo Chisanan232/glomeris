@@ -967,17 +967,23 @@ see [Known Limitations](known_limitations.md).
 because nobody is watching it: an `attempted` record, flushed to disk *before*
 anything is deleted, and then the outcome (`succeeded`, `failed` or
 `aborted_by_revalidation`). If the `attempted` record cannot be written the
-sweep deletes nothing and reports the resource as preserved with the blocker
-"audit log not writable". If the outcome cannot be written after a deletion,
-the sweep says so (a blocker on that row and a line in the monitor log) and the
-log keeps `attempted` with nothing after it — which is exactly what an
-unrecorded outcome looks like. The next reconcile (run by the monitor and by
-`glomeris resource reconcile`) closes every such record exactly once, from the
-resource's own ownership record: `succeeded` if the generation is gone,
-`interrupted` if the deletion did not complete (a safe retry is already
-queued). An `attempted` line with no later line for the same resource is
-therefore always either in flight or awaiting reconciliation, never a silent
-success.
+sweep deletes nothing, reports the resource as preserved with the blocker
+"audit log not writable", and says so in the monitor log. If the outcome cannot
+be written after a deletion, the sweep says so (a blocker on that row and a line
+in the monitor log) and the log keeps `attempted` with nothing after it, which
+is what an unrecorded outcome looks like.
+
+The next reconcile (run by the monitor and by `glomeris resource reconcile`)
+resolves such a record from what is on disk at that moment: `succeeded` if the
+generation is gone, `interrupted` if it is still there (inferred from presence —
+that covers a deletion that never started and one cut off part-way; a safe retry
+is re-admitted by the ownership reconcile, not promised by this record). A
+record it cannot prove either way — no ownership record, or presence cannot be
+established — stays open and is retried on the next pass. Each pass looks at the
+last 1024 lines of the live and the rotated log; an attempt older than that is
+not chased. Once resolved, a second pass appends nothing. An `attempted` line
+with nothing after it is therefore never a silent success: it is in flight,
+awaiting reconciliation, or beyond what reconciliation can prove.
 
 ```sh
 glomeris actions history --json --limit 2
