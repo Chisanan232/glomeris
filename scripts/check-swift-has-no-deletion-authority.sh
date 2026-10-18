@@ -114,10 +114,10 @@ run_check() {
 }
 
 self_test() {
-  local work failures=0
+  local failures=0
+  # Global, not local: the EXIT trap runs after this function's scope is gone.
   work="$(mktemp -d "${TMPDIR:-/tmp}/swift-deletion-guard.XXXXXX")"
-  # shellcheck disable=SC2064
-  trap "rm -rf '$work'" EXIT
+  trap 'rm -rf "$work"' EXIT
 
   fresh() {
     rm -rf "$work/src"
