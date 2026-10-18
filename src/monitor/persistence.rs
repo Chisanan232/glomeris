@@ -250,6 +250,12 @@ pub struct AuditRecord {
     /// deriving `Serialize` on that type directly, same reasoning as
     /// `crate::reporting::dto::ExecuteReport::outcome`. Never `"dry_run"`:
     /// no real-execution call site ever records a dry run here.
+    ///
+    /// The `"managed_sweep"` source (HORO-1920) also writes two bracketing
+    /// tokens: `"attempted"`, the durable intent recorded before the deletion
+    /// starts, and `"interrupted"`, written by reconciliation when an
+    /// `attempted` record was never followed by an outcome and the deletion
+    /// is known not to have completed.
     pub outcome: String,
     /// Populated only when `outcome == "aborted_by_revalidation"`.
     pub abort_reason: Option<String>,
@@ -399,6 +405,36 @@ pub fn append_audit_record(path: &Path, record: &AuditRecord) -> io::Result<()> 
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line.as_bytes())
+}
+
+/// The strict counterpart of [`append_audit_record`], for deletions that
+/// nobody is watching (HORO-1920): the record is flushed to stable storage
+/// before this returns, and every failure is reported to the caller.
+///
+/// [`append_audit_record`]'s best-effort contract exists so that an audit
+/// failure never changes the outcome of an action a person is looking at. The
+/// background monitor's sweep deletes with no one present, so there the
+/// opposite holds: the caller must treat `Err` as "do not delete", because a
+/// deletion that cannot be recorded is not auditable.
+pub fn append_audit_record_durable(path: &Path, record: &AuditRecord) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rotate_if_oversized(path)?;
+
+    let mut line = serde_json::to_string(record).map_err(io::Error::from)?;
+    line.push('\n');
+
+    let existed = path.exists();
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.sync_all()?;
+    if !existed {
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
 }
 
 /// Renames `path` to `path` + `.1` when it exceeds [`MAX_AUDIT_LOG_BYTES`],
@@ -731,6 +767,28 @@ mod tests {
             host_integrity_status: None,
             volume_free_delta: None,
         }
+    }
+
+    /// HORO-1920: the strict append is the one a deletion nobody watches
+    /// depends on, so a failure must reach the caller. A directory standing
+    /// where the log should be makes `open` fail deterministically; the
+    /// best-effort variant would also fail here but its contract says to
+    /// ignore that, which is exactly what this test would catch being copied.
+    #[test]
+    fn durable_append_reports_failure_and_flushes_on_success() {
+        let path = unique_audit_test_path("durable");
+        append_audit_record_durable(&path, &sample_audit_record("a"))
+            .expect("a writable path must succeed");
+        assert_eq!(read_audit_tail(&path, 10).len(), 1);
+
+        let blocked = unique_audit_test_path("durable-blocked");
+        std::fs::create_dir_all(&blocked).expect("make a directory where the log should be");
+        let error = append_audit_record_durable(&blocked, &sample_audit_record("b"))
+            .expect_err("an unwritable log must be reported, never swallowed");
+        assert!(!error.to_string().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&blocked);
     }
 
     #[test]
