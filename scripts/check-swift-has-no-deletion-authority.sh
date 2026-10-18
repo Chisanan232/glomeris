@@ -21,7 +21,8 @@
 #
 # THE ALLOWLIST (deliberately tiny)
 # ---------------------------------
-# RecoveryStopRequest.swift may call removeItem exactly once. It deletes the
+# RecoveryStopRequest.swift may call removeItem exactly once, and only as
+# `removeItem(at: url)`. It deletes the
 # zero-byte stop sentinel the app itself created in its own temp directory
 # when a recovery run starts; it never names a resource path. Adding a second
 # site, or any other file, must be a reviewed change to THIS script, with the
@@ -41,9 +42,10 @@ SOURCES_REL="macos/GlomerisMenuBar/Sources"
 ALLOWED_REMOVE_FILE="RecoveryStopRequest.swift"
 ALLOWED_PROCESS_FILE="GlomerisClient.swift"
 
-FILE_MUTATION='(removeItem|trashItem|moveItem|replaceItem)[[:space:]]*\(|(^|[^.[:alnum:]_])(unlink|rmdir|truncate)[[:space:]]*\(|(^|[^[:alnum:]_])recycle[[:space:]]*\('
-PROCESS_CREATION='(^|[^[:alnum:]_.])(Process[[:space:]]*\(|NSTask|posix_spawn|system[[:space:]]*\(|popen[[:space:]]*\()'
-SHELL_OR_DELETER='/bin/(sh|bash|zsh|rm)([^[:alnum:]_]|$)|/usr/bin/trash|"rm"|"-rf"'
+FILE_MUTATION='(removeItem|trashItem|moveItem|replaceItem)[[:space:]]*\(|(^|[^.[:alnum:]_])(unlink|unlinkat|rmdir|ftruncate|truncate|removefile|rename|renameat|renamex_np)[[:space:]]*\(|(^|[^[:alnum:]_])recycle[[:space:]]*\(|(Darwin|Glibc)\.(unlink|unlinkat|rmdir|ftruncate|truncate|remove|removefile|rename|renameat|renamex_np)[[:space:]]*\(|truncate[[:space:]]*\(atOffset'
+PROCESS_CREATION='(^|[^.[:alnum:]_])(Process[[:space:]]*(\(|\.init)|NSTask|NSAppleScript|NSUserUnixTask|NSUserScriptTask|posix_spawnp?|execv[pe]?|execl[pe]?|dlopen|system[[:space:]]*\(|popen[[:space:]]*\()|Foundation\.Process|(Darwin|Glibc)\.(posix_spawnp?|execv[pe]?|execl[pe]?|dlopen|system|popen)[[:space:]]*\(|typealias[^=]*=[[:space:]]*(Foundation\.)?Process'
+SHELL_OR_DELETER='/bin/(sh|bash|zsh|dash|rm)([^[:alnum:]_]|$)|/usr/bin/(trash|env|osascript)|osascript|"rm"|"-rf"'
+ALLOWED_REMOVE_CALL='removeItem\(at: url\)'
 
 strip_comments() {
   # Whole-line comments only; keeps line numbers. Doc comments name these APIs
@@ -64,6 +66,13 @@ check_tree() {
     while IFS= read -r hit; do
       [[ -z "$hit" ]] && continue
       if [[ "$base" == "$ALLOWED_REMOVE_FILE" && "$hit" =~ removeItem ]]; then
+        # The allowlist is the call, not the file: it must still delete only the
+        # app's own sentinel `url`, never some other URL held in the same file.
+        if ! grep -qE "$ALLOWED_REMOVE_CALL" <<<"$hit"; then
+          echo "VIOLATION: ${base}:${hit%%:*}: removeItem is allowed only as ${ALLOWED_REMOVE_CALL//\\/}: ${hit#*:}"
+          violations=$((violations + 1))
+          continue
+        fi
         remove_sites=$((remove_sites + 1))
         continue
       fi
@@ -154,6 +163,20 @@ self_test() {
   expect_fail "shell string" GlomerisPopoverView.swift 'let sh = "/bin/sh"'
   expect_fail "rm binary" GlomerisPopoverView.swift 'let rm = "/bin/rm"'
   expect_fail "rm -rf argument" GlomerisPopoverView.swift 'let args = ["-rf", path]'
+  expect_fail "FileHandle truncate" GlomerisPopoverView.swift 'try handle.truncate(atOffset: 0)'
+  expect_fail "ftruncate" GlomerisPopoverView.swift 'ftruncate(fd, 0)'
+  expect_fail "unlinkat" GlomerisPopoverView.swift 'unlinkat(fd, path, 0)'
+  expect_fail "Darwin-qualified unlink" GlomerisPopoverView.swift 'Darwin.unlink(path)'
+  expect_fail "removefile" GlomerisPopoverView.swift 'removefile(path, nil, 0)'
+  expect_fail "rename" GlomerisPopoverView.swift 'rename(a, b)'
+  expect_fail "Process.init" GlomerisPopoverView.swift 'let p = Process.init()'
+  expect_fail "Foundation.Process" GlomerisPopoverView.swift 'let p = Foundation.Process()'
+  expect_fail "Process typealias" GlomerisPopoverView.swift 'typealias Runner = Process'
+  expect_fail "NSAppleScript" GlomerisPopoverView.swift 'let a = NSAppleScript(source: "x")'
+  expect_fail "execv" GlomerisPopoverView.swift 'execv("/x", nil)'
+  expect_fail "osascript string" GlomerisPopoverView.swift 'let s = "/usr/bin/osascript"'
+  expect_fail "env launcher string" GlomerisPopoverView.swift 'let s = "/usr/bin/env"'
+  expect_fail "allowlisted file, removeItem of a different URL" RecoveryStopRequest.swift 'try? fileManager.removeItem(at: resourceURL)'
   # The allowlist is one file and one call, not a licence.
   expect_fail "removeItem in the allowlisted file, a second site" RecoveryStopRequest.swift 'try? FileManager.default.removeItem(at: other)'
   expect_fail "second Process in GlomerisClient" GlomerisClient.swift 'let again = Process()'
@@ -172,7 +195,7 @@ self_test() {
     echo "FAIL: ${failures} self-test failure(s)."
     exit 1
   fi
-  echo "PASS: self-test — unmodified tree passes; 17 planted violations are each rejected; comments and Font.system are not flagged."
+  echo "PASS: self-test — unmodified tree passes; 31 planted violations are each rejected; comments and Font.system are not flagged."
   exit 0
 }
 
