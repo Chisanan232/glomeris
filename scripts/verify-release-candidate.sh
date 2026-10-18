@@ -181,7 +181,7 @@ verify_tarball() {
   dir="$(mktemp -d "${TMPDIR:-/tmp}/glomeris-rc-extract.XXXXXX")"
   trap 'rm -rf "$dir"' RETURN
   tar -xJf "$tarball" -C "$dir"
-  BINARY="$(find "$dir" -type f -name glomeris -perm -u+x | head -1)"
+  BINARY="$(find "$dir" -type f -name glomeris -perm -u+x | head -1 || true)"
   if [[ -z "$BINARY" ]]; then
     echo "FAIL: the archive contains no executable named glomeris"
     return 1
