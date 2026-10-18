@@ -607,9 +607,10 @@ pub fn llm_check_outcome(error: Option<&LlmError>) -> &'static str {
 /// rules in Swift would drift, and the standing project rule keeps decision
 /// logic out of the thin client.
 ///
-/// Deliberately *not* rejected: `http://` (a local gateway on loopback is a
-/// legitimate BYOK setup) and any particular host or path shape (AC 6 — no
-/// company-specific host or model may be baked in).
+/// `http://` is accepted only for a loopback host (HORO-1922): a local gateway
+/// is a legitimate BYOK setup, a remote cleartext endpoint is not. Any
+/// particular host or path shape remains accepted (AC 6 — no company-specific
+/// host or model may be baked in).
 pub fn validate_base_url(base_url: &str) -> Result<(), String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -626,8 +627,12 @@ pub fn validate_base_url(base_url: &str) -> Result<(), String> {
         return Err("base URL contains a space; a URL cannot contain one".to_string());
     }
 
+    let mut is_http = false;
     let after_scheme = match base_url.split_once("://") {
-        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => {
+            is_http = true;
+            rest
+        }
         Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => rest,
         Some((_, _)) => {
             return Err("base URL must start with https:// or http://".to_string());
@@ -640,6 +645,18 @@ pub fn validate_base_url(base_url: &str) -> Result<(), String> {
     };
     if after_scheme.is_empty() || after_scheme.starts_with('/') {
         return Err("base URL has no host".to_string());
+    }
+
+    // HORO-1922: the bearer key and the whole prompt travel in this request, so
+    // cleartext is only acceptable where nothing can observe the wire. A
+    // mistyped `http://` provider URL would otherwise send both in the clear.
+    if is_http && !http_host_is_loopback(after_scheme) {
+        return Err(
+            "a base URL starting http:// is only accepted for a loopback host \
+                    (localhost, 127.0.0.0/8 or [::1]), because your API key and prompt \
+                    would cross the network unencrypted; use https:// for a remote provider"
+                .to_string(),
+        );
     }
 
     // A query or fragment must be refused rather than tolerated: appending
@@ -673,6 +690,50 @@ pub fn validate_base_url(base_url: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Whether the authority of an `http://` URL (everything after the scheme) names
+/// a loopback host: `localhost`, an IPv4 address in `127.0.0.0/8`, or `[::1]`.
+///
+/// Parsed rather than prefix-matched, because the cheap checks are exactly the
+/// ones an attacker or a typo defeats: `localhost.example.com` and
+/// `127.0.0.1.nip.io` start with a loopback name but are remote, and
+/// `127.0.0.1@evil.com` has a loopback-looking userinfo in front of the real
+/// host. Userinfo is therefore refused outright for `http://`, and an
+/// unparsable port makes the whole authority non-loopback.
+fn http_host_is_loopback(after_scheme: &str) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((inside, rest)) = bracketed.split_once(']') else {
+            return false;
+        };
+        (inside, rest.strip_prefix(':'))
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if let Some(port) = port {
+        if port.is_empty() || port.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    if authority.starts_with('[') {
+        return host.parse::<Ipv6Addr>().is_ok_and(|ip| ip.is_loopback());
+    }
+    if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.") {
+        return true;
+    }
+    host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The two prompts `glomeris llm-check` sends (HORO-1309).
@@ -2479,6 +2540,34 @@ mod tests {
             "http://localhost:1234/v1",
             "https://gateway.internal.example",
             "https://gateway.internal.example/openai/deployments/some-deployment",
+        ] {
+            assert_eq!(
+                validate_base_url(accepted),
+                Ok(()),
+                "must accept {accepted}"
+            );
+        }
+    }
+
+    /// HORO-1922: every loopback spelling a local gateway really uses keeps
+    /// working over plain http, as do remote HTTPS endpoints (BYOK, enterprise
+    /// proxies), with and without ports and paths.
+    #[test]
+    fn validate_base_url_accepts_loopback_http_and_any_https() {
+        for accepted in [
+            "http://localhost/v1",
+            "http://LOCALHOST:11434/v1",
+            "http://localhost.:11434/v1",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080/v1/",
+            "http://127.1.2.3:9/v1",
+            "http://[::1]/v1",
+            "http://[::1]:8080/v1",
+            "HTTP://127.0.0.1:1234/v1",
+            "https://api.openai.com/v1",
+            "https://llm-proxy.corp.example:8443/openai/v1",
+            "https://203.0.113.9/v1",
+            "https://localhost.example.com/v1",
         ] {
             assert_eq!(
                 validate_base_url(accepted),
