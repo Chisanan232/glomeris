@@ -344,9 +344,10 @@ pub enum ActionSource {
     /// "Autopilot did this" and "Autopilot did this under a standing consent"
     /// are the two different facts someone auditing the log is looking for.
     AutopilotPreauthorizedAsk,
-    /// The background monitor's managed-resource sweep (`glomeris resource
-    /// sweep --unattended`, HORO-1920). It deletes through its own path, not
-    /// `autopilot run`, so it needs its own word in the audit trail.
+    /// `glomeris resource sweep --unattended`, which the background monitor
+    /// runs on Glomeris-created generated artifacts. It deletes through its
+    /// own path rather than `autopilot run`, so the audit trail needs a
+    /// separate word for it (HORO-1920).
     ManagedSweep,
 }
 
