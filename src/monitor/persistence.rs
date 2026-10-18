@@ -437,6 +437,28 @@ pub fn append_audit_record_durable(path: &Path, record: &AuditRecord) -> io::Res
     Ok(())
 }
 
+/// How many trailing lines of `actions.jsonl` [`unmatched_attempts`] looks at.
+/// Bounds the work of a reconcile pass; an attempt older than this window has
+/// long since been closed or is beyond what a periodic pass should chase.
+pub const UNMATCHED_ATTEMPT_WINDOW: usize = 1024;
+
+/// The `attempted` records from `source` in the tail of the log at `path`
+/// that no later record for the same resource closes, oldest first
+/// (HORO-1920). An `attempted` record is the durable intent written before a
+/// deletion; with no outcome after it, the log is honest that it does not know
+/// how that deletion ended, and a reconcile pass is expected to close it.
+pub fn unmatched_attempts(path: &Path, source: &str) -> Vec<AuditRecord> {
+    let tail = read_audit_tail(path, UNMATCHED_ATTEMPT_WINDOW);
+    let mut open: Vec<AuditRecord> = Vec::new();
+    for record in tail.into_iter().filter(|r| r.source == source) {
+        open.retain(|a| a.resource_id != record.resource_id);
+        if record.outcome == "attempted" {
+            open.push(record);
+        }
+    }
+    open
+}
+
 /// Renames `path` to `path` + `.1` when it exceeds [`MAX_AUDIT_LOG_BYTES`],
 /// replacing any previous `.1` file. A missing `path` is not an error —
 /// there is nothing to rotate yet.
@@ -789,6 +811,40 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&blocked);
+    }
+
+    /// HORO-1920: an `attempted` record is closed by any later record for the
+    /// same resource; one with nothing after it is exactly what reconciliation
+    /// must resolve. Records from other sources never count.
+    #[test]
+    fn unmatched_attempts_are_attempted_records_without_a_later_outcome() {
+        let path = unique_audit_test_path("unmatched");
+        let record = |resource: &str, outcome: &str, source: &str| AuditRecord {
+            resource_id: resource.to_string(),
+            outcome: outcome.to_string(),
+            source: source.to_string(),
+            ..sample_audit_record("managed.clean.generated")
+        };
+        for r in [
+            record("closed", "attempted", "managed_sweep"),
+            record("closed", "succeeded", "managed_sweep"),
+            record("open", "attempted", "managed_sweep"),
+            // A different source's closing record must not close this one.
+            record("other_source", "attempted", "managed_sweep"),
+            record("other_source", "succeeded", "execute"),
+            // A later attempt for a resource whose earlier attempt was closed.
+            record("again", "attempted", "managed_sweep"),
+            record("again", "interrupted", "managed_sweep"),
+            record("again", "attempted", "managed_sweep"),
+        ] {
+            append_audit_record(&path, &r).expect("append");
+        }
+        let open: Vec<String> = unmatched_attempts(&path, "managed_sweep")
+            .into_iter()
+            .map(|r| r.resource_id)
+            .collect();
+        assert_eq!(open, ["open", "other_source", "again"]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
