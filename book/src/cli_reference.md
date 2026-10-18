@@ -947,6 +947,7 @@ and `source`. Without `--json`, prints one line per event as plain text.
 | `emergency` | `glomeris emergency`, machine-wide, `AUTO_SAFE` only |
 | `autopilot_auto_safe` | `glomeris autopilot run`, action policy allowed on its own |
 | `autopilot_preauthorized_ask` | `glomeris autopilot run`, action attempted only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
+| `managed_sweep` | `glomeris resource sweep --unattended`, which the background monitor runs; reclaims Glomeris-created generated artifacts under the Autopilot grant and the managed-resource policy |
 
 The last two are deliberately distinct rather than one `autopilot` value: the
 question an audit trail has to answer is not just *what ran* but *who
