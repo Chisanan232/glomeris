@@ -1656,6 +1656,33 @@ fn reconcile_audit(
     }
     Ok(())
 }
+/// The monitor-log lines for one sweep's rows: reclamations, and refusals the
+/// operator would otherwise never see. A persistently unwritable audit log makes
+/// every sweep refuse to delete; without a line saying so that looks identical
+/// to "nothing was eligible".
+fn sweep_log_lines(rows: &[SweepItem]) -> Vec<String> {
+    let mut lines = vec![];
+    for row in rows {
+        if row.status == "reclaimed" {
+            lines.push(format!(
+                "managed resource {} reclaimed; observed physical delta {:?}",
+                row.id, row.physical_free_delta
+            ));
+        }
+        if row.status != "reclaimed"
+            && row
+                .blockers
+                .iter()
+                .any(|b| b.contains("audit log not writable"))
+        {
+            lines.push(format!(
+                "managed resource {} NOT cleaned: the audit log is not writable, and an unauditable deletion is refused",
+                row.id
+            ));
+        }
+    }
+    lines
+}
 /// Called only from the existing monitor; absent/disabled policy does not initialize new state.
 pub fn monitor_sweep() {
     match Store::current().and_then(|s| {
@@ -1666,13 +1693,8 @@ pub fn monitor_sweep() {
         sweep(&s)
     }) {
         Ok(rows) => {
-            for row in rows {
-                if row.status == "reclaimed" {
-                    eprintln!(
-                        "managed resource {} reclaimed; observed physical delta {:?}",
-                        row.id, row.physical_free_delta
-                    );
-                }
+            for line in sweep_log_lines(&rows) {
+                eprintln!("{line}");
             }
         }
         Err(e) => eprintln!("managed resource reconciliation preserved data: {e}"),
@@ -2250,6 +2272,33 @@ mod audit_outcome_tests {
         assert_eq!(audit_close_outcome(true, Err(io_err())), None);
         assert_eq!(audit_close_outcome(false, Ok(true)), None);
         assert_eq!(audit_close_outcome(false, Ok(false)), None);
+    }
+
+    /// HORO-1920 (review of #186): when the monitor runs the sweep, a refusal
+    /// because the audit log is unwritable must reach the monitor log, or it is
+    /// indistinguishable from "nothing was eligible".
+    #[test]
+    fn a_refusal_for_an_unwritable_audit_log_reaches_the_monitor_log() {
+        let refused = SweepItem {
+            id: "r1".into(),
+            lifecycle: Lifecycle::Reclaimable,
+            status: "preserved".into(),
+            blockers: vec![
+                "audit log not writable (permission denied); nothing was deleted".into(),
+            ],
+            logical_bytes_removed: 0,
+            physical_free_delta: None,
+        };
+        let quiet = SweepItem {
+            blockers: vec!["meaningful-use inactivity threshold not reached".into()],
+            id: "r2".into(),
+            status: "preserved".into(),
+            ..reclaimed_item()
+        };
+        let lines = sweep_log_lines(&[refused, quiet, reclaimed_item()]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("r1") && lines[0].contains("audit log is not writable"));
+        assert!(lines[1].contains("abc") && lines[1].contains("reclaimed"));
     }
 
     /// HORO-1920: a deletion whose outcome could not be recorded is reported,
