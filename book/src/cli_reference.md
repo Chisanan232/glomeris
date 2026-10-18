@@ -981,7 +981,11 @@ is re-admitted by the ownership reconcile, not promised by this record). A
 record it cannot prove either way — no ownership record, or presence cannot be
 established — stays open and is retried on the next pass. Each pass looks at the
 last 1024 lines of the live and the rotated log; an attempt older than that is
-not chased. Once resolved, a second pass appends nothing. An `attempted` line
+not chased, and an attempt whose resource has no ownership record stays open
+until it ages out of that window. The audit log must be a regular file that is
+not a symbolic link: a symlinked or otherwise non-regular `actions.jsonl` makes
+the unattended sweep refuse to delete (the monitor log says why). Once
+resolved, a second pass appends nothing. An `attempted` line
 with nothing after it is therefore never a silent success: it is in flight,
 awaiting reconciliation, or beyond what reconciliation can prove.
 
