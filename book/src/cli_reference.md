@@ -937,7 +937,7 @@ event has `timestamp`, `action_id`, `resource_id`, `policy_label`,
 `outcome`, `abort_reason`, `actual_reclaimed_bytes`, `actual_reclaimed_human`,
 and `source`. Without `--json`, prints one line per event as plain text.
 
-`source` is one of five values, produced by `ActionSource::as_str` in
+`source` is one of six values, produced by `ActionSource::as_str` in
 `src/monitor/persistence.rs`:
 
 | `source` | The path that executed it |
@@ -949,12 +949,12 @@ and `source`. Without `--json`, prints one line per event as plain text.
 | `autopilot_preauthorized_ask` | `glomeris autopilot run`, action attempted only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
 | `managed_sweep` | `glomeris resource sweep --unattended`, which the background monitor runs; reclaims Glomeris-created generated artifacts under the Autopilot grant and the managed-resource policy |
 
-The last two are deliberately distinct rather than one `autopilot` value: the
+The two `autopilot_*` values are deliberately distinct rather than one `autopilot` value: the
 question an audit trail has to answer is not just *what ran* but *who
 permitted it*, and a pre-authorized `ASK` was permitted by the operator
 naming that resource kind, not by policy alone.
 
-Note "attempted" in that last row. A record is written for a failed or aborted
+Note "attempted" in the `autopilot_preauthorized_ask` row. A record is written for a failed or aborted
 attempt too — not for a *refused* one, which never reached the filesystem and
 so appears in `autopilot run`'s own report instead. Today every
 pre-authorized `ASK` aborts at
