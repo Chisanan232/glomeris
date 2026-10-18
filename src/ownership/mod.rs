@@ -1364,7 +1364,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                         permit,
                     );
                     item.physical_free_delta = report.volume_free_delta.observed().copied();
-                    record_sweep_audit(&report, size);
+                    record_sweep_audit(&report);
                     if matches!(report.outcome, crate::executor::ExecutionOutcome::Succeeded) {
                         item.status = "reclaimed".into();
                         item.lifecycle = Lifecycle::Reclaimed;
@@ -1480,7 +1480,7 @@ pub fn cli(args: &[String]) -> io::Result<()> {
 /// `glomeris actions history` and the History panel could not show.
 /// Best-effort like the other writers: a failed append never undoes or blocks
 /// a deletion that already happened.
-fn record_sweep_audit(report: &crate::executor::ExecutionReport, requested_bytes: u64) {
+fn record_sweep_audit(report: &crate::executor::ExecutionReport) {
     use crate::executor::ExecutionOutcome;
     let (outcome, abort_reason) = match &report.outcome {
         ExecutionOutcome::Succeeded => ("succeeded", None),
@@ -1507,13 +1507,7 @@ fn record_sweep_audit(report: &crate::executor::ExecutionReport, requested_bytes
         outcome: outcome.to_string(),
         abort_reason,
         actual_reclaimed_bytes: match report.outcome {
-            ExecutionOutcome::Succeeded => Some(
-                report
-                    .actual_reclaimed_bytes
-                    .observed()
-                    .copied()
-                    .unwrap_or(requested_bytes),
-            ),
+            ExecutionOutcome::Succeeded => report.actual_reclaimed_bytes.observed().copied(),
             _ => None,
         },
         source: crate::monitor::ActionSource::ManagedSweep.to_string(),
