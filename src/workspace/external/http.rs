@@ -117,6 +117,15 @@ impl ReadOnlyHttp for UreqReadOnlyHttp {
             .config()
             // See the trait's note: the adapters need the status.
             .http_status_as_error(false)
+            // HORO-1928: the trait promises not to follow a redirect to another
+            // scheme, and a credential travels in `headers`. ureq's defaults
+            // follow up to ten redirects, strip Authorization on them and
+            // would still happily request a sibling origin or an http
+            // downgrade. Following nothing makes the promise literal: a 3xx is
+            // a status the adapters already handle, and no request goes
+            // anywhere the caller did not name.
+            .max_redirects(0)
+            .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .timeout_global(Some(self.timeout))
             .build();
         for header in headers {
@@ -355,5 +364,84 @@ mod tests {
             "the credential surfaced in {message:?}"
         );
         assert!(!message.contains("Bearer"), "{message:?}");
+    }
+
+    /// HORO-1928: a redirect from the endpoint is returned as a status and the
+    /// target is never contacted. A second loopback listener records any
+    /// contact and answers, so a client that follows the redirect finishes and
+    /// fails the assertion instead of hanging.
+    #[test]
+    fn a_redirect_is_a_status_and_the_target_is_never_contacted() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let elsewhere = TcpListener::bind("127.0.0.1:0").expect("bind second listener");
+        let elsewhere_port = elsewhere.local_addr().unwrap().port();
+        elsewhere.set_nonblocking(true).unwrap();
+        let contacted = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (contacted_flag, stop_flag) = (Arc::clone(&contacted), Arc::clone(&stop));
+        let watcher = std::thread::spawn(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                match elsewhere.accept() {
+                    Ok((mut stream, _)) => {
+                        contacted_flag.store(true, Ordering::Relaxed);
+                        stream.set_nonblocking(false).ok();
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(20)),
+                }
+            }
+        });
+
+        let provider = TcpListener::bind("127.0.0.1:0").expect("bind provider listener");
+        let provider_port = provider.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = provider.accept().expect("accept the one request");
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{elsewhere_port}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            head
+        });
+
+        let http = UreqReadOnlyHttp::new(Duration::from_secs(10));
+        let answer = http
+            .get_json(
+                &format!("http://127.0.0.1:{provider_port}/repos/x/pulls"),
+                &[HeaderPair {
+                    name: "Authorization",
+                    value: "Bearer redirect-test-not-a-secret".into(),
+                }],
+            )
+            .expect("a redirect status is a response, not an error");
+        let head = server.join().expect("provider thread");
+        std::thread::sleep(Duration::from_millis(300));
+        stop.store(true, Ordering::Relaxed);
+        watcher.join().expect("watcher thread");
+
+        assert!(
+            head.to_ascii_lowercase().contains("authorization: bearer"),
+            "non-vacuity: the credential reached the endpoint that redirected"
+        );
+        assert_eq!(answer.status, 302);
+        assert!(
+            !contacted.load(Ordering::Relaxed),
+            "the redirect target was contacted, so the client followed it"
+        );
     }
 }
