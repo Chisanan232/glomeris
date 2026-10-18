@@ -782,6 +782,11 @@ impl Store {
             }
             rows.push(self.inspect(&r, now()));
         }
+        if let Err(e) = reconcile_audit(self, &_l) {
+            // Not fatal to ownership reconciliation: the open attempts stay open
+            // and the next pass retries, which is the honest state meanwhile.
+            eprintln!("managed audit reconciliation will retry: {e}");
+        }
         Ok(rows)
     }
 }
@@ -1584,6 +1589,45 @@ fn note_outcome_audit(item: &mut SweepItem, result: io::Result<()>) {
     }
 }
 
+/// HORO-1920: closes `attempted` records that no outcome ever followed (the
+/// process died, or the outcome append failed). Called with the execution lock
+/// held, so no sweep is in flight and any open attempt is stale. The ownership
+/// record decides: reclaimed means the deletion completed (`succeeded`);
+/// anything else means it did not, and the ownership reconcile has already
+/// queued a safe retry (`interrupted`). Idempotent: once closed, an attempt is
+/// no longer unmatched, so a second pass appends nothing.
+fn reconcile_audit(
+    store: &Store,
+    _authority: &crate::executor::lock::ExecutionLockGuard,
+) -> io::Result<()> {
+    let path = store.audit_path()?;
+    let open = crate::monitor::unmatched_attempts(
+        &path,
+        &crate::monitor::ActionSource::ManagedSweep.to_string(),
+    );
+    if open.is_empty() {
+        return Ok(());
+    }
+    let mut records = vec![];
+    for id in store.ids()? {
+        if let Ok(r) = store.read(&id) {
+            records.push((store.path(&r).to_string_lossy().into_owned(), r));
+        }
+    }
+    for attempt in open {
+        let reclaimed = records
+            .iter()
+            .any(|(p, r)| r.reclaimed && attempt.resource_id.ends_with(p.as_str()));
+        let outcome = if reclaimed {
+            "succeeded"
+        } else {
+            "interrupted"
+        };
+        let record = sweep_audit_record(attempt.resource_id, outcome, None);
+        crate::monitor::append_audit_record_durable(&path, &record)?;
+    }
+    Ok(())
+}
 /// Called only from the existing monitor; absent/disabled policy does not initialize new state.
 pub fn monitor_sweep() {
     match Store::current().and_then(|s| {

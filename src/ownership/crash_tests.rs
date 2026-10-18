@@ -422,6 +422,20 @@ fn child_process_driver() {
     }
 }
 
+/// The `outcome` of every line in the fixture's `actions.jsonl`, in order.
+fn audit_outcomes(store: &Store) -> Vec<String> {
+    let path = store.audit_path().expect("audit path");
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).expect("audit line is JSON");
+            assert_eq!(value["source"], "managed_sweep");
+            value["outcome"].as_str().unwrap().to_string()
+        })
+        .collect()
+}
+
 fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
     let fixture = Fixture::new();
     let (mut child, mut control) = fixture.child(json!({"op":"interrupt", "point":point}));
@@ -504,6 +518,23 @@ fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
     let result = receive(&mut control, "reconciled and swept");
     assert_eq!(result["event"], "recovered", "{result}");
     assert!(recovery.wait().success());
+    // HORO-1920: the kill left `attempted` with no outcome; recovery must close
+    // it from the ownership record, once, and never invent a second record.
+    let expected_audit: &[&str] = match (point, scenario) {
+        (Checkpoint::IntentDurable, RecoveryCase::Unchanged) => {
+            &["attempted", "interrupted", "attempted", "succeeded"]
+        }
+        (Checkpoint::IntentDurable, _) => &["attempted", "interrupted"],
+        (Checkpoint::DeletedBeforeOutcome, _) => &["attempted", "succeeded"],
+        _ => unreachable!("separate export recovery driver"),
+    };
+    assert_eq!(audit_outcomes(&store), expected_audit, "after recovery");
+    store.reconcile().expect("a second reconcile must succeed");
+    assert_eq!(
+        audit_outcomes(&store),
+        expected_audit,
+        "reconciling the audit log twice must append nothing the second time"
+    );
     let after = store.read(id).unwrap();
     assert_eq!(after.generation, before.generation);
     assert_eq!(
