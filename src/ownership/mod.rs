@@ -2439,6 +2439,11 @@ mod record_warning_tests {
         store.save(&record).unwrap();
         let data = store.path(&record);
         fs::create_dir_all(&data).unwrap();
+        // The ownership checks reject anything not private, which would fail
+        // `finish` for a reason other than the one under test.
+        for dir in [data.parent().unwrap(), data.as_path()] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         fs::write(data.join("output.o"), b"object").unwrap();
         let lock =
             crate::executor::lock::acquire_execution_lock_at(&root.join("execution.lock")).unwrap();
@@ -2466,7 +2471,11 @@ mod record_warning_tests {
             fs::remove_dir_all(root).unwrap();
             return;
         }
-        assert!(saved.is_err(), "the record write must have been refused");
+        assert_eq!(
+            saved.as_ref().err().map(io::Error::kind),
+            Some(io::ErrorKind::PermissionDenied),
+            "the record write must have been refused by the directory mode"
+        );
 
         let (mut outcome, mut warning) = (ExecutionOutcome::Succeeded, None);
         settle_record_result(&mut outcome, &mut warning, saved);
