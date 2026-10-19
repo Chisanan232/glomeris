@@ -1381,6 +1381,11 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                     );
                     item.physical_free_delta = report.volume_free_delta.observed().copied();
                     note_outcome_audit(&mut item, record_sweep_audit(store, &report));
+                    if let Some(warning) = &report.record_warning {
+                        eprintln!("managed resource {} was deleted: {warning}", item.id);
+                        item.blockers
+                            .push(format!("{warning}; reconciliation will settle the record"));
+                    }
                     if matches!(report.outcome, crate::executor::ExecutionOutcome::Succeeded) {
                         item.status = "reclaimed".into();
                         item.lifecycle = Lifecycle::Reclaimed;
@@ -2357,6 +2362,128 @@ mod traversal_tests {
             store.batch_ids("reconcile").unwrap(),
             a,
             "independent phases must not starve each other"
+        );
+        drop(lock);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod record_warning_tests {
+    use super::*;
+    use crate::executor::{settle_record_result, ExecutionOutcome};
+
+    fn denied() -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+
+    #[test]
+    fn a_successful_delete_stays_succeeded_when_the_record_cannot_be_saved() {
+        let (mut outcome, mut warning) = (ExecutionOutcome::Succeeded, None);
+        settle_record_result(&mut outcome, &mut warning, denied());
+        assert_eq!(outcome, ExecutionOutcome::Succeeded);
+        assert!(warning.unwrap().contains("persistence failed"));
+    }
+
+    #[test]
+    fn a_failed_run_reports_the_persistence_failure_as_before() {
+        let (mut outcome, mut warning) = (ExecutionOutcome::Failed("boom".into()), None);
+        settle_record_result(&mut outcome, &mut warning, denied());
+        assert!(
+            matches!(&outcome, ExecutionOutcome::Failed(m) if m.contains("persistence failed"))
+        );
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn a_saved_record_changes_nothing() {
+        let (mut outcome, mut warning) = (ExecutionOutcome::Succeeded, None);
+        settle_record_result(&mut outcome, &mut warning, Ok(()));
+        assert_eq!(outcome, ExecutionOutcome::Succeeded);
+        assert!(warning.is_none());
+    }
+
+    /// The real sequence: the generation is deleted, then the record directory
+    /// refuses the write that `finish` makes. Without the fix this is `Failed`.
+    #[test]
+    fn a_real_delete_followed_by_a_refused_record_write_is_still_succeeded() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("glomeris-record-warning-{}", random().unwrap()));
+        let store = Store { root: root.clone() };
+        store.init().unwrap();
+        let id = "00000000000000000000000000000001";
+        let record = Record {
+            schema: 1,
+            id: id.into(),
+            generation: id.into(),
+            class: "managed_generated".into(),
+            recipe: "fixture".into(),
+            source_root: root.clone(),
+            source_head: "0".repeat(40),
+            dev: 1,
+            ino: 2,
+            last_meaningful_use: 0,
+            claims: vec![],
+            read_claims: vec![],
+            sealed: None,
+            producer: None,
+            production_started: true,
+            retirement_started: true,
+            retirement_history: vec![],
+            reclaimed: false,
+            observed_free_delta: None,
+        };
+        store.save(&record).unwrap();
+        let data = store.path(&record);
+        fs::create_dir_all(&data).unwrap();
+        // The ownership checks reject anything not private, which would fail
+        // `finish` for a reason other than the one under test.
+        for dir in [data.parent().unwrap(), data.as_path()] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(data.join("output.o"), b"object").unwrap();
+        let lock =
+            crate::executor::lock::acquire_execution_lock_at(&root.join("execution.lock")).unwrap();
+        let mut guard = RetirementGuard {
+            _barrier: store.barrier(id, true).unwrap(),
+            store: Store { root: root.clone() },
+            record: record.clone(),
+        };
+
+        fs::remove_dir_all(&data).unwrap();
+        assert!(!data.exists(), "the delete really happened");
+        let records = root.join("records");
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o500)).unwrap();
+        // Root ignores directory modes, so the write cannot be refused there.
+        let refusable = File::create(records.join("probe")).is_err();
+        let saved = if refusable {
+            guard.finish(None)
+        } else {
+            Ok(())
+        };
+        fs::set_permissions(&records, fs::Permissions::from_mode(0o700)).unwrap();
+        if !refusable {
+            let _ = fs::remove_file(records.join("probe"));
+            drop(lock);
+            fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        assert_eq!(
+            saved.as_ref().err().map(io::Error::kind),
+            Some(io::ErrorKind::PermissionDenied),
+            "the record write must have been refused by the directory mode"
+        );
+
+        let (mut outcome, mut warning) = (ExecutionOutcome::Succeeded, None);
+        settle_record_result(&mut outcome, &mut warning, saved);
+        assert_eq!(outcome, ExecutionOutcome::Succeeded);
+        assert!(warning.is_some());
+        assert!(
+            !store.read(id).unwrap().reclaimed,
+            "the record is left for reconcile to settle"
         );
         drop(lock);
         fs::remove_dir_all(root).unwrap();

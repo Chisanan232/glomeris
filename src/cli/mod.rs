@@ -5465,6 +5465,7 @@ mod execute_tests {
                 actual_reclaimed_bytes: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
                 host_integrity: None,
                 volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+                record_warning: None,
             }
         }
 
@@ -5559,6 +5560,7 @@ mod execute_tests {
                 }],
             }),
             volume_free_delta: ProbeOutcome::Observed(-512),
+            record_warning: None,
         };
 
         let execute_report = build_execute_report(&report);
@@ -5584,6 +5586,7 @@ mod execute_tests {
         let clean_report = ExecutionReport {
             host_integrity: None,
             volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+            record_warning: None,
             ..report
         };
         let clean_execute_report = build_execute_report(&clean_report);
