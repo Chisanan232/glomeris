@@ -57,7 +57,7 @@ targets:
         # bundle the release workflow uploads for tag vX would report a version
         # unrelated to X — and the app embeds that CLI, so "which version am I
         # running" had two different answers inside one .app.
-        MARKETING_VERSION: "0.2.0"
+        MARKETING_VERSION: "0.3.0-rc.1"
         GENERATE_INFOPLIST_FILE: NO
         ENABLE_HARDENED_RUNTIME: NO
         # HORO-1305. Sources/Assets.xcassets/AppIcon.appiconset is generated
