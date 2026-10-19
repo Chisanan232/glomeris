@@ -526,8 +526,12 @@ jobs:
             fi
             FINAL_ARCHS="$(lipo -archs "$APP/Contents/MacOS/glomeris" 2>/dev/null || true)"
             case " $FINAL_ARCHS " in
-              *" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*) ;;
-              *) echo "::error::final embedded CLI is not universal ($FINAL_ARCHS)"; status=1 ;;
+              *" arm64 "*) ;;
+              *) echo "::error::final embedded CLI is missing arm64 ($FINAL_ARCHS)"; status=1 ;;
+            esac
+            case " $FINAL_ARCHS " in
+              *" x86_64 "*) ;;
+              *) echo "::error::final embedded CLI is missing x86_64 ($FINAL_ARCHS)"; status=1 ;;
             esac
             if ! xcrun stapler validate "$APP" >/dev/null 2>&1; then
               echo "::error::no valid notarization ticket is stapled to the app"
