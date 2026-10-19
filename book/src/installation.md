@@ -86,19 +86,22 @@ instructions above. [Menu Bar
 App](menu_bar_app.md#how-the-app-finds-the-glomeris-cli) documents the exact
 order and why `PATH` alone is not enough for a GUI app.
 
-From the next tagged release onward, `GlomerisMenuBar.app.zip` is published
-as an extra asset on that [GitHub
-Release](https://github.com/Chisanan232/glomeris/releases) alongside the CLI
-tarball, by a separate `macos-app-release.yml` workflow that fires once the
-release is published. That workflow landed after the current latest release
-was tagged, so releases published so far carry only the CLI tarballs — to
-get the app before the next tag, build
-`macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj` yourself. It's built and
-ad-hoc signed automatically
-(`codesign --force --deep --sign -`, identity `-`) — this seals the bundle
-well enough to run, but it is **not** signed with an Apple Developer ID and
-**not** notarized. Developer ID notarization is tracked as a future
-follow-up, not done today.
+A release's `GlomerisMenuBar.app.zip` is attached to its [GitHub
+Release](https://github.com/Chisanan232/glomeris/releases) by the
+`macos-app-release.yml` workflow, run deliberately after the release exists.
+That workflow fails closed: it publishes the app under this name only when it
+could sign it with an Apple Developer ID certificate, enable the hardened
+runtime and have Apple notarize it. Without those credentials it publishes
+nothing, except that a maintainer can attach a clearly named
+`GlomerisMenuBar-DEV-ONLY-unsigned.app.zip` to a **pre-release**. Releases up
+to and including v0.2.0 carry only the CLI tarballs — to get the app from
+those, build `macos/GlomerisMenuBar/GlomerisMenuBar.xcodeproj` yourself.
+
+An unsigned or ad-hoc-signed app (`codesign --force --sign -`, identity `-`)
+seals the bundle well enough to run, but it is **not** signed with an Apple
+Developer ID and **not** notarized. A Developer ID-signed, notarized release
+build opens with a normal double-click; the steps below apply only to the
+DEV-ONLY asset and to apps you build yourself.
 
 That matters the moment you download the zip through a browser: macOS tags
 the extracted app with a "quarantine" flag, and Gatekeeper will refuse to
@@ -108,7 +111,7 @@ is expected for an ad-hoc-signed app and does not mean the download is
 broken or unsafe; it's the same warning any non-notarized app gets. Follow
 these one-time steps to open it:
 
-1. Unzip `GlomerisMenuBar.app.zip` and move `GlomerisMenuBar.app` wherever
+1. Unzip the app zip and move `GlomerisMenuBar.app` wherever
    you want to keep it (e.g. `/Applications`).
 2. Double-click it. You'll see the "could not verify" warning — click
    **Done** (or **Cancel**) to dismiss it. This first attempt is expected to
