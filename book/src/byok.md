@@ -829,6 +829,8 @@ message naming what to change:
 | An interior space | A URL cannot contain one |
 | No scheme, or a scheme other than `https://`/`http://` | Nothing else can be posted to |
 | No host (`https://`, `https:///v1`) | Same |
+| `http://` to anything but a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`), or `http://` with user information | The bearer key and the whole prompt would cross the network unencrypted. A local gateway (`http://127.0.0.1:11434/v1`) and every `https://` endpoint, including enterprise proxies, still work |
+| (not a refusal) A redirect from the endpoint | Never followed: the key and prompt go only to the URL you configured, and a 3xx surfaces as a provider status |
 | A query string or a fragment | Appending `/chat/completions` to `…/v1?key=…` puts the path *inside* the query string, and the diagnostic path would then read `/v1` and misdescribe why. Refusing also keeps a credential a user pasted into the URL out of the request Glomeris builds |
 | The full endpoint URL (ends in `/chat/completions`) | Would produce `/v1/chat/completions/chat/completions` — the other half of the API-root mistake above |
 
