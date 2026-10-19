@@ -400,9 +400,16 @@ fn child_process_driver() {
             }
             let first = sweep(&store).unwrap();
             let second = sweep(&store).unwrap();
+            // HORO-1920: reconcile once more inside the fixture and report the audit
+            // sequence on both sides of it. Done here, not in the parent test
+            // process, because `Store::reconcile` takes the HOME-based execution
+            // lock, and the parent's HOME is the real user's.
+            let audit_before = audit_outcomes(&store);
+            store.reconcile().unwrap();
+            let audit_after = audit_outcomes(&store);
             send(
                 reader.get_mut(),
-                &json!({"event":"recovered", "inspections":inspections, "reconciled":reconciled, "first":first, "second":second}),
+                &json!({"event":"recovered", "inspections":inspections, "reconciled":reconciled, "first":first, "second":second, "audit_before":audit_before, "audit_after":audit_after}),
             );
         }
         "poison_parent_environment" => {
@@ -420,6 +427,20 @@ fn child_process_driver() {
         }
         other => panic!("unknown child request: {other}"),
     }
+}
+
+/// The `outcome` of every line in the fixture's `actions.jsonl`, in order.
+fn audit_outcomes(store: &Store) -> Vec<String> {
+    let path = store.audit_path().expect("audit path");
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            let value: Value = serde_json::from_str(line).expect("audit line is JSON");
+            assert_eq!(value["source"], "managed_sweep");
+            value["outcome"].as_str().unwrap().to_string()
+        })
+        .collect()
 }
 
 fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
@@ -504,6 +525,35 @@ fn interrupted_retirement(point: Checkpoint, scenario: RecoveryCase) {
     let result = receive(&mut control, "reconciled and swept");
     assert_eq!(result["event"], "recovered", "{result}");
     assert!(recovery.wait().success());
+    // HORO-1920: the kill left `attempted` with no outcome; recovery must close
+    // it from the ownership record, once, and never invent a second record.
+    let expected_audit: &[&str] = match (point, scenario) {
+        (Checkpoint::IntentDurable, RecoveryCase::Unchanged) => {
+            &["attempted", "interrupted", "attempted", "succeeded"]
+        }
+        (Checkpoint::IntentDurable, _) => &["attempted", "interrupted"],
+        (Checkpoint::DeletedBeforeOutcome, _) => &["attempted", "succeeded"],
+        _ => unreachable!("separate export recovery driver"),
+    };
+    let as_strings = |key: &str| -> Vec<String> {
+        result[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+    assert_eq!(as_strings("audit_before"), expected_audit, "after recovery");
+    assert_eq!(
+        as_strings("audit_after"),
+        expected_audit,
+        "reconciling the audit log twice must append nothing the second time"
+    );
+    assert_eq!(
+        audit_outcomes(&store),
+        expected_audit,
+        "as persisted on disk"
+    );
     let after = store.read(id).unwrap();
     assert_eq!(after.generation, before.generation);
     assert_eq!(

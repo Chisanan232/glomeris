@@ -286,6 +286,17 @@ impl Fixture {
         assert_eq!(v["status"], "held");
         Holder { child, reader }
     }
+    fn audit_path(&self) -> PathBuf {
+        self.home
+            .join("Library/Application Support/Glomeris/actions.jsonl")
+    }
+    fn audit_lines(&self) -> Vec<Value> {
+        fs::read_to_string(self.audit_path())
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
     fn record(&self, r: &Value) -> PathBuf {
         self.home
             .join("Library/Application Support/Glomeris/resources/records")
@@ -347,6 +358,70 @@ fn positive_unknown_owner_generated_manifest_reclaims_once() {
     let second = f.call(&["sweep", "--unattended"]);
     assert_eq!(second[0]["logical_bytes_removed"], 0);
     assert_eq!(second[0]["lifecycle"], "RECLAIMED");
+}
+// HORO-1920: the sweep is the one deleting path that bypassed `actions.jsonl`,
+// so a deletion the monitor made while nobody was looking was invisible to
+// `glomeris actions history` and to the History panel. The log brackets every
+// deletion: a durable `attempted` intent before it, the outcome after it.
+#[test]
+fn managed_sweep_reclamation_is_bracketed_in_the_audit_log() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    f.seal(&r);
+    let v = f.call(&["sweep", "--unattended"]);
+    assert_eq!(v[0]["status"], "reclaimed", "{v}");
+    let lines = f.audit_lines();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["outcome"], "attempted");
+    assert_eq!(lines[1]["outcome"], "succeeded");
+    for line in &lines {
+        assert_eq!(line["source"], "managed_sweep");
+        assert_eq!(line["action_id"], "managed.clean.generated");
+        assert_eq!(line["policy_label"], "AUTO_SAFE");
+    }
+    assert_eq!(lines[0]["resource_id"], lines[1]["resource_id"]);
+    assert!(lines[1]["actual_reclaimed_bytes"].as_u64().unwrap() >= 1048576);
+    assert!(lines[0]["timestamp"].as_u64() <= lines[1]["timestamp"].as_u64());
+    let second = f.call(&["sweep", "--unattended"]);
+    assert_eq!(second[0]["logical_bytes_removed"], 0);
+    assert_eq!(
+        f.audit_lines().len(),
+        2,
+        "a sweep that deletes nothing must not write a record"
+    );
+}
+
+// HORO-1920: if the log cannot be written, nothing is deleted.
+#[test]
+fn managed_sweep_refuses_to_delete_when_the_audit_log_is_unwritable() {
+    let f = Fixture::new();
+    f.policy(0, true);
+    let r = f.create();
+    f.object(&r);
+    f.seal(&r);
+    // A directory where the log should be makes every open for append fail.
+    fs::create_dir_all(f.audit_path()).unwrap();
+    let v = f.call(&["sweep", "--unattended"]);
+    assert_eq!(v[0]["status"], "preserved", "{v}");
+    assert!(
+        v[0]["blockers"]
+            .to_string()
+            .contains("audit log not writable"),
+        "{v}"
+    );
+    assert!(
+        PathBuf::from(r["path"].as_str().unwrap()).exists(),
+        "an unauditable deletion must not happen"
+    );
+    let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
+    assert_eq!(record["retirement_started"], false);
+    assert_eq!(record["reclaimed"], false);
+    // Once the log is writable again the same generation is reclaimed normally.
+    fs::remove_dir_all(f.audit_path()).unwrap();
+    let again = f.call(&["sweep", "--unattended"]);
+    assert_eq!(again[0]["status"], "reclaimed", "{again}");
 }
 #[test]
 fn possible_unique_data_and_unsealed_generation_preserve() {

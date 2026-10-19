@@ -782,6 +782,11 @@ impl Store {
             }
             rows.push(self.inspect(&r, now()));
         }
+        if let Err(e) = reconcile_audit(self, &_l) {
+            // Not fatal to ownership reconciliation: the open attempts stay open
+            // and the next pass retries, which is the honest state meanwhile.
+            eprintln!("managed audit reconciliation will retry: {e}");
+        }
         Ok(rows)
     }
 }
@@ -1331,6 +1336,17 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                     let approval =
                         crate::policy::approval::authorize(decision, ev.fingerprint.clone(), None)
                             .ok_or_else(|| error("policy authorization refused"))?;
+                    // HORO-1920: nobody is watching this deletion, so a deletion
+                    // that cannot be recorded must not happen. The durable
+                    // `attempted` record is both the intent and the proof that the
+                    // log accepts writes right now; nothing is charged to the
+                    // budget and nothing is retired if it cannot be written.
+                    if let Err(e) = audit_attempt(store, &ev.resource.to_string()) {
+                        item.blockers
+                            .push(format!("audit log not writable ({e}); nothing was deleted"));
+                        rows.push(item);
+                        continue;
+                    }
                     ledger.charge(size, size);
                     actions += 1;
                     bytes += size;
@@ -1364,6 +1380,7 @@ pub fn sweep(store: &Store) -> io::Result<Vec<SweepItem>> {
                         permit,
                     );
                     item.physical_free_delta = report.volume_free_delta.observed().copied();
+                    note_outcome_audit(&mut item, record_sweep_audit(store, &report));
                     if matches!(report.outcome, crate::executor::ExecutionOutcome::Succeeded) {
                         item.status = "reclaimed".into();
                         item.lifecycle = Lifecycle::Reclaimed;
@@ -1473,6 +1490,199 @@ pub fn cli(args: &[String]) -> io::Result<()> {
         _ => Err(error("unknown managed resource operation")),
     }
 }
+impl Store {
+    /// Where `actions.jsonl` lives: beside the resource store, which is the same
+    /// file every other deleting path appends to. Derived from the store's own
+    /// root rather than from `HOME`, so a store under test or in a fixture can
+    /// never write to the real user's log.
+    fn audit_path(&self) -> io::Result<PathBuf> {
+        self.root
+            .parent()
+            .map(|dir| dir.join("actions.jsonl"))
+            .ok_or_else(|| error("audit log location unavailable"))
+    }
+}
+
+fn sweep_audit_record(
+    resource_id: String,
+    outcome: &str,
+    abort_reason: Option<String>,
+) -> crate::monitor::AuditRecord {
+    crate::monitor::AuditRecord {
+        timestamp: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        action_id: "managed.clean.generated".to_string(),
+        resource_id,
+        policy_label: crate::reporting::policy_label::PolicyLabel::AutoSafe
+            .as_str()
+            .to_string(),
+        outcome: outcome.to_string(),
+        abort_reason,
+        actual_reclaimed_bytes: None,
+        source: crate::monitor::ActionSource::ManagedSweep.to_string(),
+        model_rank: None,
+        host_integrity_status: None,
+        volume_free_delta: None,
+    }
+}
+
+/// HORO-1920: the durable intent written before a deletion starts. An `Err`
+/// means the audit log cannot be relied on, and the caller must not delete.
+fn audit_attempt(store: &Store, resource_id: &str) -> io::Result<()> {
+    crate::monitor::append_audit_record_durable(
+        &store.audit_path()?,
+        &sweep_audit_record(resource_id.to_string(), "attempted", None),
+    )
+}
+
+/// The outcome record for a finished sweep deletion attempt, or `None` for an
+/// outcome that is not a real execution.
+fn sweep_outcome_record(
+    report: &crate::executor::ExecutionReport,
+) -> Option<crate::monitor::AuditRecord> {
+    use crate::executor::ExecutionOutcome;
+    let (outcome, abort_reason) = match &report.outcome {
+        ExecutionOutcome::Succeeded => ("succeeded", None),
+        ExecutionOutcome::Failed(_) => ("failed", None),
+        ExecutionOutcome::AbortedByRevalidation(reason) => {
+            ("aborted_by_revalidation", Some(format!("{reason:?}")))
+        }
+        ExecutionOutcome::DryRun => return None,
+    };
+    let mut record = sweep_audit_record(report.resource.to_string(), outcome, abort_reason);
+    record.actual_reclaimed_bytes = match report.outcome {
+        ExecutionOutcome::Succeeded => report.actual_reclaimed_bytes.observed().copied(),
+        _ => None,
+    };
+    record.host_integrity_status = report
+        .host_integrity
+        .as_ref()
+        .map(|h| h.status.as_str().to_string());
+    record.volume_free_delta = report.volume_free_delta.observed().copied();
+    Some(record)
+}
+
+/// Appends the outcome after the `attempted` intent. Strict: the result is
+/// reported, because the caller must not present an unrecorded deletion as a
+/// clean success.
+fn record_sweep_audit(store: &Store, report: &crate::executor::ExecutionReport) -> io::Result<()> {
+    match sweep_outcome_record(report) {
+        Some(record) => crate::monitor::append_audit_record_durable(&store.audit_path()?, &record),
+        None => Ok(()),
+    }
+}
+
+/// Makes an outcome-append failure visible instead of silent. The deletion
+/// already happened and is not undone; the log now holds `attempted` with no
+/// outcome, which is the honest record, and the next reconcile closes it.
+fn note_outcome_audit(item: &mut SweepItem, result: io::Result<()>) {
+    if let Err(e) = result {
+        eprintln!(
+            "managed resource {} deleted but its audit outcome was not recorded: {e}",
+            item.id
+        );
+        item.blockers.push(format!(
+            "audit outcome not recorded ({e}); reconciliation will complete it"
+        ));
+    }
+}
+
+/// What to record for an open `attempted` record, or `None` to leave it open
+/// (HORO-1920). Decided from what is on disk now, never from a flag that this
+/// same reconcile pass may not have reached yet (the ownership pass is capped at
+/// 64 records and 10 seconds, so `reclaimed` can lag a completed deletion):
+///
+/// * no ownership record for the resource, or presence cannot be established
+///   ⇒ unprovable, so the attempt stays open rather than being guessed;
+/// * the generation is gone ⇒ `succeeded`;
+/// * the generation is still there ⇒ `interrupted`. This is inferred from
+///   presence: it covers a deletion that never started and one cut off part-way.
+fn audit_close_outcome(found: bool, absent: io::Result<bool>) -> Option<&'static str> {
+    if !found {
+        return None;
+    }
+    match absent {
+        Ok(true) => Some("succeeded"),
+        Ok(false) => Some("interrupted"),
+        Err(_) => None,
+    }
+}
+
+/// HORO-1920: closes `attempted` records that no outcome ever followed (the
+/// process died, or the outcome append failed). Called with the execution lock
+/// held, so no sweep is in flight and any open attempt is stale. Each pass
+/// closes the attempts it can prove from [`audit_close_outcome`]; the rest stay
+/// open and are retried on the next pass. Idempotent: once closed, an attempt is
+/// no longer unmatched, so a second pass appends nothing. The window is the last
+/// [`crate::monitor::UNMATCHED_ATTEMPT_WINDOW`] lines of the live and rotated
+/// log; an attempt older than that is not chased.
+fn reconcile_audit(
+    store: &Store,
+    _authority: &crate::executor::lock::ExecutionLockGuard,
+) -> io::Result<()> {
+    use crate::evidence::model::{ResourceId, ResourceKind, ResourceLocator};
+    let path = store.audit_path()?;
+    let open = crate::monitor::unmatched_attempts(
+        &path,
+        &crate::monitor::ActionSource::ManagedSweep.to_string(),
+    );
+    if open.is_empty() {
+        return Ok(());
+    }
+    let mut records = vec![];
+    for id in store.ids()? {
+        if let Ok(r) = store.read(&id) {
+            let key = ResourceId::new(
+                ResourceKind::ManagedGenerated,
+                ResourceLocator::Path(store.path(&r)),
+            )
+            .to_string();
+            records.push((key, store.path(&r)));
+        }
+    }
+    for attempt in open {
+        let found = records.iter().find(|(key, _)| *key == attempt.resource_id);
+        let absent = match found {
+            Some((_, resource_path)) => verified_absent(resource_path),
+            None => Ok(false),
+        };
+        let Some(outcome) = audit_close_outcome(found.is_some(), absent) else {
+            continue;
+        };
+        let record = sweep_audit_record(attempt.resource_id, outcome, None);
+        crate::monitor::append_audit_record_durable(&path, &record)?;
+    }
+    Ok(())
+}
+/// The monitor-log lines for one sweep's rows: reclamations, and refusals the
+/// operator would otherwise never see. A persistently unwritable audit log makes
+/// every sweep refuse to delete; without a line saying so that looks identical
+/// to "nothing was eligible".
+fn sweep_log_lines(rows: &[SweepItem]) -> Vec<String> {
+    let mut lines = vec![];
+    for row in rows {
+        if row.status == "reclaimed" {
+            lines.push(format!(
+                "managed resource {} reclaimed; observed physical delta {:?}",
+                row.id, row.physical_free_delta
+            ));
+        }
+        if row.status != "reclaimed"
+            && row
+                .blockers
+                .iter()
+                .any(|b| b.contains("audit log not writable"))
+        {
+            lines.push(format!(
+                "managed resource {} NOT cleaned: the audit log is not writable, and an unauditable deletion is refused",
+                row.id
+            ));
+        }
+    }
+    lines
+}
 /// Called only from the existing monitor; absent/disabled policy does not initialize new state.
 pub fn monitor_sweep() {
     match Store::current().and_then(|s| {
@@ -1483,13 +1693,8 @@ pub fn monitor_sweep() {
         sweep(&s)
     }) {
         Ok(rows) => {
-            for row in rows {
-                if row.status == "reclaimed" {
-                    eprintln!(
-                        "managed resource {} reclaimed; observed physical delta {:?}",
-                        row.id, row.physical_free_delta
-                    );
-                }
+            for line in sweep_log_lines(&rows) {
+                eprintln!("{line}");
             }
         }
         Err(e) => eprintln!("managed resource reconciliation preserved data: {e}"),
@@ -2035,6 +2240,84 @@ fn authority(args: &[String]) -> io::Result<()> {
         &crate::autopilot::load_envelope().map_err(error)?,
         Some(target.display().to_string()),
     ))
+}
+
+#[cfg(test)]
+mod audit_outcome_tests {
+    use super::*;
+
+    fn reclaimed_item() -> SweepItem {
+        SweepItem {
+            id: "abc".into(),
+            lifecycle: Lifecycle::Reclaimed,
+            status: "reclaimed".into(),
+            blockers: vec![],
+            logical_bytes_removed: 1,
+            physical_free_delta: None,
+        }
+    }
+
+    fn io_err() -> io::Error {
+        error("probe failed")
+    }
+
+    /// HORO-1920 (review of #186): the close decision comes from what is on disk,
+    /// not from a `reclaimed` flag the ownership pass may not have reached. A
+    /// resource that is gone is `succeeded` whatever any record says; one that
+    /// is still there is `interrupted`; anything unprovable stays open.
+    #[test]
+    fn audit_close_outcome_is_decided_by_presence_and_leaves_the_unprovable_open() {
+        assert_eq!(audit_close_outcome(true, Ok(true)), Some("succeeded"));
+        assert_eq!(audit_close_outcome(true, Ok(false)), Some("interrupted"));
+        assert_eq!(audit_close_outcome(true, Err(io_err())), None);
+        assert_eq!(audit_close_outcome(false, Ok(true)), None);
+        assert_eq!(audit_close_outcome(false, Ok(false)), None);
+    }
+
+    /// HORO-1920 (review of #186): when the monitor runs the sweep, a refusal
+    /// because the audit log is unwritable must reach the monitor log, or it is
+    /// indistinguishable from "nothing was eligible".
+    #[test]
+    fn a_refusal_for_an_unwritable_audit_log_reaches_the_monitor_log() {
+        let refused = SweepItem {
+            id: "r1".into(),
+            lifecycle: Lifecycle::Reclaimable,
+            status: "preserved".into(),
+            blockers: vec![
+                "audit log not writable (permission denied); nothing was deleted".into(),
+            ],
+            logical_bytes_removed: 0,
+            physical_free_delta: None,
+        };
+        let quiet = SweepItem {
+            blockers: vec!["meaningful-use inactivity threshold not reached".into()],
+            id: "r2".into(),
+            status: "preserved".into(),
+            ..reclaimed_item()
+        };
+        let lines = sweep_log_lines(&[refused, quiet, reclaimed_item()]);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("r1") && lines[0].contains("audit log is not writable"));
+        assert!(lines[1].contains("abc") && lines[1].contains("reclaimed"));
+    }
+
+    /// HORO-1920: a deletion whose outcome could not be recorded is reported,
+    /// not presented as a clean success. The deletion itself already happened,
+    /// so the status stays `reclaimed`; the blocker is what makes the missing
+    /// record explicit, and the log still holds `attempted` for reconcile.
+    #[test]
+    fn an_unrecorded_outcome_is_surfaced_not_swallowed() {
+        let mut item = reclaimed_item();
+        note_outcome_audit(&mut item, Err(error("disk full")));
+        assert_eq!(item.status, "reclaimed");
+        assert_eq!(item.blockers.len(), 1);
+        assert!(item.blockers[0].contains("audit outcome not recorded"));
+        assert!(item.blockers[0].contains("reconciliation will complete it"));
+
+        let mut clean = reclaimed_item();
+        note_outcome_audit(&mut clean, Ok(()));
+        assert!(clean.blockers.is_empty());
+    }
 }
 
 #[cfg(test)]

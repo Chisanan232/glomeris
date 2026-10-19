@@ -937,7 +937,7 @@ event has `timestamp`, `action_id`, `resource_id`, `policy_label`,
 `outcome`, `abort_reason`, `actual_reclaimed_bytes`, `actual_reclaimed_human`,
 and `source`. Without `--json`, prints one line per event as plain text.
 
-`source` is one of five values, produced by `ActionSource::as_str` in
+`source` is one of six values, produced by `ActionSource::as_str` in
 `src/monitor/persistence.rs`:
 
 | `source` | The path that executed it |
@@ -947,13 +947,14 @@ and `source`. Without `--json`, prints one line per event as plain text.
 | `emergency` | `glomeris emergency`, machine-wide, `AUTO_SAFE` only |
 | `autopilot_auto_safe` | `glomeris autopilot run`, action policy allowed on its own |
 | `autopilot_preauthorized_ask` | `glomeris autopilot run`, action attempted only because `autopilot enable --preauthorize-ask` had already named that kind and reason |
+| `managed_sweep` | `glomeris resource sweep --unattended`, which the background monitor runs; reclaims Glomeris-created generated artifacts under the Autopilot grant and the managed-resource policy |
 
-The last two are deliberately distinct rather than one `autopilot` value: the
+The two `autopilot_*` values are deliberately distinct rather than one `autopilot` value: the
 question an audit trail has to answer is not just *what ran* but *who
 permitted it*, and a pre-authorized `ASK` was permitted by the operator
 naming that resource kind, not by policy alone.
 
-Note "attempted" in that last row. A record is written for a failed or aborted
+Note "attempted" in the `autopilot_preauthorized_ask` row. A record is written for a failed or aborted
 attempt too — not for a *refused* one, which never reached the filesystem and
 so appears in `autopilot run`'s own report instead. Today every
 pre-authorized `ASK` aborts at
@@ -961,6 +962,32 @@ deletion-time revalidation — so `autopilot_preauthorized_ask` currently only
 ever appears alongside `outcome: "aborted_by_revalidation"`. That is a known
 limitation with a named cause and a pinning test, not the intended end state:
 see [Known Limitations](known_limitations.md).
+
+`managed_sweep` is the one source that writes two records per deletion,
+because nobody is watching it: an `attempted` record, flushed to disk *before*
+anything is deleted, and then the outcome (`succeeded`, `failed` or
+`aborted_by_revalidation`). If the `attempted` record cannot be written the
+sweep deletes nothing, reports the resource as preserved with the blocker
+"audit log not writable", and says so in the monitor log. If the outcome cannot
+be written after a deletion, the sweep says so (a blocker on that row and a line
+in the monitor log) and the log keeps `attempted` with nothing after it, which
+is what an unrecorded outcome looks like.
+
+The next reconcile (run by the monitor and by `glomeris resource reconcile`)
+resolves such a record from what is on disk at that moment: `succeeded` if the
+generation is gone, `interrupted` if it is still there (inferred from presence —
+that covers a deletion that never started and one cut off part-way; a safe retry
+is re-admitted by the ownership reconcile, not promised by this record). A
+record it cannot prove either way — no ownership record, or presence cannot be
+established — stays open and is retried on the next pass. Each pass looks at the
+last 1024 lines of the live and the rotated log; an attempt older than that is
+not chased, and an attempt whose resource has no ownership record stays open
+until it ages out of that window. The audit log must be a regular file that is
+not a symbolic link: a symlinked or otherwise non-regular `actions.jsonl` makes
+the unattended sweep refuse to delete (the monitor log says why). Once
+resolved, a second pass appends nothing. An `attempted` line
+with nothing after it is therefore never a silent success: it is in flight,
+awaiting reconciliation, or beyond what reconciliation can prove.
 
 ```sh
 glomeris actions history --json --limit 2

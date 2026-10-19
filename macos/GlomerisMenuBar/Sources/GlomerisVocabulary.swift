@@ -553,6 +553,23 @@ enum GlomerisVocabulary {
                     + "stopped before altering anything.",
                 "exclamationmark.triangle.fill", .caution
             )
+        // HORO-1920. The background cleanup writes the intent before it acts and the
+        // result after. A row that is still "Started" with nothing after it means the
+        // result was never recorded, which is different from "Failed".
+        case "attempted":
+            return term(
+                token, outcomeAxis, "Started",
+                "Glomeris recorded that it was about to act. If no result follows, "
+                    + "the result was not recorded.",
+                "hourglass", .caution
+            )
+        case "interrupted":
+            return term(
+                token, outcomeAxis, "Interrupted",
+                "The action started but did not finish. Glomeris re-checks the "
+                    + "resource before trying again.",
+                "pause.circle.fill", .caution
+            )
         case "dry_run":
             return term(
                 token, outcomeAxis, "Dry run only",
@@ -686,6 +703,18 @@ enum GlomerisVocabulary {
                 about — you pre-authorised this kind and reason in advance.
                 """,
                 "checkmark.shield.fill", .warning
+            )
+        // HORO-1920. The background monitor's managed-resource sweep deletes
+        // without Autopilot's `run` path, so it needs its own word: a reader
+        // auditing the log must be able to tell it from a person's request.
+        case "managed_sweep":
+            return term(
+                token, sourceAxis, "Background cleanup",
+                """
+                Run by the background monitor on a Glomeris-created generated \
+                artifact, under the Autopilot grant and the managed-resource policy.
+                """,
+                "externaldrive.badge.minus", .neutral
             )
         default:
             return unrecognised(

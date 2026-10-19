@@ -64,6 +64,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// never records it.
     private static let outcomeTokens = [
         "succeeded", "failed", "aborted_by_revalidation", "dry_run",
+        "attempted", "interrupted",
     ]
 
     /// `src/reporting/dto.rs` — `ExecuteRefusalReport::reason`, including
@@ -81,6 +82,7 @@ final class GlomerisVocabularyTests: XCTestCase {
     /// precisely how they were missed once already.
     private static let sourceTokens = [
         "execute", "free", "emergency", "autopilot_auto_safe", "autopilot_preauthorized_ask",
+        "managed_sweep",
     ]
 
     /// `src/evidence/model.rs` — `ResourceKind::tag`.

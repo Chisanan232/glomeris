@@ -30,9 +30,9 @@ pub use feasibility::{assess as assess_feasibility, FeasibilityInputs, Feasibili
 pub use fs_stat::{FsStat, FsUsage};
 pub use notifier::Notifier;
 pub use persistence::{
-    append_audit_record, read_audit_tail, read_heartbeat, read_history_tail, write_heartbeat,
-    ActionSource, AuditRecord, FilePersistence, Heartbeat, HistoryEntry, PersistenceBackend,
-    PressureEvent,
+    append_audit_record, append_audit_record_durable, read_audit_tail, read_heartbeat,
+    read_history_tail, unmatched_attempts, write_heartbeat, ActionSource, AuditRecord,
+    FilePersistence, Heartbeat, HistoryEntry, PersistenceBackend, PressureEvent,
 };
 pub use poller::{poll_once, run, PollConfig, PollOutcome};
 pub use pressure::PressureState;

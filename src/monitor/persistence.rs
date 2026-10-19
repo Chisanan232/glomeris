@@ -10,7 +10,8 @@
 use crate::monitor::pressure::PressureState;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,14 +251,22 @@ pub struct AuditRecord {
     /// deriving `Serialize` on that type directly, same reasoning as
     /// `crate::reporting::dto::ExecuteReport::outcome`. Never `"dry_run"`:
     /// no real-execution call site ever records a dry run here.
+    ///
+    /// The `"managed_sweep"` source (HORO-1920) also writes two bracketing
+    /// tokens: `"attempted"`, the durable intent recorded before the deletion
+    /// starts, and `"interrupted"`, written by reconciliation when an
+    /// `attempted` record was never followed by an outcome and the resource
+    /// was still present when reconciliation looked. That is inferred from
+    /// presence: it covers a deletion that never started and one that was
+    /// cut off part-way.
     pub outcome: String,
     /// Populated only when `outcome == "aborted_by_revalidation"`.
     pub abort_reason: Option<String>,
     pub actual_reclaimed_bytes: Option<u64>,
     /// Which real-execution path produced this record, and — for
     /// `autopilot` — under what authority: `"execute"`, `"free"`,
-    /// `"emergency"`, `"autopilot_auto_safe"`, or
-    /// `"autopilot_preauthorized_ask"`. The two `autopilot_*` values are
+    /// `"emergency"`, `"autopilot_auto_safe"`,
+    /// `"autopilot_preauthorized_ask"`, or `"managed_sweep"`. The two `autopilot_*` values are
     /// distinct on purpose (HORO-1310): "Autopilot did this" and "Autopilot
     /// did this to an `ASK` resource under a pre-authorization the user
     /// granted in advance" are different facts, and an audit trail that
@@ -344,6 +353,11 @@ pub enum ActionSource {
     /// "Autopilot did this" and "Autopilot did this under a standing consent"
     /// are the two different facts someone auditing the log is looking for.
     AutopilotPreauthorizedAsk,
+    /// `glomeris resource sweep --unattended`, which the background monitor
+    /// runs on Glomeris-created generated artifacts. It deletes through its
+    /// own path rather than `autopilot run`, so the audit trail needs a
+    /// separate word for it (HORO-1920).
+    ManagedSweep,
 }
 
 impl ActionSource {
@@ -354,6 +368,7 @@ impl ActionSource {
             ActionSource::Emergency => "emergency",
             ActionSource::AutopilotAutoSafe => "autopilot_auto_safe",
             ActionSource::AutopilotPreauthorizedAsk => "autopilot_preauthorized_ask",
+            ActionSource::ManagedSweep => "managed_sweep",
         }
     }
 }
@@ -393,6 +408,94 @@ pub fn append_audit_record(path: &Path, record: &AuditRecord) -> io::Result<()> 
 
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     file.write_all(line.as_bytes())
+}
+
+/// The strict counterpart of [`append_audit_record`], for deletions that
+/// nobody is watching (HORO-1920): the record is flushed to stable storage
+/// before this returns, and every failure is reported to the caller.
+///
+/// [`append_audit_record`]'s best-effort contract exists so that an audit
+/// failure never changes the outcome of an action a person is looking at. The
+/// background monitor's sweep deletes with no one present, so there the
+/// opposite holds: the caller must treat `Err` as "do not delete", because a
+/// deletion that cannot be recorded is not auditable.
+pub fn append_audit_record_durable(path: &Path, record: &AuditRecord) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rotate_if_oversized(path)?;
+
+    let mut line = serde_json::to_string(record).map_err(io::Error::from)?;
+    line.push('\n');
+
+    let existed = path.exists();
+    // A symlink is refused (O_NOFOLLOW) and a FIFO fails to open rather than
+    // blocking forever while the execution lock is held (O_NONBLOCK, ENXIO);
+    // anything that is not a regular file is rejected below. A new file is
+    // private: the log names local paths.
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit log is not a regular file",
+        ));
+    }
+    // A previous write that failed part-way (ENOSPC is this tool's native
+    // situation) leaves a line with no newline. Appending straight after it
+    // would glue this record onto the fragment, and the reader skips the whole
+    // malformed line: the append would report success for a record nobody can
+    // read. Start a fresh line instead.
+    let len = file.metadata()?.len();
+    if len > 0 {
+        let mut last = [0u8; 1];
+        file.seek(SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.insert(0, '\n');
+        }
+    }
+    file.write_all(line.as_bytes())?;
+    file.sync_all()?;
+    if !existed {
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+/// How many trailing lines of `actions.jsonl` [`unmatched_attempts`] looks at.
+/// Bounds the work of a reconcile pass; an attempt older than this window has
+/// long since been closed or is beyond what a periodic pass should chase.
+pub const UNMATCHED_ATTEMPT_WINDOW: usize = 1024;
+
+/// The `attempted` records from `source` in the tail of the log at `path`
+/// that no later record for the same resource closes, oldest first
+/// (HORO-1920). An `attempted` record is the durable intent written before a
+/// deletion; with no outcome after it, the log is honest that it does not know
+/// how that deletion ended, and a reconcile pass is expected to close it.
+pub fn unmatched_attempts(path: &Path, source: &str) -> Vec<AuditRecord> {
+    // The rotated file first: rotation can move an `attempted` record out of the
+    // live file before its outcome arrives (or before a crash), and ignoring it
+    // would strand that attempt for good.
+    let mut rotated = path.as_os_str().to_os_string();
+    rotated.push(".1");
+    let mut tail = read_audit_tail(Path::new(&rotated), UNMATCHED_ATTEMPT_WINDOW);
+    tail.extend(read_audit_tail(path, UNMATCHED_ATTEMPT_WINDOW));
+    let mut open: Vec<AuditRecord> = Vec::new();
+    for record in tail.into_iter().filter(|r| r.source == source) {
+        open.retain(|a| a.resource_id != record.resource_id);
+        if record.outcome == "attempted" {
+            open.push(record);
+        }
+    }
+    open
 }
 
 /// Renames `path` to `path` + `.1` when it exceeds [`MAX_AUDIT_LOG_BYTES`],
@@ -494,6 +597,7 @@ mod tests {
             ActionSource::Emergency,
             ActionSource::AutopilotAutoSafe,
             ActionSource::AutopilotPreauthorizedAsk,
+            ActionSource::ManagedSweep,
         ];
         let mut seen = std::collections::BTreeSet::new();
         for source in all {
@@ -509,7 +613,7 @@ mod tests {
                 "Display must agree with as_str, or the two writing paths diverge"
             );
         }
-        assert_eq!(seen.len(), 5);
+        assert_eq!(seen.len(), 6);
     }
 
     #[test]
@@ -724,6 +828,137 @@ mod tests {
             host_integrity_status: None,
             volume_free_delta: None,
         }
+    }
+
+    /// HORO-1920: the strict append is the one a deletion nobody watches
+    /// depends on, so a failure must reach the caller. A directory standing
+    /// where the log should be makes `open` fail deterministically; the
+    /// best-effort variant would also fail here but its contract says to
+    /// ignore that, which is exactly what this test would catch being copied.
+    #[test]
+    fn durable_append_reports_failure_and_flushes_on_success() {
+        let path = unique_audit_test_path("durable");
+        append_audit_record_durable(&path, &sample_audit_record("a"))
+            .expect("a writable path must succeed");
+        assert_eq!(read_audit_tail(&path, 10).len(), 1);
+
+        let blocked = unique_audit_test_path("durable-blocked");
+        std::fs::create_dir_all(&blocked).expect("make a directory where the log should be");
+        let error = append_audit_record_durable(&blocked, &sample_audit_record("b"))
+            .expect_err("an unwritable log must be reported, never swallowed");
+        assert!(!error.to_string().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&blocked);
+    }
+
+    /// HORO-1920: an `attempted` record is closed by any later record for the
+    /// same resource; one with nothing after it is exactly what reconciliation
+    /// must resolve. Records from other sources never count.
+    #[test]
+    fn unmatched_attempts_are_attempted_records_without_a_later_outcome() {
+        let path = unique_audit_test_path("unmatched");
+        let record = |resource: &str, outcome: &str, source: &str| AuditRecord {
+            resource_id: resource.to_string(),
+            outcome: outcome.to_string(),
+            source: source.to_string(),
+            ..sample_audit_record("managed.clean.generated")
+        };
+        for r in [
+            record("closed", "attempted", "managed_sweep"),
+            record("closed", "succeeded", "managed_sweep"),
+            record("open", "attempted", "managed_sweep"),
+            // A different source's closing record must not close this one.
+            record("other_source", "attempted", "managed_sweep"),
+            record("other_source", "succeeded", "execute"),
+            // A later attempt for a resource whose earlier attempt was closed.
+            record("again", "attempted", "managed_sweep"),
+            record("again", "interrupted", "managed_sweep"),
+            record("again", "attempted", "managed_sweep"),
+        ] {
+            append_audit_record(&path, &r).expect("append");
+        }
+        let open: Vec<String> = unmatched_attempts(&path, "managed_sweep")
+            .into_iter()
+            .map(|r| r.resource_id)
+            .collect();
+        assert_eq!(open, ["open", "other_source", "again"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// HORO-1920: a previous append that failed part-way (ENOSPC) leaves a line
+    /// with no newline. The next durable record must not be glued onto it, or the
+    /// reader skips the whole line and the append reported success for a record
+    /// nobody can read.
+    #[test]
+    fn a_durable_append_after_a_torn_write_starts_a_fresh_line() {
+        let path = unique_audit_test_path("torn");
+        append_audit_record_durable(&path, &sample_audit_record("first")).unwrap();
+        // Simulate the torn write: a fragment with no trailing newline.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"timestamp\": 17000000").unwrap();
+        drop(file);
+        append_audit_record_durable(&path, &sample_audit_record("second")).unwrap();
+        let ids: Vec<String> = read_audit_tail(&path, 10)
+            .into_iter()
+            .map(|r| r.action_id)
+            .collect();
+        assert_eq!(ids, ["first", "second"], "the new record must be readable");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// HORO-1920: the log is opened without following a symlink and without
+    /// blocking on a FIFO, so a hostile or accidental file type cannot wedge the
+    /// monitor while it holds the execution lock, or redirect the audit trail.
+    #[test]
+    fn a_durable_append_refuses_a_symlink_and_a_fifo() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-audit-odd-{}-{}",
+            std::process::id(),
+            unix_now_secs()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("elsewhere.jsonl");
+        std::fs::write(&target, "").unwrap();
+        let link = dir.join("link.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(append_audit_record_durable(&link, &sample_audit_record("x")).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "");
+
+        let fifo = dir.join("fifo.jsonl");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        assert!(
+            append_audit_record_durable(&fifo, &sample_audit_record("y")).is_err(),
+            "a FIFO must fail fast, not block"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// HORO-1920: rotation can move an `attempted` record into `.1` before its
+    /// outcome arrives. An attempt there with no outcome is still open, and an
+    /// outcome in the live file still closes an attempt in `.1`.
+    #[test]
+    fn unmatched_attempts_look_into_the_rotated_file() {
+        let path = unique_audit_test_path("rotated");
+        let mut rotated = path.as_os_str().to_os_string();
+        rotated.push(".1");
+        let rotated = PathBuf::from(rotated);
+        let record = |resource: &str, outcome: &str| AuditRecord {
+            resource_id: resource.to_string(),
+            outcome: outcome.to_string(),
+            source: "managed_sweep".to_string(),
+            ..sample_audit_record("managed.clean.generated")
+        };
+        append_audit_record(&rotated, &record("stranded", "attempted")).unwrap();
+        append_audit_record(&rotated, &record("closed_later", "attempted")).unwrap();
+        append_audit_record(&path, &record("closed_later", "succeeded")).unwrap();
+        let open: Vec<String> = unmatched_attempts(&path, "managed_sweep")
+            .into_iter()
+            .map(|r| r.resource_id)
+            .collect();
+        assert_eq!(open, ["stranded"]);
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
