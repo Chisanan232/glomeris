@@ -122,6 +122,11 @@ pub struct ExecutionReport {
     /// sample failed, or the resource's own filesystem differs from the
     /// measured volume's (ADR-0001 §4.4 "different filesystem").
     pub volume_free_delta: ProbeOutcome<i64>,
+    /// HORO-1930: set when the mutation itself is done and `outcome` says so
+    /// truthfully, but the ownership record could not be updated afterwards.
+    /// The record is left for `ownership reconcile` to settle from what is on
+    /// disk; this is the visible trace that it had to.
+    pub record_warning: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -366,13 +371,39 @@ fn execute_inner(
         compute_volume_delta(identity_snapshot.map(|s| s.dev), before, after);
     if let Some(guard) = &mut managed_guard {
         let delta = report.volume_free_delta.observed().copied();
-        if let Err(e) = guard.finish(delta) {
-            report.outcome =
-                ExecutionOutcome::Failed(format!("cleanup outcome persistence failed: {e}"));
-        }
+        settle_record_result(
+            &mut report.outcome,
+            &mut report.record_warning,
+            guard.finish(delta),
+        );
     }
 
     report
+}
+
+/// Folds the result of the post-execution ownership-record update into the
+/// report (HORO-1930).
+///
+/// A `Succeeded` outcome means the mutation is done and the disk says so. A
+/// failure to write the record afterwards must not turn that into `Failed`: the
+/// report and the audit trail would then claim the opposite of what happened,
+/// and `ownership reconcile` never corrects an outcome that was already
+/// recorded. So the outcome stays truthful, the failure is carried as a
+/// warning, and reconcile settles the record from what is on disk. Any other
+/// outcome keeps the old behaviour, where the persistence failure is the
+/// failure being reported.
+pub(crate) fn settle_record_result(
+    outcome: &mut ExecutionOutcome,
+    warning: &mut Option<String>,
+    saved: std::io::Result<()>,
+) {
+    let Err(e) = saved else { return };
+    let message = format!("cleanup outcome persistence failed: {e}");
+    if *outcome == ExecutionOutcome::Succeeded {
+        *warning = Some(message);
+    } else {
+        *outcome = ExecutionOutcome::Failed(message);
+    }
 }
 
 /// Decides whether a post-action host-dependency check is worth running
@@ -636,6 +667,7 @@ fn aborted_report(action: ActionId, resource: ResourceId, reason: AbortReason) -
         // constructor is only reached for an abort BEFORE `execute_plan`
         // ever runs).
         volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        record_warning: None,
     }
 }
 
@@ -663,6 +695,7 @@ fn failed_report(
         // error path in `execute()` itself, which never reaches
         // `execute_plan` at all.
         volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        record_warning: None,
     }
 }
 
@@ -979,6 +1012,7 @@ fn execute_plan(plan: ActionPlan, identity_snapshot: Option<IdentitySnapshot>) -
         // Filled in by `execute()` immediately after this call returns —
         // see its own before/after sampling around `execute_plan`.
         volume_free_delta: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
+        record_warning: None,
     }
 }
 
