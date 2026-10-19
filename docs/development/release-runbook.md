@@ -9,7 +9,7 @@ repository admin role.
 | Step | Trigger | Effect |
 |---|---|---|
 | `Release` (`release.yml`, dist-managed) | pushing a tag such as `v0.3.0-rc.1` | Builds the `aarch64` and `x86_64` CLI tarballs, uploads them to a release that **must already exist as a draft**, then publishes it. With no draft the host job fails and nothing becomes public. |
-| Homebrew formula | same run | Runs only for a non-pre-release tag (`announcement_is_prerelease` false) **and** when `HOMEBREW_TAP_TOKEN` exists. A pre-release is skipped; `glomeris.rb` is still attached as an asset. |
+| Homebrew formula | same run | Runs for a non-pre-release tag (`announcement_is_prerelease` false); without `HOMEBREW_TAP_TOKEN` that job **fails** and `announce` is skipped. A pre-release skips it; `glomeris.rb` is still attached as an asset. |
 | `macOS App Release` (`macos-app-release.yml`) | manual dispatch (or a human publishing a release) | Signs, notarizes and attaches the app. Refuses to run without every signing secret unless dispatched with `allow_unsigned_dev` against a pre-release, in which case the asset is named `GlomerisMenuBar-DEV-ONLY-unsigned.app.zip`. |
 
 A release created by `GITHUB_TOKEN` does not trigger `macos-app-release.yml`
@@ -37,6 +37,15 @@ below, done before the tag.
    `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID`.
 5. For a stable (non-pre-release) tag: `HOMEBREW_TAP_TOKEN` (HORO-1320).
 
+The signing secrets are plain repository secrets, so any dispatch by someone with
+write access can use them. Before the first signed release, move them into a
+GitHub Environment (required reviewers, deployment branches limited to `main`)
+and add `environment:` to the job. The workflow builds the app from the tagged
+commit, not from the dispatched branch.
+
+The dist CLI tarballs are **not** Developer ID signed or notarized and are public
+as soon as the draft is undrafted by a tag push; only the app is gated.
+
 Do not paste any of these into an issue, a chat or a log. Set them with
 `gh secret set NAME` from a terminal, reading the value from stdin.
 
@@ -53,7 +62,9 @@ All of this is read-only or local; none of it needs a credential.
 3. `bash scripts/check-release-version-is-taggable.sh` and the rest of the
    guards CI runs.
 4. Confirm the signing secrets exist (names only): `gh secret list`.
-5. Create the draft: `gh release create vX.Y.Z[-rc.N] --draft --prerelease
+5. Check for stale drafts first (`gh release list`, look for `Draft`): a leftover
+   draft is published by the next tag push. Delete any you did not just create.
+6. Create the draft: `gh release create vX.Y.Z[-rc.N] --draft --prerelease
    --title ... --notes ...` (drop `--prerelease` for a stable tag).
 
 ## Cutting the release
@@ -75,7 +86,9 @@ All of this is read-only or local; none of it needs a credential.
 * Published, and something is wrong: mark it a pre-release or revert it to
   draft (`gh release edit vX.Y.Z --draft`), delete the bad app asset
   (`gh release delete-asset`), and leave the tag in place until a fixed tag
-  supersedes it. Do not move or reuse a published tag.
+  supersedes it. Do not move or reuse a published tag. A release reverted to
+  draft is re-armed: re-pushing that tag or re-running `Release` republishes it,
+  so delete the draft (and tag) once the fixed tag exists.
 * Homebrew formula was published: revert the formula commit in
   `Chisanan232/homebrew-tap` to the previous version. A pre-release never
   touches the tap.

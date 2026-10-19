@@ -51,8 +51,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
-
       - name: Select the pinned Xcode
         run: |
           set -euo pipefail
@@ -78,6 +76,13 @@ jobs:
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # The app is built from the tagged commit, not from whatever branch the
+      # run was dispatched on: the CLI comes from the tag's release assets, and
+      # a signed bundle must not mix it with different app source or workflow.
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
 
       - name: Decide signing mode (fails closed)
         # HORO-1935. Until now this workflow always produced an ad-hoc signed
@@ -161,6 +166,21 @@ jobs:
               --pattern "glomeris-$target.tar.xz" \
               --output "glomeris-$target.tar.xz" \
               --clobber
+            gh release download "$TAG" \
+              --repo "${{ github.repository }}" \
+              --pattern "glomeris-$target.tar.xz.sha256" \
+              --output "glomeris-$target.tar.xz.sha256" \
+              --clobber
+            # Signed mode would otherwise sign and notarize whatever bytes the
+            # release holds; refuse a tarball that does not match dist's checksum.
+            # (openssl on purpose: check-cli-identity-is-reported.sh reads any
+            # line using the stamp-hash tool as the embedded-CLI hash.)
+            WANT="$(awk '{print $1}' "glomeris-$target.tar.xz.sha256")"
+            GOT="$(openssl dgst -sha256 -r "glomeris-$target.tar.xz" | awk '{print $1}')"
+            if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
+              echo "::error::glomeris-$target.tar.xz does not match its published sha256"
+              exit 1
+            fi
           done
 
       - name: Extract glomeris binary
@@ -357,6 +377,7 @@ jobs:
           APP="build/GlomerisMenuBar.app"
           KEY_PATH="$RUNNER_TEMP/notary-key.p8"
           RESULT="$RUNNER_TEMP/notary-result.json"
+          trap 'rm -f "$KEY_PATH"' EXIT
           printf '%s' "$NOTARY_KEY_B64" | base64 --decode > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
           ditto -c -k --sequesterRsrc --keepParent "$APP" "$RUNNER_TEMP/notarize-submission.zip"
@@ -498,6 +519,15 @@ jobs:
             case "$CLI_DETAILS" in
               *"(runtime)"*) ;;
               *) echo "::error::the embedded CLI does not have the hardened runtime enabled"; status=1 ;;
+            esac
+            if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
+              echo "::error::codesign --verify --deep --strict failed on the final bundle"
+              status=1
+            fi
+            FINAL_ARCHS="$(lipo -archs "$APP/Contents/MacOS/glomeris" 2>/dev/null || true)"
+            case " $FINAL_ARCHS " in
+              *" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*) ;;
+              *) echo "::error::final embedded CLI is not universal ($FINAL_ARCHS)"; status=1 ;;
             esac
             if ! xcrun stapler validate "$APP" >/dev/null 2>&1; then
               echo "::error::no valid notarization ticket is stapled to the app"
