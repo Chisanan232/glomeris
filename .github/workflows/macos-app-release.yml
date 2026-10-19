@@ -175,8 +175,8 @@ jobs:
             # release holds; refuse a tarball that does not match dist's checksum.
             # (openssl on purpose: check-cli-identity-is-reported.sh reads any
             # line using the stamp-hash tool as the embedded-CLI hash.)
-            WANT="$(awk '{print $1}' "glomeris-$target.tar.xz.sha256")"
-            GOT="$(openssl dgst -sha256 -r "glomeris-$target.tar.xz" | awk '{print $1}')"
+            WANT="$(awk '{print $1}' "glomeris-$target.tar.xz.sha256" || true)"
+            GOT="$(openssl dgst -sha256 -r "glomeris-$target.tar.xz" | awk '{print $1}' || true)"
             if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
               echo "::error::glomeris-$target.tar.xz does not match its published sha256"
               exit 1
