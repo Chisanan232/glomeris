@@ -484,6 +484,18 @@ const LAUNCHCTL_STDERR_EXCERPT_LIMIT: usize = 256;
 /// surfaced only where it is actually informative: inside the error of a
 /// call whose result the caller has chosen not to discard.
 fn run_launchctl(args: &[&str]) -> io::Result<()> {
+    // HORO-1933: unit tests exercise `install`/`uninstall` against a temp plist
+    // that carries the production `LABEL`. `launchctl load -w` / `unload -w`
+    // act on the label inside the file, so on a developer machine they boot out
+    // the user's live monitor and write a persistent `disabled` override. Tests
+    // never need real launchd scheduling (the plist file logic is what they
+    // assert), so mutating subcommands are refused here; read-only `list` stays.
+    #[cfg(test)]
+    if matches!(args.first(), Some(&"load") | Some(&"unload")) {
+        return Err(io::Error::other(
+            "launchctl load/unload is disabled under unit tests (HORO-1933)",
+        ));
+    }
     let output = Command::new("launchctl").args(args).output()?;
     if output.status.success() {
         return Ok(());
@@ -608,6 +620,22 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// HORO-1933 regression: a unit test must never reach the real launchd
+    /// with a mutating subcommand. `unload -w` on a plist carrying the
+    /// production label disabled the user's live monitor on every local
+    /// `cargo test`. The error is the proof the call never left the process.
+    #[test]
+    fn unit_tests_cannot_mutate_launchd() {
+        for sub in ["load", "unload"] {
+            let err = run_launchctl(&[sub, "-w", "/nonexistent/com.glomeris.monitor.plist"])
+                .expect_err("mutating launchctl must be refused under cfg(test)");
+            assert!(
+                err.to_string().contains("disabled under unit tests"),
+                "{sub}: unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
