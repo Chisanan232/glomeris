@@ -267,6 +267,17 @@ jobs:
       - name: Check Swift sources hold no deletion authority
         run: bash scripts/check-swift-has-no-deletion-authority.sh
 
+  release-candidate-verifier-can-fail:
+    # HORO-1921: scripts/verify-release-candidate.sh is what a release candidate
+    # (and later the published artifact) is checked with. Its own --self-test
+    # proves it still rejects an armed Autopilot, a lenient CLI, a missing
+    # surface and a bad checksum, so the check cannot rot into one that passes.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - name: Prove the candidate verifier can fail
+        run: bash scripts/verify-release-candidate.sh --self-test
+
   workspace-aggregation-has-no-authority:
     # HORO-1511: `crate::workspace` groups discovered resources into git
     # worktree families so a person can see that one project accounts for

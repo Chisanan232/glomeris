@@ -607,9 +607,10 @@ pub fn llm_check_outcome(error: Option<&LlmError>) -> &'static str {
 /// rules in Swift would drift, and the standing project rule keeps decision
 /// logic out of the thin client.
 ///
-/// Deliberately *not* rejected: `http://` (a local gateway on loopback is a
-/// legitimate BYOK setup) and any particular host or path shape (AC 6 — no
-/// company-specific host or model may be baked in).
+/// `http://` is accepted only for a loopback host (HORO-1922): a local gateway
+/// is a legitimate BYOK setup, a remote cleartext endpoint is not. Any
+/// particular host or path shape remains accepted (AC 6 — no company-specific
+/// host or model may be baked in).
 pub fn validate_base_url(base_url: &str) -> Result<(), String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -626,8 +627,12 @@ pub fn validate_base_url(base_url: &str) -> Result<(), String> {
         return Err("base URL contains a space; a URL cannot contain one".to_string());
     }
 
+    let mut is_http = false;
     let after_scheme = match base_url.split_once("://") {
-        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => rest,
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("http") => {
+            is_http = true;
+            rest
+        }
         Some((scheme, rest)) if scheme.eq_ignore_ascii_case("https") => rest,
         Some((_, _)) => {
             return Err("base URL must start with https:// or http://".to_string());
@@ -640,6 +645,18 @@ pub fn validate_base_url(base_url: &str) -> Result<(), String> {
     };
     if after_scheme.is_empty() || after_scheme.starts_with('/') {
         return Err("base URL has no host".to_string());
+    }
+
+    // HORO-1922: the bearer key and the whole prompt travel in this request, so
+    // cleartext is only acceptable where nothing can observe the wire. A
+    // mistyped `http://` provider URL would otherwise send both in the clear.
+    if is_http && !http_host_is_loopback(after_scheme) {
+        return Err(
+            "a base URL starting http:// is only accepted for a loopback host \
+                    (localhost, 127.0.0.0/8 or [::1]), because your API key and prompt \
+                    would cross the network unencrypted; use https:// for a remote provider"
+                .to_string(),
+        );
     }
 
     // A query or fragment must be refused rather than tolerated: appending
@@ -673,6 +690,55 @@ pub fn validate_base_url(base_url: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Whether the authority of an `http://` URL (everything after the scheme) names
+/// a loopback host: `localhost`, an IPv4 address in `127.0.0.0/8`, or `[::1]`.
+///
+/// Parsed rather than prefix-matched, because the cheap checks are exactly the
+/// ones an attacker or a typo defeats: `localhost.example.com` and
+/// `127.0.0.1.nip.io` start with a loopback name but are remote, and
+/// `127.0.0.1@evil.com` has a loopback-looking userinfo in front of the real
+/// host. Userinfo is therefore refused outright for `http://`, and an
+/// unparsable port makes the whole authority non-loopback.
+fn http_host_is_loopback(after_scheme: &str) -> bool {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some((inside, rest)) = bracketed.split_once(']') else {
+            return false;
+        };
+        // Nothing but an optional `:port` may follow the bracket; `[::1]evil.com`
+        // and `[::1]%25eth0` are not a plain loopback authority.
+        if !(rest.is_empty() || rest.starts_with(':')) {
+            return false;
+        }
+        (inside, rest.strip_prefix(':'))
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        }
+    };
+    if let Some(port) = port {
+        if port.is_empty() || port.parse::<u16>().is_err() {
+            return false;
+        }
+    }
+    if authority.starts_with('[') {
+        return host.parse::<Ipv6Addr>().is_ok_and(|ip| ip.is_loopback());
+    }
+    if host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.") {
+        return true;
+    }
+    host.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// The two prompts `glomeris llm-check` sends (HORO-1309).
@@ -711,6 +777,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
             // opaque `NetworkError("http status: 401")` and the provider's
             // own explanation was discarded unread — HORO-1299.
             .http_status_as_error(false)
+            // HORO-1922: a redirect from the configured endpoint must never carry
+            // the bearer key or the prompt to another origin. ureq's defaults
+            // already strip Authorization on every redirect and do not replay a
+            // POST body on 307/308, but the guarantee is stated here rather than
+            // inherited, so a library default change cannot silently weaken it.
+            // Following nothing also means a 3xx surfaces as a provider status
+            // the user can act on instead of a request to somewhere unvetted.
+            .max_redirects(0)
+            .redirect_auth_headers(ureq::config::RedirectAuthHeaders::Never)
             .build()
             .header("Authorization", &auth_header)
             .header("Content-Type", "application/json")
@@ -2484,6 +2559,77 @@ mod tests {
                 validate_base_url(accepted),
                 Ok(()),
                 "must accept {accepted}"
+            );
+        }
+    }
+
+    /// HORO-1922: every loopback spelling a local gateway really uses keeps
+    /// working over plain http, as do remote HTTPS endpoints (BYOK, enterprise
+    /// proxies), with and without ports and paths.
+    #[test]
+    fn validate_base_url_accepts_loopback_http_and_any_https() {
+        for accepted in [
+            "http://localhost/v1",
+            "http://LOCALHOST:11434/v1",
+            "http://localhost.:11434/v1",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8080/v1/",
+            "http://127.1.2.3:9/v1",
+            "http://[::1]/v1",
+            "http://[::1]:8080/v1",
+            "HTTP://127.0.0.1:1234/v1",
+            "https://api.openai.com/v1",
+            "https://llm-proxy.corp.example:8443/openai/v1",
+            "https://203.0.113.9/v1",
+            "https://localhost.example.com/v1",
+        ] {
+            assert_eq!(
+                validate_base_url(accepted),
+                Ok(()),
+                "must accept {accepted}"
+            );
+        }
+    }
+
+    /// HORO-1922: cleartext http to anything that is not provably loopback is
+    /// refused, including the spellings that defeat a prefix check.
+    #[test]
+    fn validate_base_url_rejects_non_loopback_http() {
+        for rejected in [
+            "http://api.openai.com/v1",
+            "http://192.168.1.10:8000/v1",
+            "http://10.0.0.5/v1",
+            "http://0.0.0.0:8080/v1",
+            "http://localhost.evil.example/v1",
+            "http://127.0.0.1.nip.io/v1",
+            "http://localhostx/v1",
+            "http://evil.example@127.0.0.1/v1",
+            "http://127.0.0.1@evil.example/v1",
+            "http://localhost@evil.example/v1",
+            "http://user:pw@localhost/v1",
+            "http://[::ffff:8.8.8.8]/v1",
+            "http://[2001:db8::1]/v1",
+            "http://[::1/v1",
+            "http://[::1]evil.example/v1",
+            "http://[::1]%25eth0/v1",
+            "http://localhost:/v1",
+            "http://localhost:99999/v1",
+            "http://localhost:abc/v1",
+            "http://:8080/v1",
+            "HTTP://example.com/v1",
+        ] {
+            let message = validate_base_url(rejected)
+                .expect_err(&format!("must reject {rejected:?}"))
+                .to_lowercase();
+            assert!(
+                !message.contains(&rejected.to_lowercase()),
+                "a rejection must not echo the URL back: {message}"
+            );
+            assert!(
+                message.contains("loopback")
+                    || message.contains("no host")
+                    || message.contains("space"),
+                "message for {rejected:?} must say why: {message}"
             );
         }
     }
