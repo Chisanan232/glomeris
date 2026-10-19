@@ -1,24 +1,20 @@
 name: macOS App Release
 
 # cargo-dist (release.yml, dist-managed — do not hand-edit) builds and
-# publishes the Rust `glomeris` CLI binary but has no notion of the Swift
-# menu-bar app under macos/GlomerisMenuBar/. This workflow is a separate,
-# non-conflicting pipeline that runs after dist's release.yml has already
-# created the GitHub Release: it downloads the just-published
-# aarch64-apple-darwin CLI tarball, builds GlomerisMenuBar.app, embeds the
-# released binary into the bundle, and uploads the zipped app as an extra
-# asset on that same release.
+# publishes the Rust `glomeris` CLI tarballs but has no notion of the Swift
+# menu-bar app under macos/GlomerisMenuBar/. This workflow is a separate
+# pipeline that runs AFTER the release is public: it downloads both published
+# CLI tarballs, combines them into one universal binary, builds
+# GlomerisMenuBar.app, embeds the CLI, signs and notarizes it, and uploads the
+# zipped app as an extra asset on that same release.
 #
-# Trigger choice: `release: types: [published]` instead of matching
-# release.yml's `push: tags:` pattern. release.yml's `host` job creates the
-# GitHub Release with `gh release create ... artifacts/*` in a single call
-# (assets are attached atomically, not uploaded in a later step), so the
-# `published` event only fires once the release and all of dist's artifacts
-# already exist — no race to coordinate, no risk of two tag-triggered
-# workflows starting in parallel and this one downloading an asset that
-# isn't uploaded yet. It also naturally skips PR runs of release.yml (which
-# never publish a release) without needing to duplicate release.yml's
-# tag-matching regex here.
+# How it starts (HORO-1935, measured): dist's `host` job publishes with
+# GITHUB_TOKEN, and GitHub does not start workflows from events created by that
+# token, so the `release: published` trigger below does NOT fire for a
+# dist-made release (v0.2.0 has no app asset and this workflow has never run).
+# In practice every release needs a manual `workflow_dispatch` with its tag.
+# The `release` trigger still fires when a human publishes a release, and
+# either way the signing-mode step below decides whether anything is built.
 on:
   release:
     types: [published]
@@ -75,7 +71,11 @@ jobs:
           elif [ -n "$INPUT_TAG" ]; then
             TAG="$INPUT_TAG"
           else
-            TAG="$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName')"
+            TAG="$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName --jq '.[0].tagName' || true)"
+          fi
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::no release tag could be resolved; pass the tag input explicitly"
+            exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
@@ -378,7 +378,19 @@ jobs:
             exit 1
           fi
           rm -f "$KEY_PATH"
-          xcrun stapler staple "$APP"
+          # The ticket can take a moment to propagate after "Accepted", so a
+          # first `staple` may report "Record not found". Retry rather than
+          # redoing a whole notarization.
+          stapled=""
+          for attempt in 1 2 3; do
+            if xcrun stapler staple "$APP"; then stapled=yes; break; fi
+            echo "staple attempt $attempt failed; waiting for the ticket to propagate"
+            sleep 15
+          done
+          if [ -z "$stapled" ]; then
+            echo "::error::could not staple the notarization ticket"
+            exit 1
+          fi
           xcrun stapler validate "$APP"
           spctl --assess --type execute --verbose=4 "$APP"
 
@@ -482,6 +494,11 @@ jobs:
               *"(runtime)"*) ;;
               *) echo "::error::the app does not have the hardened runtime enabled"; status=1 ;;
             esac
+            CLI_DETAILS="$(codesign -dv --verbose=4 "$APP/Contents/MacOS/glomeris" 2>&1 || true)"
+            case "$CLI_DETAILS" in
+              *"(runtime)"*) ;;
+              *) echo "::error::the embedded CLI does not have the hardened runtime enabled"; status=1 ;;
+            esac
             if ! xcrun stapler validate "$APP" >/dev/null 2>&1; then
               echo "::error::no valid notarization ticket is stapled to the app"
               status=1
@@ -505,6 +522,16 @@ jobs:
           echo "asset_name=$ASSET" >> "$GITHUB_ENV"
           cd build
           ditto -c -k --sequesterRsrc --keepParent GlomerisMenuBar.app "../$ASSET"
+          cd ..
+          if [ "$mode" = "signed" ]; then
+            # Assess the file that will actually be uploaded, not the directory
+            # it was zipped from.
+            CHECK_DIR="$RUNNER_TEMP/zip-check"
+            rm -rf "$CHECK_DIR" && mkdir -p "$CHECK_DIR"
+            ditto -x -k "$ASSET" "$CHECK_DIR"
+            xcrun stapler validate "$CHECK_DIR/GlomerisMenuBar.app"
+            spctl --assess --type execute "$CHECK_DIR/GlomerisMenuBar.app"
+          fi
 
       - name: Upload app bundle to the release
         env:
