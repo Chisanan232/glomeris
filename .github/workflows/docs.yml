@@ -69,9 +69,9 @@ jobs:
           set -euo pipefail
           CHECKER="$RUNNER_TEMP/public_surface.py"
           curl -fsSL \
-            https://raw.githubusercontent.com/horonomy/.github/76cde284d122b7f21deebb935c711dfbc0c61b41/scripts/public_surface.py \
+            https://raw.githubusercontent.com/horonomy/.github/6993774851f522936753a37a83e2fcea79275cd4/scripts/public_surface.py \
             -o "$CHECKER"
-          echo "ebac17496629b9de5bcd78f64b3ab835022d4f25d566ec1b89449f4f44d0f3bb  $CHECKER" \
+          echo "17784a480df51e8c2eef41a5299931951cec268e23fb4ec2a63c26486b58f433  $CHECKER" \
             | shasum -a 256 -c -
           python3 "$CHECKER" public-surface.json site
 
