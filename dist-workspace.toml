@@ -36,13 +36,21 @@ installers = ["homebrew"]
 # release run with a complete release attached to it and a tap formula still
 # pinned to the previous version, not a release that failed to appear.
 #
-# macos-app-release.yml is unaffected for the same reason: it triggers on
-# `release: published`, which fires when `host` creates the release, upstream of
-# this job.
+# macos-app-release.yml is unaffected: it is not part of this job graph. It does
+# not start automatically after dist publishes (GITHUB_TOKEN-created events do
+# not trigger workflows), so it is dispatched by hand once the release exists.
 tap = "Chisanan232/homebrew-tap"
 # Actually run the Homebrew publish job (pushes the generated formula to the
 # tap repo above) as part of releases, not just generate the formula file.
 publish-jobs = ["homebrew"]
+# HORO-1935: dist uploads into a DRAFT release that a human created first, then
+# undrafts it itself when the upload finishes. With this unset dist ran `gh
+# release create`, so the release was public the moment any tag built. If no
+# draft exists the host job fails, which is the safe direction: a bare tag push
+# publishes nothing. This is not a review gate after the build; the dry run in
+# docs/development/release-runbook.md is. A leftover draft WOULD be published by
+# the next tag push, so delete stale drafts.
+create-release = false
 # Target platforms to build apps for (Rust target-triple syntax).
 # macOS-only MVP (HORO-957): Apple Silicon is the primary target;
 # x86_64-apple-darwin cross-compiles cleanly from this toolchain and is
