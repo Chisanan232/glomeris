@@ -35,7 +35,7 @@ fn core_export_releases_source_access_without_native_exposure() {
     assert_eq!(record["producer"]["closed_consumers"], true);
     assert_eq!(record["read_claims"][0]["ended"], true);
     assert_eq!(record["read_claims"][0]["exported"], true);
-    assert_eq!(f.call(&["inspect"])[0]["eligible"], true);
+    assert_eq!(f.inspect()[0]["eligible"], true);
     let sweep = f.call(&["sweep", "--unattended"]);
     assert_eq!(sweep[0]["status"], "reclaimed");
     assert!(
@@ -75,12 +75,12 @@ fn export_refuses_overwrite_and_reconciles_ended_access_not_success() {
         fs::read_to_string(&destination).unwrap(),
         "unique user-created contents"
     );
-    assert_eq!(f.call(&["inspect"])[0]["eligible"], false);
+    assert_eq!(f.inspect()[0]["eligible"], false);
     f.call(&["reconcile"]);
     let record: Value = serde_json::from_slice(&fs::read(f.record(&r)).unwrap()).unwrap();
     assert_eq!(record["read_claims"][0]["ended"], true);
     assert_eq!(record["read_claims"][0]["exported"], false);
-    assert_eq!(f.call(&["inspect"])[0]["eligible"], true);
+    assert_eq!(f.inspect()[0]["eligible"], true);
 }
 
 #[test]
@@ -215,6 +215,36 @@ impl Fixture {
             String::from_utf8_lossy(&o.stderr)
         );
         serde_json::from_slice(&o.stdout).unwrap()
+    }
+    /// `resource inspect`, retried while the owner-liveness probe is inconclusive.
+    ///
+    /// HORO-2013. `inspect` shells out to `ps` and, by design (HORO-1914), reports
+    /// `UNKNOWN` and withholds eligibility when that probe fails, rather than
+    /// guessing the owner is gone. On a loaded host the probe can fail
+    /// transiently, which is the product behaving correctly, but the tests here
+    /// assert the settled lifecycle. Retry only that exact inconclusive case; a
+    /// persistent failure still reaches the caller's assertion unchanged.
+    fn inspect(&self) -> Value {
+        let mut last = self.call(&["inspect"]);
+        for _ in 0..10 {
+            let inconclusive = last.as_array().is_some_and(|rows| {
+                rows.iter().any(|r| {
+                    r["lifecycle"] == "UNKNOWN"
+                        && r["blockers"].as_array().is_some_and(|b| {
+                            b.iter().any(|m| {
+                                m.as_str()
+                                    .is_some_and(|s| s.contains("liveness could not be confirmed"))
+                            })
+                        })
+                })
+            });
+            if !inconclusive {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            last = self.call(&["inspect"]);
+        }
+        last
     }
     fn create(&self) -> Value {
         self.call(&[
@@ -481,7 +511,7 @@ fn two_hosts_live_idle_and_renewal_never_authorize_cleanup() {
         !seal.status.success(),
         "native exposure cannot renew closure proof"
     );
-    assert_ne!(f.call(&["inspect"])[0]["lifecycle"], "RECLAIMABLE");
+    assert_ne!(f.inspect()[0]["lifecycle"], "RECLAIMABLE");
     assert!(PathBuf::from(r["path"].as_str().unwrap()).exists());
 }
 #[test]
@@ -497,7 +527,7 @@ fn long_running_progress_and_silent_valid_owner_are_protected() {
         holder.op(json!({"op":"progress","sequence":1}))["status"],
         "ok"
     );
-    let v = f.call(&["inspect"]);
+    let v = f.inspect();
     assert_eq!(v[0]["lifecycle"], "ACTIVE");
     assert!(!v[0]["eligible"].as_bool().unwrap());
     assert_eq!(
@@ -520,7 +550,7 @@ fn stronger_stalled_health_is_diagnostic_not_termination() {
         h.op(json!({"op":"health","faults":["checkpoint_stale","dependency_failed"]}))["status"],
         "ok"
     );
-    assert_eq!(f.call(&["inspect"])[0]["lifecycle"], "STALLED");
+    assert_eq!(f.inspect()[0]["lifecycle"], "STALLED");
     assert_eq!(f.call(&["sweep", "--unattended"])[0]["status"], "preserved");
     h.release();
 }
@@ -609,7 +639,7 @@ fn exec_transition_preserves_same_process_generation() {
     rec["claims"][0]["holder"]["executable"] = json!("previous-image-before-exec");
     rec["claims"][0]["owner"]["executable"] = json!("previous-image-before-exec");
     fs::write(f.record(&r), rec.to_string()).unwrap();
-    let v = f.call(&["inspect"]);
+    let v = f.inspect();
     assert_eq!(v[0]["lifecycle"], "IDLE");
     assert!(!v[0]["eligible"].as_bool().unwrap());
     h.release();
@@ -792,7 +822,7 @@ fn producer_rejects_unretained_environment_dependency() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    let rows = f.call(&["inspect"]);
+    let rows = f.inspect();
     assert_ne!(rows[0]["lifecycle"], "RECLAIMABLE");
 }
 
@@ -868,7 +898,7 @@ fn exposure_before_production_cannot_restore_closed_consumer_authority() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(!f.call(&["inspect"])[0]["eligible"].as_bool().unwrap());
+    assert!(!f.inspect()[0]["eligible"].as_bool().unwrap());
 }
 
 #[test]
