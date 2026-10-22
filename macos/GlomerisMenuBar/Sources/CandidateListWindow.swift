@@ -35,23 +35,29 @@ enum CandidateListWindow {
         return (Array(items.prefix(bound)), items.count - bound)
     }
 
-    /// The limit after one "Show more", never past the number of rows.
+    /// The limit after one "Show more", never past the number of rows. Compares
+    /// before adding so a huge `limit` cannot overflow.
     static func expanded(from limit: Int, total: Int) -> Int {
-        min(max(limit, initialLimit) + step, max(total, initialLimit))
+        let base = max(limit, initialLimit)
+        let cap = max(total, initialLimit)
+        return base >= cap - step ? cap : base + step
     }
 
     /// One line counting the COMPLETE scan by safety class, e.g.
     /// "219 found: 2 safe to reclaim, 5 ask first, 134 protected, 78 not enough evidence".
-    /// Classes with no members are omitted. Counts come from the same
-    /// `keptToken` mapping the filter uses, so the summary and the filter
-    /// cannot disagree about what a class is.
+    /// Classes with no members are omitted, and any row whose label is not one
+    /// of the four known classes is counted as "other" rather than dropped from
+    /// the arithmetic. Each class is counted through `CandidateListShaping`, the
+    /// same code the filter menu uses, so the two cannot disagree.
     static func safetySummary(of candidates: [DetectCandidateReportDto]) -> String {
-        let parts: [String] = CandidateSafetyFilter.allCases.compactMap { filter in
-            guard let token = filter.keptToken else { return nil }
-            let count = candidates.filter { $0.policyLabel == token }.count
-            guard count > 0 else { return nil }
-            return "\(count) \(filter.summaryNoun)"
+        var counted = 0
+        var parts: [String] = []
+        for filter in CandidateSafetyFilter.allCases where filter.keptToken != nil {
+            let count = CandidateListShaping.shape(candidates, filter: filter, order: .recommended).count
+            counted += count
+            if count > 0 { parts.append("\(count) \(filter.summaryNoun)") }
         }
+        if candidates.count > counted { parts.append("\(candidates.count - counted) other") }
         let head = "\(candidates.count) found"
         return parts.isEmpty ? head : head + ": " + parts.joined(separator: ", ")
     }
@@ -90,7 +96,7 @@ struct CandidateShowMoreView: View {
                     .buttonStyle(.borderless)
                     .font(GlomerisDesign.captionFont)
                     .accessibilityLabel(
-                        "Show \(min(CandidateListWindow.step, hiddenCount)) more of \(hiddenCount) hidden candidates"
+                        "Show \(min(CandidateListWindow.step, hiddenCount)) more, \(hiddenCount) hidden in total"
                     )
             }
         }

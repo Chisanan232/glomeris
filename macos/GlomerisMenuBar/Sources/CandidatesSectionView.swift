@@ -519,9 +519,9 @@ struct CandidatesSectionView: View {
 
     /// HORO-2157: how many of the filtered, ordered rows are drawn. View-only
     /// presentation state; the scan itself is never trimmed. Reset whenever the
-    /// list it windows changes (filter, order, a new scan): `shownLimit` only
-    /// counts while `shownLimitKey` still matches `windowKey`, so no
-    /// `onChange` is needed.
+    /// list it windows changes. `shownLimit` only counts while `shownLimitKey`
+    /// matches `windowKey` (filter, order, scan time); any change of the key
+    /// falls back to the initial limit, so no `onChange` is needed.
     @State private var shownLimit = CandidateListWindow.initialLimit
     @State private var shownLimitKey = ""
 

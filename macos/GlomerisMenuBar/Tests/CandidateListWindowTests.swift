@@ -21,9 +21,9 @@ final class CandidateListWindowTests: XCTestCase {
             impactTier: nil,
             policyLabel: label,
             reasons: [],
-            executable: false,
+            executable: id % 3 == 0,
             offeredActions: [],
-            refusalReason: "no registered cleanup action for this resource kind"
+            refusalReason: id % 3 == 0 ? nil : "refusal-\(id)"
         )
     }
 
@@ -68,17 +68,39 @@ final class CandidateListWindowTests: XCTestCase {
 
     func testSummaryCountsTheCompleteScanBySafetyClass() {
         let text = CandidateListWindow.safetySummary(of: scan(219))
-        XCTAssertTrue(text.hasPrefix("219 found: "), text)
-        XCTAssertTrue(text.contains("protected"), text)
-        XCTAssertTrue(text.contains("not enough evidence"), text)
-        XCTAssertTrue(text.contains("ask first"), text)
-        XCTAssertTrue(text.contains("safe to reclaim"), text)
+        // 219 = 55 protected + 55 ask + 55 incomplete + 54 safe (labels cycle).
+        XCTAssertEqual(
+            text,
+            "219 found: 54 safe to reclaim, 55 ask first, 55 protected, 55 not enough evidence")
     }
 
     func testSummaryOmitsEmptyClassesAndHandlesEmptyScan() {
         let onlyProtected = (0..<3).map { candidate($0, label: "PROTECTED") }
         XCTAssertEqual(CandidateListWindow.safetySummary(of: onlyProtected), "3 found: 3 protected")
         XCTAssertEqual(CandidateListWindow.safetySummary(of: []), "0 found")
+    }
+
+    func testUnknownLabelsAreCountedAsOtherNotDropped() {
+        let mixed = scan(4) + [candidate(99, label: "SOMETHING_NEW")]
+        XCTAssertTrue(CandidateListWindow.safetySummary(of: mixed).hasSuffix(", 1 other"))
+    }
+
+    func testBoundariesAtTheInitialLimit() {
+        XCTAssertEqual(CandidateListWindow.window(scan(25), limit: 25).hiddenCount, 0)
+        XCTAssertEqual(CandidateListWindow.window(scan(26), limit: 25).hiddenCount, 1)
+        XCTAssertEqual(CandidateListWindow.expanded(from: -5, total: 100), 50)
+        XCTAssertEqual(CandidateListWindow.expanded(from: Int.max, total: 100), 100)
+    }
+
+    /// The load-bearing call site: the summary must count the whole scan, never
+    /// the filtered or windowed slice, and appears only past the initial limit.
+    func testViewSummarisesTheCompleteScanOnly() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/CandidatesSectionView.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("CandidateListWindow.safetySummary(of: scan.candidates)"))
+        XCTAssertTrue(source.contains("scan.candidates.count > CandidateListWindow.initialLimit"))
     }
 
     func testWindowingDoesNotChangeAnyRowsClassificationOrRefusal() {
@@ -89,10 +111,12 @@ final class CandidateListWindowTests: XCTestCase {
             XCTAssertEqual(a.executable, b.executable)
             XCTAssertEqual(a.refusalReason, b.refusalReason)
         }
+        XCTAssertTrue(shown.contains { $0.executable } && shown.contains { !$0.executable })
     }
 
-    /// The new file holds exactly one Button (Show more), and no cleanup,
-    /// execute or policy-label branching, so the list stays a read-only surface.
+    /// The new file holds exactly one Button (Show more; the sanctioned third
+    /// control next to the two pinned in CandidatesSectionView) and no cleanup or
+    /// execute path, so the list stays a read-only surface.
     func testShowMoreControlIsNotACleanupPath() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
@@ -100,7 +124,8 @@ final class CandidateListWindowTests: XCTestCase {
         let source = try String(contentsOf: url, encoding: .utf8)
             .split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
-        XCTAssertEqual(source.components(separatedBy: "Button(").count - 1, 1)
+        XCTAssertEqual(
+            (source.components(separatedBy: "Button(").count - 1) + (source.components(separatedBy: "Button {").count - 1), 1)
         for forbidden in ["execute", "\"Clean\"", "executable", ".disabled("] {
             XCTAssertFalse(source.contains(forbidden), "unexpected \(forbidden)")
         }
