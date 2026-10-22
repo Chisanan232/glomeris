@@ -517,6 +517,22 @@ struct CandidatesSectionView: View {
     /// drill-down is what decides that; see `OverviewState.swift`.
     @ObservedObject private var scan: ScanState
 
+    /// HORO-2157: how many of the filtered, ordered rows are drawn. View-only
+    /// presentation state; the scan itself is never trimmed. Reset whenever the
+    /// list it windows changes. `shownLimit` only counts while `shownLimitKey`
+    /// matches `windowKey` (filter, order, scan time); any change of the key
+    /// falls back to the initial limit, so no `onChange` is needed.
+    @State private var shownLimit = CandidateListWindow.initialLimit
+    @State private var shownLimitKey = ""
+
+    private var windowKey: String {
+        "\(scan.safetyFilter.rawValue)|\(scan.sortOrder.rawValue)|\(scan.lastScannedAt?.timeIntervalSince1970 ?? 0)"
+    }
+
+    private var effectiveLimit: Int {
+        shownLimitKey == windowKey ? shownLimit : CandidateListWindow.initialLimit
+    }
+
     /// HORO-1064/HORO-1357: what a row tap does — report the tapped
     /// resource upward, so the popover shell can show its detail view in
     /// place of this list.
@@ -778,11 +794,21 @@ struct CandidatesSectionView: View {
 
     @ViewBuilder
     private var rows: some View {
-        ForEach(Array(visibleCandidates.map(CandidateRowViewModel.init).enumerated()), id: \.element.id) { index, row in
+        let windowed = CandidateListWindow.window(visibleCandidates, limit: effectiveLimit)
+        if scan.candidates.count > CandidateListWindow.initialLimit {
+            Text(CandidateListWindow.safetySummary(of: scan.candidates))
+                .font(GlomerisDesign.captionFont)
+                .foregroundStyle(.secondary)
+        }
+        ForEach(Array(windowed.shown.map(CandidateRowViewModel.init).enumerated()), id: \.element.id) { index, row in
             if index > 0 {
                 Divider()
             }
             rowView(row)
+        }
+        CandidateShowMoreView(hiddenCount: windowed.hiddenCount) {
+            shownLimit = CandidateListWindow.expanded(from: effectiveLimit, total: visibleCandidates.count)
+            shownLimitKey = windowKey
         }
     }
 
