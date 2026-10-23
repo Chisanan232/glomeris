@@ -20,6 +20,7 @@ while IFS= read -r file; do
   [[ "$base" == "GlomerisQAFixtures.swift" ]] && continue
   awk -v f="$base" '
     /^[[:space:]]*#if[[:space:]]+DEBUG/ { depth++ ; next }
+    /^[[:space:]]*#(else|elseif)/ { if (depth > 0) depth-- ; next }
     /^[[:space:]]*#endif/ { if (depth > 0) depth-- ; next }
     /GlomerisQAFixtures\.(fixtureCLI|isActive|cliEnvironmentKey)/ {
       if (depth == 0) { printf "VIOLATION: %s:%d: seam used outside #if DEBUG: %s\n", f, NR, $0; bad = 1 }
@@ -41,15 +42,14 @@ if [[ $# -ge 1 ]]; then
   app="$1"
   exe="$app/Contents/MacOS/GlomerisMenuBar"
   [[ -f "$exe" ]] || { echo "ERROR: no executable at $exe"; exit 2; }
-  # Every Mach-O in the bundle's code directories, not just the main
+  # Every file in the bundle (code, Resources, plists), not just the main
   # executable: a Debug build keeps the app's code in GlomerisMenuBar.debug.dylib
   # beside a stub executable, so scanning only the stub proves nothing.
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' EXIT
   scanned=0
   while IFS= read -r -d '' bin; do
-    file -b "$bin" | grep -q 'Mach-O' || continue
-    scanned=$((scanned + 1))
+    if file -b "$bin" | grep -q 'Mach-O'; then scanned=$((scanned + 1)); fi
     # To a file first: `strings | grep -q` under pipefail reports "not found"
     # whenever grep exits early and strings dies of SIGPIPE, which is a silent
     # false PASS on exactly the binary this guard exists to catch.
@@ -59,7 +59,7 @@ if [[ $# -ge 1 ]]; then
         echo "VIOLATION: ${bin#"$app"/} contains '$m'"; fail=1
       fi
     done
-  done < <(find "$app/Contents/MacOS" "$app/Contents/Frameworks" -type f -print0 2>/dev/null)
+  done < <(find "$app" -type f -print0 2>/dev/null)
   if [[ $scanned -eq 0 ]]; then echo "ERROR: no Mach-O files found under $app"; exit 2; fi
   echo "binary check: scanned $scanned Mach-O file(s) in $app"
 fi

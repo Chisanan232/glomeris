@@ -165,6 +165,15 @@ final class GlomerisGoldenJourneyUITests: XCTestCase {
         return CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque(raw).takeUnretainedValue())
     }
 
+    /// Click near the top of a list to focus it, only inside this app's own windows.
+    private func tapTop(_ e: XCUIElement) {
+        let f = e.frame
+        let owned = app.windows.allElementsBoundByIndex.contains { $0.frame.contains(CGPoint(x: f.midX, y: f.minY + f.height * 0.08)) }
+        XCTAssertTrue(owned, "refusing a coordinate click outside this app's windows")
+        guard owned else { return }
+        e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).click()
+    }
+
     /// Static text found by its displayed string (SwiftUI exposes it as the value).
     private func staticText(value: String) -> XCUIElement {
         app.staticTexts.matching(NSPredicate(format: "value == %@", value)).firstMatch
@@ -173,7 +182,15 @@ final class GlomerisGoldenJourneyUITests: XCTestCase {
     /// Click an element even when AX reports it "not hittable" (measured on a
     /// window placed on a secondary display): fall back to its centre point.
     private func tap(_ e: XCUIElement) {
-        if e.isHittable { e.click() } else { e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click() }
+        if e.isHittable { e.click(); return }
+        // A coordinate click lands on whatever is on screen there, so only do it
+        // when the element lies inside one of this app's own windows or dialogs.
+        let frame = e.frame
+        let owned = (app.windows.allElementsBoundByIndex + app.dialogs.allElementsBoundByIndex)
+            .contains { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }
+        XCTAssertTrue(owned, "refusing a coordinate click outside this app's windows: \(e)")
+        guard owned else { return }
+        e.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
     }
 
     /// SwiftUI `Text` exposes its string as the element's value, not its label.
@@ -225,7 +242,7 @@ final class GlomerisGoldenJourneyUITests: XCTestCase {
         appears(list, "candidate list")
         // Focus the list by clicking near its top (that selects a row, so the
         // placeholder is checked before this click), then use only the keyboard.
-        list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).click()
+        tapTop(list)
         app.typeKey(.downArrow, modifierFlags: [])
         appears(element("glomeris.browser.detail"), "detail pane after Down arrow")
         XCTAssertFalse(element("glomeris.browser.placeholder.none").exists)
@@ -298,7 +315,7 @@ final class GlomerisGoldenJourneyUITests: XCTestCase {
             inputSourceIsASCIICapable,
             "Cmd+W cannot be synthesised under this non-ASCII input source; verify the shortcut by hand")
         try openWindow(count: 25)
-        element("glomeris.browser.list").coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).click()
+        tapTop(element("glomeris.browser.list"))
         app.typeKey("w", modifierFlags: .command)
         disappears(element("glomeris.browser.root"), "window after Cmd+W")
     }
@@ -309,6 +326,10 @@ final class GlomerisGoldenJourneyUITests: XCTestCase {
         try launch(count: n)
         openPopover()
         refresh()
+        // Wait for the scan to finish (it stamps "scanned <time>") before asserting
+        // absence, so the n == 0 case cannot pass while the scan is still running.
+        let finished = app.staticTexts.matching(NSPredicate(format: "value BEGINSWITH 'scanned'")).firstMatch
+        appears(finished, "scan completion", timeout: 60)
         if n == 0 {
             XCTAssertFalse(element("glomeris.candidates.summary").exists)
             XCTAssertFalse(element("glomeris.candidates.viewAll").exists)
