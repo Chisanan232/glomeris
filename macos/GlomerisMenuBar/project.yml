@@ -163,6 +163,7 @@ targets:
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateListWindow.swift
       - path: Sources/CandidateListStateMessage.swift
+      - path: Sources/CandidateSelection.swift
       - path: Sources/CandidateDetailView.swift
       - path: Sources/HistoryAuditSectionView.swift
       - path: Sources/AiPlanSectionView.swift
