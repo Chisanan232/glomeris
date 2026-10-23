@@ -255,7 +255,9 @@ final class CandidateBrowserNSWindow: NSWindow {
     /// (Dvorak keeps "w" where it is); only a non-ASCII one falls back to the
     /// physical W key.
     static func isCloseShortcut(_ event: NSEvent) -> Bool {
-        guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return false }
+        // Only the modifiers the user chose count: Caps Lock is a state, not a chord.
+        let chosen: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+        guard event.modifierFlags.intersection(chosen) == .command else { return false }
         let character = event.charactersIgnoringModifiers ?? ""
         if character.unicodeScalars.count == 1, character.unicodeScalars.allSatisfy(\.isASCII) {
             return character == "w"

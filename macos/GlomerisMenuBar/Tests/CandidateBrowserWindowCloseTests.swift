@@ -75,6 +75,14 @@ final class CandidateBrowserWindowCloseTests: XCTestCase {
         XCTAssertEqual(closeRequests(for: try keyDown("w", keyCode: 13, flags: [.command, .option])).requests, 0)
     }
 
+    func testCapsLockDoesNotDisableCmdW() throws {
+        // Caps Lock and the numeric-pad/function state bits are not chosen modifiers.
+        XCTAssertEqual(closeRequests(for: try keyDown("w", keyCode: 13, flags: [.command, .capsLock])).requests, 1)
+        XCTAssertEqual(closeRequests(for: try keyDown("ㄊ", keyCode: 13, flags: [.command, .capsLock])).requests, 1)
+        // ...but a chosen extra modifier still disqualifies it.
+        XCTAssertEqual(closeRequests(for: try keyDown("w", keyCode: 13, flags: [.command, .capsLock, .shift])).requests, 0)
+    }
+
     func testAnAsciiLayoutWhereWIsElsewhereIsNotConfusedWithTheKeyCode() throws {
         // Dvorak: the physical key at code 13 types ",", and "w" lives at code 43.
         XCTAssertEqual(closeRequests(for: try keyDown(",", keyCode: 13)).requests, 0)
