@@ -146,10 +146,12 @@ final class GlomerisGoldenJourneyUITests: XCTestCase {
         XCTAssertTrue(window.waitForExistence(timeout: 10), "no candidates window to close")
         let close = window.buttons[XCUIIdentifierCloseWindow]
         close.click()
-        // With uncommitted input-method text in the search field, the first click
-        // can be spent ending that composition. Report it rather than hide it.
+        // Measured (HORO-2176): when the status-item popover was reopened while
+        // this window was open, the first click on the close button only dismisses
+        // that transient popover. It is not caused by search text or an input
+        // method (no-popover controls close on the first click). Report it.
         if element("glomeris.browser.root").waitForNonExistence(timeout: 3) == false {
-            print("NOTE closeBrowserWindow: window still open after the first click; clicking again")
+            print("NOTE closeBrowserWindow: window still open after the first click (transient popover dismissal); clicking again")
             window.buttons[XCUIIdentifierCloseWindow].click()
         }
     }

@@ -246,10 +246,27 @@ struct CandidateBrowserView: View {
 /// with no menu bar of its own, so the standard Close shortcut has nothing to
 /// land on unless the window answers it itself.
 final class CandidateBrowserNSWindow: NSWindow {
+    /// Key code of the physical W key on an ANSI keyboard.
+    private static let physicalWKeyCode: UInt16 = 13
+
+    /// Under a non-ASCII input source (Zhuyin, Cyrillic, ...) the event's
+    /// character is that script's letter, not "w", so the character alone would
+    /// drop the shortcut for those users. An ASCII character is trusted as is
+    /// (Dvorak keeps "w" where it is); only a non-ASCII one falls back to the
+    /// physical W key.
+    static func isCloseShortcut(_ event: NSEvent) -> Bool {
+        // Only the modifiers the user chose count: Caps Lock is a state, not a chord.
+        let chosen: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+        guard event.modifierFlags.intersection(chosen) == .command else { return false }
+        let character = event.charactersIgnoringModifiers ?? ""
+        if character.unicodeScalars.count == 1, character.unicodeScalars.allSatisfy(\.isASCII) {
+            return character == "w"
+        }
+        return event.keyCode == physicalWKeyCode
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-            event.charactersIgnoringModifiers == "w"
-        {
+        if Self.isCloseShortcut(event) {
             performClose(nil)
             return true
         }
