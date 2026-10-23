@@ -86,8 +86,14 @@ final class CandidateListWindowTests: XCTestCase {
             .appendingPathComponent("Sources/CandidatesSectionView.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(source.contains("CandidateListWindow.safetySummary(of: scan.candidates)"))
-        XCTAssertTrue(source.contains("scan.candidates.count > CandidateListWindow.previewLimit"))
+        XCTAssertTrue(source.contains("CandidateListWindow.showsViewAll(candidateCount: scan.candidates.count)"))
         XCTAssertFalse(source.contains("Show more"), "the popover list no longer grows")
+    }
+
+    func testViewAllIsOfferedOnlyPastThePreview() {
+        for (n, expected) in [(0, false), (1, false), (5, false), (6, true), (219, true), (5_000, true)] {
+            XCTAssertEqual(CandidateListWindow.showsViewAll(candidateCount: n), expected, "n=\(n)")
+        }
     }
 
     func testWindowingDoesNotChangeAnyRowsClassificationOrRefusal() {

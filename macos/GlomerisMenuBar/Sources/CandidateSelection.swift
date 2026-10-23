@@ -30,6 +30,15 @@ enum CandidateBrowserRows {
     }
 }
 
+extension CandidateBrowserRows {
+    /// True only when the scan has candidates and the search leaves none of them
+    /// showing. An empty scan (never scanned, scanning, failed, nothing found) is
+    /// a different situation with its own wording and must not borrow this one.
+    static func searchHidesEverything(totalCandidates: Int, shownCount: Int) -> Bool {
+        totalCandidates > 0 && shownCount == 0
+    }
+}
+
 enum CandidateSelection {
     enum Outcome: Equatable {
         /// Nothing was selected.

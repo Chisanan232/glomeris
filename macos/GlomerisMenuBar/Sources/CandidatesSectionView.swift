@@ -754,7 +754,7 @@ struct CandidatesSectionView: View {
             }
             rowView(row)
         }
-        if scan.candidates.count > CandidateListWindow.previewLimit {
+        if CandidateListWindow.showsViewAll(candidateCount: scan.candidates.count) {
             CandidateViewAllView(
                 total: scan.candidates.count, hiddenCount: windowed.hiddenCount, onViewAll: onViewAll)
         }

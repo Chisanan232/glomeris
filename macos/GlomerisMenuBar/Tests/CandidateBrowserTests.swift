@@ -77,6 +77,12 @@ final class CandidateBrowserTests: XCTestCase {
             CandidateBrowserRows.rows(items, filter: .all, order: .path, search: "very-long").first?.resourceId, long)
     }
 
+    func testSearchMessageIsOnlyForANonEmptyScanWithNothingShown() {
+        XCTAssertTrue(CandidateBrowserRows.searchHidesEverything(totalCandidates: 10, shownCount: 0))
+        XCTAssertFalse(CandidateBrowserRows.searchHidesEverything(totalCandidates: 0, shownCount: 0), "failed/empty scan")
+        XCTAssertFalse(CandidateBrowserRows.searchHidesEverything(totalCandidates: 10, shownCount: 3))
+    }
+
     // MARK: - Selection
 
     func testNoSelection() {

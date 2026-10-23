@@ -36,6 +36,12 @@ enum CandidateListWindow {
         return (Array(items.prefix(bound)), items.count - bound)
     }
 
+    /// Whether the popover offers "View all": only when the scan has more
+    /// candidates than the preview shows.
+    static func showsViewAll(candidateCount: Int) -> Bool {
+        candidateCount > previewLimit
+    }
+
     /// One line counting the COMPLETE scan by safety class, e.g.
     /// "219 found: 2 safe to reclaim, 5 ask first, 134 protected, 78 not enough evidence".
     /// Classes with no members are omitted, and any row whose label is not one

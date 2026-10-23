@@ -122,7 +122,7 @@ struct CandidateBrowserView: View {
         )
         Group {
             if shown.isEmpty {
-                emptyState
+                emptyState(shownCount: shown.count)
             } else {
                 List(selection: binding) {
                     ForEach(shown) { candidate in
@@ -158,11 +158,12 @@ struct CandidateBrowserView: View {
     }
 
     @ViewBuilder
-    private var emptyState: some View {
+    private func emptyState(shownCount: Int) -> some View {
         if let message = CandidateListStateMessage.message(for: scan) {
             GlomerisStateMessageView(message: message).padding(GlomerisDesign.outerPadding)
-        } else {
-            // Rows exist in the scan but search hides every one of them.
+        } else if CandidateBrowserRows.searchHidesEverything(
+            totalCandidates: scan.candidates.count, shownCount: shownCount)
+        {
             GlomerisStateMessageView(
                 message: .filteredOut(
                     "No candidates match this search",
@@ -170,6 +171,8 @@ struct CandidateBrowserView: View {
                 )
             ).padding(GlomerisDesign.outerPadding)
         }
+        // Otherwise (a failed scan with no rows) the summary bar above already
+        // carries the failure, and saying anything more here would contradict it.
     }
 
     private func row(_ candidate: DetectCandidateReportDto) -> some View {
