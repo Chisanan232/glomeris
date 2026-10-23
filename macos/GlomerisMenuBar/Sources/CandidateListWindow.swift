@@ -75,6 +75,11 @@ extension CandidateSafetyFilter {
 /// list has no cleanup control" stays mechanical. This control only opens the
 /// candidates window; it runs and authorises nothing.
 struct CandidateViewAllView: View {
+    /// What VoiceOver reads for the control.
+    static func accessibilityLabel(total: Int) -> String {
+        "View all \(total) \(total == 1 ? "candidate" : "candidates") in a window"
+    }
+
     let total: Int
     let hiddenCount: Int
     let onViewAll: () -> Void
@@ -90,7 +95,7 @@ struct CandidateViewAllView: View {
             Button("View all \(total)", action: onViewAll)
                 .buttonStyle(.borderless)
                 .font(GlomerisDesign.captionFont)
-                .accessibilityLabel("View all \(total) candidates in a window")
+                .accessibilityLabel(Self.accessibilityLabel(total: total))
                 .accessibilityHint("Opens the full list with search, filter and details")
         }
     }

@@ -119,6 +119,7 @@
 		BC822B8BD45C6AB26F4F7806 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		BE11AF504111C29A277E925E /* CandidatesSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DCE0D8BAF4CB001ABD98651 /* CandidatesSectionViewTests.swift */; };
 		BF001D547BEE2CD0220063CD /* TestUserDefaultsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA61784D28A6235DDA429D45 /* TestUserDefaultsTests.swift */; };
+		C48F2FBA5DEE677CCC500588 /* CandidateBrowserLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E967A5092AFA3EA572259CD /* CandidateBrowserLayoutTests.swift */; };
 		C49D0E67DB2391025B3E7064 /* GlomerisClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E9A9B369FF29B89DBF7F2098 /* GlomerisClient.swift */; };
 		C4D9D4A87E0AFEE0101F6942 /* GlomerisUsedPercent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5127AF8E4739C87C293FDDF9 /* GlomerisUsedPercent.swift */; };
 		C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */; };
@@ -194,6 +195,7 @@
 		36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiPlanSectionViewTests.swift; sourceTree = "<group>"; };
 		3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateActionabilityTests.swift; sourceTree = "<group>"; };
 		3E802DFA3BA87D2852D8F475 /* PressureNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PressureNotification.swift; sourceTree = "<group>"; };
+		3E967A5092AFA3EA572259CD /* CandidateBrowserLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateBrowserLayoutTests.swift; sourceTree = "<group>"; };
 		3F64EDD803CBF517A519597B /* BundleIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleIdentity.swift; sourceTree = "<group>"; };
 		47250A5B4D152C9EE65C9F49 /* GlomerisClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisClientTests.swift; sourceTree = "<group>"; };
 		47F17252EA69F82335F1A1E6 /* GlomerisCliProjectRootScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisCliProjectRootScopeTests.swift; sourceTree = "<group>"; };
@@ -367,6 +369,7 @@
 				D858925711701E78306BC04E /* AutopilotSectionViewTests.swift */,
 				67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */,
 				3A53644BB794034A97C1F10C /* CandidateActionabilityTests.swift */,
+				3E967A5092AFA3EA572259CD /* CandidateBrowserLayoutTests.swift */,
 				853107CA3C6F000C7925FB0C /* CandidateBrowserTests.swift */,
 				AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */,
 				EE3CF0E4AFC63C4F8CAE6F93 /* CandidateListWindowTests.swift */,
@@ -524,6 +527,7 @@
 				7B6DDC175DFBFBB860E5CBA5 /* BundleIdentityTests.swift in Sources */,
 				B67B4B02F9A450278A3D05E3 /* CandidateActionability.swift in Sources */,
 				C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */,
+				C48F2FBA5DEE677CCC500588 /* CandidateBrowserLayoutTests.swift in Sources */,
 				AB9ED8A9D8EF292AF1A91C9F /* CandidateBrowserTests.swift in Sources */,
 				84CC1BEA8241893801F330B5 /* CandidateBrowserWindow.swift in Sources */,
 				D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */,
