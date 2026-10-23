@@ -1097,7 +1097,11 @@ final class CandidatesSectionViewTests: XCTestCase {
     /// sheet where `executable` is read directly.
     func testTheRowBadgeAddsNoEnablementDecision() throws {
         let source = Self.strippedOfComments(try Self.readSource("CandidatesSectionView.swift"))
-        XCTAssertTrue(source.contains("GlomerisBadgeView(term: actionabilityTerm)"))
+        // HORO-2173: the row's content moved to CandidateRowLabel, which both
+        // the popover and the candidates window render.
+        let labelSource = Self.strippedOfComments(try Self.readSource("CandidateListStateMessage.swift"))
+        XCTAssertTrue(labelSource.contains("GlomerisBadgeView(term: actionabilityTerm)"))
+        XCTAssertFalse(labelSource.contains(".disabled("), "the shared row label must gain no enablement decision")
 
         let disabledModifiers = source.components(separatedBy: ".disabled(").dropFirst()
         XCTAssertEqual(disabledModifiers.count, 1, "a new .disabled appeared in the candidate list")

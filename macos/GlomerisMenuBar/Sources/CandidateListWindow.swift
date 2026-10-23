@@ -2,7 +2,10 @@
 //  CandidateListWindow.swift
 //  GlomerisMenuBar
 //
-//  HORO-2157: a bounded initial presentation for the candidates card.
+//  HORO-2157: a bounded presentation for the candidates card. HORO-2173 made
+//  the bound final: the popover shows a safety summary and a short preview, and
+//  "View all" opens the candidates window for the rest, so the popover no longer
+//  grows with the number of candidates at all.
 //
 //  A scan on a machine with a busy Docker daemon reports hundreds of
 //  candidates (219 in the rc.1 acceptance run), and the card used to render
@@ -21,26 +24,22 @@
 import SwiftUI
 
 enum CandidateListWindow {
-    /// Rows drawn before the user asks for more.
-    static let initialLimit = 25
-    /// Rows added by each "Show more".
-    static let step = 25
+    /// Rows the popover card draws, however many candidates a scan found.
+    static let previewLimit = 5
 
     /// The prefix of `items` that fits in `limit`, and how many were left out.
-    /// A non-positive limit is treated as the initial limit rather than
-    /// hiding everything.
+    /// A non-positive limit is treated as the preview limit rather than hiding
+    /// everything.
     static func window<T>(_ items: [T], limit: Int) -> (shown: [T], hiddenCount: Int) {
-        let bound = limit > 0 ? limit : initialLimit
+        let bound = limit > 0 ? limit : previewLimit
         guard items.count > bound else { return (items, 0) }
         return (Array(items.prefix(bound)), items.count - bound)
     }
 
-    /// The limit after one "Show more", never past the number of rows. Compares
-    /// before adding so a huge `limit` cannot overflow.
-    static func expanded(from limit: Int, total: Int) -> Int {
-        let base = max(limit, initialLimit)
-        let cap = max(total, initialLimit)
-        return base >= cap - step ? cap : base + step
+    /// Whether the popover offers "View all": only when the scan has more
+    /// candidates than the preview shows.
+    static func showsViewAll(candidateCount: Int) -> Bool {
+        candidateCount > previewLimit
     }
 
     /// One line counting the COMPLETE scan by safety class, e.g.
@@ -76,29 +75,34 @@ extension CandidateSafetyFilter {
     }
 }
 
-/// The "N hidden" line and its single "Show more" control. Kept out of
+/// The "N more" line and its single "View all" control. Kept out of
 /// `CandidatesSectionView.swift` on purpose: that file's source is pinned to
 /// exactly two `Button` constructions (Refresh and the row tap) so that "the
-/// list has no cleanup control" stays mechanical. This control only widens
-/// how many rows are drawn.
-struct CandidateShowMoreView: View {
+/// list has no cleanup control" stays mechanical. This control only opens the
+/// candidates window; it runs and authorises nothing.
+struct CandidateViewAllView: View {
+    /// What VoiceOver reads for the control.
+    static func accessibilityLabel(total: Int) -> String {
+        "View all \(total) \(total == 1 ? "candidate" : "candidates") in a window"
+    }
+
+    let total: Int
     let hiddenCount: Int
-    let onShowMore: () -> Void
+    let onViewAll: () -> Void
 
     var body: some View {
-        if hiddenCount > 0 {
-            HStack {
-                Text("\(hiddenCount) more hidden")
+        HStack {
+            if hiddenCount > 0 {
+                Text("\(hiddenCount) more not shown here")
                     .font(GlomerisDesign.captionFont)
                     .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                Button("Show more", action: onShowMore)
-                    .buttonStyle(.borderless)
-                    .font(GlomerisDesign.captionFont)
-                    .accessibilityLabel(
-                        "Show \(min(CandidateListWindow.step, hiddenCount)) more, \(hiddenCount) hidden in total"
-                    )
             }
+            Spacer(minLength: 0)
+            Button("View all \(total)", action: onViewAll)
+                .buttonStyle(.borderless)
+                .font(GlomerisDesign.captionFont)
+                .accessibilityLabel(Self.accessibilityLabel(total: total))
+                .accessibilityHint("Opens the full list with search, filter and details")
         }
     }
 }

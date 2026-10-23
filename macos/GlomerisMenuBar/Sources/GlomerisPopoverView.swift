@@ -116,6 +116,10 @@ struct GlomerisPopoverView: View {
     /// else in it is a report the CLI produced.
     @StateObject private var recovery = RecoveryState()
 
+    /// HORO-2173: the candidates window. Owned here, beside the scan it shows,
+    /// and handed that same scan on every open.
+    @StateObject private var candidateBrowser = CandidateBrowserWindowPresenter()
+
     /// The panel is one level deep: the overview, or one candidate's detail.
     ///
     /// This one IS `@State`, and correctly so: which candidate the user is
@@ -285,7 +289,11 @@ struct GlomerisPopoverView: View {
                     scan: scan,
                     client: client,
                     projectRootsStore: projectRootsStore,
-                    onOpenDetail: { navigation.open($0) }
+                    onOpenDetail: { navigation.open($0) },
+                    onViewAll: {
+                        candidateBrowser.open(
+                            scan: scan, client: client, projectRootsStore: projectRootsStore)
+                    }
                 )
                 // HORO-1511, directly under the list it reorganises: it answers
                 // "what does this belong to" about the rows immediately above,
