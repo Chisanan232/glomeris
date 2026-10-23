@@ -276,6 +276,12 @@ struct GlomerisClient {
         if let pinnedExecutableURL {
             return pinnedExecutableURL
         }
+        // HORO-2176: DEBUG-only DEV-QA seam; compiled out of Release builds.
+        #if DEBUG
+        if let fixture = GlomerisQAFixtures.fixtureCLI() {
+            return fixture
+        }
+        #endif
         guard let located = locator.locate() else {
             throw GlomerisClientError.executableNotFound(searched: locator.searchedLocations)
         }

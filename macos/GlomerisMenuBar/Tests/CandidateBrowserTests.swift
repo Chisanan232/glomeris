@@ -47,6 +47,20 @@ final class CandidateBrowserTests: XCTestCase {
         XCTAssertTrue(protected.allSatisfy { $0.policyLabel == "PROTECTED" })
     }
 
+    func testSearchIsWidthInsensitiveSoFullWidthInputFindsTheSameRows() {
+        let items = [
+            candidate(0, label: "ASK", id: "devqa-synthetic:docker_image:00001", kind: "docker_image"),
+            candidate(1, label: "ASK", id: "devqa-synthetic:docker_image:00002", kind: "docker_image"),
+        ]
+        func ids(_ q: String) -> [String] {
+            CandidateBrowserRows.rows(items, filter: .all, order: .recommended, search: q).map(\.resourceId)
+        }
+        XCTAssertEqual(ids("００００１"), ["devqa-synthetic:docker_image:00001"], "full-width digits")
+        XCTAssertEqual(ids("ＤＯＣＫＥＲ"), items.map(\.resourceId), "full-width, upper-case letters")
+        XCTAssertEqual(ids("\u{3000}００００２\u{3000}"), ["devqa-synthetic:docker_image:00002"], "ideographic space trimmed")
+        XCTAssertEqual(ids("００００９"), [], "still a real filter")
+    }
+
     func testSearchMatchesPathAndKindCaseInsensitivelyAndTrims() {
         let items = [
             candidate(0, label: "ASK", id: "/Users/dev/Projects/Alpha/target", kind: "cargo_target_dir"),

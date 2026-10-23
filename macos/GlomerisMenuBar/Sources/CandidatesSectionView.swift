@@ -638,6 +638,7 @@ struct CandidatesSectionView: View {
                 Task { await runDetect() }
             }
             .disabled(scan.isScanning)
+            .accessibilityIdentifier("glomeris.candidates.refresh")
 
             Text(lastScannedText)
                 .font(GlomerisDesign.captionFont)
@@ -747,12 +748,14 @@ struct CandidatesSectionView: View {
             Text(CandidateListWindow.safetySummary(of: scan.candidates))
                 .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.secondary)
+                .accessibilityIdentifier("glomeris.candidates.summary")
         }
         ForEach(Array(windowed.shown.map(CandidateRowViewModel.init).enumerated()), id: \.element.id) { index, row in
             if index > 0 {
                 Divider()
             }
             rowView(row)
+                .accessibilityIdentifier("glomeris.candidates.preview.row.\(index)")
         }
         if CandidateListWindow.showsViewAll(candidateCount: scan.candidates.count) {
             CandidateViewAllView(

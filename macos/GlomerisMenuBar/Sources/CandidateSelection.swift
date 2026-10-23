@@ -11,9 +11,13 @@ import Foundation
 
 enum CandidateBrowserRows {
     /// The window's rows: the shared filter and order, then an optional search.
-    /// Search is a case-insensitive substring match on the resource id (the
-    /// path) and the kind token. It only hides rows from this list; a hidden row
-    /// is still in the scan and still counted in the summary.
+    /// Search is a case- and width-insensitive substring match on the resource id
+    /// (the path) and the kind token. Width-insensitive because an input method
+    /// that types full-width digits and letters ("００００１", measured with a
+    /// Japanese-style input source in the HORO-2176 UI run) must find the same
+    /// rows as the half-width characters it stands for. It only hides rows from
+    /// this list; a hidden row is still in the scan and still counted in the
+    /// summary.
     static func rows(
         _ candidates: [DetectCandidateReportDto],
         filter: CandidateSafetyFilter,
@@ -23,10 +27,11 @@ enum CandidateBrowserRows {
         let shaped = CandidateListShaping.shape(candidates, filter: filter, order: order)
         let needle = search.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return shaped }
-        return shaped.filter {
-            $0.resourceId.localizedCaseInsensitiveContains(needle)
-                || $0.kind.localizedCaseInsensitiveContains(needle)
-        }
+        return shaped.filter { matches($0.resourceId, needle) || matches($0.kind, needle) }
+    }
+
+    private static func matches(_ text: String, _ needle: String) -> Bool {
+        text.range(of: needle, options: [.caseInsensitive, .widthInsensitive]) != nil
     }
 }
 
