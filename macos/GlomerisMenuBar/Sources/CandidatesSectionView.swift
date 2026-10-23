@@ -517,21 +517,9 @@ struct CandidatesSectionView: View {
     /// drill-down is what decides that; see `OverviewState.swift`.
     @ObservedObject private var scan: ScanState
 
-    /// HORO-2157: how many of the filtered, ordered rows are drawn. View-only
-    /// presentation state; the scan itself is never trimmed. Reset whenever the
-    /// list it windows changes. `shownLimit` only counts while `shownLimitKey`
-    /// matches `windowKey` (filter, order, scan time); any change of the key
-    /// falls back to the initial limit, so no `onChange` is needed.
-    @State private var shownLimit = CandidateListWindow.initialLimit
-    @State private var shownLimitKey = ""
-
-    private var windowKey: String {
-        "\(scan.safetyFilter.rawValue)|\(scan.sortOrder.rawValue)|\(scan.lastScannedAt?.timeIntervalSince1970 ?? 0)"
-    }
-
-    private var effectiveLimit: Int {
-        shownLimitKey == windowKey ? shownLimit : CandidateListWindow.initialLimit
-    }
+    /// HORO-2173: opens the candidates window. Like `onOpenDetail`, this only
+    /// reports upward; the popover shell owns the window.
+    private let onViewAll: () -> Void
 
     /// HORO-1064/HORO-1357: what a row tap does — report the tapped
     /// resource upward, so the popover shell can show its detail view in
@@ -558,12 +546,14 @@ struct CandidatesSectionView: View {
         scan: ScanState,
         client: GlomerisClient = GlomerisClient(),
         projectRootsStore: ProjectRootsStore = ProjectRootsStore(),
-        onOpenDetail: @escaping (String) -> Void = { _ in }
+        onOpenDetail: @escaping (String) -> Void = { _ in },
+        onViewAll: @escaping () -> Void = {}
     ) {
         self.scan = scan
         self.client = client
         self.projectRootsStore = projectRootsStore
         self.onOpenDetail = onOpenDetail
+        self.onViewAll = onViewAll
     }
 
     var body: some View {
@@ -749,8 +739,11 @@ struct CandidatesSectionView: View {
 
     @ViewBuilder
     private var rows: some View {
-        let windowed = CandidateListWindow.window(visibleCandidates, limit: effectiveLimit)
-        if scan.candidates.count > CandidateListWindow.initialLimit {
+        // HORO-2173: a fixed-size preview. The summary counts the complete scan
+        // (never the preview slice), so a hidden row cannot hide a "Protected"
+        // or "Not enough evidence" classification; the rest is in the window.
+        let windowed = CandidateListWindow.window(visibleCandidates, limit: CandidateListWindow.previewLimit)
+        if !scan.candidates.isEmpty {
             Text(CandidateListWindow.safetySummary(of: scan.candidates))
                 .font(GlomerisDesign.captionFont)
                 .foregroundStyle(.secondary)
@@ -761,9 +754,9 @@ struct CandidatesSectionView: View {
             }
             rowView(row)
         }
-        CandidateShowMoreView(hiddenCount: windowed.hiddenCount) {
-            shownLimit = CandidateListWindow.expanded(from: effectiveLimit, total: visibleCandidates.count)
-            shownLimitKey = windowKey
+        if scan.candidates.count > CandidateListWindow.previewLimit {
+            CandidateViewAllView(
+                total: scan.candidates.count, hiddenCount: windowed.hiddenCount, onViewAll: onViewAll)
         }
     }
 

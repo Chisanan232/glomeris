@@ -33,38 +33,25 @@ final class CandidateListWindowTests: XCTestCase {
     }
 
     func testSmallListIsShownWhole() {
-        let items = scan(10)
-        let w = CandidateListWindow.window(items, limit: CandidateListWindow.initialLimit)
+        let items = scan(4)
+        let w = CandidateListWindow.window(items, limit: CandidateListWindow.previewLimit)
         XCTAssertEqual(w.shown, items)
         XCTAssertEqual(w.hiddenCount, 0)
     }
 
     func testLargeListIsBoundedAndKeepsOrder() {
         let items = scan(219)
-        let w = CandidateListWindow.window(items, limit: CandidateListWindow.initialLimit)
-        XCTAssertEqual(w.shown.count, 25)
-        XCTAssertEqual(w.hiddenCount, 194)
-        XCTAssertEqual(w.shown, Array(items.prefix(25)), "windowing must keep the CLI's order")
+        let w = CandidateListWindow.window(items, limit: CandidateListWindow.previewLimit)
+        XCTAssertEqual(w.shown.count, 5)
+        XCTAssertEqual(w.hiddenCount, 214)
+        XCTAssertEqual(w.shown, Array(items.prefix(5)), "windowing must keep the CLI's order")
     }
 
     func testNonPositiveLimitFallsBackToTheInitialLimit() {
-        XCTAssertEqual(CandidateListWindow.window(scan(100), limit: 0).shown.count, 25)
+        XCTAssertEqual(CandidateListWindow.window(scan(100), limit: 0).shown.count, 5)
     }
 
-    func testShowMoreGrowsByStepAndNeverPastTheTotal() {
-        XCTAssertEqual(CandidateListWindow.expanded(from: 25, total: 219), 50)
-        XCTAssertEqual(CandidateListWindow.expanded(from: 200, total: 219), 219)
-        XCTAssertEqual(CandidateListWindow.expanded(from: 25, total: 30), 30)
-    }
 
-    func testRepeatedShowMoreEventuallyShowsEveryRow() {
-        let items = scan(219)
-        var limit = CandidateListWindow.initialLimit
-        for _ in 0..<20 { limit = CandidateListWindow.expanded(from: limit, total: items.count) }
-        let w = CandidateListWindow.window(items, limit: limit)
-        XCTAssertEqual(w.shown, items)
-        XCTAssertEqual(w.hiddenCount, 0)
-    }
 
     func testSummaryCountsTheCompleteScanBySafetyClass() {
         let text = CandidateListWindow.safetySummary(of: scan(219))
@@ -86,10 +73,9 @@ final class CandidateListWindowTests: XCTestCase {
     }
 
     func testBoundariesAtTheInitialLimit() {
-        XCTAssertEqual(CandidateListWindow.window(scan(25), limit: 25).hiddenCount, 0)
-        XCTAssertEqual(CandidateListWindow.window(scan(26), limit: 25).hiddenCount, 1)
-        XCTAssertEqual(CandidateListWindow.expanded(from: -5, total: 100), 50)
-        XCTAssertEqual(CandidateListWindow.expanded(from: Int.max, total: 100), 100)
+        XCTAssertEqual(CandidateListWindow.window(scan(5), limit: 5).hiddenCount, 0)
+        XCTAssertEqual(CandidateListWindow.window(scan(6), limit: 5).hiddenCount, 1)
+        XCTAssertEqual(CandidateListWindow.window(scan(0), limit: 5).shown.count, 0)
     }
 
     /// The load-bearing call site: the summary must count the whole scan, never
@@ -100,12 +86,13 @@ final class CandidateListWindowTests: XCTestCase {
             .appendingPathComponent("Sources/CandidatesSectionView.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(source.contains("CandidateListWindow.safetySummary(of: scan.candidates)"))
-        XCTAssertTrue(source.contains("scan.candidates.count > CandidateListWindow.initialLimit"))
+        XCTAssertTrue(source.contains("scan.candidates.count > CandidateListWindow.previewLimit"))
+        XCTAssertFalse(source.contains("Show more"), "the popover list no longer grows")
     }
 
     func testWindowingDoesNotChangeAnyRowsClassificationOrRefusal() {
         let items = scan(100)
-        let shown = CandidateListWindow.window(items, limit: 25).shown
+        let shown = CandidateListWindow.window(items, limit: 5).shown
         for (a, b) in zip(shown, items) {
             XCTAssertEqual(a.policyLabel, b.policyLabel)
             XCTAssertEqual(a.executable, b.executable)
@@ -114,10 +101,10 @@ final class CandidateListWindowTests: XCTestCase {
         XCTAssertTrue(shown.contains { $0.executable } && shown.contains { !$0.executable })
     }
 
-    /// The new file holds exactly one Button (Show more; the sanctioned third
+    /// The new file holds exactly one Button (View all; the sanctioned third
     /// control next to the two pinned in CandidatesSectionView) and no cleanup or
     /// execute path, so the list stays a read-only surface.
-    func testShowMoreControlIsNotACleanupPath() throws {
+    func testViewAllControlIsNotACleanupPath() throws {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/CandidateListWindow.swift")
