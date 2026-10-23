@@ -64,6 +64,14 @@ targets:
         # from Sources/GlomerisMark.swift by scripts/generate-app-icon.sh;
         # scripts/check-app-icon-matches-geometry.sh keeps the two in step.
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        Debug:
+          # HORO-2176: a Debug build (the one XCUITest drives) files its state
+          # under its own identifier, so it never reads the release app's
+          # keychain items or preferences, and SingleInstanceGuard — which
+          # matches on bundle identifier — does not yield to a real Glomeris
+          # that happens to be running.
+          PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBar.debug
     scheme:
       testTargets:
         - GlomerisMenuBarTests
@@ -83,6 +91,8 @@ targets:
       - path: Sources/BundleIdentity.swift
       - path: Sources/AppVersionLabel.swift
       - path: Sources/GlomerisClient.swift
+      # HORO-2176: the DEBUG-only DEV-QA seam GlomerisClient consults.
+      - path: Sources/GlomerisQAFixtures.swift
       - path: Sources/GlomerisExecutableLocator.swift
       # HORO-1466: which binary was resolved and whether it is the one this app
       # was built against. Compiled in so the comparison rule is asserted
@@ -333,3 +343,36 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarTests
         GENERATE_INFOPLIST_FILE: YES
+  # HORO-2176: real-GUI automation. Needs the one-time owner setup in
+  # macos/GlomerisMenuBar/README.md (Automation Mode + Accessibility for the
+  # test runner); without it these tests do not run, and are never reported as
+  # passed.
+  GlomerisMenuBarUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: UITests
+    dependencies:
+      - target: GlomerisMenuBar
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.glomeris.GlomerisMenuBarUITests
+        TEST_TARGET_NAME: GlomerisMenuBar
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGNING_ALLOWED: YES
+        CODE_SIGNING_REQUIRED: NO
+schemes:
+  # Its own scheme on purpose: the default `GlomerisMenuBar` scheme is what CI's
+  # `xcodebuild test` runs, and a real-GUI test needs an interactive session
+  # with Automation Mode and Accessibility granted, which a hosted runner does
+  # not have. Run with: xcodebuild test -scheme GlomerisMenuBarUITests
+  GlomerisMenuBarUITests:
+    build:
+      targets:
+        GlomerisMenuBar: all
+        GlomerisMenuBarUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - GlomerisMenuBarUITests

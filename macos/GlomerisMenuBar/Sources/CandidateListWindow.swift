@@ -103,6 +103,7 @@ struct CandidateViewAllView: View {
                 .font(GlomerisDesign.captionFont)
                 .accessibilityLabel(Self.accessibilityLabel(total: total))
                 .accessibilityHint("Opens the full list with search, filter and details")
+                .accessibilityIdentifier("glomeris.candidates.viewAll")
         }
     }
 }

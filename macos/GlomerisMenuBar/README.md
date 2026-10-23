@@ -116,3 +116,60 @@ Symbol resolves on the running OS, so the toolchain is part of what the job
 asserts; and 26.2 is the version the app is developed and dogfooded against.
 `xcodeproj-drift` needs no Xcode pin — it never runs `xcodebuild`, and
 XcodeGen's output was observed not to depend on the installed Xcode.
+
+## Real-GUI tests (HORO-2176)
+
+`GlomerisMenuBarUITests` drives the real menu-bar popover and candidates window
+of a **Debug** build with XCUITest, over deterministic synthetic candidates.
+It has its own scheme so the default `GlomerisMenuBar` scheme (what CI runs)
+never tries to launch a GUI.
+
+```sh
+xcodebuild test -project GlomerisMenuBar.xcodeproj -scheme GlomerisMenuBarUITests \
+  -destination 'platform=macOS'
+# one test:  ... -only-testing:GlomerisMenuBarUITests/GlomerisGoldenJourneyUITests/testGoldenJourney
+```
+
+**How the synthetic data works.** The app is launched with
+`GLOMERIS_QA_FIXTURE_CLI` naming `QAFixtures/glomeris-qa-fixture-cli.py`. In a
+Debug build `GlomerisClient` then spawns that script instead of `glomeris` for
+*every* command, so the popover and window show the real UI over the real DTO
+decoding. The script reads nothing from the machine, emits `GLOMERIS_QA_COUNT`
+candidates (0, 1, 5, 25, 220, 1000 and 5000 are exercised) whose ids all start
+with `devqa-synthetic:`, answers only `detect` and `explain`, and refuses
+everything else (exit 64, logged). It has no cleanup authority. A purple
+"DEV-QA SYNTHETIC DATA" banner is drawn on both surfaces. The seam is
+`#if DEBUG`; `scripts/check-qa-fixtures-absent-from-release.sh <App.app>`
+proves a built Release app contains none of it (and fails on a Debug app).
+Each test gets its own HOME and state directory; the Debug build also has its own
+bundle identifier (`dev.glomeris.GlomerisMenuBar.debug`), so it shares no
+keychain items or preferences with an installed Glomeris.
+
+**What it covers.** The golden journey (popover, compact summary, five-row
+preview, View all N, window, arrow keys, search, filter-independent detail and
+risk, a dropped item reported as "No longer shown", close and reopen, and a
+check that the stand-in CLI saw no mutating command), the seven result-set
+sizes, that the popover does not grow with the result set, and accessibility
+labels.
+
+**First-time permissions (owner, once).** UI automation needs Developer Mode
+(`DevToolsSecurity -status`; `sudo DevToolsSecurity -enable` if disabled) and
+Accessibility for the test runner: the first `xcodebuild test` shows the system
+prompt; approve it in System Settings > Privacy & Security > Accessibility.
+Window screenshots and Apple's accessibility audit additionally need **Screen
+Recording** for the runner; they are opt-in
+(`TEST_RUNNER_GLOMERIS_UITEST_SCREENSHOTS=1`, optional
+`TEST_RUNNER_GLOMERIS_UITEST_ARTIFACT_DIR=<dir>`; `xcodebuild` forwards only
+`TEST_RUNNER_`-prefixed variables) and are skipped, not passed, without it.
+Screenshots are window-level only; never capture the whole desktop.
+
+**Known limits.**
+
+- Cmd+W is asserted only when the current input source is ASCII-capable.
+  Synthetic key events under a non-ASCII source (e.g. Zhuyin) never arrive as a
+  key equivalent, so the test skips and the shortcut stays a manual check.
+- Increase Contrast and Reduce Motion are system settings XCUITest cannot toggle
+  in isolation; they stay manual (the app contains no animation code).
+- `typeText` goes through the input source: a Japanese/Chinese source types
+  full-width digits as uncommitted text. The tests press Return after typing and
+  the search is width-insensitive for the same reason.

@@ -57,6 +57,7 @@ struct CandidateBrowserView: View {
         let shown = rows
         let outcome = CandidateSelection.reconcile(selected: selection, shownIds: shown.map(\.resourceId))
         VStack(alignment: .leading, spacing: 0) {
+            GlomerisQABanner()
             summaryBar(shownCount: shown.count)
             Divider()
             NavigationSplitView {
@@ -67,6 +68,11 @@ struct CandidateBrowserView: View {
             }
         }
         .frame(minWidth: 880, minHeight: 520)
+        // A container element of its own: an identifier set directly on this
+        // stack is inherited by every child that has none of its own, and was
+        // measured replacing the summary's and the banner's.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("glomeris.browser.root")
     }
 
     // MARK: - Summary and notices
@@ -76,6 +82,7 @@ struct CandidateBrowserView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(CandidateListWindow.safetySummary(of: scan.candidates))
                     .font(GlomerisDesign.secondaryFont)
+                    .accessibilityIdentifier("glomeris.browser.summary")
                 Spacer(minLength: 0)
                 if shownCount != scan.candidates.count {
                     Text("Showing \(shownCount) of \(scan.candidates.count)")
@@ -130,6 +137,7 @@ struct CandidateBrowserView: View {
                     }
                 }
                 .accessibilityLabel("Candidates, \(shown.count)")
+                .accessibilityIdentifier("glomeris.browser.list")
             }
         }
         .searchable(text: $search, placement: .sidebar, prompt: "Search path or kind")
@@ -186,6 +194,7 @@ struct CandidateBrowserView: View {
             // semantics, and this supplies the one label.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(model.accessibilityLabel)
+            .accessibilityIdentifier("glomeris.browser.row.\(candidate.resourceId)")
     }
 
     // MARK: - Detail
@@ -200,19 +209,23 @@ struct CandidateBrowserView: View {
                     // candidate actually shown.
                     .id(id)
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("glomeris.browser.detail")
         case .unavailable:
             placeholder(
                 "No longer shown",
                 "That candidate is not in the latest scan, or the current filter or search hides it. "
-                    + "Pick a candidate from the list.")
+                    + "Pick a candidate from the list.",
+                identifier: "glomeris.browser.placeholder.unavailable")
         case .none:
             placeholder(
                 "Select a candidate",
-                "Its evidence and the actions Glomeris will and will not take are shown here.")
+                "Its evidence and the actions Glomeris will and will not take are shown here.",
+                identifier: "glomeris.browser.placeholder.none")
         }
     }
 
-    private func placeholder(_ title: String, _ detail: String) -> some View {
+    private func placeholder(_ title: String, _ detail: String, identifier: String) -> some View {
         VStack(spacing: 6) {
             Text(title).font(GlomerisDesign.titleFont)
             Text(detail)
@@ -223,6 +236,7 @@ struct CandidateBrowserView: View {
         .padding(GlomerisDesign.outerPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
     }
 }
 

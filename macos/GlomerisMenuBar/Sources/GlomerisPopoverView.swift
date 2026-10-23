@@ -149,6 +149,7 @@ struct GlomerisPopoverView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            GlomerisQABanner()
             header
             Divider()
             scrollingBody
@@ -242,6 +243,7 @@ struct GlomerisPopoverView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             AppVersionLabel.spokenLabel(title: MenuBarAppearance.title, version: AppVersionLabel.running))
+        .accessibilityIdentifier("glomeris.popover.header")
         .padding(.horizontal, GlomerisDesign.outerPadding)
         .padding(.vertical, GlomerisDesign.cardPadding)
     }
