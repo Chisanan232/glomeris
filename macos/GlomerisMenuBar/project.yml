@@ -81,6 +81,7 @@ targets:
       # be driven over both its branches, the fallback one included, which no
       # process the app is normally run as takes.
       - path: Sources/BundleIdentity.swift
+      - path: Sources/AppVersionLabel.swift
       - path: Sources/GlomerisClient.swift
       - path: Sources/GlomerisExecutableLocator.swift
       # HORO-1466: which binary was resolved and whether it is the one this app

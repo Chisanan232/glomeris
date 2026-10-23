@@ -226,8 +226,18 @@ struct GlomerisPopoverView: View {
                 .accessibilityHidden(true)
             Text(MenuBarAppearance.title)
                 .font(GlomerisDesign.titleFont)
+            // HORO-2170: the app's own version, so a tester can tell builds apart.
+            if let version = AppVersionLabel.running {
+                Text(version)
+                    .font(GlomerisDesign.captionFont)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
             Spacer(minLength: 0)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            AppVersionLabel.spokenLabel(title: MenuBarAppearance.title, version: AppVersionLabel.running))
         .padding(.horizontal, GlomerisDesign.outerPadding)
         .padding(.vertical, GlomerisDesign.cardPadding)
     }
