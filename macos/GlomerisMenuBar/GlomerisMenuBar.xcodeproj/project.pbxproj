@@ -50,6 +50,7 @@
 		59A5C09A78790C4BA221F3F6 /* PressureNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A31106BCDF16D319AC886B3 /* PressureNotificationTests.swift */; };
 		5C25EFF7FAF885E8A3A53016 /* PlanApplication.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8906B36CF3E4AA34D9E7564C /* PlanApplication.swift */; };
 		5E18B81492AB93659C734D7C /* GlomerisUsedPercent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5127AF8E4739C87C293FDDF9 /* GlomerisUsedPercent.swift */; };
+		6036CFF0A277D2E0491858AC /* CandidateListStateMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B166CAB66BCE88500407D9BE /* CandidateListStateMessage.swift */; };
 		65357E877F95058389A8C311 /* HistoryAuditSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 572A0F15A4840A54F5B9B4D8 /* HistoryAuditSectionView.swift */; };
 		6617AB7D0383955250A95CD0 /* GlomerisLlmSettingsKeychainDeadlineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77BE309ED2F0147644C00F8 /* GlomerisLlmSettingsKeychainDeadlineTests.swift */; };
 		66FFC9C14B1A422451DC56ED /* GlomerisLlmSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 558C6D9B51E2DBA8DFBEA99D /* GlomerisLlmSettingsStore.swift */; };
@@ -89,6 +90,7 @@
 		8E5E2AFF2DEF7DDB4F3DCAD2 /* AutopilotSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BDFCE0A89F01ADAAAA131481 /* AutopilotSectionView.swift */; };
 		9008DE4C1BE18A30F80671D3 /* CandidateListWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D5FDD9076560B909591A398 /* CandidateListWindow.swift */; };
 		9105F63CB2E9FF2919AC35A0 /* AutopilotPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */; };
+		91ACADB5B8AEA6307E5119C5 /* CandidateListStateMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = B166CAB66BCE88500407D9BE /* CandidateListStateMessage.swift */; };
 		91FD602EE400DFACF486AC58 /* AutopilotUnpromptedMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3184B22449E2EF1B6DF1C3E /* AutopilotUnpromptedMode.swift */; };
 		98387B1346E25502E879EE10 /* PressureNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E802DFA3BA87D2852D8F475 /* PressureNotification.swift */; };
 		99BF0605FAA6ABA511330AA2 /* RecoveryDeepLinkWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28CE10298B87A5E426FC2667 /* RecoveryDeepLinkWindow.swift */; };
@@ -227,6 +229,7 @@
 		AD31600BC7E939520CBFE799 /* CandidateDetailViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateDetailViewTests.swift; sourceTree = "<group>"; };
 		AE7CBDDAA17C4F3C77E9C9AD /* RecoverySectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoverySectionView.swift; sourceTree = "<group>"; };
 		B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutopilotPreferencesView.swift; sourceTree = "<group>"; };
+		B166CAB66BCE88500407D9BE /* CandidateListStateMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateListStateMessage.swift; sourceTree = "<group>"; };
 		B8A0A74D7AB855F1B6916985 /* ProjectRootsPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProjectRootsPreferencesView.swift; sourceTree = "<group>"; };
 		BA1C1B1449D4449C9247F407 /* PressureAlertSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PressureAlertSectionView.swift; sourceTree = "<group>"; };
 		BA300DA77B492ED31E60B970 /* RecoveryRestartGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryRestartGateTests.swift; sourceTree = "<group>"; };
@@ -297,6 +300,7 @@
 				3F64EDD803CBF517A519597B /* BundleIdentity.swift */,
 				BE2C8052F902D4945D73B022 /* CandidateActionability.swift */,
 				D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */,
+				B166CAB66BCE88500407D9BE /* CandidateListStateMessage.swift */,
 				1D5FDD9076560B909591A398 /* CandidateListWindow.swift */,
 				99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */,
 				74C6C8DE3240E7647ACE73E5 /* CredentialAccessList.swift */,
@@ -511,6 +515,7 @@
 				C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */,
 				D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */,
 				3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */,
+				6036CFF0A277D2E0491858AC /* CandidateListStateMessage.swift in Sources */,
 				7FAB20014C9F3CA10C5552AC /* CandidateListWindow.swift in Sources */,
 				B02CDB3DA28B704460AF4910 /* CandidateListWindowTests.swift in Sources */,
 				E67F00D16D2CAFE9E74443CB /* CandidatesSectionView.swift in Sources */,
@@ -606,6 +611,7 @@
 				7994B235BE871884E2AEAB08 /* BundleIdentity.swift in Sources */,
 				1AFD92B6FDCC3D55D137614C /* CandidateActionability.swift in Sources */,
 				86BD83AA3245ED6F3B7F381A /* CandidateDetailView.swift in Sources */,
+				91ACADB5B8AEA6307E5119C5 /* CandidateListStateMessage.swift in Sources */,
 				9008DE4C1BE18A30F80671D3 /* CandidateListWindow.swift in Sources */,
 				F9DFFB9F1710A9D696739189 /* CandidatesSectionView.swift in Sources */,
 				F20FD170CF572BC838F8FFD0 /* CredentialAccessList.swift in Sources */,

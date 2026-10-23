@@ -162,6 +162,7 @@ targets:
       - path: Sources/StatusHealthSectionView.swift
       - path: Sources/CandidatesSectionView.swift
       - path: Sources/CandidateListWindow.swift
+      - path: Sources/CandidateListStateMessage.swift
       - path: Sources/CandidateDetailView.swift
       - path: Sources/HistoryAuditSectionView.swift
       - path: Sources/AiPlanSectionView.swift
