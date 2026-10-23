@@ -37,6 +37,10 @@ final class AppVersionLabelTests: XCTestCase {
             .deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/GlomerisPopoverView.swift")
         let source = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(source.contains("AppVersionLabel.running"))
+        // Code lines only, so a mention in a comment cannot satisfy this.
+        let code = source.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        XCTAssertTrue(code.contains("if let version = AppVersionLabel.running"))
+        XCTAssertTrue(code.contains("AppVersionLabel.spokenLabel(title: MenuBarAppearance.title"))
     }
 }
