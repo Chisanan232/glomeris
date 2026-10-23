@@ -81,6 +81,7 @@
 		81DD0203CA5AE10816276612 /* SpokenLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A98FAC22B023BB94EA556577 /* SpokenLabel.swift */; };
 		8309D6D68336995F7DA36ADB /* UnpromptedRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8C38528DF3AD874F4AEA896 /* UnpromptedRecoveryTests.swift */; };
 		847FDF28A3C3FFE0307946CF /* GlomerisMenuBarApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29CCC97F9DEA1F53F834AF90 /* GlomerisMenuBarApp.swift */; };
+		84CC1BEA8241893801F330B5 /* CandidateBrowserWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A39F916AEFA6E6A368EBD969 /* CandidateBrowserWindow.swift */; };
 		861A2E9ED2F71299D3BB44C9 /* ProjectRootsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 017031320C8922881F4739BC /* ProjectRootsStore.swift */; };
 		86AAAE7934B24C3234B3C04D /* HistoryAuditSectionViewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A258960CB7D0D961F0980060 /* HistoryAuditSectionViewTests.swift */; };
 		86BD83AA3245ED6F3B7F381A /* CandidateDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */; };
@@ -153,6 +154,7 @@
 		F5E7DCA6C8A78703F1F8DE90 /* AppVersionLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30FC345A49B2A175374B1E48 /* AppVersionLabel.swift */; };
 		F5F870ACCEBC63B0F7DB3192 /* RecoverySectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7CBDDAA17C4F3C77E9C9AD /* RecoverySectionView.swift */; };
 		F74F65D0FD1B4A09F0CD73ED /* AutopilotPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */; };
+		F839CF40884C4DB381E2BD76 /* CandidateBrowserWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = A39F916AEFA6E6A368EBD969 /* CandidateBrowserWindow.swift */; };
 		F9DFFB9F1710A9D696739189 /* CandidatesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */; };
 		FB2FCAA6E745E5CFCC339775 /* GlomerisCliProjectRootScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F17252EA69F82335F1A1E6 /* GlomerisCliProjectRootScopeTests.swift */; };
 		FB7D6E34A8080F27244D3231 /* GlomerisLlmSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 558C6D9B51E2DBA8DFBEA99D /* GlomerisLlmSettingsStore.swift */; };
@@ -226,6 +228,7 @@
 		9E169B1E4235782D6C59E4FE /* ApplyPlanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplyPlanView.swift; sourceTree = "<group>"; };
 		A258960CB7D0D961F0980060 /* HistoryAuditSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAuditSectionViewTests.swift; sourceTree = "<group>"; };
 		A2B19DC05F505C060A54791A /* RecoveryDeepLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryDeepLink.swift; sourceTree = "<group>"; };
+		A39F916AEFA6E6A368EBD969 /* CandidateBrowserWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CandidateBrowserWindow.swift; sourceTree = "<group>"; };
 		A4CC4E617F0CB236D6E83B8A /* GlomerisExecutableLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisExecutableLocator.swift; sourceTree = "<group>"; };
 		A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiProviderPreferencesView.swift; sourceTree = "<group>"; };
 		A98E13E5FE5F4E90FE76683D /* GlomerisMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisMark.swift; sourceTree = "<group>"; };
@@ -304,6 +307,7 @@
 				E3184B22449E2EF1B6DF1C3E /* AutopilotUnpromptedMode.swift */,
 				3F64EDD803CBF517A519597B /* BundleIdentity.swift */,
 				BE2C8052F902D4945D73B022 /* CandidateActionability.swift */,
+				A39F916AEFA6E6A368EBD969 /* CandidateBrowserWindow.swift */,
 				D860B979BAE33AB0C8032041 /* CandidateDetailView.swift */,
 				B166CAB66BCE88500407D9BE /* CandidateListStateMessage.swift */,
 				1D5FDD9076560B909591A398 /* CandidateListWindow.swift */,
@@ -521,6 +525,7 @@
 				B67B4B02F9A450278A3D05E3 /* CandidateActionability.swift in Sources */,
 				C6E8468205A2CAB47BAB1DD3 /* CandidateActionabilityTests.swift in Sources */,
 				AB9ED8A9D8EF292AF1A91C9F /* CandidateBrowserTests.swift in Sources */,
+				84CC1BEA8241893801F330B5 /* CandidateBrowserWindow.swift in Sources */,
 				D805860E0E262487C92ED4A4 /* CandidateDetailView.swift in Sources */,
 				3BB765B0E0F2903C61FAAB7F /* CandidateDetailViewTests.swift in Sources */,
 				6036CFF0A277D2E0491858AC /* CandidateListStateMessage.swift in Sources */,
@@ -619,6 +624,7 @@
 				B6EB86B5E146486E162F36D9 /* AutopilotUnpromptedMode.swift in Sources */,
 				7994B235BE871884E2AEAB08 /* BundleIdentity.swift in Sources */,
 				1AFD92B6FDCC3D55D137614C /* CandidateActionability.swift in Sources */,
+				F839CF40884C4DB381E2BD76 /* CandidateBrowserWindow.swift in Sources */,
 				86BD83AA3245ED6F3B7F381A /* CandidateDetailView.swift in Sources */,
 				91ACADB5B8AEA6307E5119C5 /* CandidateListStateMessage.swift in Sources */,
 				9008DE4C1BE18A30F80671D3 /* CandidateListWindow.swift in Sources */,
