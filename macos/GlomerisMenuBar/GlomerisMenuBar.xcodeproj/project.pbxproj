@@ -38,6 +38,7 @@
 		4CFF3D92D5B8BC156F45679F /* GlomerisCliProjectRootScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A18F5BC6D9640B8FC883724 /* GlomerisCliProjectRootScope.swift */; };
 		4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */; };
 		4FA352E5091B3E7CFC650EA4 /* RecoveryDeepLinkWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AB9EFAC7BE1E89565B5BF43 /* RecoveryDeepLinkWindowTests.swift */; };
+		52C4C95BBFE4D450D2AE4DE4 /* AppVersionLabelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D0B674FB4D2FE58F5C85C5E /* AppVersionLabelTests.swift */; };
 		5393C26940014C01F01AFAF3 /* CredentialStoreAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77AAAEBAAAE62AE8B7FD1118 /* CredentialStoreAccessTests.swift */; };
 		5508DE75140375FE77786898 /* DiskCapacityViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A67A36664EA6BCE5CB779D1 /* DiskCapacityViewModelTests.swift */; };
 		5574CDBBE4BC468971B1A704 /* PlanApplication.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8906B36CF3E4AA34D9E7564C /* PlanApplication.swift */; };
@@ -61,6 +62,7 @@
 		6EF44220294C701CFE6C2DC0 /* SingleInstanceGuardTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0803EC181FBF0B0D1507D2C /* SingleInstanceGuardTests.swift */; };
 		7089C39F2C1E62332E18A302 /* WorkspaceFamilyRowViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA52C6B614B130972EA20DF1 /* WorkspaceFamilyRowViewModelTests.swift */; };
 		7234B87DA614D063F3FB6063 /* AiPlanSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F2E709BCC8869676C1A53C /* AiPlanSectionView.swift */; };
+		73DBF82B36A63EF4F4EEB27B /* AppVersionLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30FC345A49B2A175374B1E48 /* AppVersionLabel.swift */; };
 		74B89E9F04018A21BB2E177A /* GlomerisExecutableLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A3E6A530DA68EDBAE46ED8 /* GlomerisExecutableLocatorTests.swift */; };
 		75B85E1DE42B288E5148DDFE /* ApplyPlanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E169B1E4235782D6C59E4FE /* ApplyPlanView.swift */; };
 		7765D1EC48C4DACF135BD63F /* OverviewState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A38DA67075A1D20749AA40B /* OverviewState.swift */; };
@@ -143,6 +145,7 @@
 		F343796D3574F7D76569AFD0 /* AiPlanSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4F2E709BCC8869676C1A53C /* AiPlanSectionView.swift */; };
 		F4BEEB6C6E3D375FAE6D4CF5 /* SingleInstanceGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32DF9E12B32B0A4F24572FA8 /* SingleInstanceGuard.swift */; };
 		F5C7757C1A78DEEA5F600852 /* PlanApplicationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DADBD41F34721D97EB1E2605 /* PlanApplicationTests.swift */; };
+		F5E7DCA6C8A78703F1F8DE90 /* AppVersionLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30FC345A49B2A175374B1E48 /* AppVersionLabel.swift */; };
 		F5F870ACCEBC63B0F7DB3192 /* RecoverySectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7CBDDAA17C4F3C77E9C9AD /* RecoverySectionView.swift */; };
 		F74F65D0FD1B4A09F0CD73ED /* AutopilotPreferencesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */; };
 		F9DFFB9F1710A9D696739189 /* CandidatesSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99AE9DB7825B14D9B1584B47 /* CandidatesSectionView.swift */; };
@@ -178,6 +181,7 @@
 		2A67A36664EA6BCE5CB779D1 /* DiskCapacityViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiskCapacityViewModelTests.swift; sourceTree = "<group>"; };
 		2E27BB6DCFBF6ECC94FA3B64 /* WorkspaceIntelligenceSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceIntelligenceSectionViewTests.swift; sourceTree = "<group>"; };
 		309C5D9C5225309746B98B1F /* GlomerisCliIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisCliIdentityTests.swift; sourceTree = "<group>"; };
+		30FC345A49B2A175374B1E48 /* AppVersionLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersionLabel.swift; sourceTree = "<group>"; };
 		32DF9E12B32B0A4F24572FA8 /* SingleInstanceGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingleInstanceGuard.swift; sourceTree = "<group>"; };
 		369DFF13FAF9E42E7B08AF3F /* GlomerisDtos.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisDtos.swift; sourceTree = "<group>"; };
 		36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AiPlanSectionViewTests.swift; sourceTree = "<group>"; };
@@ -186,6 +190,7 @@
 		3F64EDD803CBF517A519597B /* BundleIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BundleIdentity.swift; sourceTree = "<group>"; };
 		47250A5B4D152C9EE65C9F49 /* GlomerisClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisClientTests.swift; sourceTree = "<group>"; };
 		47F17252EA69F82335F1A1E6 /* GlomerisCliProjectRootScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisCliProjectRootScopeTests.swift; sourceTree = "<group>"; };
+		4D0B674FB4D2FE58F5C85C5E /* AppVersionLabelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppVersionLabelTests.swift; sourceTree = "<group>"; };
 		5127AF8E4739C87C293FDDF9 /* GlomerisUsedPercent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisUsedPercent.swift; sourceTree = "<group>"; };
 		558C6D9B51E2DBA8DFBEA99D /* GlomerisLlmSettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlomerisLlmSettingsStore.swift; sourceTree = "<group>"; };
 		572A0F15A4840A54F5B9B4D8 /* HistoryAuditSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryAuditSectionView.swift; sourceTree = "<group>"; };
@@ -284,6 +289,7 @@
 				D4F2E709BCC8869676C1A53C /* AiPlanSectionView.swift */,
 				A92F507D373F1362C628C3E5 /* AiProviderPreferencesView.swift */,
 				9E169B1E4235782D6C59E4FE /* ApplyPlanView.swift */,
+				30FC345A49B2A175374B1E48 /* AppVersionLabel.swift */,
 				D0EF776D63062A306819D429 /* Assets.xcassets */,
 				B1380BC06C4397CFAC168B41 /* AutopilotPreferencesView.swift */,
 				BDFCE0A89F01ADAAAA131481 /* AutopilotSectionView.swift */,
@@ -342,6 +348,7 @@
 				36EE9AEE6CFFB2A901A60ECB /* AiPlanSectionViewTests.swift */,
 				C45E203D8214154FE63F6DAD /* AiProviderPreferencesViewTests.swift */,
 				D2EC959107399B1D4F311033 /* ApplyPlanViewTests.swift */,
+				4D0B674FB4D2FE58F5C85C5E /* AppVersionLabelTests.swift */,
 				9A24913599DF33AA9961C0A7 /* AutopilotPreferencesTests.swift */,
 				D858925711701E78306BC04E /* AutopilotSectionViewTests.swift */,
 				67657A18FF00E7828983C8BC /* BundleIdentityTests.swift */,
@@ -489,6 +496,8 @@
 				DB5D8383B59675585CAAAB8A /* AiPlanSectionViewTests.swift in Sources */,
 				EAA07A11FEF627787AF615A7 /* AiProviderPreferencesView.swift in Sources */,
 				24E8F3886E209400E58A9387 /* AiProviderPreferencesViewTests.swift in Sources */,
+				F5E7DCA6C8A78703F1F8DE90 /* AppVersionLabel.swift in Sources */,
+				52C4C95BBFE4D450D2AE4DE4 /* AppVersionLabelTests.swift in Sources */,
 				562ED5C34CC7EBDE31C962DE /* ApplyPlanView.swift in Sources */,
 				3B5353546293268FBB22E4E6 /* ApplyPlanViewTests.swift in Sources */,
 				4DBC6EFFE7B8C5F3149625F5 /* AutopilotPreferencesTests.swift in Sources */,
@@ -589,6 +598,7 @@
 			files = (
 				7234B87DA614D063F3FB6063 /* AiPlanSectionView.swift in Sources */,
 				AF71CB2F7EFCFF57F96E2F16 /* AiProviderPreferencesView.swift in Sources */,
+				73DBF82B36A63EF4F4EEB27B /* AppVersionLabel.swift in Sources */,
 				75B85E1DE42B288E5148DDFE /* ApplyPlanView.swift in Sources */,
 				9105F63CB2E9FF2919AC35A0 /* AutopilotPreferencesView.swift in Sources */,
 				A2802C88AA0B44CAEB117399 /* AutopilotSectionView.swift in Sources */,
