@@ -734,6 +734,9 @@ enum GlomerisVocabulary {
     /// actually need to be scanned.
     static func kind(_ token: String) -> GlomerisTerm {
         switch token {
+        case "managed_cargo_library":
+            return prose(token, kindAxis, "Managed Cargo library",
+                         "Core-produced standalone library; native Cargo targets are excluded.")
         case "managed_generated":
             return prose(token, kindAxis, "Managed generated output",
                          "Core-produced artifacts guarded by ownership and retention policy.")

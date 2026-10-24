@@ -228,11 +228,31 @@ fn execute_inner(
     admitted_guard: Option<crate::ownership::RetirementGuard>,
 ) -> ExecutionReport {
     let resource = approval.decision().resource.clone();
+    // 0. Snapshot the resource's live filesystem identity via
+    // `symlink_metadata` (never `metadata` — a symlink must be detected as
+    // a symlink, not resolved through) as the VERY FIRST thing this
+    // function does, before the slow revalidation correlation pass
+    // (`build_fresh_evidence` -> `collector.collect()`) gets any chance to
+    // run. This is the anchor a symlink-swap TOCTOU attack cannot
+    // backdate: even if the attacker replaces the resource with a symlink
+    // during the slow correlation pass below, the final guard right before
+    // mutation (see `verify_identity_unchanged`) compares against THIS
+    // early snapshot, not against a freshly re-derived one.
+    let identity_snapshot = match &resource.locator {
+        ResourceLocator::Path(p) => match snapshot_identity(p) {
+            Ok(snapshot) => Some(snapshot),
+            Err(_) => {
+                return aborted_report(action.id(), resource, AbortReason::ResourceIdentityChanged)
+            }
+        },
+        ResourceLocator::Tool { .. } => None,
+    };
+
     let _native_guard = match crate::ownership::native::execution_guard(&resource) {
         Ok(guard) => guard,
         Err(_) => return aborted_report(action.id(), resource, AbortReason::EvidenceDegraded),
     };
-    let mut managed_guard = if resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
+    let mut managed_guard = if resource.kind.is_managed_resource() {
         let crate::evidence::ResourceLocator::Path(path) = &resource.locator else {
             return aborted_report(action.id(), resource, AbortReason::ResourceIdentityChanged);
         };
@@ -248,21 +268,6 @@ fn execute_inner(
             }
         }
         None
-    };
-
-    // 0. Snapshot the resource's live filesystem identity via
-    // `symlink_metadata` (never `metadata` — a symlink must be detected as
-    // a symlink, not resolved through) as the VERY FIRST thing this
-    // function does, before the slow revalidation correlation pass
-    // (`build_fresh_evidence` -> `collector.collect()`) gets any chance to
-    // run. This is the anchor a symlink-swap TOCTOU attack cannot
-    // backdate: even if the attacker replaces the resource with a symlink
-    // during the slow correlation pass below, the final guard right before
-    // mutation (see `verify_identity_unchanged`) compares against THIS
-    // early snapshot, not against a freshly re-derived one.
-    let identity_snapshot = match &resource.locator {
-        ResourceLocator::Path(p) => snapshot_identity(p).ok(),
-        ResourceLocator::Tool { .. } => None,
     };
 
     // 1-2: re-canonicalize/re-collect: `fresh_evidence` re-probes the
@@ -637,7 +642,7 @@ pub(crate) fn build_fresh_evidence(
     );
     merge_into(&mut evidence, correlation);
 
-    if resource.kind == crate::evidence::ResourceKind::ManagedGenerated {
+    if resource.kind.is_managed_resource() {
         evidence.managed_ownership = Some(match path {
             Some(path) => crate::ownership::collect_ownership(path, now),
             None => ProbeOutcome::Unavailable(ProbeReason::Failed),

@@ -185,7 +185,9 @@ fn cleanest_evidence(kind: ResourceKind) -> Evidence {
 /// while proving the classifier never read its regenerability.
 fn expected_cleanest_class(kind: ResourceKind) -> (PolicyClass, ReasonCode) {
     match kind {
-        ResourceKind::ManagedGenerated => (PolicyClass::Ask, ReasonCode::EvidenceIncomplete),
+        ResourceKind::ManagedGenerated | ResourceKind::ManagedCargoLibrary => {
+            (PolicyClass::Ask, ReasonCode::EvidenceIncomplete)
+        }
         // Fail-closed sink. Refused before any evidence is consulted.
         ResourceKind::Unknown => (
             PolicyClass::Protected,

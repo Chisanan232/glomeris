@@ -13,7 +13,10 @@ impl Detector for ManagedGeneratedDetector {
         DetectorId("managed_generated")
     }
     fn resource_kinds(&self) -> &'static [ResourceKind] {
-        &[ResourceKind::ManagedGenerated]
+        &[
+            ResourceKind::ManagedGenerated,
+            ResourceKind::ManagedCargoLibrary,
+        ]
     }
     fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
         let store = crate::ownership::Store {
@@ -34,13 +37,20 @@ impl Detector for ManagedGeneratedDetector {
             if record.reclaimed {
                 continue;
             }
+            let kind = if record.class == "managed_cargo_library" {
+                ResourceKind::ManagedCargoLibrary
+            } else {
+                ResourceKind::ManagedGenerated
+            };
+            let action = if kind == ResourceKind::ManagedCargoLibrary {
+                "managed.clean.cargo-library"
+            } else {
+                "managed.clean.generated"
+            };
             let path = store.path(&record);
             let size = estimate_logical_bytes(&path, size_estimate_budget());
             let mut evidence = discovery_evidence(
-                ResourceId::new(
-                    ResourceKind::ManagedGenerated,
-                    ResourceLocator::Path(path.clone()),
-                ),
+                ResourceId::new(kind, ResourceLocator::Path(path.clone())),
                 self.id(),
                 &path,
                 size.bytes.clone(),
@@ -49,7 +59,7 @@ impl Detector for ManagedGeneratedDetector {
                 probe_mtime(&path),
                 Regenerability::RegenerableByRebuild,
                 Recoverability::RegenerableByRebuild,
-                NativeCleanup::Available(crate::actions::ActionId("managed.clean.generated")),
+                NativeCleanup::Available(crate::actions::ActionId(action)),
             );
             let view = store.inspect(
                 &record,

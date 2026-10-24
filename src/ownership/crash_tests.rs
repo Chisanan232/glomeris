@@ -93,7 +93,10 @@ fn receive(stream: &mut BufReader<UnixStream>, boundary: &str) -> Value {
 struct OwnedChild(Child, Receiver<String>);
 impl OwnedChild {
     fn expect_checkpoint(&self, point: Checkpoint) {
-        let marker = format!("GLOMERIS_UNIT_CRASH_CHECKPOINT:{}", point.phase());
+        self.expect_phase(point.phase());
+    }
+    fn expect_phase(&self, phase: &str) {
+        let marker = format!("GLOMERIS_UNIT_CRASH_CHECKPOINT:{phase}");
         let deadline = Instant::now() + WAIT;
         loop {
             let line = self
@@ -185,6 +188,8 @@ impl Fixture {
         if request["op"] == "interrupt" || request["op"] == "interrupt_export" {
             let point: Checkpoint = serde_json::from_value(request["point"].clone()).unwrap();
             command.env(CRASH_PHASE, point.phase());
+        } else if request["op"] == "interrupt_cargo" {
+            command.env(CRASH_PHASE, request["phase"].as_str().unwrap());
         } else {
             command.env_remove(CRASH_PHASE);
         }
@@ -303,6 +308,63 @@ fn child_process_driver() {
     let request = receive(&mut reader, "child request");
     let store = Store::current().unwrap();
     match request["op"].as_str().unwrap() {
+        "interrupt_cargo" => {
+            let source = PathBuf::from(std::env::var_os("HOME").unwrap()).join("cargo-source");
+            fs::create_dir_all(source.join("src")).unwrap();
+            fs::write(
+                source.join("Cargo.toml"),
+                "[package]\nname='crash_source'\nversion='0.0.0'\nedition='2021'\n",
+            )
+            .unwrap();
+            fs::write(
+                source.join("src/lib.rs"),
+                "pub static ARTIFACT: [u8; 1048576] = [42;1048576];\n",
+            )
+            .unwrap();
+            git(&source, &["init", "-q"]);
+            git(&source, &["config", "user.name", "Fixture"]);
+            git(
+                &source,
+                &["config", "user.email", "fixture@example.invalid"],
+            );
+            git(&source, &["add", "."]);
+            git(&source, &["commit", "-qm", "committed source"]);
+            let mut policy = RetentionPolicy::default();
+            policy.classes.insert(
+                "managed_cargo_library".into(),
+                ClassPolicy {
+                    idle_threshold_secs: 0,
+                    unattended: true,
+                },
+            );
+            store.apply_policy(&policy).unwrap();
+            let mut envelope = crate::autopilot::AutopilotEnvelope::default();
+            envelope.enable();
+            envelope
+                .allow_kind(crate::evidence::ResourceKind::ManagedCargoLibrary)
+                .unwrap();
+            envelope.set_respond_to_alerts(true);
+            crate::autopilot::save_envelope(&envelope).unwrap();
+            let r = store
+                .create_class(
+                    &source,
+                    "fixed standalone library extraction",
+                    "managed_cargo_library",
+                )
+                .unwrap();
+            send(reader.get_mut(), &json!({"event":"prepared","id":r.id}));
+            super::cargo_library::produce(&store, &r.id, &r.generation).unwrap();
+            panic!("Cargo producer missed actual crash checkpoint");
+        }
+        "recover_cargo" => {
+            let id = request["id"].as_str().unwrap();
+            let rows = store.reconcile().unwrap();
+            let sweep = sweep(&store).unwrap();
+            send(
+                reader.get_mut(),
+                &json!({"event":"cargo_preserved","inspection":rows,"sweep":sweep,"record":store.read(id).unwrap()}),
+            );
+        }
         "interrupt_export" => {
             let record = prepare(&store);
             send(
@@ -755,4 +817,40 @@ fn crash_fixture_ignores_parent_home_and_toolchain_environment() {
         "environment_isolated"
     );
     assert!(child.wait().success());
+}
+
+#[test]
+fn cargo_crash_before_spawn_and_after_build_never_fabricates_consumer_closure() {
+    for phase in ["cargo_intent", "cargo_built"] {
+        let fixture = Fixture::new();
+        let (mut child, mut control) = fixture.child(json!({"op":"interrupt_cargo","phase":phase}));
+        let prepared = receive(&mut control, "Cargo generation prepared");
+        let id = prepared["id"].as_str().unwrap();
+        child.expect_phase(phase);
+        let before = fixture.store().read(id).unwrap();
+        assert!(before.production_started);
+        assert!(before.producer.is_none());
+        assert!(before.cargo_proof.is_none());
+        let artifact = fixture
+            .store()
+            .path(&before)
+            .join("debug/libglomeris_managed_library.rlib");
+        if phase == "cargo_built" {
+            assert!(artifact.exists());
+        }
+        child.interrupt();
+        drop(control);
+        let (mut recovery, mut control) = fixture.child(json!({"op":"recover_cargo","id":id}));
+        let result = receive(&mut control, "Cargo orphan reconciliation");
+        assert!(recovery.wait().success());
+        assert_eq!(result["event"], "cargo_preserved");
+        assert_eq!(result["sweep"][0]["status"], "preserved");
+        assert_eq!(result["inspection"][0]["eligible"], false);
+        assert!(result["record"]["producer"].is_null());
+        assert!(!result["record"]["reclaimed"].as_bool().unwrap());
+        if phase == "cargo_built" {
+            assert!(artifact.exists());
+        }
+        assert!(before.source_root.join("src/lib.rs").exists());
+    }
 }
