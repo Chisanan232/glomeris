@@ -9,6 +9,7 @@
 //! absent from the machine is normal, expected state, never an error.
 
 pub(crate) mod cargo;
+pub mod cargo_roots;
 mod docker;
 mod docker_objects;
 mod go;
@@ -176,6 +177,12 @@ pub struct DiscoveryContext {
     /// detectors that need this do nothing when it's empty rather than
     /// guessing at project locations.
     pub known_project_roots: Vec<PathBuf>,
+    /// Globs naming Cargo target directories that live outside every project
+    /// root (HORO-2358). Empty unless a caller supplied them, so
+    /// [`DiscoveryContext::new`] stays hermetic; [`DiscoveryContext::
+    /// from_process_env`] loads the user's list from
+    /// [`cargo_roots::config_path`].
+    pub extra_cargo_target_globs: Vec<String>,
     /// What the tools' own variables say, as captured at the process
     /// boundary: the variable, the spelling that was set, and its value.
     /// Empty unless a caller supplied them, which is what makes
@@ -201,6 +208,7 @@ impl DiscoveryContext {
         Self {
             home_dir: home_dir.into(),
             known_project_roots: Vec::new(),
+            extra_cargo_target_globs: Vec::new(),
             tool_env_vars: Vec::new(),
         }
     }
@@ -209,6 +217,7 @@ impl DiscoveryContext {
     /// constructor production code uses.
     pub fn from_process_env(home_dir: impl Into<PathBuf>) -> Self {
         let mut ctx = Self::new(home_dir);
+        ctx.extra_cargo_target_globs = cargo_roots::load_globs(&ctx.home_dir);
         for var in ToolEnvVar::ALL {
             for name in var.names() {
                 if let Ok(value) = std::env::var(name) {
@@ -221,6 +230,11 @@ impl DiscoveryContext {
 
     pub fn with_known_project_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.known_project_roots = roots;
+        self
+    }
+
+    pub fn with_extra_cargo_target_globs(mut self, globs: Vec<String>) -> Self {
+        self.extra_cargo_target_globs = globs;
         self
     }
 
