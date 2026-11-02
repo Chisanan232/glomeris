@@ -10,6 +10,7 @@ pub mod correlate;
 pub mod docker;
 pub mod model;
 pub mod probe;
+pub mod protective_marker;
 
 pub use correlate::derive_claim;
 pub use docker::{
@@ -23,3 +24,4 @@ pub use model::{
     ResourceKind, ResourceLocator, SourceTag, Supervisor, TargetScope, UnresolvedRef,
 };
 pub use probe::{ProbeOutcome, ProbeReason};
+pub use protective_marker::ConfigMarkers;
