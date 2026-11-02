@@ -37,6 +37,14 @@ pub const MAX_MATCHES: usize = 512;
 /// Directory entries read from any one directory while expanding a wildcard.
 /// Bounds the cost of `~/.cargo/*` on a directory with a huge fan-out.
 pub const MAX_ENTRIES_PER_DIR: usize = 20_000;
+/// Directory entries read across ONE whole [`expand_globs`] call, however many
+/// patterns and wildcard levels it has. The per-directory cap alone lets
+/// `~/*/*/*` fan out into millions of reads.
+pub const MAX_TOTAL_ENTRIES: usize = 100_000;
+/// Path segments per pattern that may contain `*`.
+pub const MAX_WILDCARD_SEGMENTS: usize = 3;
+/// The config file is a short list of globs; anything larger is not one.
+pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 /// Where the user's list of extra target-root globs is read from.
 pub fn config_path(home: &Path) -> PathBuf {
@@ -52,7 +60,12 @@ pub fn config_path(home: &Path) -> PathBuf {
 /// this list only ever *adds* candidates, so failing to read it can make
 /// Glomeris see less, never more.
 pub fn load_globs(home: &Path) -> Vec<String> {
-    match std::fs::read_to_string(config_path(home)) {
+    let path = config_path(home);
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_CONFIG_BYTES => {}
+        _ => return Vec::new(),
+    }
+    match std::fs::read_to_string(&path) {
         Ok(contents) => parse_globs(&contents),
         Err(_) => Vec::new(),
     }
@@ -78,13 +91,21 @@ pub fn validate_pattern(pattern: &str) -> bool {
     if !rooted || pattern.contains(['?', '[', ']', '{', '}', '\0']) || pattern.contains("**") {
         return false;
     }
-    !pattern.split('/').any(|segment| segment == "..")
+    if pattern.split('/').any(|segment| segment == "..") {
+        return false;
+    }
+    pattern
+        .split('/')
+        .filter(|segment| segment.contains('*'))
+        .count()
+        <= MAX_WILDCARD_SEGMENTS
 }
 
 /// Expands every pattern to existing directories, canonicalized and
 /// de-duplicated, capped at [`MAX_MATCHES`].
 pub fn expand_globs(patterns: &[String], home: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
+    let mut budget = MAX_TOTAL_ENTRIES;
     for pattern in patterns {
         if found.len() >= MAX_MATCHES {
             break;
@@ -102,7 +123,7 @@ pub fn expand_globs(patterns: &[String], home: &Path) -> Vec<PathBuf> {
             let mut next = Vec::new();
             for base in &candidates {
                 if segment.contains('*') {
-                    next.extend(matching_children(base, &segment));
+                    next.extend(matching_children(base, &segment, &mut budget));
                 } else {
                     let joined = base.join(&segment);
                     if joined.is_dir() {
@@ -132,18 +153,27 @@ pub fn expand_globs(patterns: &[String], home: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn matching_children(base: &Path, pattern: &str) -> Vec<PathBuf> {
+/// Children of `base` whose name matches `pattern`. Reads at most
+/// [`MAX_ENTRIES_PER_DIR`] entries, in the directory's own (unspecified)
+/// order, and charges every entry read against `budget`; an exhausted budget
+/// yields no further matches, so a capped expansion can miss entries.
+fn matching_children(base: &Path, pattern: &str, budget: &mut usize) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(base) else {
         return Vec::new();
     };
+    let take = MAX_ENTRIES_PER_DIR.min(*budget);
+    let mut read = 0usize;
     let mut matches: Vec<PathBuf> = entries
-        .take(MAX_ENTRIES_PER_DIR)
+        .take(take)
+        .inspect(|_| read += 1)
         .filter_map(Result::ok)
         .filter(|entry| wildcard_match(pattern, &entry.file_name().to_string_lossy()))
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .collect();
-    // read_dir order is unspecified; sort so a capped expansion is stable.
+    *budget = budget.saturating_sub(read);
+    // Sorted so the matches that survive the cap below are stable for the
+    // entries that were read; which entries were read is up to the OS.
     matches.sort();
     matches.truncate(MAX_MATCHES);
     matches
@@ -314,6 +344,39 @@ mod tests {
             format!("{}/t/a", home.display()),
         ];
         assert_eq!(expand_globs(&patterns, &home).len(), 1);
+    }
+
+    #[test]
+    fn too_many_wildcard_segments_are_rejected() {
+        assert!(validate_pattern("/a/*/b*/*c"));
+        assert!(!validate_pattern("/a/*/*/*/*"));
+    }
+
+    #[test]
+    fn an_oversized_config_file_is_ignored() {
+        let home = temp_dir("bigcfg");
+        let path = config_path(&home);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = "# pad\n".repeat(20_000) + "~/.cargo/qual-*\n";
+        assert!(body.len() as u64 > MAX_CONFIG_BYTES);
+        fs::write(&path, body).unwrap();
+        assert!(load_globs(&home).is_empty());
+    }
+
+    #[test]
+    fn the_total_entry_budget_stops_a_wide_expansion() {
+        let home = temp_dir("budget");
+        for i in 0..40 {
+            for j in 0..10 {
+                fs::create_dir_all(home.join(format!("t/d{i:02}/e{j}"))).unwrap();
+            }
+        }
+        // The first level costs 40 reads; a budget of 40 leaves nothing for the second.
+        let mut budget = 40usize;
+        let first = matching_children(&home.join("t"), "d*", &mut budget);
+        assert_eq!(first.len(), 40);
+        assert_eq!(budget, 0);
+        assert!(matching_children(&first[0], "e*", &mut budget).is_empty());
     }
 
     #[test]

@@ -810,13 +810,56 @@ pub(crate) fn is_unowned_candidate(ev: &Evidence) -> bool {
 /// [`upsert_candidate`] through configuration rather than through a
 /// workspace's own `target/`: a configured root glob, or `build.build-dir`.
 /// Mirrors the rejections `resolve_cargo_fields` applies to `target_directory`
-/// — it must hold Cargo markers, hold no source, not be (or contain) a
-/// workspace, and not be (or contain) the home directory.
-fn is_plausible_unowned_dir(dir: &Path, home: &Path, workspace_root: Option<&Path>) -> bool {
-    cargo_roots::looks_like_cargo_target(dir)
-        && !has_rust_source(dir)
-        && !home.canonicalize().is_ok_and(|home| home.starts_with(dir))
-        && !workspace_root.is_some_and(|workspace| workspace.starts_with(dir))
+/// — it must hold Cargo markers, hold no source, and neither be nor contain
+/// the home directory or any known project root (`protected`). An
+/// uncanonicalizable home or root fails CLOSED: it cannot be proven apart from
+/// `dir`, so `dir` is rejected.
+fn is_plausible_unowned_dir(dir: &Path, home: &Path, protected: &[PathBuf]) -> bool {
+    if !cargo_roots::looks_like_cargo_target(dir) || has_rust_source(dir) {
+        return false;
+    }
+    let contained_by = |path: &Path| match path.canonicalize() {
+        Ok(canonical) => canonical.starts_with(dir),
+        Err(_) => true,
+    };
+    !contained_by(home) && !protected.iter().any(|root| contained_by(root))
+}
+
+/// Drops configuration-found candidates that sit inside, or contain, another
+/// candidate. A glob like `~/proj/target/*` otherwise adds the target's own
+/// per-triple subdirectories as second rows whose bytes would be counted twice.
+/// An owned entry always wins over an unowned one; between two unowned entries
+/// the outer directory wins.
+fn drop_nested_unowned(by_physical: &mut HashMap<(u64, u64), Evidence>) {
+    let paths: Vec<((u64, u64), PathBuf, bool)> = by_physical
+        .iter()
+        .filter_map(|(key, ev)| match &ev.resource.locator {
+            ResourceLocator::Path(path) => {
+                Some((*key, path.clone(), ev.resource.ownership_unresolved))
+            }
+            _ => None,
+        })
+        .collect();
+    for (key, path, unowned) in &paths {
+        if !unowned {
+            continue;
+        }
+        let nested = paths.iter().any(|(other_key, other, other_unowned)| {
+            if other_key == key {
+                return false;
+            }
+            if *other_unowned {
+                // Two unowned entries: the inner one goes, the outer one stays.
+                path.starts_with(other)
+            } else {
+                // An owned entry that overlaps either way wins.
+                path.starts_with(other) || other.starts_with(path)
+            }
+        });
+        if nested {
+            by_physical.remove(key);
+        }
+    }
 }
 
 pub struct CargoDetector;
@@ -935,11 +978,13 @@ impl Detector for CargoDetector {
                 // action), and only if nobody already explained that
                 // directory.
                 if let Some(build_dir) = &fields.resolved_build_dir {
-                    if is_plausible_unowned_dir(
-                        build_dir,
-                        &ctx.home_dir,
-                        Some(&fields.workspace_root),
-                    ) {
+                    let protected: Vec<PathBuf> = ctx
+                        .known_project_roots
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(fields.workspace_root.clone()))
+                        .collect();
+                    if is_plausible_unowned_dir(build_dir, &ctx.home_dir, &protected) {
                         if let Ok(key) = dev_ino(build_dir) {
                             upsert_candidate(
                                 &mut by_physical,
@@ -960,7 +1005,7 @@ impl Detector for CargoDetector {
         // protective) scope; this pass only ever inserts a directory nobody
         // else found, and never merges into or lowers an existing entry.
         for dir in cargo_roots::expand_globs(&ctx.extra_cargo_target_globs, &ctx.home_dir) {
-            if !is_plausible_unowned_dir(&dir, &ctx.home_dir, None) {
+            if !is_plausible_unowned_dir(&dir, &ctx.home_dir, &ctx.known_project_roots) {
                 continue;
             }
             let Ok(key) = dev_ino(&dir) else {
@@ -974,6 +1019,7 @@ impl Detector for CargoDetector {
             upsert_candidate(&mut by_physical, key, dir, None, unowned_scope(), self.id());
         }
 
+        drop_nested_unowned(&mut by_physical);
         let evidence: Vec<Evidence> = by_physical.into_values().collect();
 
         if evidence.is_empty() && saw_permission_error {
@@ -2208,7 +2254,7 @@ mod extra_target_root_tests {
     }
 
     #[test]
-    fn a_hard_linked_alias_of_one_directory_is_one_candidate() {
+    fn a_symlink_alias_of_one_directory_is_one_candidate() {
         let home = fixture_home("symlink");
         cargo_target(&home.join(".cargo/private-target-a"));
         std::os::unix::fs::symlink(
@@ -2258,6 +2304,69 @@ mod extra_target_root_tests {
         complete_except_ownership(&mut surfaced);
         let decision = classify(&surfaced, &PolicyConfig::default(), SystemTime::now());
         assert_eq!(decision.class, PolicyClass::Ask);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_glob_matching_inside_an_explained_target_adds_no_second_row() {
+        let home = fixture_home("nested");
+        let project = home.join("proj");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("src/lib.rs"), "").unwrap();
+        cargo_target(&project.join("target"));
+        cargo_target(&project.join("target/aarch64-apple-darwin"));
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![project.clone()])
+            .with_extra_cargo_target_globs(vec![format!("{}/target/*", project.display())]);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        assert_eq!(evidence.len(), 1, "{evidence:?}");
+        assert!(!is_unowned_candidate(&evidence[0]));
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn two_unowned_candidates_one_inside_the_other_keep_only_the_outer() {
+        let home = fixture_home("nested-unowned");
+        cargo_target(&home.join("scratch/outer-target"));
+        cargo_target(&home.join("scratch/outer-target/inner-target"));
+        let ctx = DiscoveryContext::new(&home).with_extra_cargo_target_globs(vec![
+            "~/scratch/outer-target".to_string(),
+            "~/scratch/outer-target/inner-target".to_string(),
+        ]);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0].resource.locator,
+            ResourceLocator::Path(home.join("scratch/outer-target").canonicalize().unwrap())
+        );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_glob_matching_an_ancestor_of_a_project_root_is_ignored() {
+        let home = fixture_home("ancestor");
+        let project = home.join("dev/rust/proj");
+        fs::create_dir_all(&project).unwrap();
+        cargo_target(&home.join("dev/rust"));
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![project])
+            .with_extra_cargo_target_globs(vec!["~/dev/rust".to_string()]);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        assert!(
+            evidence.iter().all(|ev| !is_unowned_candidate(ev)),
+            "{evidence:?}"
+        );
         fs::remove_dir_all(&home).ok();
     }
 
