@@ -765,8 +765,9 @@ fn upsert_candidate(
         ResourceKind::CargoTargetDir,
         ResourceLocator::Path(locator.clone()),
     );
-    if let Some(root) = root {
-        resource = resource.with_source_project_root(root);
+    match root {
+        Some(root) => resource = resource.with_source_project_root(root),
+        None => resource = resource.with_unresolved_ownership(),
     }
     let mut ev = discovery_evidence(
         resource,
@@ -795,15 +796,27 @@ fn unowned_scope() -> ProbeOutcome<CargoTargetScope> {
 }
 
 /// Whether `ev` is a recommend-only candidate of the kind [`unowned_scope`]
-/// describes: a Cargo target with no `source_project_root` and an ownership
-/// probe that was never attempted. `cargo.clean.target_dir` refuses these,
-/// because the old "manifest beside the target's parent" fallback would let a
-/// directory another workspace shares pass as a leftover of whatever project
-/// happens to sit next to it (the HORO-1822 shape).
+/// describes: a Cargo target whose owner the detector positively could not
+/// resolve. `cargo.clean.target_dir` and the executor's revalidation both
+/// refuse these, because the old "manifest beside the target's parent"
+/// fallback would let a directory another workspace shares pass as a
+/// leftover of whatever project happens to sit next to it (the HORO-1822
+/// shape). The marker lives on the resource, so it survives revalidation.
 pub(crate) fn is_unowned_candidate(ev: &Evidence) -> bool {
-    ev.resource.kind == ResourceKind::CargoTargetDir
-        && ev.resource.source_project_root.is_none()
-        && ev.cargo_target_scope == Some(unowned_scope())
+    ev.resource.kind == ResourceKind::CargoTargetDir && ev.resource.ownership_unresolved
+}
+
+/// Shared plausibility check for every directory that reaches
+/// [`upsert_candidate`] through configuration rather than through a
+/// workspace's own `target/`: a configured root glob, or `build.build-dir`.
+/// Mirrors the rejections `resolve_cargo_fields` applies to `target_directory`
+/// — it must hold Cargo markers, hold no source, not be (or contain) a
+/// workspace, and not be (or contain) the home directory.
+fn is_plausible_unowned_dir(dir: &Path, home: &Path, workspace_root: Option<&Path>) -> bool {
+    cargo_roots::looks_like_cargo_target(dir)
+        && !has_rust_source(dir)
+        && !home.canonicalize().is_ok_and(|home| home.starts_with(dir))
+        && !workspace_root.is_some_and(|workspace| workspace.starts_with(dir))
 }
 
 pub struct CargoDetector;
@@ -922,7 +935,11 @@ impl Detector for CargoDetector {
                 // action), and only if nobody already explained that
                 // directory.
                 if let Some(build_dir) = &fields.resolved_build_dir {
-                    if cargo_roots::looks_like_cargo_target(build_dir) {
+                    if is_plausible_unowned_dir(
+                        build_dir,
+                        &ctx.home_dir,
+                        Some(&fields.workspace_root),
+                    ) {
                         if let Ok(key) = dev_ino(build_dir) {
                             upsert_candidate(
                                 &mut by_physical,
@@ -943,15 +960,7 @@ impl Detector for CargoDetector {
         // protective) scope; this pass only ever inserts a directory nobody
         // else found, and never merges into or lowers an existing entry.
         for dir in cargo_roots::expand_globs(&ctx.extra_cargo_target_globs, &ctx.home_dir) {
-            if !cargo_roots::looks_like_cargo_target(&dir) {
-                continue;
-            }
-            // Never a candidate that contains the home directory.
-            if ctx
-                .home_dir
-                .canonicalize()
-                .is_ok_and(|home| home.starts_with(&dir))
-            {
+            if !is_plausible_unowned_dir(&dir, &ctx.home_dir, None) {
                 continue;
             }
             let Ok(key) = dev_ino(&dir) else {
@@ -2126,14 +2135,13 @@ mod extra_target_root_tests {
         cargo_target(&home.join(".cargo/private-target-a"));
         let ctx = DiscoveryContext::new(&home)
             .with_extra_cargo_target_globs(vec!["~/.cargo/private-target-*".to_string()]);
-        let ev = found(CargoDetector.discover(&ctx)).remove(0);
+        let mut ev = found(CargoDetector.discover(&ctx)).remove(0);
+        complete_except_ownership(&mut ev);
 
         let decision = classify(&ev, &PolicyConfig::default(), SystemTime::now());
 
         assert_eq!(decision.class, PolicyClass::Ask);
-        assert!(decision
-            .reasons
-            .contains(&ReasonCode::TargetOwnershipUnknown));
+        assert_eq!(decision.reasons, vec![ReasonCode::TargetOwnershipUnknown]);
         assert!(!crate::autopilot::envelope::is_preauthorizable(
             ReasonCode::TargetOwnershipUnknown
         ));

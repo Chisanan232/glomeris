@@ -413,7 +413,7 @@ mod tests {
         fs::write(root.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
 
         let mut ev = evidence_for_with_root(target_dir, RK::CargoTargetDir, None);
-        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::NotAttempted));
+        ev.resource = ev.resource.with_unresolved_ownership();
 
         match CargoCleanTargetDir.plan(&ev) {
             Err(ActionError::Unsupported(reason)) => {

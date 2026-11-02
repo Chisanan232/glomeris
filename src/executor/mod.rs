@@ -593,7 +593,14 @@ pub(crate) fn build_fresh_evidence(
     // revalidation, which `Evidence::completeness()` reads as missing,
     // which aborts EVERY real cleanup of a Cargo target dir unconditionally
     // (the exact trap HORO-994 fixed for `reclaimable_bytes` above).
-    if resource.kind == crate::evidence::ResourceKind::CargoTargetDir {
+    if resource.kind == crate::evidence::ResourceKind::CargoTargetDir
+        && resource.ownership_unresolved
+    {
+        // HORO-2358: the detector positively could not resolve an owner for
+        // this target (configured root / build-dir). Never guess one from the
+        // target's parent: leave ownership Unavailable, which aborts the run.
+        evidence.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+    } else if resource.kind == crate::evidence::ResourceKind::CargoTargetDir {
         if let Some(target_path) = path {
             // Same fallback the action itself uses (see
             // `crate::actions::cargo::manifest_path_for`): the discovered
@@ -2394,6 +2401,70 @@ mod tests {
 
         fs::remove_dir_all(&victim_root).ok();
         fs::remove_dir_all(&approver_root).ok();
+    }
+
+    /// HORO-2358: a target found by a configured root has no resolved owner.
+    /// Even with consent, and even when its parent holds a `Cargo.toml` that
+    /// the old fallback would have adopted as the owner, `execute()` must not
+    /// run `cargo clean` against it — the unresolved-ownership marker lives on
+    /// the resource, so it survives the fresh revalidation.
+    #[test]
+    fn execute_never_cleans_a_target_whose_owner_was_not_resolved() {
+        let neighbour = make_temp_dir("unowned-neighbour");
+        fs::write(
+            neighbour.join("Cargo.toml"),
+            "[package]\nname = \"neighbour\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let target = neighbour.join("configured-target");
+        fs::create_dir_all(target.join("debug")).unwrap();
+        fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        fs::write(target.join("debug/artifact"), vec![0u8; 4096]).unwrap();
+
+        let resource = ResourceId::new(
+            ResourceKind::CargoTargetDir,
+            ResourceLocator::Path(target.clone()),
+        )
+        .with_unresolved_ownership();
+        let fingerprint = fingerprint_of(&target);
+        let now = SystemTime::now();
+        let decision = PolicyDecision {
+            resource: resource.clone(),
+            class: PolicyClass::Ask,
+            reasons: vec![ReasonCode::TargetOwnershipUnknown],
+            evidence_collected_at: now,
+            evaluated_at: now,
+            policy_version: 3,
+        };
+        let consent = UserConsent::new(resource.clone(), fingerprint.clone(), now);
+        let approval = authorize(decision, fingerprint, Some(&consent))
+            .expect("an Ask decision with matching consent authorizes");
+
+        let report = execute(
+            &CargoCleanTargetDir,
+            &approval,
+            &FakeCollector,
+            &PolicyConfig::default(),
+            now,
+            None,
+        );
+
+        assert!(
+            target.join("debug/artifact").exists(),
+            "the unowned target must survive: {:?}",
+            report.outcome
+        );
+        assert!(
+            !matches!(report.outcome, ExecutionOutcome::Succeeded),
+            "got {:?}",
+            report.outcome
+        );
+
+        fs::remove_dir_all(&neighbour).ok();
     }
 
     /// Defect 3 regression test: a plan with more than one step is
