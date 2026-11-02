@@ -332,6 +332,9 @@ mod tests {
             } else {
                 None
             },
+            config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+                crate::evidence::ProbeOutcome::Observed(crate::evidence::ConfigMarkers::none())
+            }),
             collected_at,
             sources: Vec::new(),
         }

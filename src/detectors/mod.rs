@@ -594,6 +594,17 @@ pub(crate) fn discovery_evidence(
     recoverability: Recoverability,
     native_cleanup: NativeCleanup,
 ) -> Evidence {
+    // HORO-2359: only a Cargo target dir is checked for Config markers; the
+    // probe is one `read_dir` plus an `lstat` per child, so it is cheap
+    // enough to run at discovery and again at revalidation (which also
+    // builds its evidence here).
+    let config_markers = match (&resource.kind, &resource.locator) {
+        (
+            crate::evidence::ResourceKind::CargoTargetDir,
+            crate::evidence::ResourceLocator::Path(path),
+        ) => Some(crate::evidence::protective_marker::probe(path)),
+        _ => None,
+    };
     Evidence {
         resource,
         fingerprint: ResourceFingerprint {
@@ -622,6 +633,7 @@ pub(crate) fn discovery_evidence(
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         managed_ownership: None,
         cargo_target_scope: None,
+        config_markers,
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }

@@ -108,6 +108,9 @@ fn auto_safe_evidence(kind: ResourceKind, path: &Path, reclaimable: u64) -> Evid
                 is_direct_locator: true,
             })
         }),
+        config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+            glomeris::evidence::ProbeOutcome::Observed(glomeris::evidence::ConfigMarkers::none())
+        }),
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }

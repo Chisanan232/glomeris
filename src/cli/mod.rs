@@ -2780,6 +2780,9 @@ mod tests {
                     is_direct_locator: true,
                 })
             }),
+            config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+                crate::evidence::ProbeOutcome::Observed(crate::evidence::ConfigMarkers::none())
+            }),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
@@ -4986,6 +4989,7 @@ mod execute_tests {
             ),
             managed_ownership: None,
             cargo_target_scope: None,
+            config_markers: None,
             collected_at: now,
             sources: Vec::new(),
         };

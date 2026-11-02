@@ -2274,6 +2274,9 @@ fn explain_evidence(kind: ResourceKind, path: &str) -> Evidence {
         } else {
             None
         },
+        config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+            glomeris::evidence::ProbeOutcome::Observed(glomeris::evidence::ConfigMarkers::none())
+        }),
         collected_at: SystemTime::UNIX_EPOCH,
         sources: Vec::new(),
     }

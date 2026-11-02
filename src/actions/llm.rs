@@ -1238,6 +1238,9 @@ mod tests {
                     is_direct_locator: true,
                 })
             }),
+            config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+                crate::evidence::ProbeOutcome::Observed(crate::evidence::ConfigMarkers::none())
+            }),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
