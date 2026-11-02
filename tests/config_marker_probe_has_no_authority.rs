@@ -10,11 +10,16 @@
 fn production_source(file: &str) -> String {
     let full = format!("{}/{file}", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read {full}: {e}"));
-    // Everything before the unit-test module is production code.
-    match text.find("#[cfg(test)]") {
-        Some(at) => text[..at].to_string(),
-        None => text,
-    }
+    // Everything before the unit-test module is production code, and comment
+    // lines are not code: the module docs legitimately name what it avoids.
+    let code = match text.find("#[cfg(test)]") {
+        Some(at) => &text[..at],
+        None => &text,
+    };
+    code.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
