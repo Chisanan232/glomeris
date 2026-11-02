@@ -48,6 +48,11 @@ pub enum ReasonCode {
     /// or parse — never examined at the reference level) is excluded and
     /// stays `ExecutableDependencyUnknown`.
     ProtectedUnresolvedExecutableDependency,
+    /// HORO-2359: a Config `.ca-keep` marker sits on the resource (or one
+    /// directory below it). Unconditionally `Protected`: the sibling tool's
+    /// "never delete" decision wins, decided before staleness and
+    /// completeness exactly like the executable-dependency vetoes.
+    ProtectedKeepMarker,
     // -> Ask
     EvidenceIncomplete,
     EvidenceStale,
@@ -105,6 +110,15 @@ pub enum ReasonCode {
     /// `EvidenceIncomplete`, so `UNKNOWN_INCOMPLETE` reporting and
     /// `completeness_rank_from_decision` can name the actual gap.
     TargetOwnershipUnknown,
+    /// HORO-2359: a Config owner receipt (`.ca-owner.json`) sits on the
+    /// resource. Glomeris cannot verify the owning session is gone, so this
+    /// is a reason to stop and ask. Never pre-authorizable, and the receipt's
+    /// content is never read, so it can only ever add caution.
+    OwnerReceiptPresent,
+    /// HORO-2359: the Config marker probe could not complete (permission
+    /// error, directory too large to examine), or was never run for a Cargo
+    /// target. "Could not check" is not "no marker".
+    ProtectiveMarkerUnverified,
     // -> AutoSafe
     EvidenceFreshAndComplete,
     RegenerableByTool,
@@ -130,6 +144,7 @@ impl ReasonCode {
             // "token"`-on-one-line extraction regex finds this arm.
             #[rustfmt::skip]
             ReasonCode::ProtectedUnresolvedExecutableDependency => "protected_unresolved_executable_dependency",
+            ReasonCode::ProtectedKeepMarker => "protected_keep_marker",
             ReasonCode::EvidenceIncomplete => "evidence_incomplete",
             ReasonCode::EvidenceStale => "evidence_stale",
             ReasonCode::EvidenceProbeFailed => "evidence_probe_failed",
@@ -145,6 +160,8 @@ impl ReasonCode {
             ReasonCode::ExecutableDependencyUnknown => "executable_dependency_unknown",
             ReasonCode::SharedBuildCacheBlastRadius => "shared_build_cache_blast_radius",
             ReasonCode::TargetOwnershipUnknown => "target_ownership_unknown",
+            ReasonCode::OwnerReceiptPresent => "owner_receipt_present",
+            ReasonCode::ProtectiveMarkerUnverified => "protective_marker_unverified",
             ReasonCode::EvidenceFreshAndComplete => "evidence_fresh_and_complete",
             ReasonCode::RegenerableByTool => "regenerable_by_tool",
             ReasonCode::NoActiveUseObserved => "no_active_use_observed",
@@ -165,6 +182,7 @@ impl ReasonCode {
         ReasonCode::ProtectedUnknownResourceKind,
         ReasonCode::ProtectedExecutableDependency,
         ReasonCode::ProtectedUnresolvedExecutableDependency,
+        ReasonCode::ProtectedKeepMarker,
         ReasonCode::EvidenceIncomplete,
         ReasonCode::EvidenceStale,
         ReasonCode::EvidenceProbeFailed,
@@ -180,6 +198,8 @@ impl ReasonCode {
         ReasonCode::ExecutableDependencyUnknown,
         ReasonCode::SharedBuildCacheBlastRadius,
         ReasonCode::TargetOwnershipUnknown,
+        ReasonCode::OwnerReceiptPresent,
+        ReasonCode::ProtectiveMarkerUnverified,
         ReasonCode::EvidenceFreshAndComplete,
         ReasonCode::RegenerableByTool,
         ReasonCode::NoActiveUseObserved,
@@ -238,24 +258,27 @@ mod tests {
                 ReasonCode::ProtectedUnknownResourceKind => 7,
                 ReasonCode::ProtectedExecutableDependency => 8,
                 ReasonCode::ProtectedUnresolvedExecutableDependency => 9,
-                ReasonCode::EvidenceIncomplete => 10,
-                ReasonCode::EvidenceStale => 11,
-                ReasonCode::EvidenceProbeFailed => 12,
-                ReasonCode::ResourceInActiveUse => 13,
-                ReasonCode::GitWorktreeDirty => 14,
-                ReasonCode::RebuildCostHigh => 15,
-                ReasonCode::RegenerabilityUnknown => 16,
-                ReasonCode::RecoverabilityIrreversible => 17,
-                ReasonCode::OwningToolLive => 18,
-                ReasonCode::DockerObjectInUse => 19,
-                ReasonCode::DockerActivityUnknown => 20,
-                ReasonCode::ExecutableRunningFromResource => 21,
-                ReasonCode::ExecutableDependencyUnknown => 22,
-                ReasonCode::SharedBuildCacheBlastRadius => 23,
-                ReasonCode::TargetOwnershipUnknown => 24,
-                ReasonCode::EvidenceFreshAndComplete => 25,
-                ReasonCode::RegenerableByTool => 26,
-                ReasonCode::NoActiveUseObserved => 27,
+                ReasonCode::ProtectedKeepMarker => 10,
+                ReasonCode::EvidenceIncomplete => 11,
+                ReasonCode::EvidenceStale => 12,
+                ReasonCode::EvidenceProbeFailed => 13,
+                ReasonCode::ResourceInActiveUse => 14,
+                ReasonCode::GitWorktreeDirty => 15,
+                ReasonCode::RebuildCostHigh => 16,
+                ReasonCode::RegenerabilityUnknown => 17,
+                ReasonCode::RecoverabilityIrreversible => 18,
+                ReasonCode::OwningToolLive => 19,
+                ReasonCode::DockerObjectInUse => 20,
+                ReasonCode::DockerActivityUnknown => 21,
+                ReasonCode::ExecutableRunningFromResource => 22,
+                ReasonCode::ExecutableDependencyUnknown => 23,
+                ReasonCode::SharedBuildCacheBlastRadius => 24,
+                ReasonCode::TargetOwnershipUnknown => 25,
+                ReasonCode::OwnerReceiptPresent => 26,
+                ReasonCode::ProtectiveMarkerUnverified => 27,
+                ReasonCode::EvidenceFreshAndComplete => 28,
+                ReasonCode::RegenerableByTool => 29,
+                ReasonCode::NoActiveUseObserved => 30,
             };
             assert_eq!(
                 index,
@@ -266,7 +289,7 @@ mod tests {
         }
         assert_eq!(
             ReasonCode::ALL.len(),
-            28,
+            31,
             "ReasonCode::ALL has gained, lost, or duplicated an entry"
         );
     }

@@ -161,6 +161,14 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         // the ownership check off.
         ReasonCode::TargetOwnershipUnknown => false,
 
+        // HORO-2359. A Config owner receipt is a reason to stop; Glomeris
+        // cannot verify the owner session is gone, and the receipt's content
+        // is never read. An unverified marker probe is an absence of
+        // knowledge, like `TargetOwnershipUnknown`. Neither may be
+        // pre-authorized.
+        ReasonCode::OwnerReceiptPresent => false,
+        ReasonCode::ProtectiveMarkerUnverified => false,
+
         // Protected reasons. `authorize` refuses these unconditionally, so
         // an envelope entry naming one could never do anything except
         // mislead whoever read the envelope.
@@ -172,6 +180,7 @@ pub fn is_preauthorizable(reason: ReasonCode) -> bool {
         | ReasonCode::ProtectedSystemPath
         | ReasonCode::ProtectedUnsafeMountOrSymlink
         | ReasonCode::ProtectedUnknownResourceKind
+        | ReasonCode::ProtectedKeepMarker
         | ReasonCode::ProtectedExecutableDependency
         | ReasonCode::ProtectedUnresolvedExecutableDependency => false,
 
