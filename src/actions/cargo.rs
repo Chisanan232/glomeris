@@ -45,6 +45,16 @@ impl Action for CargoCleanTargetDir {
         }
 
         let target_dir = target_dir_path(&ev.resource)?;
+        // HORO-2358: a target found by a configured root has no owning
+        // project to run cargo against; it is recommend-only.
+        if crate::detectors::cargo::is_unowned_candidate(ev) {
+            return Err(ActionError::Unsupported(format!(
+                "{} has no known owning project: it was found by a configured target root, \
+                 and Glomeris will not run cargo clean against a directory it cannot tie to a \
+                 Cargo manifest",
+                target_dir.display()
+            )));
+        }
         let manifest_path = manifest_path_for(&ev.resource, target_dir)?;
 
         let steps = vec![ActionStep::RunTool {
@@ -389,6 +399,28 @@ mod tests {
             args[manifest_idx + 1],
             root.join("Cargo.toml").to_string_lossy().into_owned()
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-2358: an unowned candidate is refused even when the directory's
+    /// parent happens to hold a manifest.
+    #[test]
+    fn an_unowned_candidate_is_refused_even_beside_a_manifest() {
+        let root = make_temp_dir("cargo-plan-unowned");
+        let target_dir = root.join("some-target");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(root.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+
+        let mut ev = evidence_for_with_root(target_dir, RK::CargoTargetDir, None);
+        ev.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::NotAttempted));
+
+        match CargoCleanTargetDir.plan(&ev) {
+            Err(ActionError::Unsupported(reason)) => {
+                assert!(reason.contains("no known owning project"), "{reason}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
 
         fs::remove_dir_all(&root).ok();
     }

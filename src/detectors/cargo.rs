@@ -43,6 +43,7 @@ use crate::evidence::{
     ResourceKind, ResourceLocator, TargetScope,
 };
 
+use super::cargo_roots;
 use super::{
     cache_root_status, discovery_evidence, estimate_logical_bytes, probe_mtime,
     size_estimate_budget, Detector, DetectorId, DetectorStatus, DiscoveryContext, RootAbsence,
@@ -720,7 +721,7 @@ fn upsert_candidate(
     by_physical: &mut HashMap<(u64, u64), Evidence>,
     key: (u64, u64),
     locator: PathBuf,
-    root: PathBuf,
+    root: Option<PathBuf>,
     scope_outcome: ProbeOutcome<CargoTargetScope>,
     detector_id: DetectorId,
 ) {
@@ -760,11 +761,13 @@ fn upsert_candidate(
 
     let estimate = estimate_logical_bytes(&locator, size_estimate_budget());
     let logical_bytes = estimate.bytes.clone();
-    let resource = ResourceId::new(
+    let mut resource = ResourceId::new(
         ResourceKind::CargoTargetDir,
         ResourceLocator::Path(locator.clone()),
-    )
-    .with_source_project_root(root);
+    );
+    if let Some(root) = root {
+        resource = resource.with_source_project_root(root);
+    }
     let mut ev = discovery_evidence(
         resource,
         detector_id,
@@ -784,6 +787,25 @@ fn upsert_candidate(
     by_physical.insert(key, ev);
 }
 
+/// The scope outcome of a candidate whose owning project was never resolved
+/// (HORO-2358): found by a configured extra root or as `build.build-dir`, with
+/// no workspace to ask. `classify` reads it as ASK / `TargetOwnershipUnknown`.
+fn unowned_scope() -> ProbeOutcome<CargoTargetScope> {
+    ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+}
+
+/// Whether `ev` is a recommend-only candidate of the kind [`unowned_scope`]
+/// describes: a Cargo target with no `source_project_root` and an ownership
+/// probe that was never attempted. `cargo.clean.target_dir` refuses these,
+/// because the old "manifest beside the target's parent" fallback would let a
+/// directory another workspace shares pass as a leftover of whatever project
+/// happens to sit next to it (the HORO-1822 shape).
+pub(crate) fn is_unowned_candidate(ev: &Evidence) -> bool {
+    ev.resource.kind == ResourceKind::CargoTargetDir
+        && ev.resource.source_project_root.is_none()
+        && ev.cargo_target_scope == Some(unowned_scope())
+}
+
 pub struct CargoDetector;
 
 const RESOURCE_KINDS: &[ResourceKind] = &[ResourceKind::CargoTargetDir];
@@ -801,7 +823,7 @@ impl Detector for CargoDetector {
         // Before anything is read: with no roots, the loop below would run
         // zero times and every answer after it would be about a search that
         // never happened (HORO-1576).
-        if ctx.known_project_roots.is_empty() {
+        if ctx.known_project_roots.is_empty() && ctx.extra_cargo_target_globs.is_empty() {
             return DetectorStatus::NotConfigured;
         }
 
@@ -858,7 +880,7 @@ impl Detector for CargoDetector {
                     &mut by_physical,
                     key,
                     canonical.clone(),
-                    root.clone(),
+                    Some(root.clone()),
                     scope_outcome,
                     self.id(),
                 );
@@ -886,13 +908,61 @@ impl Detector for CargoDetector {
                             &mut by_physical,
                             key,
                             fields.resolved_target.clone(),
-                            root.clone(),
+                            Some(root.clone()),
                             scope_outcome,
                             self.id(),
                         );
                     }
                 }
+
+                // HORO-2358: `build.build-dir` holds Cargo's intermediates
+                // away from `target-dir` and was computed but never shown.
+                // It is surfaced exactly like a configured extra root:
+                // ownership unresolved (ASK), no project root (so no cleanup
+                // action), and only if nobody already explained that
+                // directory.
+                if let Some(build_dir) = &fields.resolved_build_dir {
+                    if cargo_roots::looks_like_cargo_target(build_dir) {
+                        if let Ok(key) = dev_ino(build_dir) {
+                            upsert_candidate(
+                                &mut by_physical,
+                                key,
+                                build_dir.clone(),
+                                None,
+                                unowned_scope(),
+                                self.id(),
+                            );
+                        }
+                    }
+                }
             }
+        }
+
+        // HORO-2358: configured extra roots. Added AFTER every project root so
+        // a directory a workspace already explained keeps that (possibly more
+        // protective) scope; this pass only ever inserts a directory nobody
+        // else found, and never merges into or lowers an existing entry.
+        for dir in cargo_roots::expand_globs(&ctx.extra_cargo_target_globs, &ctx.home_dir) {
+            if !cargo_roots::looks_like_cargo_target(&dir) {
+                continue;
+            }
+            // Never a candidate that contains the home directory.
+            if ctx
+                .home_dir
+                .canonicalize()
+                .is_ok_and(|home| home.starts_with(&dir))
+            {
+                continue;
+            }
+            let Ok(key) = dev_ino(&dir) else {
+                continue;
+            };
+            // No project root: ownership cannot be resolved without a
+            // manifest, so the scope is Unavailable, which `classify` reads
+            // as ASK / TargetOwnershipUnknown. With no root, `cargo clean`
+            // also refuses to plan (see `manifest_path_for`), so this is a
+            // recommend-only candidate.
+            upsert_candidate(&mut by_physical, key, dir, None, unowned_scope(), self.id());
         }
 
         let evidence: Vec<Evidence> = by_physical.into_values().collect();
@@ -1932,5 +2002,264 @@ mod tests {
 
         fs::remove_dir_all(&relocated).ok();
         fs::remove_dir_all(&decoy_home).ok();
+    }
+}
+
+/// HORO-2358: configured extra target roots become recommend-only candidates.
+#[cfg(test)]
+mod extra_target_root_tests {
+    use super::*;
+    use crate::evidence::probe::{ProbeOutcome, ProbeReason};
+    use crate::policy::{classify, PolicyClass, PolicyConfig, ReasonCode};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    fn fixture_home(label: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-extra-roots-{label}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir.canonicalize().unwrap()
+    }
+
+    fn cargo_target(dir: &Path) {
+        fs::create_dir_all(dir.join("debug")).unwrap();
+        fs::write(
+            dir.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
+        fs::write(dir.join("debug/artifact"), vec![0u8; 4096]).unwrap();
+    }
+
+    /// Discovery evidence is completed by the correlator in production; fill
+    /// the remaining required probes so the ONLY open question left is
+    /// ownership, isolating exactly what this ticket decides.
+    fn complete_except_ownership(ev: &mut Evidence) {
+        ev.reclaimable_bytes = ProbeOutcome::Observed(4096);
+        ev.last_modified = ProbeOutcome::Observed(SystemTime::now());
+        ev.open_by_process = ProbeOutcome::Observed(Vec::new());
+        ev.process_cwd_match = ProbeOutcome::Observed(Vec::new());
+        ev.git_state = ProbeOutcome::Observed(None);
+        ev.executable_dependency =
+            ProbeOutcome::Observed(crate::evidence::ExecutableDependencyReport::empty());
+    }
+
+    fn found(status: DetectorStatus) -> Vec<Evidence> {
+        match status {
+            DetectorStatus::Found(evidence) => evidence,
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_roots_and_globs_both_empty_nothing_was_examined() {
+        let ctx = DiscoveryContext::new("/tmp").with_extra_cargo_target_globs(Vec::new());
+        assert_eq!(CargoDetector.discover(&ctx), DetectorStatus::NotConfigured);
+    }
+
+    #[test]
+    fn a_configured_glob_alone_is_enough_to_search() {
+        let home = fixture_home("glob-only");
+        cargo_target(&home.join(".cargo/private-target-a"));
+        let ctx = DiscoveryContext::new(&home)
+            .with_extra_cargo_target_globs(vec!["~/.cargo/private-target-*".to_string()]);
+        let evidence = found(CargoDetector.discover(&ctx));
+        assert_eq!(evidence.len(), 1);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn every_root_family_is_discovered_without_a_project_root() {
+        let home = fixture_home("families");
+        for dir in [
+            ".cargo/qual-aaasm-6262-a",
+            ".cargo/private-target-x",
+            ".cargo/pkg-repro-target-y",
+            ".cargo/isolated-targets/horo-1399",
+            ".cargo/nda-targets/one",
+            "AI-agent-assembly/private-target-z",
+        ] {
+            cargo_target(&home.join(dir));
+        }
+        let tmp_family = home.join("scratch/ticket-target");
+        cargo_target(&tmp_family);
+        let globs = [
+            "~/.cargo/qual-*",
+            "~/.cargo/private-target-*",
+            "~/.cargo/pkg-repro-target-*",
+            "~/.cargo/isolated-targets/*",
+            "~/.cargo/nda-targets/*",
+            "~/AI-agent-assembly/private-target-*",
+            "~/scratch/*-target",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let ctx = DiscoveryContext::new(&home).with_extra_cargo_target_globs(globs);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        assert_eq!(evidence.len(), 7);
+        for ev in &evidence {
+            assert_eq!(
+                ev.resource.source_project_root, None,
+                "no project root is invented"
+            );
+            assert_eq!(
+                ev.cargo_target_scope,
+                Some(ProbeOutcome::Unavailable(ProbeReason::NotAttempted))
+            );
+        }
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The central safety property: discovering a root never raises it toward
+    /// AUTO_SAFE. Ownership is unresolved, so the class is ASK with the one
+    /// reason that can never be pre-authorized.
+    #[test]
+    fn a_configured_root_classifies_ask_target_ownership_unknown_never_auto_safe() {
+        let home = fixture_home("classify");
+        cargo_target(&home.join(".cargo/private-target-a"));
+        let ctx = DiscoveryContext::new(&home)
+            .with_extra_cargo_target_globs(vec!["~/.cargo/private-target-*".to_string()]);
+        let ev = found(CargoDetector.discover(&ctx)).remove(0);
+
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::now());
+
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::TargetOwnershipUnknown));
+        assert!(!crate::autopilot::envelope::is_preauthorizable(
+            ReasonCode::TargetOwnershipUnknown
+        ));
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_configured_root_with_no_manifest_offers_no_runnable_action() {
+        let home = fixture_home("no-clean");
+        cargo_target(&home.join(".cargo/private-target-a"));
+        let ctx = DiscoveryContext::new(&home)
+            .with_extra_cargo_target_globs(vec!["~/.cargo/private-target-*".to_string()]);
+        let mut ev = found(CargoDetector.discover(&ctx)).remove(0);
+        assert!(is_unowned_candidate(&ev));
+        complete_except_ownership(&mut ev);
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::now());
+
+        let eligible = crate::actionability::eligible_action_ids(
+            &ev,
+            &decision,
+            &crate::actions::ActionRegistry::builtin(),
+        );
+
+        assert!(eligible.is_empty(), "recommend-only, got {eligible:?}");
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_glob_that_matches_a_source_tree_or_non_target_is_ignored() {
+        let home = fixture_home("not-targets");
+        fs::create_dir_all(home.join("work/proj-target/src")).unwrap();
+        fs::write(home.join("work/proj-target/CACHEDIR.TAG"), b"x").unwrap();
+        fs::create_dir_all(home.join("work/empty-target")).unwrap();
+        let ctx = DiscoveryContext::new(&home)
+            .with_extra_cargo_target_globs(vec!["~/work/*-target".to_string()]);
+        assert!(found(CargoDetector.discover(&ctx)).is_empty());
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_directory_found_by_project_root_and_by_glob_is_one_candidate_and_keeps_its_scope() {
+        let home = fixture_home("dedup");
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        cargo_target(&project.join("target"));
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![project.clone()])
+            .with_extra_cargo_target_globs(vec![format!("{}/target", project.display())]);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0].resource.source_project_root.as_deref(),
+            Some(project.as_path()),
+            "the project root's explanation is not replaced by the glob"
+        );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_hard_linked_alias_of_one_directory_is_one_candidate() {
+        let home = fixture_home("symlink");
+        cargo_target(&home.join(".cargo/private-target-a"));
+        std::os::unix::fs::symlink(
+            home.join(".cargo/private-target-a"),
+            home.join(".cargo/private-target-alias"),
+        )
+        .unwrap();
+        let ctx = DiscoveryContext::new(&home)
+            .with_extra_cargo_target_globs(vec!["~/.cargo/private-target-*".to_string()]);
+        assert_eq!(found(CargoDetector.discover(&ctx)).len(), 1);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_configured_build_dir_is_surfaced_as_an_ask_only_candidate() {
+        let home = fixture_home("build-dir");
+        let project = home.join("proj");
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::create_dir_all(project.join(".cargo")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.0.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("src/lib.rs"), "").unwrap();
+        // Cargo's resolved target dir must exist for the widening pass to run.
+        cargo_target(&project.join("target"));
+        let build_dir = home.join("elsewhere/build");
+        cargo_target(&build_dir);
+        fs::write(
+            project.join(".cargo/config.toml"),
+            format!("[build]\nbuild-dir = \"{}\"\n", build_dir.display()),
+        )
+        .unwrap();
+        let ctx = DiscoveryContext::new(&home).with_known_project_roots(vec![project.clone()]);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        let surfaced = evidence
+            .iter()
+            .find(|ev| {
+                ev.resource.locator == ResourceLocator::Path(build_dir.canonicalize().unwrap())
+            })
+            .unwrap_or_else(|| panic!("build dir not surfaced: {evidence:?}"));
+        assert!(is_unowned_candidate(surfaced));
+        let mut surfaced = surfaced.clone();
+        complete_except_ownership(&mut surfaced);
+        let decision = classify(&surfaced, &PolicyConfig::default(), SystemTime::now());
+        assert_eq!(decision.class, PolicyClass::Ask);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn the_home_directory_itself_is_never_a_candidate() {
+        let home = fixture_home("home-guard");
+        fs::create_dir_all(home.join("debug")).unwrap();
+        let ctx = DiscoveryContext::new(&home)
+            .with_extra_cargo_target_globs(vec![format!("{}", home.display())]);
+        assert!(found(CargoDetector.discover(&ctx)).is_empty());
+        fs::remove_dir_all(&home).ok();
     }
 }
