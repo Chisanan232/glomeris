@@ -1840,11 +1840,14 @@ mod tests {
                 PolicyClass::Protected => 2,
             }
         }
-        let baseline = rank(classify(
-            &complete_evidence(ResourceKind::CargoTargetDir, NOW),
-            &cfg(),
-            NOW,
-        ));
+        let baseline = rank(
+            classify(
+                &complete_evidence(ResourceKind::CargoTargetDir, NOW),
+                &cfg(),
+                NOW,
+            )
+            .class,
+        );
         let states = [
             markers(false, false),
             markers(true, false),
