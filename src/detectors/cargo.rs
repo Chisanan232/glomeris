@@ -814,15 +814,38 @@ pub(crate) fn is_unowned_candidate(ev: &Evidence) -> bool {
 /// the home directory or any known project root (`protected`). An
 /// uncanonicalizable home or root fails CLOSED: it cannot be proven apart from
 /// `dir`, so `dir` is rejected.
-fn is_plausible_unowned_dir(dir: &Path, home: &Path, protected: &[PathBuf]) -> bool {
-    if !cargo_roots::looks_like_cargo_target(dir) || has_rust_source(dir) {
+fn is_plausible_unowned_dir(
+    dir: &Path,
+    home: &Path,
+    protected: &[PathBuf],
+    reject_inside_project_roots: bool,
+) -> bool {
+    if !cargo_roots::looks_like_cargo_target(dir) {
         return false;
     }
-    let contained_by = |path: &Path| match path.canonicalize() {
-        Ok(canonical) => canonical.starts_with(dir),
-        Err(_) => true,
+    // Bounded: an unreadable or over-large directory is rejected, never
+    // "no source found".
+    if cargo_roots::top_level_rust_source(dir) != Some(false) {
+        return false;
+    }
+    let canonical = |path: &Path| path.canonicalize().ok();
+    let contained_by = |path: &Path| match canonical(path) {
+        Some(canonical) => canonical.starts_with(dir),
+        None => true,
     };
-    !contained_by(home) && !protected.iter().any(|root| contained_by(root))
+    if contained_by(home) || protected.iter().any(|root| contained_by(root)) {
+        return false;
+    }
+    if reject_inside_project_roots {
+        let inside = |root: &PathBuf| match canonical(root) {
+            Some(root) => dir.starts_with(root),
+            None => true,
+        };
+        if protected.iter().any(inside) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Drops configuration-found candidates that sit inside, or contain, another
@@ -906,6 +929,7 @@ impl Detector for CargoDetector {
         // design (direct entries concatenated with a separately-deduped
         // widened map) was unsafe.
         let mut by_physical: HashMap<(u64, u64), Evidence> = HashMap::new();
+        let mut pending_build_dirs: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
 
         for root in &ctx.known_project_roots {
             let target_dir: PathBuf = root.join("target");
@@ -973,29 +997,32 @@ impl Detector for CargoDetector {
 
                 // HORO-2358: `build.build-dir` holds Cargo's intermediates
                 // away from `target-dir` and was computed but never shown.
-                // It is surfaced exactly like a configured extra root:
-                // ownership unresolved (ASK), no project root (so no cleanup
-                // action), and only if nobody already explained that
-                // directory.
+                // Collected here and inserted AFTER every root has been
+                // processed, so the outcome does not depend on root order: a
+                // directory some other root explains as its own `target/`
+                // keeps that owner (`upsert_candidate` never replaces an
+                // existing entry with an unowned one).
                 if let Some(build_dir) = &fields.resolved_build_dir {
-                    let protected: Vec<PathBuf> = ctx
-                        .known_project_roots
-                        .iter()
-                        .cloned()
-                        .chain(std::iter::once(fields.workspace_root.clone()))
-                        .collect();
-                    if is_plausible_unowned_dir(build_dir, &ctx.home_dir, &protected) {
-                        if let Ok(key) = dev_ino(build_dir) {
-                            upsert_candidate(
-                                &mut by_physical,
-                                key,
-                                build_dir.clone(),
-                                None,
-                                unowned_scope(),
-                                self.id(),
-                            );
-                        }
-                    }
+                    let mut protected: Vec<PathBuf> = ctx.known_project_roots.clone();
+                    protected.push(fields.workspace_root.clone());
+                    pending_build_dirs.push((build_dir.clone(), protected));
+                }
+            }
+        }
+
+        for (build_dir, protected) in pending_build_dirs {
+            // A build dir inside the workspace is legitimate, so descendants of
+            // a project root are allowed here (unlike configured globs).
+            if is_plausible_unowned_dir(&build_dir, &ctx.home_dir, &protected, false) {
+                if let Ok(key) = dev_ino(&build_dir) {
+                    upsert_candidate(
+                        &mut by_physical,
+                        key,
+                        build_dir,
+                        None,
+                        unowned_scope(),
+                        self.id(),
+                    );
                 }
             }
         }
@@ -1005,7 +1032,7 @@ impl Detector for CargoDetector {
         // protective) scope; this pass only ever inserts a directory nobody
         // else found, and never merges into or lowers an existing entry.
         for dir in cargo_roots::expand_globs(&ctx.extra_cargo_target_globs, &ctx.home_dir) {
-            if !is_plausible_unowned_dir(&dir, &ctx.home_dir, &ctx.known_project_roots) {
+            if !is_plausible_unowned_dir(&dir, &ctx.home_dir, &ctx.known_project_roots, true) {
                 continue;
             }
             let Ok(key) = dev_ino(&dir) else {
@@ -2367,6 +2394,70 @@ mod extra_target_root_tests {
             evidence.iter().all(|ev| !is_unowned_candidate(ev)),
             "{evidence:?}"
         );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn a_glob_matching_inside_a_project_root_is_ignored() {
+        let home = fixture_home("inside-root");
+        let project = home.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        // `assets` qualifies only through a generic `release/` directory.
+        fs::create_dir_all(project.join("assets/release")).unwrap();
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![project])
+            .with_extra_cargo_target_globs(vec!["~/proj/assets".to_string()]);
+
+        let evidence = found(CargoDetector.discover(&ctx));
+
+        assert!(
+            evidence.iter().all(|ev| !is_unowned_candidate(ev)),
+            "{evidence:?}"
+        );
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// Project A's build-dir is project B's own `target/`. Whichever root is
+    /// processed first, B's directory keeps its owner.
+    #[test]
+    fn a_build_dir_that_is_another_roots_target_keeps_that_roots_ownership() {
+        let home = fixture_home("order");
+        let make_project = |name: &str, build_dir: Option<&Path>| {
+            let project = home.join(name);
+            fs::create_dir_all(project.join("src")).unwrap();
+            fs::write(
+                project.join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n"),
+            )
+            .unwrap();
+            fs::write(project.join("src/lib.rs"), "").unwrap();
+            cargo_target(&project.join("target"));
+            if let Some(build_dir) = build_dir {
+                fs::create_dir_all(project.join(".cargo")).unwrap();
+                fs::write(
+                    project.join(".cargo/config.toml"),
+                    format!("[build]\nbuild-dir = \"{}\"\n", build_dir.display()),
+                )
+                .unwrap();
+            }
+            project
+        };
+        let b = make_project("b", None);
+        let a = make_project("a", Some(&b.join("target")));
+        let b_target = b.join("target").canonicalize().unwrap();
+
+        for roots in [vec![a.clone(), b.clone()], vec![b.clone(), a.clone()]] {
+            let ctx = DiscoveryContext::new(&home).with_known_project_roots(roots.clone());
+            let evidence = found(CargoDetector.discover(&ctx));
+            let owned = evidence
+                .iter()
+                .find(|ev| ev.resource.locator == ResourceLocator::Path(b_target.clone()))
+                .unwrap_or_else(|| panic!("b/target missing for {roots:?}"));
+            assert!(
+                !is_unowned_candidate(owned),
+                "owner lost for root order {roots:?}"
+            );
+        }
         fs::remove_dir_all(&home).ok();
     }
 

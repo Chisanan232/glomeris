@@ -200,6 +200,28 @@ fn wildcard_match(pattern: &str, name: &str) -> bool {
     true
 }
 
+/// Whether `dir` has a `*.rs` file directly inside it, reading at most
+/// [`MAX_ENTRIES_PER_DIR`] entries. `None` when the answer is unknown (the
+/// directory is unreadable or larger than the cap); callers must treat that as
+/// "reject", never as "no source".
+pub fn top_level_rust_source(dir: &Path) -> Option<bool> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for (seen, entry) in entries.enumerate() {
+        if seen >= MAX_ENTRIES_PER_DIR {
+            return None;
+        }
+        let entry = entry.ok()?;
+        if entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        {
+            return Some(true);
+        }
+    }
+    Some(false)
+}
+
 /// Whether `dir` looks like Cargo build output rather than something else a
 /// glob happened to match. Requires one of Cargo's own markers, and refuses a
 /// directory that holds a manifest or Rust source: a misconfigured glob must
@@ -387,6 +409,17 @@ mod tests {
         }
         let found = expand_globs(&[format!("{}/t/*", home.display())], &home);
         assert_eq!(found.len(), MAX_MATCHES);
+    }
+
+    #[test]
+    fn top_level_rust_source_is_found_or_reported_unknown() {
+        let root = temp_dir("rs-scan");
+        let clean = root.join("clean");
+        fs::create_dir_all(&clean).unwrap();
+        assert_eq!(top_level_rust_source(&clean), Some(false));
+        fs::write(clean.join("lib.rs"), b"").unwrap();
+        assert_eq!(top_level_rust_source(&clean), Some(true));
+        assert_eq!(top_level_rust_source(&root.join("missing")), None);
     }
 
     #[test]
