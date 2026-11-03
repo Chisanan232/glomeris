@@ -136,8 +136,15 @@ fn a_keep_marker_one_level_down_makes_the_target_protected() {
     std::fs::remove_dir_all(&home).ok();
 }
 
-/// Even a receipt claiming every autonomy-raising field is only ever a reason
-/// to stop: it is never read, and the class is never AUTO_SAFE.
+/// Even a receipt claiming every autonomy-raising field never yields AUTO_SAFE.
+///
+/// This is deliberately the weak claim. Under a temp HOME the Cargo ownership
+/// probe cannot resolve, so the class is ASK either way and the exact
+/// `owner_receipt_present` reason is not reachable here (a Partial candidate
+/// returns before the active-use reasons). The precise behaviour (a receipt on
+/// otherwise clean evidence is exactly ASK `[owner_receipt_present]`, and no
+/// marker state lowers protection) is pinned by the
+/// `policy::engine` unit tests, which build complete evidence.
 #[test]
 fn an_owner_receipt_never_raises_autonomy() {
     let home = make_temp_home("receipt");

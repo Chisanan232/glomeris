@@ -1411,6 +1411,8 @@ mod tests {
             ),
             managed_ownership: None,
             cargo_target_scope,
+            config_markers: (kind == ResourceKind::CargoTargetDir)
+                .then(|| ProbeOutcome::Observed(crate::evidence::ConfigMarkers::none())),
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

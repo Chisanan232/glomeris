@@ -14,7 +14,7 @@
 //! * A marker it cannot verify (permission error, over-large directory) is
 //!   `Unavailable`, which policy turns into ASK, never into "no marker".
 //! * Depth matches Config's own scan for a Cargo target: the directory itself
-//!   and one level below.
+//!   and one level below, for both markers.
 
 use std::io::ErrorKind;
 use std::path::Path;
@@ -33,7 +33,7 @@ const MAX_ENTRIES: usize = 4096;
 pub struct ConfigMarkers {
     /// A `.ca-keep` marker at the top level or one directory below.
     pub keep: bool,
-    /// A `.ca-owner.json` receipt at the top level.
+    /// A `.ca-owner.json` receipt at the top level or one directory below.
     pub owner_receipt: bool,
 }
 
@@ -59,7 +59,24 @@ fn reason_for(error: &std::io::Error) -> ProbeReason {
 /// `NotFound` for `dir` itself is `Observed(none)`: a vanished target is
 /// caught by the fingerprint check, and "nothing there" has no marker to
 /// honour. Every other failure is `Unavailable`.
+///
+/// A `.ca-keep` is a veto and wins immediately: once one is seen the result is
+/// returned at once, so a later error or an over-large directory can never
+/// turn an observed keep marker into a merely consentable ASK.
 pub fn probe(dir: &Path) -> ProbeOutcome<ConfigMarkers> {
+    // Cheapest and strongest signal first, before any bounded enumeration.
+    match std::fs::symlink_metadata(dir.join(KEEP_MARKER)) {
+        Ok(_) => {
+            return ProbeOutcome::Observed(ConfigMarkers {
+                keep: true,
+                owner_receipt: false,
+            })
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        // The directory itself may be missing; read_dir below decides.
+        Err(_) => {}
+    }
+
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -79,8 +96,10 @@ pub fn probe(dir: &Path) -> ProbeOutcome<ConfigMarkers> {
         };
         let name = entry.file_name();
         if name == KEEP_MARKER {
-            markers.keep = true;
-            continue;
+            return ProbeOutcome::Observed(ConfigMarkers {
+                keep: true,
+                owner_receipt: markers.owner_receipt,
+            });
         }
         if name == RECEIPT_MARKER {
             markers.owner_receipt = true;
@@ -89,18 +108,49 @@ pub fn probe(dir: &Path) -> ProbeOutcome<ConfigMarkers> {
         // One level down. `file_type` does not follow a symlink, so a link to
         // a directory elsewhere is not descended into.
         match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {
-                match std::fs::symlink_metadata(entry.path().join(KEEP_MARKER)) {
-                    Ok(_) => markers.keep = true,
-                    Err(e) if e.kind() == ErrorKind::NotFound => {}
-                    Err(e) => return ProbeOutcome::Unavailable(reason_for(&e)),
+            Ok(kind) if kind.is_dir() => match probe_child(&entry.path()) {
+                Ok(child) => {
+                    if child.keep {
+                        return ProbeOutcome::Observed(ConfigMarkers {
+                            keep: true,
+                            owner_receipt: markers.owner_receipt || child.owner_receipt,
+                        });
+                    }
+                    markers.owner_receipt |= child.owner_receipt;
                 }
-            }
+                Err(reason) => return ProbeOutcome::Unavailable(reason),
+            },
             Ok(_) => {}
             Err(e) => return ProbeOutcome::Unavailable(reason_for(&e)),
         }
     }
     ProbeOutcome::Observed(markers)
+}
+
+/// Both markers inside one immediate child directory, by name only.
+///
+/// The child was a real directory when listed, but the path is looked up
+/// again here, so a swap for a symlink in between would make the lookups
+/// follow it. Re-checking the child after the lookups narrows that window to
+/// one `lstat`: if it is no longer a plain directory the answer is
+/// `Failed`, never "no marker". (Closing it fully needs `openat` on a held
+/// descriptor; the attacker who can swap entries inside a cache directory can
+/// equally just delete a marker, so the residual is recorded, not chased.)
+fn probe_child(child: &Path) -> Result<ConfigMarkers, ProbeReason> {
+    let mut found = ConfigMarkers::none();
+    for (name, flag) in [(KEEP_MARKER, true), (RECEIPT_MARKER, false)] {
+        match std::fs::symlink_metadata(child.join(name)) {
+            Ok(_) if flag => found.keep = true,
+            Ok(_) => found.owner_receipt = true,
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => return Err(reason_for(&e)),
+        }
+    }
+    match std::fs::symlink_metadata(child) {
+        Ok(meta) if meta.file_type().is_dir() => Ok(found),
+        Ok(_) => Err(ProbeReason::Failed),
+        Err(e) => Err(reason_for(&e)),
+    }
 }
 
 #[cfg(test)]
@@ -227,5 +277,46 @@ mod tests {
             fs::write(dir.join(format!("f{i}")), b"").unwrap();
         }
         assert_eq!(probe(&dir), ProbeOutcome::Unavailable(ProbeReason::Failed));
+    }
+
+    #[test]
+    fn a_receipt_one_level_down_is_seen() {
+        let dir = temp_dir("receipt-child");
+        fs::create_dir_all(dir.join("debug")).unwrap();
+        fs::write(dir.join("debug/.ca-owner.json"), b"{}").unwrap();
+        let markers = observed(probe(&dir));
+        assert!(markers.owner_receipt);
+        assert!(!markers.keep);
+    }
+
+    #[test]
+    fn a_keep_marker_survives_an_oversized_directory() {
+        let dir = temp_dir("keep-big");
+        fs::write(dir.join(".ca-keep"), b"").unwrap();
+        for i in 0..MAX_ENTRIES + 1 {
+            fs::write(dir.join(format!("f{i}")), b"").unwrap();
+        }
+        assert!(
+            observed(probe(&dir)).keep,
+            "an observed keep must not degrade to Unavailable"
+        );
+    }
+
+    #[test]
+    fn a_keep_marker_in_a_child_survives_a_later_unreadable_sibling() {
+        let dir = temp_dir("keep-then-locked");
+        fs::create_dir_all(dir.join("a-kept")).unwrap();
+        fs::write(dir.join("a-kept/.ca-keep"), b"").unwrap();
+        fs::create_dir_all(dir.join("z-locked")).unwrap();
+        fs::set_permissions(dir.join("z-locked"), fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = probe(&dir);
+        fs::set_permissions(dir.join("z-locked"), fs::Permissions::from_mode(0o755)).unwrap();
+        // read_dir order is unspecified: either the keep is seen first and wins,
+        // or the locked sibling is seen first and the result is Unavailable.
+        // What must never happen is Observed(none).
+        match outcome {
+            ProbeOutcome::Observed(markers) => assert!(markers.keep),
+            ProbeOutcome::Unavailable(_) => {}
+        }
     }
 }

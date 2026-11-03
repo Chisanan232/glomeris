@@ -78,11 +78,14 @@ fn marker_data_never_reaches_a_model_or_a_report_dto() {
         "src/reporting/dto.rs",
     ] {
         let path = format!("{}/{file}", env!("CARGO_MANIFEST_DIR"));
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        if std::fs::metadata(&path).is_err() {
             continue;
-        };
+        }
+        // Production code only: the unit-test modules in these files build
+        // `Evidence` literals that legitimately name the field.
+        let code = production_source(file);
         assert!(
-            !text.contains("config_markers"),
+            !code.contains("config_markers"),
             "{file} must not carry Config marker data"
         );
     }
