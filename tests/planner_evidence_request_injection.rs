@@ -129,6 +129,7 @@ fn candidate(target: &Path) -> (Evidence, PolicyDecision) {
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         managed_ownership: None,
         cargo_target_scope: None,
+        config_markers: None,
         collected_at: T0 + Duration::from_secs(86_400 * 7),
         sources: Vec::new(),
     };

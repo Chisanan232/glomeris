@@ -96,6 +96,8 @@ fn docker_evidence(kind: ResourceKind, lifecycle: DockerLifecycle) -> Evidence {
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         managed_ownership: None,
         cargo_target_scope: None,
+        config_markers: (kind == ResourceKind::CargoTargetDir)
+            .then(|| ProbeOutcome::Observed(glomeris::evidence::ConfigMarkers::none())),
         collected_at: NOW,
         sources: Vec::new(),
     }

@@ -223,6 +223,9 @@ fn candidate(target: &Path, repo_root: &Path, local: &Local) -> (Evidence, Polic
                 is_direct_locator: true,
             },
         )),
+        config_markers: Some(glomeris::evidence::ProbeOutcome::Observed(
+            glomeris::evidence::ConfigMarkers::none(),
+        )),
         collected_at: collected_at(),
         sources: Vec::new(),
     };

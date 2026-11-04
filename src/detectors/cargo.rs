@@ -1672,6 +1672,9 @@ mod tests {
             ),
             managed_ownership: None,
             cargo_target_scope: Some(outcome),
+            config_markers: Some(crate::evidence::ProbeOutcome::Observed(
+                crate::evidence::ConfigMarkers::none(),
+            )),
             collected_at: now,
             sources: Vec::new(),
         };

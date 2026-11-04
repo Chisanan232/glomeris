@@ -933,6 +933,19 @@ enum GlomerisVocabulary {
             return prose(token, reasonAxis, "Could not confirm ownership",
                          "Cargo's own configuration could not be read, so Glomeris could "
                              + "not confirm whether this build cache is local or shared.")
+        case "protected_keep_marker":
+            return prose(token, reasonAxis, "Marked to keep",
+                         "A keep marker (.ca-keep) was found here, so Glomeris will not "
+                             + "clean it. This cannot be overridden.")
+        case "owner_receipt_present":
+            return prose(token, reasonAxis, "Another session claims this",
+                         "An owner receipt was found here. Glomeris cannot tell whether "
+                             + "that session is finished, so it will only clean this if "
+                             + "you say so.")
+        case "protective_marker_unverified":
+            return prose(token, reasonAxis, "Could not check for a keep marker",
+                         "Glomeris could not finish looking for a keep marker or owner "
+                             + "receipt here, so it will not assume there is none.")
         default:
             return unrecognised(
                 token, reasonAxis, "Unrecognised reason",

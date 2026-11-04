@@ -31,7 +31,8 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         // HORO-1873: untracked work now vetoes unattended reclamation.
         // Fresh class/reason revalidation, rather than this version alone,
         // invalidates an approval collected before the work appeared.
-        policy_version: 5,
+        // HORO-2359 (6): Config protective markers can add a veto.
+        policy_version: 6,
     };
 
     // 1. Unknown resource kind is an unconditional, fail-closed Protected
@@ -91,6 +92,21 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
                     vec![ReasonCode::ProtectedUnresolvedExecutableDependency],
                 );
             }
+        }
+    }
+
+    // 2d (HORO-2359, ADR-0001 §18). A Config `.ca-keep` marker on the
+    // resource: the sibling tool's "never delete" decision wins. Placed
+    // BEFORE staleness and completeness for the same load-bearing reason as
+    // 2b/2c — after them, a stale or Partial candidate would return Ask
+    // before this veto was reached, widening a kept directory into a
+    // consentable ASK.
+    if let Some(ProbeOutcome::Observed(markers)) = &ev.config_markers {
+        if markers.keep {
+            return decision(
+                PolicyClass::Protected,
+                vec![ReasonCode::ProtectedKeepMarker],
+            );
         }
     }
 
@@ -205,6 +221,25 @@ pub fn classify(ev: &Evidence, cfg: &PolicyConfig, now: SystemTime) -> PolicyDec
         if scope.scope == TargetScope::Redirected || !scope.is_direct_locator {
             active_use_reasons.push(ReasonCode::SharedBuildCacheBlastRadius);
         }
+    }
+
+    // HORO-2359: Config owner receipt / unverifiable marker probe. Veto-only:
+    // both push toward ASK and nothing here can lift a candidate. A Cargo
+    // target whose probe field is missing entirely is treated as unverified,
+    // so a code path that forgot the probe fails closed.
+    match &ev.config_markers {
+        Some(ProbeOutcome::Observed(markers)) => {
+            if markers.owner_receipt {
+                active_use_reasons.push(ReasonCode::OwnerReceiptPresent);
+            }
+        }
+        Some(ProbeOutcome::Unavailable(_)) => {
+            active_use_reasons.push(ReasonCode::ProtectiveMarkerUnverified);
+        }
+        None if ev.resource.kind == ResourceKind::CargoTargetDir => {
+            active_use_reasons.push(ReasonCode::ProtectiveMarkerUnverified);
+        }
+        None => {}
     }
 
     active_use_reasons.dedup();
@@ -332,6 +367,9 @@ mod tests {
             } else {
                 None
             },
+            config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+                crate::evidence::ProbeOutcome::Observed(crate::evidence::ConfigMarkers::none())
+            }),
             collected_at,
             sources: Vec::new(),
         }
@@ -652,7 +690,7 @@ mod tests {
         let decision = classify(&ev, &cfg(), NOW);
         assert_eq!(decision.class, PolicyClass::Ask);
         assert_eq!(decision.reasons, vec![ReasonCode::GitWorktreeDirty]);
-        assert_eq!(decision.policy_version, 5);
+        assert_eq!(decision.policy_version, 6);
         assert!(crate::reporting::dto::active_use_signals(&ev)
             .contains(&"git: untracked files present".to_string()));
     }
@@ -1013,12 +1051,12 @@ mod tests {
     }
 
     #[test]
-    fn policy_version_is_five() {
+    fn policy_version_is_six() {
         // HORO-1868: bumped 3 -> 4. See the `classify()` comment at
         // the `policy_version` literal for what changed.
         let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
         let decision = classify(&ev, &cfg(), NOW);
-        assert_eq!(decision.policy_version, 5);
+        assert_eq!(decision.policy_version, 6);
     }
 
     // ---- HORO-1825 §13 anti-vacuity + AC tests ----
@@ -1673,6 +1711,160 @@ mod tests {
                 "{kind:?} classified AutoSafe despite every correlation field being \
                  Unavailable(TimedOut) — a pass-budget skip must never read as clean"
             );
+        }
+    }
+
+    // ---- HORO-2359: Config protective markers are veto-only ----
+
+    fn markers(
+        keep: bool,
+        owner_receipt: bool,
+    ) -> Option<ProbeOutcome<crate::evidence::ConfigMarkers>> {
+        Some(ProbeOutcome::Observed(crate::evidence::ConfigMarkers {
+            keep,
+            owner_receipt,
+        }))
+    }
+
+    #[test]
+    fn a_keep_marker_is_protected() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.config_markers = markers(true, false);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Protected);
+        assert_eq!(decision.reasons, vec![ReasonCode::ProtectedKeepMarker]);
+    }
+
+    /// The load-bearing ordering: the veto holds for stale and for Partial
+    /// evidence, which would otherwise return Ask from an earlier step.
+    #[test]
+    fn a_keep_marker_wins_over_stale_and_partial_evidence() {
+        let mut stale = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        stale.config_markers = markers(true, false);
+        let much_later = NOW + cfg().max_evidence_age + Duration::from_secs(60);
+        assert_eq!(
+            classify(&stale, &cfg(), much_later).class,
+            PolicyClass::Protected
+        );
+
+        let mut partial = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        partial.config_markers = markers(true, false);
+        partial.cargo_target_scope = Some(ProbeOutcome::Unavailable(ProbeReason::Failed));
+        assert_eq!(
+            classify(&partial, &cfg(), NOW).class,
+            PolicyClass::Protected
+        );
+    }
+
+    #[test]
+    fn an_owner_receipt_is_ask_never_auto_safe() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.config_markers = markers(false, true);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(decision.reasons, vec![ReasonCode::OwnerReceiptPresent]);
+    }
+
+    #[test]
+    fn an_unverifiable_marker_probe_is_ask() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.config_markers = Some(ProbeOutcome::Unavailable(ProbeReason::PermissionDenied));
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectiveMarkerUnverified]
+        );
+    }
+
+    #[test]
+    fn a_cargo_target_whose_marker_probe_never_ran_fails_closed() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.config_markers = None;
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert_eq!(
+            decision.reasons,
+            vec![ReasonCode::ProtectiveMarkerUnverified]
+        );
+    }
+
+    #[test]
+    fn no_marker_leaves_a_clean_cargo_target_auto_safe() {
+        // Non-vacuity baseline for the tests above.
+        let ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        assert_eq!(classify(&ev, &cfg(), NOW).class, PolicyClass::AutoSafe);
+    }
+
+    #[test]
+    fn a_non_cargo_kind_ignores_markers_entirely() {
+        let mut ev = complete_evidence(ResourceKind::NodeModules, NOW);
+        let before = classify(&ev, &cfg(), NOW);
+        ev.config_markers = markers(true, true);
+        assert_eq!(
+            classify(&ev, &cfg(), NOW).class,
+            PolicyClass::Protected,
+            "an explicit marker on any kind is still honoured"
+        );
+        ev.config_markers = None;
+        assert_eq!(
+            classify(&ev, &cfg(), NOW),
+            before,
+            "None is not applicable to a non-Cargo kind"
+        );
+    }
+
+    #[test]
+    fn a_receipt_adds_a_reason_without_hiding_the_original_ones() {
+        let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+        ev.open_by_process = ProbeOutcome::Observed(vec![crate::evidence::ProcessRef::new(
+            1,
+            "cargo".to_string(),
+        )]);
+        ev.config_markers = markers(false, true);
+        let decision = classify(&ev, &cfg(), NOW);
+        assert_eq!(decision.class, PolicyClass::Ask);
+        assert!(decision.reasons.contains(&ReasonCode::ResourceInActiveUse));
+        assert!(decision.reasons.contains(&ReasonCode::OwnerReceiptPresent));
+    }
+
+    /// Veto-only property: across every marker state, the class is never
+    /// less protective than the clean baseline, and AUTO_SAFE appears only
+    /// for "observed, no marker".
+    #[test]
+    fn markers_can_only_move_a_candidate_toward_protection() {
+        fn rank(class: PolicyClass) -> u8 {
+            match class {
+                PolicyClass::AutoSafe => 0,
+                PolicyClass::Ask => 1,
+                PolicyClass::Protected => 2,
+            }
+        }
+        let baseline = rank(
+            classify(
+                &complete_evidence(ResourceKind::CargoTargetDir, NOW),
+                &cfg(),
+                NOW,
+            )
+            .class,
+        );
+        let states = [
+            markers(false, false),
+            markers(true, false),
+            markers(false, true),
+            markers(true, true),
+            Some(ProbeOutcome::Unavailable(ProbeReason::Failed)),
+            Some(ProbeOutcome::Unavailable(ProbeReason::PermissionDenied)),
+            None,
+        ];
+        for state in states {
+            let mut ev = complete_evidence(ResourceKind::CargoTargetDir, NOW);
+            ev.config_markers = state.clone();
+            let class = classify(&ev, &cfg(), NOW).class;
+            assert!(rank(class) >= baseline, "{state:?} lowered protection");
+            if class == PolicyClass::AutoSafe {
+                assert_eq!(state, markers(false, false), "{state:?} reached AUTO_SAFE");
+            }
         }
     }
 }

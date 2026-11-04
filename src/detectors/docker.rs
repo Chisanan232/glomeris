@@ -252,6 +252,7 @@ impl Detector for DockerDetector {
             executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             managed_ownership: None,
             cargo_target_scope: None,
+            config_markers: None,
             collected_at: SystemTime::now(),
             sources: vec!["docker system df --format '{{json .}}'".to_string()],
         };

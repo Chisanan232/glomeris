@@ -169,6 +169,9 @@ fn cleanest_evidence(kind: ResourceKind) -> Evidence {
                 is_direct_locator: true,
             })
         }),
+        config_markers: (kind == ResourceKind::CargoTargetDir).then(|| {
+            glomeris::evidence::ProbeOutcome::Observed(glomeris::evidence::ConfigMarkers::none())
+        }),
         collected_at: NOW,
         sources: Vec::new(),
     }

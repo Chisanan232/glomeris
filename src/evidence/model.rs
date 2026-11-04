@@ -1542,6 +1542,16 @@ pub struct Evidence {
     /// see [`crate::detectors::cargo::resolve_cargo_target_scope`].
     pub managed_ownership: Option<ProbeOutcome<crate::ownership::OwnershipEvidence>>,
     pub cargo_target_scope: Option<ProbeOutcome<CargoTargetScope>>,
+    /// HORO-2359: Config protective markers (`.ca-keep`, owner receipt) found
+    /// on the resource. `Some(_)` only for [`ResourceKind::CargoTargetDir`];
+    /// `None` means the check does not apply to the kind. It is veto-only
+    /// evidence (ADR-0001 §18): it can move a candidate to ASK or PROTECTED and
+    /// never toward AUTO_SAFE. Deliberately NOT part of `required_evidence`: a
+    /// directory with no marker is the normal case, and absence must not turn
+    /// every candidate into an ASK. A `None` on a Cargo target is treated as
+    /// unverified by `classify`, so a code path that forgets the probe fails
+    /// closed.
+    pub config_markers: Option<ProbeOutcome<super::protective_marker::ConfigMarkers>>,
     pub collected_at: SystemTime,
     /// Bounded provenance notes (capped at `MAX_SOURCES` entries).
     pub sources: Vec<String>,
@@ -1742,6 +1752,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             managed_ownership: None,
             cargo_target_scope: None,
+            config_markers: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }
