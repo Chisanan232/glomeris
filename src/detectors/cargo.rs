@@ -781,6 +781,7 @@ fn upsert_candidate(
         Recoverability::RegenerableByRebuild,
         NativeCleanup::Unsupported,
     );
+    ev.physical_bytes = estimate.allocated();
     if let Some(note) = estimate.lower_bound_note() {
         ev.push_source(note);
     }
