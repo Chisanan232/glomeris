@@ -92,6 +92,11 @@ const CONTAINER_MARKER: &str = "acme-billing-prod-replica";
 /// name, and it leaves this Mac for the same reason: it does not.
 const IMAGE_MARKER: &str = "registry.acme.example/acme-billing/api:v9142";
 
+/// A distinctive allocated-size figure (HORO-2360). It must differ from every
+/// other byte count in the fixture so its absence from the payload proves the
+/// figure itself, not a coincidentally equal value, is withheld.
+const PHYSICAL_MARKER_BYTES: u64 = 7_654_321;
+
 fn at(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
 }
@@ -147,7 +152,7 @@ fn candidate(
         },
         detector: glomeris::detectors::DetectorId("cargo.target_dir"),
         logical_bytes: ProbeOutcome::Observed(8_192),
-        physical_bytes: Some(8_192),
+        physical_bytes: Some(PHYSICAL_MARKER_BYTES),
         reclaimable_bytes: ProbeOutcome::Observed(8_192),
         reclaimable_bytes_is_lower_bound: true,
         last_modified: ProbeOutcome::Observed(at(86_400 * 20)),
@@ -956,6 +961,10 @@ fn no_local_identity_reaches_a_probe_finding() {
             "a probe finding carried {marker} off this machine"
         );
     }
+    assert!(
+        !body.contains(&PHYSICAL_MARKER_BYTES.to_string()),
+        "an on-disk allocated size reached the model payload: {body}"
+    );
     assert!(
         !body.contains('/'),
         "a path separator reached a round that carried evidence: {body}"
