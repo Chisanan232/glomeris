@@ -128,6 +128,49 @@ pub fn stop_reason_detail(reason: &StopReason) -> String {
     }
 }
 
+/// For each candidate, whether its bytes belong in a total built from the
+/// candidates for which `contributes` is true (HORO-2360).
+///
+/// A candidate whose bytes are already inside an enclosing candidate that also
+/// contributes to the same total must not be summed again: a directory and its
+/// own child would otherwise count the child twice. The check walks the whole
+/// `contained_in` chain, so a grandchild under a contributing grandparent is
+/// covered even when the parent between them is not. An enclosing candidate
+/// that does not contribute (protected, unmeasured, or outside this total) does
+/// not hide the child, so the only possible error is a conservative one. Pure
+/// and report-only: nothing about classification or executability changes.
+fn counted_in_total(
+    candidates: &[DetectCandidateReport],
+    contributes: impl Fn(&DetectCandidateReport) -> bool,
+) -> Vec<bool> {
+    use std::collections::HashMap;
+
+    let index: HashMap<&str, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.resource_id.as_str(), i))
+        .collect();
+    candidates
+        .iter()
+        .map(|candidate| {
+            let mut next = candidate.contained_in.as_deref();
+            // Bounded by the candidate count: a malformed chain must end, not
+            // loop.
+            for _ in 0..candidates.len() {
+                let Some(id) = next else { return true };
+                let Some(&at) = index.get(id) else {
+                    return true;
+                };
+                if contributes(&candidates[at]) {
+                    return false;
+                }
+                next = candidates[at].contained_in.as_deref();
+            }
+            true
+        })
+        .collect()
+}
+
 /// Sum and split the estimated opportunity across a discovery pass's
 /// candidates.
 ///
@@ -140,8 +183,11 @@ pub fn build_recovery_opportunity(
     candidates: &[DetectCandidateReport],
 ) -> RecoveryOpportunityReport {
     let mut out = RecoveryOpportunityReport::default();
+    let counted = counted_in_total(candidates, |c| {
+        c.executable && c.reclaimable_bytes.is_some()
+    });
 
-    for candidate in candidates {
+    for (candidate, counted) in candidates.iter().zip(counted) {
         if !candidate.executable {
             out.not_executable_count += 1;
             if candidate.policy_label == "PROTECTED" {
@@ -158,7 +204,13 @@ pub fn build_recovery_opportunity(
             .offered_actions
             .iter()
             .any(|action| action.requires_confirmation);
-        let bytes = candidate.reclaimable_bytes.unwrap_or(0);
+        // Counted in the figures, but its bytes are not added again when an
+        // enclosing executable candidate already includes them.
+        let bytes = if counted {
+            candidate.reclaimable_bytes.unwrap_or(0)
+        } else {
+            0
+        };
 
         if requires_confirmation {
             out.requires_confirmation_count += 1;
@@ -168,7 +220,10 @@ pub fn build_recovery_opportunity(
             out.actionable_now_bytes = out.actionable_now_bytes.saturating_add(bytes);
         }
 
-        if candidate.reclaimable_bytes.is_some() && candidate.reclaimable_bytes_is_lower_bound {
+        if counted
+            && candidate.reclaimable_bytes.is_some()
+            && candidate.reclaimable_bytes_is_lower_bound
+        {
             out.is_lower_bound = true;
         }
     }
@@ -190,6 +245,10 @@ pub fn build_recovery_opportunity(
 /// `EvidenceIncomplete`) is counted once, under its first reason, never
 /// once per reason it carries — summing `estimated_bytes` across the
 /// returned groups therefore never double-counts that candidate's bytes.
+/// Nested candidates are handled the same way (HORO-2360): a guarded candidate
+/// inside another guarded candidate that has bytes keeps its place in the
+/// group's `count` but adds no bytes of its own, so a directory and its child
+/// are never summed twice.
 ///
 /// Sorted by `estimated_bytes` descending so a client that renders
 /// "largest first" (the Swift UI does) needs no sort of its own.
@@ -207,15 +266,21 @@ pub fn build_guarded_breakdown(candidates: &[DetectCandidateReport]) -> Vec<Guar
 
     let mut groups: BTreeMap<(&'static str, &'static str), Acc> = BTreeMap::new();
 
-    for candidate in candidates {
-        // Actionable-without-confirmation candidates are the opportunity,
-        // never the guard — see this function's doc comment.
-        let actionable_without_confirmation = candidate.executable
+    let actionable_without_confirmation = |candidate: &DetectCandidateReport| {
+        candidate.executable
             && candidate
                 .offered_actions
                 .iter()
-                .any(|action| !action.requires_confirmation);
-        if actionable_without_confirmation {
+                .any(|action| !action.requires_confirmation)
+    };
+    let counted = counted_in_total(candidates, |c| {
+        !actionable_without_confirmation(c) && c.reclaimable_bytes.is_some()
+    });
+
+    for (candidate, counted) in candidates.iter().zip(counted) {
+        // Actionable-without-confirmation candidates are the opportunity,
+        // never the guard — see this function's doc comment.
+        if actionable_without_confirmation(candidate) {
             continue;
         }
 
@@ -227,6 +292,9 @@ pub fn build_guarded_breakdown(candidates: &[DetectCandidateReport]) -> Vec<Guar
         });
         acc.count += 1;
         match candidate.reclaimable_bytes {
+            // Inside an enclosing guarded candidate that already includes
+            // these bytes: still counted as a candidate, not summed again.
+            Some(_) if !counted => {}
             Some(bytes) => {
                 acc.bytes = acc.bytes.saturating_add(bytes);
                 if candidate.reclaimable_bytes_is_lower_bound {
@@ -819,6 +887,7 @@ mod tests {
         lower_bound: bool,
     ) -> DetectCandidateReport {
         DetectCandidateReport {
+            contained_in: None,
             resource_id: id.to_string(),
             kind: "cargo_target_dir",
             reclaimable_bytes: bytes,
@@ -857,9 +926,195 @@ mod tests {
         bytes: Option<u64>,
     ) -> DetectCandidateReport {
         DetectCandidateReport {
+            contained_in: None,
             reasons,
             ..candidate(id, label, executable, requires_confirmation, bytes, false)
         }
+    }
+
+    fn nested(mut c: DetectCandidateReport, inside: &str) -> DetectCandidateReport {
+        c.contained_in = Some(inside.to_string());
+        c
+    }
+
+    /// HORO-2360: a directory and its single child that is just as large (the
+    /// `isolated-targets` / `horo-1399` shape) are both executable. The total
+    /// counts the bytes once; the count still names both candidates.
+    #[test]
+    fn opportunity_counts_a_nested_candidate_once() {
+        let candidates = vec![
+            candidate("parent", "AUTO_SAFE", true, false, Some(9_900), false),
+            nested(
+                candidate("child", "AUTO_SAFE", true, false, Some(9_900), false),
+                "parent",
+            ),
+        ];
+        let out = build_recovery_opportunity(&candidates);
+        assert_eq!(out.actionable_now_bytes, 9_900);
+        assert_eq!(out.actionable_now_count, 2);
+    }
+
+    #[test]
+    fn opportunity_dedups_regardless_of_candidate_order() {
+        let candidates = vec![
+            nested(
+                candidate("child", "AUTO_SAFE", true, false, Some(9_900), false),
+                "parent",
+            ),
+            candidate("parent", "AUTO_SAFE", true, false, Some(9_900), false),
+        ];
+        assert_eq!(
+            build_recovery_opportunity(&candidates).actionable_now_bytes,
+            9_900
+        );
+    }
+
+    /// A grandchild is covered by a contributing grandparent even when the
+    /// candidate between them does not contribute.
+    #[test]
+    fn opportunity_dedups_through_a_non_contributing_middle_candidate() {
+        let candidates = vec![
+            candidate("grand", "AUTO_SAFE", true, false, Some(1_000), false),
+            nested(
+                candidate("mid", "PROTECTED", false, false, Some(900), false),
+                "grand",
+            ),
+            nested(
+                candidate("leaf", "AUTO_SAFE", true, false, Some(800), false),
+                "mid",
+            ),
+        ];
+        assert_eq!(
+            build_recovery_opportunity(&candidates).actionable_now_bytes,
+            1_000
+        );
+    }
+
+    /// A PROTECTED or unmeasured enclosing candidate is not a contributor, so
+    /// the child's bytes are not hidden behind it.
+    #[test]
+    fn opportunity_keeps_a_child_whose_enclosing_candidate_does_not_contribute() {
+        let protected = vec![
+            candidate("parent", "PROTECTED", false, false, Some(5_000), false),
+            nested(
+                candidate("child", "AUTO_SAFE", true, false, Some(700), false),
+                "parent",
+            ),
+        ];
+        assert_eq!(
+            build_recovery_opportunity(&protected).actionable_now_bytes,
+            700
+        );
+        let unmeasured = vec![
+            candidate("parent", "AUTO_SAFE", true, false, None, false),
+            nested(
+                candidate("child", "AUTO_SAFE", true, false, Some(700), false),
+                "parent",
+            ),
+        ];
+        assert_eq!(
+            build_recovery_opportunity(&unmeasured).actionable_now_bytes,
+            700
+        );
+    }
+
+    /// An ASK parent with an AUTO_SAFE child: auto + consent equals the parent
+    /// alone, so the feasibility sum of the two cannot overlap.
+    #[test]
+    fn opportunity_never_adds_a_child_to_auto_when_an_ask_parent_holds_it() {
+        let candidates = vec![
+            candidate("parent", "ASK", true, true, Some(4_000), false),
+            nested(
+                candidate("child", "AUTO_SAFE", true, false, Some(1_500), false),
+                "parent",
+            ),
+        ];
+        let out = build_recovery_opportunity(&candidates);
+        assert_eq!(out.actionable_now_bytes, 0);
+        assert_eq!(out.requires_confirmation_bytes, 4_000);
+        assert_eq!(
+            out.actionable_now_bytes + out.requires_confirmation_bytes,
+            4_000
+        );
+    }
+
+    /// Only a contributing candidate propagates the lower-bound flag.
+    #[test]
+    fn opportunity_lower_bound_comes_only_from_counted_candidates() {
+        let candidates = vec![
+            candidate("parent", "AUTO_SAFE", true, false, Some(1_000), false),
+            nested(
+                candidate("child", "AUTO_SAFE", true, false, Some(800), true),
+                "parent",
+            ),
+        ];
+        assert!(!build_recovery_opportunity(&candidates).is_lower_bound);
+    }
+
+    /// Nesting split across two guarded groups still counts the bytes once.
+    #[test]
+    fn guarded_breakdown_counts_a_nested_candidate_once_across_groups() {
+        let candidates = vec![
+            candidate_with_reasons(
+                "parent",
+                "ASK",
+                vec!["rebuild_cost_high"],
+                true,
+                true,
+                Some(6_000),
+            ),
+            nested(
+                candidate_with_reasons(
+                    "child",
+                    "ASK",
+                    vec!["resource_in_active_use"],
+                    true,
+                    true,
+                    Some(6_000),
+                ),
+                "parent",
+            ),
+        ];
+        let guarded = build_guarded_breakdown(&candidates);
+        let total: u64 = guarded.iter().map(|g| g.estimated_bytes).sum();
+        let count: usize = guarded.iter().map(|g| g.count).sum();
+        assert_eq!(total, 6_000, "{guarded:?}");
+        assert_eq!(count, 2, "both candidates stay visible: {guarded:?}");
+    }
+
+    /// Candidates with no `contained_in` behave exactly as before.
+    #[test]
+    fn candidates_that_nest_in_nothing_are_summed_as_before() {
+        let candidates = vec![
+            candidate("a", "AUTO_SAFE", true, false, Some(100), false),
+            candidate("b", "AUTO_SAFE", true, false, Some(200), false),
+        ];
+        assert_eq!(
+            build_recovery_opportunity(&candidates).actionable_now_bytes,
+            300
+        );
+    }
+
+    /// A malformed chain (a cycle, or an id that names no candidate) must end
+    /// and fall back to counting, never loop.
+    #[test]
+    fn a_cyclic_or_dangling_contained_in_chain_terminates() {
+        let candidates = vec![
+            nested(
+                candidate("a", "AUTO_SAFE", true, false, Some(100), false),
+                "b",
+            ),
+            nested(
+                candidate("b", "AUTO_SAFE", true, false, Some(200), false),
+                "a",
+            ),
+            nested(
+                candidate("c", "AUTO_SAFE", true, false, Some(50), false),
+                "missing",
+            ),
+        ];
+        let out = build_recovery_opportunity(&candidates);
+        assert!(out.actionable_now_bytes >= 50);
     }
 
     /// HORO-1828 anti-vacuity: summing `estimated_bytes` across every

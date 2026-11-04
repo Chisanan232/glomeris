@@ -130,6 +130,7 @@ mod tests {
             Vec::new()
         };
         DetectCandidateReport {
+            contained_in: None,
             resource_id: "cargo_target_dir:/tmp/x".to_string(),
             kind: "cargo_target_dir",
             reclaimable_bytes: Some(1),
@@ -146,6 +147,7 @@ mod tests {
 
     fn ask_requires_confirmation() -> DetectCandidateReport {
         DetectCandidateReport {
+            contained_in: None,
             offered_actions: vec![OfferedAction {
                 action_id: "cargo.clean.target_dir".to_string(),
                 requires_confirmation: true,

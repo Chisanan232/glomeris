@@ -888,6 +888,14 @@ pub struct DetectCandidateReport {
     /// Human-readable reason set exactly when `executable` is `false`.
     /// HORO-1053.
     pub refusal_reason: Option<String>,
+    /// `resource_id` of the nearest other candidate whose path encloses this
+    /// one (HORO-2360, ADR-0001 §20). Totals count this candidate's bytes
+    /// only if no enclosing candidate already contributes them, so a
+    /// directory and its own child are never summed twice. Report-only:
+    /// classification, actions and executability are unaffected. Absent when
+    /// nothing encloses it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contained_in: Option<String>,
 }
 
 impl DetectCandidateReport {
@@ -919,6 +927,7 @@ impl DetectCandidateReport {
             executable,
             offered_actions,
             refusal_reason,
+            contained_in: None,
         }
     }
 }
@@ -1121,21 +1130,52 @@ impl WorkspaceFamilyReport {
         let mut unmeasured_count = 0usize;
         let mut is_lower_bound = false;
 
-        for member in family.members() {
+        // A member inside another member of this family whose bytes are
+        // already counted there (HORO-2360): AUTO_SAFE and ASK members with
+        // measured bytes are the contributors, protected or unmeasured
+        // enclosing members hide nothing.
+        let members: Vec<&WorkspaceMember> = family.members().collect();
+        let contributes = |m: &WorkspaceMember| {
+            m.reclaimable_bytes.is_some()
+                && matches!(m.label, PolicyLabel::AutoSafe | PolicyLabel::Ask)
+        };
+        let by_id: std::collections::HashMap<&str, &WorkspaceMember> = members
+            .iter()
+            .map(|m| (m.resource_id.as_str(), *m))
+            .collect();
+        let nested = |member: &WorkspaceMember| {
+            let mut next = member.contained_in.as_deref();
+            for _ in 0..members.len() {
+                let Some(enclosing) = next.and_then(|id| by_id.get(id)) else {
+                    return false;
+                };
+                if contributes(enclosing) {
+                    return true;
+                }
+                next = enclosing.contained_in.as_deref();
+            }
+            false
+        };
+
+        for member in members.iter().copied() {
             if member.reclaimable_bytes.is_none() {
                 unmeasured_count += 1;
             }
-            let bytes = member.reclaimable_bytes.unwrap_or(0);
+            let bytes = if nested(member) {
+                0
+            } else {
+                member.reclaimable_bytes.unwrap_or(0)
+            };
             match member.label {
                 PolicyLabel::AutoSafe => {
                     actionable_now_count += 1;
                     actionable_now_bytes = actionable_now_bytes.saturating_add(bytes);
-                    is_lower_bound |= member.reclaimable_bytes_is_lower_bound;
+                    is_lower_bound |= member.reclaimable_bytes_is_lower_bound && !nested(member);
                 }
                 PolicyLabel::Ask => {
                     requires_confirmation_count += 1;
                     requires_confirmation_bytes = requires_confirmation_bytes.saturating_add(bytes);
-                    is_lower_bound |= member.reclaimable_bytes_is_lower_bound;
+                    is_lower_bound |= member.reclaimable_bytes_is_lower_bound && !nested(member);
                 }
                 PolicyLabel::Protected => protected_count += 1,
                 PolicyLabel::UnknownIncomplete => unknown_count += 1,
@@ -3871,6 +3911,7 @@ mod tests {
 
     fn member(id: &str, bytes: Option<u64>, label: PolicyLabel) -> WorkspaceMember {
         WorkspaceMember {
+            contained_in: None,
             resource_id: id.to_string(),
             reclaimable_bytes: bytes,
             reclaimable_bytes_is_lower_bound: false,
@@ -3909,6 +3950,70 @@ mod tests {
             common_dir: PathBuf::from("/work/proj/.git"),
             worktrees,
         })
+    }
+
+    fn inside(mut m: WorkspaceMember, enclosing: &str) -> WorkspaceMember {
+        m.contained_in = Some(enclosing.to_string());
+        m
+    }
+
+    /// HORO-2360: a member inside another measured member of its family adds
+    /// no bytes of its own, but stays counted.
+    #[test]
+    fn a_nested_family_member_is_counted_but_not_summed_twice() {
+        let report = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![
+                member("parent", Some(9_000), PolicyLabel::AutoSafe),
+                inside(
+                    member("child", Some(9_000), PolicyLabel::AutoSafe),
+                    "parent",
+                ),
+            ],
+        )]);
+
+        assert_eq!(report.actionable_now_bytes, 9_000);
+        assert_eq!(report.actionable_now_count, 2);
+    }
+
+    /// An ASK parent holding an AUTO_SAFE child: the child moves out of the
+    /// auto figure, so auto + consent is the parent alone.
+    #[test]
+    fn an_ask_parent_absorbs_its_auto_safe_child_in_a_family_total() {
+        let report = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![
+                member("parent", Some(4_000), PolicyLabel::Ask),
+                inside(
+                    member("child", Some(1_500), PolicyLabel::AutoSafe),
+                    "parent",
+                ),
+            ],
+        )]);
+
+        assert_eq!(report.actionable_now_bytes, 0);
+        assert_eq!(report.requires_confirmation_bytes, 4_000);
+    }
+
+    #[test]
+    fn a_protected_or_foreign_enclosing_member_hides_nothing() {
+        let protected = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![
+                member("parent", Some(5_000), PolicyLabel::Protected),
+                inside(member("child", Some(700), PolicyLabel::AutoSafe), "parent"),
+            ],
+        )]);
+        assert_eq!(protected.actionable_now_bytes, 700);
+
+        let foreign = family_of(vec![settled_worktree(
+            "/work/proj",
+            vec![inside(
+                member("child", Some(700), PolicyLabel::AutoSafe),
+                "elsewhere",
+            )],
+        )]);
+        assert_eq!(foreign.actionable_now_bytes, 700);
     }
 
     /// Protected bulk is counted, never summed. Presenting bytes a run can

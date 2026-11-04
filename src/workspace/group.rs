@@ -119,6 +119,9 @@ pub struct WorkspaceMember {
     /// how much is protected; not re-derived and not branched on to
     /// permit anything.
     pub label: PolicyLabel,
+    /// `resource_id` of the nearest other candidate that encloses this one
+    /// (HORO-2360), so a family total does not count the same bytes twice.
+    pub contained_in: Option<String>,
 }
 
 /// One git working tree and the discovered resources inside it.
@@ -199,8 +202,13 @@ pub fn group_families(
     // common_dir -> repo_root -> members, both ordered so the output is
     // deterministic for one disk state.
     let mut families: BTreeMap<PathBuf, BTreeMap<PathBuf, WorktreeAccumulator>> = BTreeMap::new();
+    // Containment is judged over every discovered candidate, so a family
+    // member knows when the candidate enclosing it lives elsewhere; the
+    // family total only honours an enclosing member of its own family.
+    let enclosing =
+        crate::evidence::containment::enclosing_resource_ids(candidates.iter().map(|(ev, _)| ev));
 
-    for (ev, decision) in candidates {
+    for ((ev, decision), contained_in) in candidates.iter().zip(enclosing) {
         let Some(Some(git)) = ev.git_state.observed() else {
             continue;
         };
@@ -213,6 +221,7 @@ pub fn group_families(
         accumulator.absorb(
             ev,
             WorkspaceMember {
+                contained_in: None,
                 resource_id: ev.resource.to_string(),
                 reclaimable_bytes: reclaimable,
                 reclaimable_bytes_is_lower_bound: reclaimable.is_some()
