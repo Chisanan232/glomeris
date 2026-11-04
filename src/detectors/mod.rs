@@ -1474,6 +1474,62 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
 
+    /// HORO-2359: the Config marker probe is wired into discovery itself, so the
+    /// executor's revalidation (which builds its evidence here) sees a marker
+    /// created after approval. Nothing hand-sets the field.
+    #[test]
+    fn discovery_evidence_probes_markers_for_cargo_targets_only() {
+        use crate::evidence::{ConfigMarkers, ResourceKind};
+        let make = |kind: ResourceKind, dir: &Path| {
+            discovery_evidence(
+                ResourceId::new(kind, ResourceLocator::Path(dir.to_path_buf())),
+                DetectorId("test"),
+                dir,
+                ProbeOutcome::Observed(0),
+                ProbeOutcome::Observed(0),
+                false,
+                ProbeOutcome::Observed(SystemTime::now()),
+                Regenerability::RegenerableByRebuild,
+                Recoverability::RegenerableByRebuild,
+                NativeCleanup::Unsupported,
+            )
+        };
+        let dir = test_support::make_temp_dir("marker-wiring");
+
+        let clean = make(ResourceKind::CargoTargetDir, &dir);
+        assert_eq!(
+            clean.config_markers,
+            Some(ProbeOutcome::Observed(ConfigMarkers::none()))
+        );
+
+        std::fs::write(dir.join(".ca-owner.json"), b"{}").unwrap();
+        let receipt = make(ResourceKind::CargoTargetDir, &dir);
+        assert_eq!(
+            receipt.config_markers,
+            Some(ProbeOutcome::Observed(ConfigMarkers {
+                keep: false,
+                owner_receipt: true
+            }))
+        );
+
+        std::fs::write(dir.join(".ca-keep"), b"").unwrap();
+        let kept = make(ResourceKind::CargoTargetDir, &dir);
+        assert_eq!(
+            kept.config_markers,
+            Some(ProbeOutcome::Observed(ConfigMarkers {
+                keep: true,
+                owner_receipt: false
+            }))
+        );
+
+        let node = make(ResourceKind::NodeModules, &dir);
+        assert_eq!(
+            node.config_markers, None,
+            "the check is scoped to Cargo targets"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// HORO-1824 §4.4: before/after fixture proving hardlink dedup. Two
     /// hardlinks to the same physical 4096-byte file must be counted ONCE,
     /// not twice — this is the exact shape Cargo produces when it uplifts

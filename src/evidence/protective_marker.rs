@@ -138,13 +138,23 @@ pub fn probe(dir: &Path) -> ProbeOutcome<ConfigMarkers> {
 /// equally just delete a marker, so the residual is recorded, not chased.)
 fn probe_child(child: &Path) -> Result<ConfigMarkers, ProbeReason> {
     let mut found = ConfigMarkers::none();
-    for (name, flag) in [(KEEP_MARKER, true), (RECEIPT_MARKER, false)] {
-        match std::fs::symlink_metadata(child.join(name)) {
-            Ok(_) if flag => found.keep = true,
-            Ok(_) => found.owner_receipt = true,
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(reason_for(&e)),
+    // The keep marker is the veto: the moment it is seen the answer is final,
+    // so no later fallible step (the receipt lookup, the directory re-check)
+    // can lose it.
+    match std::fs::symlink_metadata(child.join(KEEP_MARKER)) {
+        Ok(_) => {
+            return Ok(ConfigMarkers {
+                keep: true,
+                owner_receipt: false,
+            })
         }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(reason_for(&e)),
+    }
+    match std::fs::symlink_metadata(child.join(RECEIPT_MARKER)) {
+        Ok(_) => found.owner_receipt = true,
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(reason_for(&e)),
     }
     match std::fs::symlink_metadata(child) {
         Ok(meta) if meta.file_type().is_dir() => Ok(found),
