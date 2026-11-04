@@ -14,7 +14,7 @@ pub struct Evidence {
     pub fingerprint: ResourceFingerprint,
     pub detector: DetectorId,
     pub logical_bytes: ProbeOutcome<u64>,
-    pub physical_bytes: Option<u64>,       // always None in the MVP
+    pub physical_bytes: Option<u64>,       // st_blocks * 512 from the size walk; report-only
     pub reclaimable_bytes: ProbeOutcome<u64>,
     pub last_modified: ProbeOutcome<SystemTime>,
     pub last_accessed: ProbeOutcome<SystemTime>,
@@ -31,8 +31,13 @@ pub struct Evidence {
 }
 ```
 
-`physical_bytes` is always `None` today — subtree `st_blocks` summation is
-out of scope for the current milestone. `git_state`'s `Observed(None)` means
+`physical_bytes` is the subtree's on-disk allocated size (`st_blocks * 512`),
+summed by the same bounded walk as `logical_bytes`. It is `None` when the
+resource was not walked (Docker figures, executor revalidation). It is an
+upper bound on what deleting frees (APFS clones, hardlinks outside the
+resource and local snapshots can make the real gain smaller), a lower bound
+when the walk was truncated, and report-only: policy, the planner and the
+executor never read it (ADR-0001 §19). `git_state`'s `Observed(None)` means
 the probe ran successfully and determined the resource genuinely isn't in a
 git working tree — a complete, legitimate answer, not a missing one; only
 `Unavailable(reason)` means the probe itself failed.
