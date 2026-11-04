@@ -24,16 +24,38 @@ const MEASUREMENT_NAMES: [&str; 2] = ["physical_bytes", "allocated_bytes"];
 
 fn production_source(path: &Path) -> String {
     let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    // Only a whole test module ends production code: an inline
-    // `#[cfg(test)]` on a single statement must not hide what follows it.
-    let code = match text.find("#[cfg(test)]\nmod ") {
-        Some(at) => &text[..at],
-        None => &text,
-    };
-    code.lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    // Drop every whole `#[cfg(test)] mod ... { }` block, and keep what follows
+    // it: several files hold production code after their test module. rustfmt
+    // closes a top-level module with a lone `}` at column 0, and an inline
+    // `#[cfg(test)]` on a single statement is production code around it.
+    let mut kept = Vec::new();
+    let mut in_test_mod = false;
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        if in_test_mod {
+            if line == "}" {
+                in_test_mod = false;
+            }
+            continue;
+        }
+        if line.trim() == "#[cfg(test)]"
+            && lines.peek().is_some_and(|next| {
+                let next = next.trim_start();
+                next.starts_with("mod ") || next.starts_with("pub mod ")
+            })
+        {
+            // A `mod name;` declaration has no body to skip.
+            let next = lines.peek().unwrap();
+            if !next.trim_end().ends_with(';') {
+                in_test_mod = true;
+            }
+            continue;
+        }
+        if !line.trim_start().starts_with("//") {
+            kept.push(line);
+        }
+    }
+    kept.join("\n")
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
