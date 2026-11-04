@@ -24,7 +24,9 @@ const MEASUREMENT_NAMES: [&str; 2] = ["physical_bytes", "allocated_bytes"];
 
 fn production_source(path: &Path) -> String {
     let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let code = match text.find("#[cfg(test)]") {
+    // Only a whole test module ends production code: an inline
+    // `#[cfg(test)]` on a single statement must not hide what follows it.
+    let code = match text.find("#[cfg(test)]\nmod ") {
         Some(at) => &text[..at],
         None => &text,
     };

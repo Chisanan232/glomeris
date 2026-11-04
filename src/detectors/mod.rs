@@ -364,7 +364,8 @@ impl SizeEstimate {
     /// [`SizeEstimate::lower_bound_note`]'s advisory text are derived
     /// from — callers must never derive one from the other.
     pub fn is_lower_bound(&self) -> bool {
-        self.bytes.is_observed() && self.stop_reason != StopReason::Exhausted
+        self.bytes.is_observed()
+            && (self.stop_reason != StopReason::Exhausted || self.unreadable_entries > 0)
     }
 
     /// On-disk allocated bytes for [`Evidence::physical_bytes`]: `Some` only
@@ -391,6 +392,11 @@ impl SizeEstimate {
             return None;
         }
         match self.stop_reason {
+            StopReason::Exhausted if self.unreadable_entries > 0 => Some(format!(
+                "size estimate skipped {} unreadable entries after {} entries: reported \
+                 logical and allocated bytes are a lower bound, not the full subtree total",
+                self.unreadable_entries, self.entries_visited
+            )),
             StopReason::Exhausted => None,
             StopReason::TimeBudget => Some(format!(
                 "size estimate stopped early after {} entries ({} unreadable): {:?} time \
@@ -497,7 +503,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
     }
 
     let mut total: u64 = 0;
-    let mut allocated: u64 = 0;
+    let mut allocated: u64 = allocated_bytes_of(&root_meta);
     let mut entries_visited: u64 = 0;
     let mut unreadable_entries: u64 = 0;
     let mut stop_reason = StopReason::Exhausted;
@@ -569,6 +575,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             };
 
             if meta.is_dir() {
+                // Directories carry no logical bytes, but filesystems that
+                // allocate blocks for them (ext4; APFS reports 0) do count.
+                allocated = allocated.saturating_add(allocated_bytes_of(&meta));
                 stack.push(entry.path());
             } else {
                 #[cfg(unix)]
@@ -1646,11 +1655,23 @@ mod tests {
         let allocated = estimate
             .allocated()
             .expect("a walked directory reports allocation");
-        assert!(allocated > 0, "the written block is allocated");
-        assert!(
-            allocated < 1024 * 1024,
-            "sparse file allocated {allocated} bytes against 16 MiB logical"
+        use std::os::unix::fs::MetadataExt;
+        let own = std::fs::metadata(root.join("sparse.bin")).unwrap().blocks() * 512;
+        let root_own = std::fs::metadata(&root).unwrap().blocks() * 512;
+        assert_eq!(
+            allocated,
+            own + root_own,
+            "allocation must come from the entries' own st_blocks"
         );
+        // APFS (and most Unix filesystems) leave the hole unallocated. Some
+        // sandboxed filesystems allocate fully, so the size claim is made
+        // only where the filesystem itself reports the file as sparse.
+        if own < 16 * 1024 * 1024 {
+            assert!(
+                allocated < 1024 * 1024,
+                "sparse file allocated {allocated} bytes"
+            );
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1720,6 +1741,27 @@ mod tests {
         assert!(allocated < 8 * 8192, "partial walk must not extrapolate");
         let note = estimate.lower_bound_note().expect("truncation note");
         assert!(note.contains("allocated"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An unreadable subdirectory hides its contents, so the figures are a
+    /// lower bound even though the walk finished within budget.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subdirectory_makes_the_estimate_a_lower_bound() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_support::make_temp_dir("allocated-unreadable");
+        let hidden = root.join("hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("big.bin"), vec![1u8; 64 * 1024]).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(estimate.unreadable_entries, 1);
+        assert!(estimate.is_lower_bound());
+        assert!(estimate.lower_bound_note().is_some());
         std::fs::remove_dir_all(&root).ok();
     }
 
