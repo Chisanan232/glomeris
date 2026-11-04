@@ -1995,6 +1995,13 @@ pub fn print_explain_report(report: &ExplainReport) {
             report.reclaimable_bytes_is_lower_bound
         )
     );
+    if let Some(allocated) = &report.allocated {
+        println!(
+            "allocated:     {} (on-disk blocks; an upper bound on what deleting frees — \
+             APFS clones, hardlinks outside the resource and local snapshots can make it less)",
+            format_size_field(Some(&allocated.human), allocated.is_lower_bound)
+        );
+    }
     println!("completeness:  {}", report.completeness);
     println!("confidence:    {}", report.confidence);
     println!("regenerable:   {}", report.regenerability);
