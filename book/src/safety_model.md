@@ -69,7 +69,7 @@ part of the safety guarantee:
 7. Otherwise → `AutoSafe`, with reasons `EvidenceFreshAndComplete` (+
    `RegenerableByTool` if applicable) + `NoActiveUseObserved`.
 
-`policy_version` is `5` as of HORO-1873 (1825→2, 1824→3, 1868→4, 1873→5) — an
+`policy_version` is `6` as of HORO-2359 (1825→2, 1824→3, 1868→4, 1873→5, 2359→6) — an
 outstanding `explain`→`execute` consent now meets these new reasons, and the
 executor aborts with `PolicyClassDowngraded` when the class changes, or
 `PolicyReasonsWidened` when an existing ASK gains a veto (safe) rather than silently
@@ -81,6 +81,26 @@ Neither new `Ask` reason (`ExecutableRunningFromResource`,
 as of HORO-1868) can be pre-authorized by Autopilot —
 `autopilot::envelope::is_preauthorizable` refuses all of them unconditionally,
 same as every other live-use/absence-of-knowledge reason on this page.
+
+## Config protective markers (HORO-2359)
+
+The companion Config tooling protects directories it considers evidence with
+two markers. Glomeris looks for both on a Cargo target directory — in the
+directory itself and one level below — and uses them only to be **more**
+careful:
+
+| Found | Result | Reason |
+|---|---|---|
+| a `.ca-keep` file | `PROTECTED`, decided before staleness and completeness | `protected_keep_marker` |
+| a `.ca-owner.json` receipt | `ASK`, never pre-authorizable | `owner_receipt_present` |
+| the check could not finish (permission error, directory too large to examine) | `ASK`, shown as unknown/incomplete | `protective_marker_unverified` |
+| nothing | no effect — the normal case | — |
+
+The check lists directory entries and never opens a file, so nothing in a
+receipt (including a claim that its contents are reproducible or private) can
+raise what Glomeris is willing to do. A receipt can only make Glomeris stop and
+ask. SPE-109 disk reservations are not consulted: a reservation records bytes
+and a process id, not a path, so it cannot be tied to a directory.
 
 ## Git untracked files and automatic cleanup
 

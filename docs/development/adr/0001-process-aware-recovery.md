@@ -669,3 +669,15 @@ of §5 and one specific clause of §8.
 - **Not reopened.** §4.3's closed recognized-source list, §9's ownership
   model, §10's rejected alternatives, and §16's three founder-resolved
   decisions stand as this ADR already recorded them.
+
+## 18. Amendment — HORO-2359: Config protective markers as veto-only evidence (2026-11-02, Level 1)
+
+Config's resource lifecycle protects evidence with a `.ca-keep` marker and an owner receipt `.ca-owner.json`. Glomeris now notices both on a `CargoTargetDir`, with a pure filesystem probe (`evidence::protective_marker`) that uses only `symlink_metadata` and `read_dir`, at the directory and one level below. It adds **protection only**; §3 is unchanged.
+
+- `.ca-keep` present → `PROTECTED` (`protective_keep_marker`), decided before staleness and completeness, like the executable-dependency veto.
+- `.ca-owner.json` present → `ASK` (`owner_receipt_present`), never pre-authorizable. Glomeris cannot verify the owner session is dead, so a receipt is a reason to stop, never a licence.
+- A marker that cannot be verified (permission error, directory too large to examine) → `ASK` (`protective_marker_unverified`), never "no marker".
+- The probe never opens a file and never reads content, so no receipt field (`reproducible`, `private`, `evidence_free`, `session_id`) can influence policy. Using a Config receipt to **raise** autonomy would need a separate ADR amendment and a founder decision, and is out of scope.
+- SPE-109 reservations are not consulted: a reservation record carries bytes and a pid but no path, so it cannot be tied to a directory. If Config adds a canonical path to the record, or writes a lease inside the resource, that is a follow-up.
+- **Accepted residual (HORO-2359):** a child directory is looked up by path, so an attacker who can swap entries inside the cache directory during the probe could make a marker look absent for that one pass (the probe re-checks that the child is still a plain directory afterwards, which only narrows the window). Closing it fully needs `openat` on a held descriptor. The same attacker can simply delete the marker, which no probe can detect, so this is recorded rather than chased; the executor re-runs the probe at execution time.
+

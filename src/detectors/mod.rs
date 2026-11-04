@@ -594,6 +594,17 @@ pub(crate) fn discovery_evidence(
     recoverability: Recoverability,
     native_cleanup: NativeCleanup,
 ) -> Evidence {
+    // HORO-2359: only a Cargo target dir is checked for Config markers; the
+    // probe is one `read_dir` plus an `lstat` per child, so it is cheap
+    // enough to run at discovery and again at revalidation (which also
+    // builds its evidence here).
+    let config_markers = match (&resource.kind, &resource.locator) {
+        (
+            crate::evidence::ResourceKind::CargoTargetDir,
+            crate::evidence::ResourceLocator::Path(path),
+        ) => Some(crate::evidence::protective_marker::probe(path)),
+        _ => None,
+    };
     Evidence {
         resource,
         fingerprint: ResourceFingerprint {
@@ -622,6 +633,7 @@ pub(crate) fn discovery_evidence(
         executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
         managed_ownership: None,
         cargo_target_scope: None,
+        config_markers,
         collected_at: SystemTime::now(),
         sources: Vec::new(),
     }
@@ -1461,6 +1473,62 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HORO-2359: the Config marker probe is wired into discovery itself, so the
+    /// executor's revalidation (which builds its evidence here) sees a marker
+    /// created after approval. Nothing hand-sets the field.
+    #[test]
+    fn discovery_evidence_probes_markers_for_cargo_targets_only() {
+        use crate::evidence::{ConfigMarkers, ResourceKind};
+        let make = |kind: ResourceKind, dir: &Path| {
+            discovery_evidence(
+                ResourceId::new(kind, ResourceLocator::Path(dir.to_path_buf())),
+                DetectorId("test"),
+                dir,
+                ProbeOutcome::Observed(0),
+                ProbeOutcome::Observed(0),
+                false,
+                ProbeOutcome::Observed(SystemTime::now()),
+                Regenerability::RegenerableByRebuild,
+                Recoverability::RegenerableByRebuild,
+                NativeCleanup::Unsupported,
+            )
+        };
+        let dir = test_support::make_temp_dir("marker-wiring");
+
+        let clean = make(ResourceKind::CargoTargetDir, &dir);
+        assert_eq!(
+            clean.config_markers,
+            Some(ProbeOutcome::Observed(ConfigMarkers::none()))
+        );
+
+        std::fs::write(dir.join(".ca-owner.json"), b"{}").unwrap();
+        let receipt = make(ResourceKind::CargoTargetDir, &dir);
+        assert_eq!(
+            receipt.config_markers,
+            Some(ProbeOutcome::Observed(ConfigMarkers {
+                keep: false,
+                owner_receipt: true
+            }))
+        );
+
+        std::fs::write(dir.join(".ca-keep"), b"").unwrap();
+        let kept = make(ResourceKind::CargoTargetDir, &dir);
+        assert_eq!(
+            kept.config_markers,
+            Some(ProbeOutcome::Observed(ConfigMarkers {
+                keep: true,
+                owner_receipt: false
+            }))
+        );
+
+        let node = make(ResourceKind::NodeModules, &dir);
+        assert_eq!(
+            node.config_markers, None,
+            "the check is scoped to Cargo targets"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// HORO-1824 §4.4: before/after fixture proving hardlink dedup. Two
     /// hardlinks to the same physical 4096-byte file must be counted ONCE,

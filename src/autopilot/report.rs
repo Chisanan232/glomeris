@@ -172,6 +172,9 @@ fn is_refusal_reason(reason: ReasonCode) -> bool {
         | ReasonCode::ProtectedSystemPath
         | ReasonCode::ProtectedUnsafeMountOrSymlink
         | ReasonCode::ProtectedUnknownResourceKind
+        | ReasonCode::ProtectedKeepMarker
+        | ReasonCode::OwnerReceiptPresent
+        | ReasonCode::ProtectiveMarkerUnverified
         | ReasonCode::EvidenceIncomplete
         | ReasonCode::EvidenceStale
         | ReasonCode::EvidenceProbeFailed

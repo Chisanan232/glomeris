@@ -123,6 +123,7 @@ mod tests {
             executable_dependency: ProbeOutcome::Unavailable(ProbeReason::NotAttempted),
             managed_ownership: None,
             cargo_target_scope: None,
+            config_markers: None,
             collected_at: SystemTime::UNIX_EPOCH,
             sources: Vec::new(),
         }

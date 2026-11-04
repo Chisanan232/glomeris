@@ -91,6 +91,10 @@ pub fn label_for(decision: &PolicyDecision) -> PolicyLabel {
                 // (it IS shared), not a gap in what was measured, so it
                 // stays plain `ASK`.
                 | ReasonCode::TargetOwnershipUnknown
+                // HORO-2359: a marker probe that could not complete is an
+                // evidence-quality gap. A present receipt or keep marker is a
+                // positive fact about the resource and stays ASK / PROTECTED.
+                | ReasonCode::ProtectiveMarkerUnverified
         )
     });
 
