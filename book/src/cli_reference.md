@@ -258,6 +258,15 @@ Before that they came back in detector-registration order, so a 40 GB Cargo
 measurement quality — an exact size outranks a `≥` lower bound of the same
 number, because the exact one is the claim you can act on — and then by
 `resource_id`, so two runs over an unchanged machine produce the same order.
+
+A candidate whose path lies inside another candidate's carries `contained_in`
+(HORO-2360): the `resource_id` of the nearest enclosing candidate. Byte totals
+(`recovery_opportunity`, the guarded breakdown, workspace family totals) count
+its bytes only if no enclosing candidate already contributes them, so a
+directory and its own child are never summed twice; both still appear in the
+candidate list and in the counts. The field is absent when nothing encloses the
+candidate. It is a display pointer only: labels, reasons and executability are
+unaffected.
 Candidates whose size could not be measured at all sort last rather than
 being treated as zero. Ordering is applied at the single point where the
 report is assembled, so `--json` and the human-readable output can never
