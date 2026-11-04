@@ -223,6 +223,29 @@ never ask whether cargo, node or Swift is installed, so the older
 observation supported. `not_configured` is the one of the five states you can
 close yourself, and passing this flag is how.
 
+Cargo build output that lives **outside** every project — per-ticket targets
+under `~/.cargo`, `/private/tmp/*-target`, a qualification directory — can be
+named in `~/Library/Application Support/Glomeris/cargo-target-roots.conf`
+(HORO-2358): one glob per line, `#` comments and blank lines ignored.
+
+```text
+# ~/Library/Application Support/Glomeris/cargo-target-roots.conf
+~/.cargo/private-target-*
+~/.cargo/isolated-targets/*
+/private/tmp/*-target
+```
+
+The list is **empty by default**; a missing file changes nothing. Only the
+absolute (`/…`) and home-relative (`~/…`) forms are accepted, and only `*`
+inside one path segment — `**`, `?`, `[…]`, `{…}` and `..` are ignored rather
+than half-supported. Expansion is bounded (64 patterns, 512 directories). A
+match is reported only if it holds one of Cargo's own markers (`CACHEDIR.TAG`,
+`.rustc_info.json`, or a `debug/` or `release/` directory) and no
+`Cargo.toml`, `src/` or top-level Rust source; it must not be, or contain, your home directory or a configured project root. Matches nested inside another candidate, or inside a project root, are dropped. At most three path segments may contain `*`, the file may be at most 64 KiB, and one expansion reads at most 100,000 directory entries. Such a candidate has no project root, so its ownership
+cannot be resolved: it is always `ASK` (`target_ownership_unknown`), is never
+`AUTO_SAFE` and never pre-authorizable, and offers no cleanup action. Glomeris
+tells you where the space is; it does not delete from these roots. `build.build-dir` is listed the same way, but only while Cargo's target directory for that project exists, and note that Cargo itself removes a project's build directory together with its target directory when you run `cargo clean` for that project.
+
 `--json` prints a `DetectReport` — one candidate line per discovered
 resource, including the already-computed
 `executable`/`offered_actions`/`refusal_reason` triple (HORO-1053) a caller

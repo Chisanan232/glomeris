@@ -459,6 +459,15 @@ pub struct ResourceId {
     /// Homebrew, Node, Docker) — only the Cargo detector ever populates
     /// `Some(_)`.
     pub source_project_root: Option<PathBuf>,
+    /// HORO-2358: set by the Cargo detector for a target it found without any
+    /// owning workspace (a configured extra root, or `build.build-dir`).
+    /// Unlike `source_project_root: None`, which older code reads as "derive
+    /// the project from the target's parent", this is a positive statement
+    /// that no owner was resolved. It lives on the resource so it survives
+    /// revalidation, and `cargo.clean.target_dir` and the executor's scope
+    /// re-resolution both refuse to guess an owner for it. Provenance, like
+    /// `source_project_root`: not part of identity.
+    pub ownership_unresolved: bool,
 }
 
 /// Identity is `kind` + `locator` only. `source_project_root` is
@@ -488,7 +497,15 @@ impl ResourceId {
             kind,
             locator,
             source_project_root: None,
+            ownership_unresolved: false,
         }
+    }
+
+    /// Marks this resource as having no resolvable owning project. See
+    /// [`ResourceId::ownership_unresolved`].
+    pub fn with_unresolved_ownership(mut self) -> Self {
+        self.ownership_unresolved = true;
+        self
     }
 
     /// Attach the project root this resource was actually discovered
