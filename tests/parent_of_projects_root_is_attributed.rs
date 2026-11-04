@@ -167,8 +167,30 @@ fn a_parent_of_projects_root_is_attributed_rather_than_a_silent_clean_bill_of_he
 
     // This is still an honest, complete search (HORO-1576) — AC2/option 2's
     // own constraint: this field is purely additive attribution, never a
-    // new completeness signal.
-    assert!(report.discovery_complete);
+    // new completeness signal. The three project-scoped detectors this
+    // scenario is about each answered completely, and the report's
+    // `discovery_complete` is exactly what the detector outcomes say. It is
+    // deliberately NOT asserted `true` outright (HORO-2421): the registry is
+    // the real builtin one, so a slow host tool (`pip3 cache dir` past its
+    // 3 s probe) in an unrelated cache detector would otherwise fail a test
+    // about project roots.
+    for id in ["cargo_target_dir", "node_modules", "swiftpm_build_dir"] {
+        let outcome = pass
+            .detectors
+            .iter()
+            .find(|(detector, _)| detector.0 == id)
+            .map(|(_, outcome)| outcome)
+            .unwrap_or_else(|| panic!("{id} must be registered"));
+        assert!(
+            !outcome.left_discovery_incomplete(),
+            "{id} must have searched completely: {outcome:?}"
+        );
+    }
+    let expected_complete = !pass
+        .detectors
+        .iter()
+        .any(|(_, outcome)| outcome.left_discovery_incomplete());
+    assert_eq!(report.discovery_complete, expected_complete);
     assert_eq!(
         report.scan_coverage_note.as_deref(),
         Some(scan_coverage_line(1).as_str()),
