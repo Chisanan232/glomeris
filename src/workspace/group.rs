@@ -221,7 +221,7 @@ pub fn group_families(
         accumulator.absorb(
             ev,
             WorkspaceMember {
-                contained_in: None,
+                contained_in,
                 resource_id: ev.resource.to_string(),
                 reclaimable_bytes: reclaimable,
                 reclaimable_bytes_is_lower_bound: reclaimable.is_some()

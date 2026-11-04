@@ -19,7 +19,7 @@ use super::bytes::human_bytes;
 use super::impact::{classify_impact, ImpactContext, ImpactThresholds};
 use super::policy_label::{label_for, PolicyLabel};
 use crate::evidence::probe::{ProbeOutcome, ProbeReason};
-use crate::workspace::{UpstreamState, WorkspaceFamily, WorkspaceWorktree};
+use crate::workspace::{UpstreamState, WorkspaceFamily, WorkspaceMember, WorkspaceWorktree};
 
 /// A commit instant as seconds since the Unix epoch, or the reason there is
 /// none (HORO-1545).
