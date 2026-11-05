@@ -45,7 +45,9 @@ existing convention (files and symlinks counted by their own size,
 directories contribute 0). On a real developer machine the 750ms deadline
 truncates the Xcode DerivedData walk at roughly 42,000 entries, so that
 resource's reported bytes are normally a lower bound, by design — no
-extrapolation is attempted.
+extrapolation is attempted. The same walk sums allocated bytes
+(`st_blocks`, HORO-2360) for `explain`; that figure is an upper bound on
+recovery and report-only (ADR-0001 §19).
 
 ## Docker build cache can never reach `Completeness::Complete`
 

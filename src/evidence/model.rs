@@ -1481,9 +1481,16 @@ pub struct Evidence {
     pub fingerprint: ResourceFingerprint,
     pub detector: DetectorId,
     pub logical_bytes: ProbeOutcome<u64>,
-    /// Physical (on-disk block) size. MVP always leaves this `None` —
-    /// subtree `st_blocks` summation is explicitly out of scope for this
-    /// ticket.
+    /// Physical (on-disk block, `st_blocks * 512`) size, summed by the same
+    /// bounded walk as `logical_bytes` (HORO-2360). `None` when the resource
+    /// was not walked (Docker figures, executor revalidation) or the
+    /// platform reports no block counts. An UPPER BOUND on what deleting
+    /// frees (APFS clones, hardlinks outside the resource and local
+    /// snapshots can make the real gain smaller). Report-only: never read by
+    /// classify, the planner, the executor or Autopilot (ADR-0001 §19). It
+    /// shares `reclaimable_bytes_is_lower_bound` with the walk that produced
+    /// it; a future producer from a different source must not lean on that
+    /// flag.
     pub physical_bytes: Option<u64>,
     pub reclaimable_bytes: ProbeOutcome<u64>,
     /// `true` when `reclaimable_bytes` (and `logical_bytes`, which shares
