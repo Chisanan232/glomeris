@@ -425,6 +425,38 @@ mod tests {
         );
     }
 
+    /// HORO-2360: `physical_bytes` is a report-only allocated-size figure.
+    /// Varying it must never change a decision or the evidence completeness,
+    /// on any path `classify` can reach.
+    #[test]
+    fn physical_bytes_never_affects_classify_output() {
+        let cfg = cfg();
+        for kind in [ResourceKind::CargoTargetDir, ResourceKind::Unknown] {
+            for active in [false, true] {
+                let baseline = {
+                    let mut ev = complete_evidence(kind, NOW);
+                    ev.physical_bytes = None;
+                    if active {
+                        ev.tool_liveness = ProbeOutcome::Observed(true);
+                    }
+                    (classify(&ev, &cfg, NOW), ev.completeness())
+                };
+                for physical in [Some(0), Some(4096), Some(u64::MAX)] {
+                    let mut ev = complete_evidence(kind, NOW);
+                    ev.physical_bytes = physical;
+                    if active {
+                        ev.tool_liveness = ProbeOutcome::Observed(true);
+                    }
+                    assert_eq!(
+                        (classify(&ev, &cfg, NOW), ev.completeness()),
+                        baseline,
+                        "physical_bytes {physical:?} changed the outcome for {kind:?} (active={active})"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn unknown_resource_kind_is_unconditionally_protected() {
         let ev = complete_evidence(ResourceKind::Unknown, NOW);

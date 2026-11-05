@@ -466,6 +466,13 @@ matches the query.
 `--project-root <path>` and `--progress-json` mean exactly what they mean
 for `detect` above.
 
+`allocated` (HORO-2360) is the resource's on-disk size (`st_blocks`), present
+only when the resource was walked. It is an upper bound on what deleting
+frees (`recovery_bound` is always `"upper_bound"`: APFS clones, hardlinks
+outside the resource and local snapshots can make the real gain smaller) and
+`is_lower_bound` is `true` when the scan was truncated. It is report-only and
+never an input to policy.
+
 ```sh
 glomeris explain cargo_target_dir:/Users/dev/proj/target --json
 ```
@@ -481,6 +488,12 @@ glomeris explain cargo_target_dir:/Users/dev/proj/target --json
   "reclaimable_bytes": 2147483648,
   "reclaimable_human": "2.0 GB",
   "reclaimable_bytes_is_lower_bound": false,
+  "allocated": {
+    "bytes": 2147483648,
+    "human": "2.0 GB",
+    "is_lower_bound": false,
+    "recovery_bound": "upper_bound"
+  },
   "completeness": "complete",
   "confidence": "high",
   "active_use_signals": [],

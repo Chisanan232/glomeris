@@ -106,6 +106,7 @@ impl Detector for XcodeDetector {
             // native cleanup support is left unregistered for MVP.
             NativeCleanup::Unsupported,
         );
+        evidence.physical_bytes = estimate.allocated();
         if let Some(note) = estimate.lower_bound_note() {
             evidence.push_source(note);
         }
