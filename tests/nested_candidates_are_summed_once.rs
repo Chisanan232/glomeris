@@ -33,16 +33,19 @@ fn temp_dir(prefix: &str) -> PathBuf {
     dir.canonicalize().unwrap()
 }
 
+fn not_attempted<T>() -> ProbeOutcome<T> {
+    ProbeOutcome::Unavailable(ProbeReason::NotAttempted)
+}
+
 struct NoopCollector;
 impl EvidenceCollector for NoopCollector {
     fn collect(&self, _resource: &ResourceId, _budget: ProbeBudget) -> CorrelationResult {
-        let na = || ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
         CorrelationResult {
-            open_by_process: na(),
-            process_cwd_match: na(),
-            git_state: na(),
-            tool_liveness: na(),
-            executable_dependency: na(),
+            open_by_process: not_attempted(),
+            process_cwd_match: not_attempted(),
+            git_state: not_attempted(),
+            tool_liveness: not_attempted(),
+            executable_dependency: not_attempted(),
         }
     }
 }
