@@ -45,12 +45,8 @@ pub fn nearest_enclosing(paths: &[Option<&Path>]) -> Vec<Option<usize>> {
     enclosing
 }
 
-/// For each evidence, the `resource_id` of the nearest other evidence whose
-/// filesystem path encloses it (see [`nearest_enclosing`]).
-pub fn enclosing_resource_ids<'a>(
-    evidence: impl IntoIterator<Item = &'a Evidence>,
-) -> Vec<Option<String>> {
-    let evidence: Vec<&Evidence> = evidence.into_iter().collect();
+/// [`nearest_enclosing`] over the filesystem locations of `evidence`.
+pub fn enclosing_indices(evidence: &[&Evidence]) -> Vec<Option<usize>> {
     let paths: Vec<Option<&Path>> = evidence
         .iter()
         .map(|ev| match &ev.resource.locator {
@@ -59,6 +55,15 @@ pub fn enclosing_resource_ids<'a>(
         })
         .collect();
     nearest_enclosing(&paths)
+}
+
+/// For each evidence, the `resource_id` of the nearest other evidence whose
+/// filesystem path encloses it (see [`nearest_enclosing`]).
+pub fn enclosing_resource_ids<'a>(
+    evidence: impl IntoIterator<Item = &'a Evidence>,
+) -> Vec<Option<String>> {
+    let evidence: Vec<&Evidence> = evidence.into_iter().collect();
+    enclosing_indices(&evidence)
         .into_iter()
         .map(|enclosing| enclosing.map(|i| evidence[i].resource.to_string()))
         .collect()

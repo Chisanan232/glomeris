@@ -202,13 +202,33 @@ pub fn group_families(
     // common_dir -> repo_root -> members, both ordered so the output is
     // deterministic for one disk state.
     let mut families: BTreeMap<PathBuf, BTreeMap<PathBuf, WorktreeAccumulator>> = BTreeMap::new();
-    // Containment is judged over every discovered candidate, so a family
-    // member knows when the candidate enclosing it lives elsewhere; the
-    // family total only honours an enclosing member of its own family.
-    let enclosing =
-        crate::evidence::containment::enclosing_resource_ids(candidates.iter().map(|(ev, _)| ev));
+    // Containment is judged over every discovered candidate, then resolved
+    // to the nearest enclosing candidate *of the same family*: an
+    // intermediate candidate with no observed git state is not a member, and
+    // stopping at it would let a grandparent and its grandchild both count.
+    let evidence: Vec<&Evidence> = candidates.iter().map(|(ev, _)| ev).collect();
+    let nearest = crate::evidence::containment::enclosing_indices(&evidence);
+    let family_of: Vec<Option<&PathBuf>> = evidence
+        .iter()
+        .map(|ev| match ev.git_state.observed() {
+            Some(Some(git)) => Some(&git.common_dir),
+            _ => None,
+        })
+        .collect();
 
-    for ((ev, decision), contained_in) in candidates.iter().zip(enclosing) {
+    for (i, (ev, decision)) in candidates.iter().enumerate() {
+        let contained_in = {
+            let mut next = nearest[i];
+            let mut found = None;
+            while let Some(j) = next {
+                if family_of[i].is_some() && family_of[j] == family_of[i] {
+                    found = Some(evidence[j].resource.to_string());
+                    break;
+                }
+                next = nearest[j];
+            }
+            found
+        };
         let Some(Some(git)) = ev.git_state.observed() else {
             continue;
         };
@@ -1007,6 +1027,44 @@ mod tests {
             probe.0.into_inner(),
             vec![PathBuf::from("/work/app-a"), PathBuf::from("/work/app-b")]
         );
+    }
+
+    /// HORO-2360: containment skips a candidate that has no family. A
+    /// grandparent and its grandchild, with a middle candidate whose git
+    /// probe failed, still count once.
+    #[test]
+    fn an_intermediate_outside_every_family_does_not_break_containment() {
+        let wt = Worktree::clean("/work/app", "/work/app/.git").main_checkout();
+        let grandparent = candidate("/work/app/target", Some(1000), &wt, PolicyClass::AutoSafe);
+        let mut middle = candidate(
+            "/work/app/target/debug/mid",
+            Some(900),
+            &wt,
+            PolicyClass::AutoSafe,
+        );
+        middle.0.git_state = ProbeOutcome::Unavailable(ProbeReason::NotAttempted);
+        let child = candidate(
+            "/work/app/target/debug/mid/inner",
+            Some(800),
+            &wt,
+            PolicyClass::AutoSafe,
+        );
+
+        let families = group_families(
+            &[grandparent, middle, child],
+            &WorkspaceSurvey::unsurveyed(),
+        );
+        let family = only_family(&families);
+        let inner = family
+            .members()
+            .find(|m| m.resource_id.ends_with("/mid/inner"))
+            .expect("child is a member");
+        assert_eq!(
+            inner.contained_in.as_deref(),
+            Some("cargo_target_dir:/work/app/target")
+        );
+        let report = crate::reporting::dto::WorkspaceFamilyReport::from_family(family);
+        assert_eq!(report.actionable_now_bytes, 1000, "{report:#?}");
     }
 
     #[test]
