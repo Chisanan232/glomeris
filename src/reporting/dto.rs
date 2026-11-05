@@ -1329,6 +1329,33 @@ pub struct DetectReport {
     pub uncorrelated_candidates: usize,
 }
 
+/// On-disk allocated size of one resource (HORO-2360), shown by `explain`.
+/// Report-only: never an input to policy, planning or execution.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AllocatedSizeReport {
+    pub bytes: u64,
+    pub human: String,
+    /// `true` when the size walk stopped on its budget, so the full
+    /// allocated figure is larger.
+    pub is_lower_bound: bool,
+    /// Always `"upper_bound"`: deleting frees at most this much. APFS
+    /// clones, hardlinks outside the resource and local snapshots can make
+    /// the real gain smaller.
+    pub recovery_bound: &'static str,
+}
+
+impl AllocatedSizeReport {
+    fn from_evidence(ev: &Evidence) -> Option<Self> {
+        let bytes = ev.physical_bytes?;
+        Some(Self {
+            bytes,
+            human: human_bytes(bytes),
+            is_lower_bound: ev.reclaimable_bytes_is_lower_bound,
+            recovery_bound: "upper_bound",
+        })
+    }
+}
+
 /// `glomeris explain <resource>` report: the full evidence-and-policy
 /// picture for exactly one resource.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1357,6 +1384,9 @@ pub struct ExplainReport {
     /// [`Evidence::reclaimable_bytes_is_lower_bound`]'s doc comment.
     /// Always `false` when `reclaimable_bytes` is `None`.
     pub reclaimable_bytes_is_lower_bound: bool,
+    /// On-disk allocated size (`st_blocks`), when the resource was walked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocated: Option<AllocatedSizeReport>,
     pub completeness: &'static str,
     pub confidence: &'static str,
     pub active_use_signals: Vec<String>,
@@ -1463,6 +1493,7 @@ impl ExplainReport {
             reclaimable_human: reclaimable.map(human_bytes),
             reclaimable_bytes_is_lower_bound: reclaimable.is_some()
                 && ev.reclaimable_bytes_is_lower_bound,
+            allocated: AllocatedSizeReport::from_evidence(ev),
             completeness: completeness_tag(&ev.completeness()),
             confidence: confidence_tag(ev.confidence()),
             active_use_signals: active_use_signals(ev),
@@ -3517,6 +3548,36 @@ mod tests {
         let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
 
         assert!(report.reclaimable_bytes_is_lower_bound);
+    }
+
+    /// HORO-2360: `allocated` is absent (not zero, not null) when the
+    /// resource was not walked, so existing consumers and goldens see no
+    /// change.
+    #[test]
+    fn explain_report_omits_allocated_when_not_measured() {
+        let mut ev = base_evidence();
+        ev.physical_bytes = None;
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        assert!(report.allocated.is_none());
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("allocated").is_none());
+    }
+
+    #[test]
+    fn explain_report_labels_allocated_as_an_upper_bound_and_carries_truncation() {
+        let mut ev = base_evidence();
+        ev.physical_bytes = Some(4096);
+        ev.reclaimable_bytes_is_lower_bound = true;
+        let d = decision(PolicyClass::AutoSafe, vec![ReasonCode::NoActiveUseObserved]);
+        let report = ExplainReport::from_evidence_and_decision(&ev, &d, None);
+
+        let allocated = report.allocated.expect("physical_bytes was set");
+        assert_eq!(allocated.bytes, 4096);
+        assert_eq!(allocated.human, "4.0 KB");
+        assert!(allocated.is_lower_bound);
+        assert_eq!(allocated.recovery_bound, "upper_bound");
     }
 
     #[test]

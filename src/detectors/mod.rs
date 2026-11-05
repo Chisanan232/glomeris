@@ -345,6 +345,10 @@ pub(crate) fn size_estimate_budget() -> ScanBudget {
 #[derive(Debug)]
 pub(crate) struct SizeEstimate {
     pub bytes: ProbeOutcome<u64>,
+    /// On-disk allocated bytes (`st_blocks * 512`) from the SAME walk as
+    /// `bytes`, with the same hardlink dedup and budget (HORO-2360).
+    /// Meaningful only when `bytes` is `Observed` and only on unix.
+    pub allocated_bytes: u64,
     /// Meaningful only when `bytes` is `Observed` — the root's own probe
     /// failing (`Unavailable`) never got far enough to consult a budget.
     pub stop_reason: StopReason,
@@ -360,7 +364,22 @@ impl SizeEstimate {
     /// [`SizeEstimate::lower_bound_note`]'s advisory text are derived
     /// from — callers must never derive one from the other.
     pub fn is_lower_bound(&self) -> bool {
-        self.bytes.is_observed() && self.stop_reason != StopReason::Exhausted
+        self.bytes.is_observed()
+            && (self.stop_reason != StopReason::Exhausted || self.unreadable_entries > 0)
+    }
+
+    /// On-disk allocated bytes for [`Evidence::physical_bytes`]: `Some` only
+    /// when `bytes` is `Observed` and the platform reports block counts.
+    /// An upper bound on what deleting frees (APFS clones, hardlinks outside
+    /// the resource and local snapshots can make the real gain smaller), and
+    /// a lower bound when [`SizeEstimate::is_lower_bound`]. Report-only:
+    /// never read by classify, the planner or the executor (ADR-0001 §19).
+    pub fn allocated(&self) -> Option<u64> {
+        if cfg!(unix) && self.bytes.is_observed() {
+            Some(self.allocated_bytes)
+        } else {
+            None
+        }
     }
 
     /// A provenance note for [`Evidence::push_source`], present only when
@@ -373,19 +392,40 @@ impl SizeEstimate {
             return None;
         }
         match self.stop_reason {
+            StopReason::Exhausted if self.unreadable_entries > 0 => Some(format!(
+                "size estimate skipped {} unreadable entries after {} entries: reported \
+                 logical and allocated bytes are a lower bound, not the full subtree total",
+                self.unreadable_entries, self.entries_visited
+            )),
             StopReason::Exhausted => None,
             StopReason::TimeBudget => Some(format!(
                 "size estimate stopped early after {} entries ({} unreadable): {:?} time \
-                 budget exceeded — reported bytes are a lower bound, not the full subtree total",
+                 budget exceeded — reported logical and allocated bytes are a lower bound, not the full subtree total",
                 self.entries_visited, self.unreadable_entries, SIZE_ESTIMATE_DEADLINE
             )),
             StopReason::FileCountBudget => Some(format!(
                 "size estimate stopped early after {} entries ({} unreadable): {} entry \
-                 budget exceeded — reported bytes are a lower bound, not the full subtree total",
+                 budget exceeded — reported logical and allocated bytes are a lower bound, not the full subtree total",
                 self.entries_visited, self.unreadable_entries, SIZE_ESTIMATE_MAX_ENTRIES
             )),
         }
     }
+}
+
+/// `st_blocks * 512` for one entry (unix); 0 elsewhere. APFS directories
+/// report 0 blocks, so only files contribute.
+#[cfg(unix)]
+fn allocated_bytes_of(meta: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.blocks().saturating_mul(512)
+}
+#[cfg(not(unix))]
+fn allocated_bytes_of(_meta: &fs::Metadata) -> u64 {
+    0
+}
+
+fn root_allocated_bytes(meta: &fs::Metadata) -> u64 {
+    allocated_bytes_of(meta)
 }
 
 /// Bounded, recursive logical-byte estimate for `path` (HORO-1016):
@@ -438,6 +478,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 stop_reason: StopReason::Exhausted,
                 entries_visited: 0,
                 unreadable_entries: 0,
+                allocated_bytes: 0,
             };
         }
         Err(_) => {
@@ -446,6 +487,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 stop_reason: StopReason::Exhausted,
                 entries_visited: 0,
                 unreadable_entries: 0,
+                allocated_bytes: 0,
             };
         }
     };
@@ -456,10 +498,12 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             stop_reason: StopReason::Exhausted,
             entries_visited: 0,
             unreadable_entries: 0,
+            allocated_bytes: root_allocated_bytes(&root_meta),
         };
     }
 
     let mut total: u64 = 0;
+    let mut allocated: u64 = allocated_bytes_of(&root_meta);
     let mut entries_visited: u64 = 0;
     let mut unreadable_entries: u64 = 0;
     let mut stop_reason = StopReason::Exhausted;
@@ -487,6 +531,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     stop_reason: StopReason::Exhausted,
                     entries_visited: 0,
                     unreadable_entries: 0,
+                    allocated_bytes: 0,
                 };
             }
             Err(_) if is_root => {
@@ -495,6 +540,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     stop_reason: StopReason::Exhausted,
                     entries_visited: 0,
                     unreadable_entries: 0,
+                    allocated_bytes: 0,
                 };
             }
             Err(_) => {
@@ -529,6 +575,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             };
 
             if meta.is_dir() {
+                // Directories carry no logical bytes, but filesystems that
+                // allocate blocks for them (ext4; APFS reports 0) do count.
+                allocated = allocated.saturating_add(allocated_bytes_of(&meta));
                 stack.push(entry.path());
             } else {
                 #[cfg(unix)]
@@ -559,6 +608,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
 
                 if !already_counted {
                     total = total.saturating_add(meta.len());
+                    allocated = allocated.saturating_add(allocated_bytes_of(&meta));
                 }
             }
         }
@@ -566,6 +616,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
 
     SizeEstimate {
         bytes: ProbeOutcome::Observed(total),
+        allocated_bytes: allocated,
         stop_reason,
         entries_visited,
         unreadable_entries,
@@ -1126,6 +1177,7 @@ pub(crate) fn cache_dir_evidence(
         // than have an action invented to satisfy completion.
         NativeCleanup::Unsupported,
     );
+    evidence.physical_bytes = estimate.allocated();
     if let Some(note) = estimate.lower_bound_note() {
         evidence.push_source(note);
     }
@@ -1581,6 +1633,146 @@ mod tests {
 
         assert_eq!(estimate.bytes, ProbeOutcome::Observed(8192));
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// HORO-2360: allocated bytes come from `st_blocks`, so a sparse file's
+    /// allocation is far below its logical length. A `physical = logical`
+    /// shortcut would fail this.
+    #[cfg(unix)]
+    #[test]
+    fn sparse_file_allocates_far_less_than_its_logical_size() {
+        use std::io::{Seek, SeekFrom, Write};
+        let root = test_support::make_temp_dir("allocated-sparse");
+        let mut f = std::fs::File::create(root.join("sparse.bin")).unwrap();
+        f.seek(SeekFrom::Start(16 * 1024 * 1024 - 1)).unwrap();
+        f.write_all(&[1]).unwrap();
+        drop(f);
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(16 * 1024 * 1024));
+        let allocated = estimate
+            .allocated()
+            .expect("a walked directory reports allocation");
+        use std::os::unix::fs::MetadataExt;
+        let own = std::fs::metadata(root.join("sparse.bin")).unwrap().blocks() * 512;
+        let root_own = std::fs::metadata(&root).unwrap().blocks() * 512;
+        assert_eq!(
+            allocated,
+            own + root_own,
+            "allocation must come from the entries' own st_blocks"
+        );
+        // APFS (and most Unix filesystems) leave the hole unallocated. Some
+        // sandboxed filesystems allocate fully, so the size claim is made
+        // only where the filesystem itself reports the file as sparse.
+        if own < 16 * 1024 * 1024 {
+            assert!(
+                allocated < 1024 * 1024,
+                "sparse file allocated {allocated} bytes"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Two hardlinks share blocks, so allocation is counted once, with the
+    /// same dedup as the logical figure.
+    #[cfg(unix)]
+    #[test]
+    fn hardlinked_entries_allocate_once() {
+        let root = test_support::make_temp_dir("allocated-hardlink");
+        let original = root.join("original.bin");
+        std::fs::write(&original, vec![7u8; 64 * 1024]).unwrap();
+        std::fs::hard_link(&original, root.join("linked.bin")).unwrap();
+        let single = {
+            let alone = test_support::make_temp_dir("allocated-hardlink-alone");
+            std::fs::write(alone.join("only.bin"), vec![7u8; 64 * 1024]).unwrap();
+            let e = estimate_logical_bytes(&alone, size_estimate_budget());
+            std::fs::remove_dir_all(&alone).ok();
+            e.allocated().unwrap()
+        };
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+
+        assert_eq!(estimate.allocated(), Some(single));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A macOS (APFS) clone shares blocks, but `st_blocks` still reports the
+    /// full allocation on both copies. This documents why the figure is an
+    /// UPPER bound on recovery rather than a measurement of it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apfs_clone_reports_full_allocation_on_both_copies() {
+        let root = test_support::make_temp_dir("allocated-clone");
+        let src = root.join("src.bin");
+        let data = vec![0xA5u8; 4 * 1024 * 1024];
+        std::fs::write(&src, &data).unwrap();
+        let status = std::process::Command::new("/bin/cp")
+            .arg("-c")
+            .arg(&src)
+            .arg(root.join("clone.bin"))
+            .status()
+            .expect("cp runs");
+        assert!(status.success(), "cp -c must succeed on APFS");
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+
+        assert_eq!(estimate.bytes, ProbeOutcome::Observed(8 * 1024 * 1024));
+        assert_eq!(estimate.allocated(), Some(8 * 1024 * 1024));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The allocated figure carries the walk's truncation: a budget stop
+    /// makes it a lower bound, never an extrapolation.
+    #[cfg(unix)]
+    #[test]
+    fn a_truncated_walk_reports_partial_allocation_as_lower_bound() {
+        let root = test_support::make_temp_dir("allocated-truncated");
+        for i in 0..8 {
+            std::fs::write(root.join(format!("f{i}.bin")), vec![1u8; 8192]).unwrap();
+        }
+
+        let estimate =
+            estimate_logical_bytes(&root, ScanBudget::default().with_max_files_visited(2));
+
+        assert!(estimate.is_lower_bound());
+        let allocated = estimate.allocated().expect("observed root");
+        assert!(allocated < 8 * 8192, "partial walk must not extrapolate");
+        let note = estimate.lower_bound_note().expect("truncation note");
+        assert!(note.contains("allocated"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An unreadable subdirectory hides its contents, so the figures are a
+    /// lower bound even though the walk finished within budget.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subdirectory_makes_the_estimate_a_lower_bound() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = test_support::make_temp_dir("allocated-unreadable");
+        let hidden = root.join("hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("big.bin"), vec![1u8; 64 * 1024]).unwrap();
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let estimate = estimate_logical_bytes(&root, size_estimate_budget());
+        std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(estimate.unreadable_entries, 1);
+        assert!(estimate.is_lower_bound());
+        assert!(estimate.lower_bound_note().is_some());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unreadable_root_reports_no_allocation() {
+        let root = test_support::make_temp_dir("allocated-missing");
+        let missing = root.join("missing");
+
+        let estimate = estimate_logical_bytes(&missing, size_estimate_budget());
+
+        assert_eq!(estimate.allocated(), None);
         std::fs::remove_dir_all(&root).ok();
     }
 

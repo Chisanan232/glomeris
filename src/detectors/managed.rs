@@ -51,6 +51,7 @@ impl Detector for ManagedGeneratedDetector {
                 Recoverability::RegenerableByRebuild,
                 NativeCleanup::Available(crate::actions::ActionId("managed.clean.generated")),
             );
+            evidence.physical_bytes = size.allocated();
             let view = store.inspect(
                 &record,
                 evidence
