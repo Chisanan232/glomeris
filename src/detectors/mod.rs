@@ -2080,6 +2080,12 @@ mod tests {
     ///   candidate list, proving `DetectReport::scan_coverage_note`'s
     ///   attribution on the real `cargo_target_dir`/`node_modules`
     ///   detectors rather than on a stub.
+    /// - `tests/nested_candidates_are_summed_once.rs` (HORO-2360), which
+    ///   mirrors `tests/parent_of_projects_root_is_attributed.rs`: it calls
+    ///   `discover_and_classify_pass` (discovery + classification only)
+    ///   against disposable tempdir projects under a fixture `$HOME`, with
+    ///   a no-op evidence collector, and never reaches
+    ///   `authorize()`/`execute()`.
     /// - `tests/project_level_hook_source.rs`'s
     ///   `m4_execute_revalidation_aborts_on_a_hook_added_after_plan_time_toctou`
     ///   (HORO-1865 M4 regression): the `DetectorRegistry::builtin()`
@@ -2120,6 +2126,7 @@ mod tests {
                 1,
             ),
             ("tests/parent_of_projects_root_is_attributed.rs", 2),
+            ("tests/nested_candidates_are_summed_once.rs", 1),
             ("tests/project_level_hook_source.rs", 1),
         ];
 
