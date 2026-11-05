@@ -172,12 +172,36 @@ fn now_unix_secs() -> u64 {
 /// directories, so the fake `launchctl` wins while `/bin/sh` (which the
 /// fake itself needs) still resolves.
 fn run_glomeris(args: &[&str], home: &Path, path_dirs: &[&Path]) -> std::process::Output {
+    run_with_path(args, home, path_dirs, true)
+}
+
+/// Like [`run_glomeris`] but `PATH` is exactly `path_dirs`. The system
+/// directories are where the host's real `launchctl` lives, so a test that
+/// needs `launchctl` to be genuinely absent must not include them: otherwise
+/// the answer depends on whether the real agent is loaded on the machine
+/// running the test (HORO-2441).
+fn run_glomeris_without_system_path(
+    args: &[&str],
+    home: &Path,
+    path_dirs: &[&Path],
+) -> std::process::Output {
+    run_with_path(args, home, path_dirs, false)
+}
+
+fn run_with_path(
+    args: &[&str],
+    home: &Path,
+    path_dirs: &[&Path],
+    include_system_dirs: bool,
+) -> std::process::Output {
     let mut path = path_dirs
         .iter()
         .map(|d| d.display().to_string())
         .collect::<Vec<_>>();
-    path.push("/usr/bin".to_string());
-    path.push("/bin".to_string());
+    if include_system_dirs {
+        path.push("/usr/bin".to_string());
+        path.push("/bin".to_string());
+    }
 
     Command::new(glomeris_bin())
         .args(args)
@@ -273,10 +297,11 @@ fn unloaded_agent_yields_clean_json_with_loaded_false() {
 #[test]
 fn absent_launchctl_reports_not_loaded_rather_than_failing() {
     let home = home_with_plist("absent-home");
-    // An empty directory: no `launchctl` anywhere on the child's PATH.
+    // An empty directory as the whole PATH: no `launchctl` anywhere.
     let empty = unique_dir("absent-bin");
 
-    let output = run_glomeris(&["daemon", "status", "--json"], &home, &[&empty]);
+    let output =
+        run_glomeris_without_system_path(&["daemon", "status", "--json"], &home, &[&empty]);
 
     assert!(
         output.status.success(),
