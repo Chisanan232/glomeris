@@ -1905,6 +1905,24 @@ fn format_size_field(human: Option<&str>, is_lower_bound: bool) -> String {
     }
 }
 
+/// Makes a file-system-derived string safe to print on a terminal: control
+/// characters (including ESC) and Unicode bidi overrides are shown as escapes
+/// so a crafted directory name cannot rewrite the screen or reorder the line.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control()
+                || ('\u{202A}'..='\u{202E}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c)
+            {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Prints the report-only Cargo target breakdown (HORO-2360 slice C).
 fn print_cargo_layout(layout: &crate::detectors::cargo_layout::CargoLayoutSurvey) {
     use crate::reporting::bytes::human_bytes;
@@ -1913,12 +1931,15 @@ fn print_cargo_layout(layout: &crate::detectors::cargo_layout::CargoLayoutSurvey
         match (unit.measured, unit.logical_bytes, unit.allocated_bytes) {
             (true, Some(logical), allocated) => println!(
                 "  {:<44} {}{} logical, {} allocated",
-                unit.path,
+                printable(&unit.path),
                 if unit.is_lower_bound { "≥ " } else { "" },
                 human_bytes(logical),
                 allocated.map_or_else(|| "unknown".to_string(), human_bytes),
             ),
-            _ => println!("  {:<44} not measured (survey deadline reached)", unit.path),
+            _ => println!(
+                "  {:<44} not measured (survey deadline reached)",
+                printable(&unit.path)
+            ),
         }
     }
     if layout.omitted_units > 0 {
@@ -3673,6 +3694,16 @@ mod tests {
         assert!(!explain_report.reclaimable_bytes_is_lower_bound);
         let explain_json = serde_json::to_string(&explain_report).expect("serialize");
         assert!(explain_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
+    }
+
+    #[test]
+    fn printable_escapes_terminal_controls_and_bidi_overrides() {
+        assert_eq!(printable("debug/deps"), "debug/deps");
+        let hostile = printable("a\u{1b}[2Jb\u{202e}c\n");
+        assert!(!hostile.contains('\u{1b}'));
+        assert!(!hostile.contains('\u{202e}'));
+        assert!(!hostile.contains('\n'));
+        assert!(hostile.contains("\\u{1b}"));
     }
 
     /// HORO-2360 slice C: `explain` attaches the report-only Cargo layout for

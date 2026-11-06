@@ -36,6 +36,10 @@ const MAX_UNITS: usize = 96;
 /// Directory depth below the target dir the layout recursion may reach
 /// (`<triple>/<profile>/<sub-unit>` is depth 3).
 const MAX_DEPTH: usize = 4;
+/// Directory entries read from any one directory while listing units, and
+/// loose files summed into one unit. A directory with more is reported as
+/// truncated rather than read to the end.
+const MAX_ENTRIES_PER_DIR: usize = 20_000;
 
 /// What a unit is, by its conventional Cargo name. A reader's label only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -102,6 +106,8 @@ pub struct CargoLayoutSurvey {
     pub measured_allocated_bytes: u64,
     /// Always `true`: cross-unit hardlinks are counted in each unit.
     pub sum_is_upper_bound: bool,
+    /// Listing stopped on the deadline or an entry cap, so units may be missing.
+    pub listing_truncated: bool,
     /// `true` only when every unit was measured and none hit its budget.
     pub complete: bool,
 }
@@ -115,6 +121,20 @@ struct UnitSpec {
     llvm_cov: bool,
     /// `Some(names)` for a loose-files group; the files are summed directly.
     loose_files: Option<Vec<PathBuf>>,
+}
+
+/// Shared bound for the listing phase: the same deadline as measurement, so
+/// a huge fan-out cannot run unmetered before the first unit is measured.
+struct Listing {
+    started: Instant,
+    deadline: Duration,
+    truncated: bool,
+}
+
+impl Listing {
+    fn expired(&self) -> bool {
+        self.started.elapsed() >= self.deadline
+    }
 }
 
 #[derive(Clone, Default)]
@@ -131,6 +151,12 @@ pub fn survey_cargo_layout(target_dir: &Path) -> CargoLayoutSurvey {
 }
 
 pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> CargoLayoutSurvey {
+    let started = Instant::now();
+    let mut listing = Listing {
+        started,
+        deadline,
+        truncated: false,
+    };
     let mut specs = Vec::new();
     let mut omitted = 0usize;
     enumerate(
@@ -141,19 +167,22 @@ pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> Car
         0,
         &mut specs,
         &mut omitted,
+        &mut listing,
     );
 
-    let started = Instant::now();
     let mut units = Vec::with_capacity(specs.len());
     for spec in specs {
         let expired = started.elapsed() >= deadline;
-        units.push(measure(spec, expired));
+        units.push(measure(spec, expired, started, deadline));
     }
 
     let measured_logical_bytes = units.iter().filter_map(|u| u.logical_bytes).sum();
     let measured_allocated_bytes = units.iter().filter_map(|u| u.allocated_bytes).sum();
     let unmeasured_units = units.iter().filter(|u| !u.measured).count();
-    let complete = omitted == 0 && unmeasured_units == 0 && units.iter().all(|u| !u.is_lower_bound);
+    let complete = omitted == 0
+        && !listing.truncated
+        && unmeasured_units == 0
+        && units.iter().all(|u| !u.is_lower_bound);
     units.sort_by(|a, b| {
         b.measured
             .cmp(&a.measured)
@@ -167,14 +196,22 @@ pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> Car
         measured_logical_bytes,
         measured_allocated_bytes,
         sum_is_upper_bound: true,
+        listing_truncated: listing.truncated,
         complete,
     }
 }
 
-fn child_dirs_and_files(dir: &Path) -> Option<(Vec<(String, PathBuf)>, Vec<PathBuf>)> {
+fn child_dirs_and_files(
+    dir: &Path,
+    listing: &mut Listing,
+) -> Option<(Vec<(String, PathBuf)>, Vec<PathBuf>)> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
-    for entry in fs::read_dir(dir).ok()?.flatten() {
+    for (seen, entry) in fs::read_dir(dir).ok()?.flatten().enumerate() {
+        if seen >= MAX_ENTRIES_PER_DIR || listing.expired() {
+            listing.truncated = true;
+            break;
+        }
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         // A symlink is never followed: it is a loose file whose own lstat
@@ -198,8 +235,8 @@ fn is_profile_dir(dir: &Path) -> bool {
 }
 
 /// A target-triple directory holds profile directories (cross builds).
-fn holds_profiles(dir: &Path) -> bool {
-    child_dirs_and_files(dir)
+fn holds_profiles(dir: &Path, listing: &mut Listing) -> bool {
+    child_dirs_and_files(dir, listing)
         .map(|(dirs, _)| dirs.iter().any(|(_, p)| is_profile_dir(p)))
         .unwrap_or(false)
 }
@@ -228,13 +265,21 @@ fn enumerate(
     depth: usize,
     specs: &mut Vec<UnitSpec>,
     omitted: &mut usize,
+    listing: &mut Listing,
 ) {
-    let Some((dirs, files)) = child_dirs_and_files(dir) else {
+    let Some((dirs, files)) = child_dirs_and_files(dir, listing) else {
         return;
     };
     for (name, path) in dirs {
         let child_rel = join_rel(rel, &name);
-        if in_profile {
+        // Once the cap or deadline is hit, stop probing and recursing; every
+        // remaining directory is still listed as a plain unit (or counted as
+        // omitted), never silently dropped.
+        let probing = specs.len() < MAX_UNITS && !listing.expired();
+        if !probing && !in_profile {
+            listing.truncated = true;
+        }
+        if in_profile || !probing {
             push(
                 specs,
                 omitted,
@@ -251,15 +296,42 @@ fn enumerate(
         } else if depth < MAX_DEPTH && name == "llvm-cov-target" {
             let mut next = ctx.clone();
             next.llvm_cov = true;
-            enumerate(&path, &child_rel, &next, false, depth + 1, specs, omitted);
+            enumerate(
+                &path,
+                &child_rel,
+                &next,
+                false,
+                depth + 1,
+                specs,
+                omitted,
+                listing,
+            );
         } else if depth < MAX_DEPTH && is_profile_dir(&path) {
             let mut next = ctx.clone();
             next.profile = Some(name.clone());
-            enumerate(&path, &child_rel, &next, true, depth + 1, specs, omitted);
-        } else if depth < MAX_DEPTH && ctx.triple.is_none() && holds_profiles(&path) {
+            enumerate(
+                &path,
+                &child_rel,
+                &next,
+                true,
+                depth + 1,
+                specs,
+                omitted,
+                listing,
+            );
+        } else if depth < MAX_DEPTH && ctx.triple.is_none() && holds_profiles(&path, listing) {
             let mut next = ctx.clone();
             next.triple = Some(name.clone());
-            enumerate(&path, &child_rel, &next, false, depth + 1, specs, omitted);
+            enumerate(
+                &path,
+                &child_rel,
+                &next,
+                false,
+                depth + 1,
+                specs,
+                omitted,
+                listing,
+            );
         } else {
             push(
                 specs,
@@ -317,12 +389,17 @@ fn unmeasured(spec: UnitSpec) -> LayoutUnit {
     }
 }
 
-fn measure(spec: UnitSpec, deadline_passed: bool) -> LayoutUnit {
+fn measure(
+    spec: UnitSpec,
+    deadline_passed: bool,
+    started: Instant,
+    deadline: Duration,
+) -> LayoutUnit {
     if deadline_passed {
         return unmeasured(spec);
     }
     if let Some(files) = &spec.loose_files {
-        return measure_loose_files(&spec, files);
+        return measure_loose_files(&spec, files, started, deadline);
     }
     let est = estimate_logical_bytes(&spec.abs, size_estimate_budget());
     let Some(logical) = est.bytes.observed().copied() else {
@@ -342,7 +419,12 @@ fn measure(spec: UnitSpec, deadline_passed: bool) -> LayoutUnit {
     }
 }
 
-fn measure_loose_files(spec: &UnitSpec, files: &[PathBuf]) -> LayoutUnit {
+fn measure_loose_files(
+    spec: &UnitSpec,
+    files: &[PathBuf],
+    started: Instant,
+    deadline: Duration,
+) -> LayoutUnit {
     let mut logical = 0u64;
     let mut allocated = 0u64;
     let mut newest: Option<SystemTime> = None;
@@ -350,6 +432,10 @@ fn measure_loose_files(spec: &UnitSpec, files: &[PathBuf]) -> LayoutUnit {
     let mut seen = std::collections::HashSet::new();
     let mut unreadable = false;
     for f in files {
+        if started.elapsed() >= deadline {
+            unreadable = true;
+            break;
+        }
         let Ok(meta) = fs::symlink_metadata(f) else {
             unreadable = true;
             continue;
@@ -486,18 +572,36 @@ mod tests {
     }
 
     #[test]
-    fn expired_deadline_lists_unreached_units_without_bytes() {
+    fn expired_deadline_marks_the_listing_truncated_and_measures_nothing() {
         let t = shared_target();
         let s = survey_with_deadline(&t, Duration::ZERO);
 
         assert!(!s.complete);
-        assert_eq!(s.unmeasured_units, s.units.len());
+        assert!(s.listing_truncated);
+        assert_eq!(s.measured_logical_bytes, 0);
         assert!(s
             .units
             .iter()
             .all(|u| !u.measured && u.logical_bytes.is_none() && u.allocated_bytes.is_none()));
-        assert_eq!(s.measured_logical_bytes, 0);
-        assert!(s.units.iter().any(|u| u.path == "debug/incremental"));
+        fs::remove_dir_all(&t).ok();
+    }
+
+    #[test]
+    fn a_unit_reached_after_the_deadline_is_listed_unmeasured() {
+        let t = shared_target();
+        let spec = UnitSpec {
+            abs: t.join("debug/incremental"),
+            rel: "debug/incremental".to_string(),
+            role: LayoutRole::Incremental,
+            profile: Some("debug".to_string()),
+            triple: None,
+            llvm_cov: false,
+            loose_files: None,
+        };
+        let unit = measure(spec, true, Instant::now(), Duration::ZERO);
+        assert!(!unit.measured);
+        assert_eq!(unit.logical_bytes, None);
+        assert_eq!(unit.path, "debug/incremental");
         fs::remove_dir_all(&t).ok();
     }
 
