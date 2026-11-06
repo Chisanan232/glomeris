@@ -752,10 +752,14 @@ pub fn build_detect_report(
     known_project_root_count: usize,
     uncorrelated_candidates: usize,
 ) -> DetectReport {
+    let enclosing =
+        crate::evidence::containment::enclosing_resource_ids(candidates.iter().map(|(ev, _)| ev));
     let mut candidates: Vec<DetectCandidateReport> = candidates
         .iter()
-        .map(|(ev, d)| {
-            DetectCandidateReport::from_evidence_and_decision(
+        .zip(enclosing)
+        .map(|((ev, d), contained_in)| DetectCandidateReport {
+            contained_in,
+            ..DetectCandidateReport::from_evidence_and_decision(
                 ev,
                 d,
                 resolve_action_for(ev, actions),
@@ -1948,6 +1952,9 @@ pub fn print_detect_report(report: &DetectReport) {
             size,
             c.reasons.join(",")
         );
+        if let Some(enclosing) = &c.contained_in {
+            println!("      (inside {enclosing}; its bytes are counted there)");
+        }
     }
     if let Some(note) = &report.scan_coverage_note {
         println!("{note}");

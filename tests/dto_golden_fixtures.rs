@@ -209,6 +209,7 @@ fn detect_report_matches_golden_fixture() {
     let report = DetectReport {
         candidates: vec![
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                 kind: "cargo_target_dir",
                 reclaimable_bytes: Some(2_147_483_648),
@@ -230,6 +231,7 @@ fn detect_report_matches_golden_fixture() {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "docker_build_cache:docker".to_string(),
                 kind: "docker_build_cache",
                 reclaimable_bytes: Some(10_737_418_240),
@@ -435,6 +437,7 @@ fn llm_plan_report_matches_golden_fixture() {
                 explain: Some("remove the Cargo target directory for this project".to_string()),
                 skip_reason: None,
                 candidate: DetectCandidateReport {
+                    contained_in: None,
                     resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                     kind: "cargo_target_dir",
                     reclaimable_bytes: Some(2_147_483_648),
@@ -462,6 +465,7 @@ fn llm_plan_report_matches_golden_fixture() {
                 explain: Some("remove node_modules for this project".to_string()),
                 skip_reason: None,
                 candidate: DetectCandidateReport {
+                    contained_in: None,
                     resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
                     kind: "node_modules",
                     reclaimable_bytes: Some(536_870_912),
@@ -498,6 +502,7 @@ fn llm_plan_report_matches_golden_fixture() {
                     "PROTECTED — no cleanup action is ever rendered for this resource".to_string(),
                 ),
                 candidate: DetectCandidateReport {
+                    contained_in: None,
                     resource_id: "cargo_target_dir:/Users/dev/.ssh/id_ed25519".to_string(),
                     kind: "cargo_target_dir",
                     reclaimable_bytes: Some(1024),
@@ -585,6 +590,7 @@ fn workspace_plan_report_matches_golden_fixture() {
                     explain: Some("remove the Cargo target directory for this project".to_string()),
                     skip_reason: None,
                     candidate: DetectCandidateReport {
+                        contained_in: None,
                         resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                         kind: "cargo_target_dir",
                         reclaimable_bytes: Some(2_147_483_648),
@@ -619,6 +625,7 @@ fn workspace_plan_report_matches_golden_fixture() {
                     explain: Some("remove node_modules for this project".to_string()),
                     skip_reason: None,
                     candidate: DetectCandidateReport {
+                        contained_in: None,
                         resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
                         kind: "node_modules",
                         reclaimable_bytes: Some(536_870_912),
@@ -1036,6 +1043,7 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                     },
                 }),
                 members: vec![WorkspaceMember {
+                    contained_in: None,
                     resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                     reclaimable_bytes: Some(2_147_483_648),
                     reclaimable_bytes_is_lower_bound: false,
@@ -1082,6 +1090,7 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                 }),
                 members: vec![
                     WorkspaceMember {
+                        contained_in: None,
                         resource_id: "node_modules:/Users/dev/proj-feature/node_modules"
                             .to_string(),
                         reclaimable_bytes: Some(5_368_709_120),
@@ -1089,6 +1098,7 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                         label: PolicyLabel::Ask,
                     },
                     WorkspaceMember {
+                        contained_in: None,
                         resource_id: "docker_build_cache:/Users/dev/proj-feature/.docker"
                             .to_string(),
                         reclaimable_bytes: None,
@@ -1109,6 +1119,7 @@ fn one_repositorys_three_checkouts() -> WorkspaceFamily {
                 newest_member_modified_at: None,
                 branch: ProbeOutcome::Unavailable(ProbeReason::TimedOut),
                 members: vec![WorkspaceMember {
+                    contained_in: None,
                     resource_id:
                         "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-h"
                             .to_string(),
@@ -1141,6 +1152,7 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
     let report = DetectReport {
         candidates: vec![
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                 kind: "cargo_target_dir",
                 reclaimable_bytes: Some(2_147_483_648),
@@ -1157,6 +1169,7 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "node_modules:/Users/dev/proj-feature/node_modules".to_string(),
                 kind: "node_modules",
                 reclaimable_bytes: Some(5_368_709_120),
@@ -1173,6 +1186,7 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "docker_build_cache:/Users/dev/proj-feature/.docker".to_string(),
                 kind: "docker_build_cache",
                 reclaimable_bytes: None,
@@ -1186,6 +1200,7 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
                 refusal_reason: Some("size could not be measured".to_string()),
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id:
                     "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-h"
                         .to_string(),
@@ -1202,6 +1217,7 @@ fn detect_report_with_workspaces_matches_golden_fixture() {
             },
             // Discovered, and in no family: not inside any git working tree.
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "homebrew_cache:/Users/dev/Library/Caches/Homebrew".to_string(),
                 kind: "homebrew_cache",
                 reclaimable_bytes: Some(3_221_225_472),
@@ -1341,6 +1357,7 @@ fn recovery_discovery_pass() -> DetectReport {
     DetectReport {
         candidates: vec![
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                 kind: "cargo_target_dir",
                 reclaimable_bytes: Some(2_147_483_648),
@@ -1357,6 +1374,7 @@ fn recovery_discovery_pass() -> DetectReport {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
                 kind: "node_modules",
                 reclaimable_bytes: Some(5_368_709_120),
@@ -1373,6 +1391,7 @@ fn recovery_discovery_pass() -> DetectReport {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id:
                     "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData/App-a"
                         .to_string(),
@@ -1388,6 +1407,7 @@ fn recovery_discovery_pass() -> DetectReport {
                 refusal_reason: Some("an active process is using this path".to_string()),
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "docker_build_cache:docker".to_string(),
                 kind: "docker_build_cache",
                 reclaimable_bytes: Some(10_737_418_240),
@@ -1528,6 +1548,7 @@ fn recovery_preview_report_discovery_incomplete_matches_golden_fixture() {
     let goal = RecoveryGoal::from_used_percent(60.0).expect("60% used is a valid goal");
     let detect = DetectReport {
         candidates: vec![DetectCandidateReport {
+            contained_in: None,
             resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
             kind: "cargo_target_dir",
             reclaimable_bytes: Some(2_147_483_648),
@@ -1618,6 +1639,7 @@ fn recovery_preview_report_target_unreachable_matches_golden_fixture() {
     let detect = DetectReport {
         candidates: vec![
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "cargo_target_dir:/Users/dev/proj/target".to_string(),
                 kind: "cargo_target_dir",
                 reclaimable_bytes: Some(1_000_000_000),
@@ -1634,6 +1656,7 @@ fn recovery_preview_report_target_unreachable_matches_golden_fixture() {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "node_modules:/Users/dev/proj/node_modules".to_string(),
                 kind: "node_modules",
                 reclaimable_bytes: Some(2_000_000_000),
@@ -1650,6 +1673,7 @@ fn recovery_preview_report_target_unreachable_matches_golden_fixture() {
                 refusal_reason: None,
             },
             DetectCandidateReport {
+                contained_in: None,
                 resource_id: "cargo_target_dir:/Users/shared/target".to_string(),
                 kind: "cargo_target_dir",
                 reclaimable_bytes: Some(900_000_000_000),
