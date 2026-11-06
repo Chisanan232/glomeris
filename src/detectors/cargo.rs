@@ -1059,7 +1059,23 @@ impl Detector for CargoDetector {
         }
 
         drop_nested_unowned(&mut by_physical);
-        let evidence: Vec<Evidence> = by_physical.into_values().collect();
+        let mut evidence: Vec<Evidence> = by_physical.into_values().collect();
+
+        // HORO-2361: a skipped root may be the one that shares (redirects to)
+        // a directory another root found as its own `Local` target — the
+        // protective merge in `upsert_candidate` needs every root. With any
+        // root unexamined, ownership is unproven for everything found, which
+        // `classify` reads as ASK / TargetOwnershipUnknown, never AUTO_SAFE.
+        if ctx.skipped_on_deadline(self.id()) {
+            for ev in &mut evidence {
+                ev.cargo_target_scope = Some(unowned_scope());
+                ev.push_source(
+                    "ownership not established: the discovery deadline skipped project roots \
+                     that might share this target"
+                        .to_string(),
+                );
+            }
+        }
 
         if evidence.is_empty() && saw_permission_error {
             return DetectorStatus::Failed(
@@ -1161,7 +1177,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     /// Independent-review adversarial fixture for the second must-fix:
     /// `rustup_presence`'s caching decision must treat `TimedOut` and
@@ -1235,7 +1251,8 @@ mod tests {
             .collect();
         let ctx = DiscoveryContext::new(&home)
             .with_known_project_roots(roots)
-            .with_discovery_budget(Duration::from_millis(1));
+            .with_discovery_budget(Duration::from_secs(3600))
+            .spend_budget_after_checks(5);
         let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
 
         let started = Instant::now();
@@ -1251,6 +1268,7 @@ mod tests {
         assert_eq!(summaries.len(), 1);
         let (id, text) = &summaries[0];
         assert_eq!(id.0, "cargo_target_dir");
+        assert!(text.contains("996 root(s)"), "{text}");
         let skipped: usize = text
             .split("reached: ")
             .nth(1)
@@ -1264,6 +1282,77 @@ mod tests {
             "1,000 roots must not cost 1,000 probes: {elapsed:?}"
         );
         fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A skipped root may be the one that shares a target another root found
+    /// as its own, so with any root unexamined ownership is unproven: the
+    /// found target must not keep a `Local` scope that could reach AUTO_SAFE.
+    #[test]
+    fn a_deadline_skip_withdraws_ownership_from_what_was_found() {
+        use crate::detectors::DetectorRegistry;
+        use crate::evidence::TargetScope;
+
+        let base = make_temp_dir("skip-ownership");
+        let home = make_temp_dir("skip-ownership-home");
+        let owner = base.join("a");
+        let skipped = base.join("b");
+        fs::create_dir_all(owner.join("target")).unwrap();
+        fs::create_dir_all(&skipped).unwrap();
+        write_manifest(&owner);
+        write_manifest(&skipped);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
+
+        let full = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![owner.clone(), skipped.clone()]);
+        let DetectorStatus::Found(found) = registry.discover_all(&full).remove(0).1 else {
+            panic!("expected Found");
+        };
+        let scope = found[0]
+            .cargo_target_scope
+            .as_ref()
+            .and_then(|s| s.observed());
+        assert_eq!(scope.map(|s| s.scope), Some(TargetScope::Local));
+
+        // registry check + the first root pass; the second root is skipped.
+        let cut = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![owner, skipped])
+            .with_discovery_budget(Duration::from_secs(3600))
+            .spend_budget_after_checks(2);
+        let DetectorStatus::Found(found) = registry.discover_all(&cut).remove(0).1 else {
+            panic!("expected Found");
+        };
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0]
+                .cargo_target_scope
+                .as_ref()
+                .is_some_and(|s| s.observed().is_none()),
+            "ownership must be withdrawn, got {:?}",
+            found[0].cargo_target_scope
+        );
+        assert_eq!(cut.unexamined_summaries().len(), 1);
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The deadline bounds the pass: a detector registered after expiry is
+    /// reported as not started, not as having found nothing.
+    #[test]
+    fn a_detector_after_the_deadline_is_reported_not_started() {
+        use crate::detectors::DetectorRegistry;
+
+        let home = make_temp_dir("not-started-home");
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![home.clone()])
+            .with_discovery_budget(Duration::from_secs(3600))
+            .spend_budget_after_checks(0);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
+        match registry.discover_all(&ctx).remove(0).1 {
+            DetectorStatus::Failed(reason) => assert!(reason.contains("did not look"), "{reason}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(ctx.unexamined_summaries().len(), 1);
         fs::remove_dir_all(&home).ok();
     }
 

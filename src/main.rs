@@ -764,7 +764,19 @@ fn run_explain_command(args: &[String]) {
             }
         },
     ) else {
-        eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
+        // "Not found" is only true of a search that finished (HORO-2361).
+        let cut_short = ctx.unexamined_summaries();
+        if cut_short.is_empty() {
+            eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
+        } else {
+            eprintln!(
+                "glomeris explain: no candidate matching '{query}' was found, but discovery was \
+                 cut short, so absence is not established:"
+            );
+            for (id, reason) in cut_short {
+                eprintln!("  {}: {reason}", id.0);
+            }
+        }
         std::process::exit(1);
     };
 

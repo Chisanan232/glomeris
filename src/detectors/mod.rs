@@ -205,6 +205,12 @@ pub struct DiscoveryContext {
 #[derive(Default)]
 struct DiscoveryPassState {
     deadline: Option<Instant>,
+    /// Test seam: the budget reads as spent from the Nth check on, so a test
+    /// can pin "some roots examined, the rest skipped" without a clock race.
+    #[cfg(test)]
+    spent_after_checks: Option<usize>,
+    #[cfg(test)]
+    checks: usize,
     /// Roots a detector was never able to look at because the pass deadline
     /// had already passed — recorded, never silently dropped.
     unexamined: Vec<(DetectorId, PathBuf)>,
@@ -243,14 +249,41 @@ impl DiscoveryContext {
         let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
         state.deadline = self.discovery_budget.map(|b| Instant::now() + b);
         state.unexamined.clear();
+        #[cfg(test)]
+        {
+            state.checks = 0;
+        }
     }
 
     /// Whether this pass's total budget is spent. Detectors that loop over
     /// many roots check it before starting each one and call
     /// [`DiscoveryContext::note_unexamined`] for every root they skip.
     pub fn discovery_budget_spent(&self) -> bool {
-        let state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        #[allow(unused_mut)]
+        let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(test)]
+        {
+            state.checks += 1;
+            if let Some(n) = state.spent_after_checks {
+                return state.checks > n;
+            }
+        }
         state.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spend_budget_after_checks(self, n: usize) -> Self {
+        {
+            let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+            state.spent_after_checks = Some(n);
+        }
+        self
+    }
+
+    /// Whether `detector` skipped anything on the deadline this pass.
+    pub fn skipped_on_deadline(&self, detector: DetectorId) -> bool {
+        let state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.unexamined.iter().any(|(id, _)| *id == detector)
     }
 
     pub fn note_unexamined(&self, detector: DetectorId, root: PathBuf) {
@@ -1563,7 +1596,18 @@ impl DetectorRegistry {
             .map(|detector| {
                 let id = detector.id();
                 on_progress(id, DetectorProgress::Started);
-                let status = detector.discover(ctx);
+                // HORO-2361: the deadline bounds the pass, not just one
+                // detector. A detector that never started did not look, which
+                // is a failed answer, not an empty one.
+                let status = if ctx.discovery_budget_spent() {
+                    ctx.note_unexamined(id, PathBuf::from("(detector not started)"));
+                    DetectorStatus::Failed(
+                        "discovery deadline reached before this detector started: it did not look"
+                            .to_string(),
+                    )
+                } else {
+                    detector.discover(ctx)
+                };
                 on_progress(id, DetectorProgress::Finished(&status));
                 (id, status)
             })

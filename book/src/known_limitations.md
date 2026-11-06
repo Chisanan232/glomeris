@@ -388,8 +388,13 @@ metadata` and a size walk for each, and those bounds do not add up to a limit.
 seconds of discovery. The roots not reached are named in the Cargo detector's
 outcome, which becomes `failed` with the count and the first few paths, so
 `discovery_complete` is `false` and the menu-bar panel does not print an
-all-clear over a search that did not finish. Candidates found before the
-deadline stay listed and are classified exactly as before. The deadline is an
+all-clear over a search that did not finish. A detector registered after the deadline is reported as not started rather than
+as having found nothing, and when Cargo roots were skipped every Cargo target
+found keeps no claimed owner (`ASK`, never `AUTO_SAFE`), because a skipped root
+may be the one that shares it. Candidates found before the deadline stay listed
+and are otherwise classified as before. The `--progress-json` stream reports each
+detector as it finishes, so it can still say `found` for a detector the final
+report marks `failed`; the final report is the one to read. The deadline is an
 engineering default, not a measured number. `emergency` is unchanged: its
 discovery context has no deadline.
 

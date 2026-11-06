@@ -186,9 +186,9 @@ its own priority to the background band, and declines to start while the
 one-minute load average per core is above a ceiling (1.5 by default;
 `GLOMERIS_SCAN_LOAD_CEILING` overrides it with a positive number). Declining
 exits 75 having scanned and deleted nothing — with `--json` it prints the same
-`busy` refusal an execution-lock collision does, so a client that already
-treats that as "try again shortly" needs nothing new — and the pressure poller
-raises the alert again on its next sample. A load average that cannot be read is admitted:
+`busy` refusal an execution-lock collision does, so the app shows its existing
+"busy, try again shortly" message. The CLI itself schedules no retry: the next
+unattended run starts only when pressure is next signalled. A load average that cannot be read is admitted:
 not being able to read it is not evidence that the host is busy. A run somebody
 typed is never held back by this.
 
