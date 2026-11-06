@@ -1930,25 +1930,38 @@ fn print_cargo_layout(layout: &crate::detectors::cargo_layout::CargoLayoutSurvey
     for unit in &layout.units {
         match (unit.measured, unit.logical_bytes, unit.allocated_bytes) {
             (true, Some(logical), allocated) => println!(
-                "  {:<44} {}{} logical, {} allocated",
+                "  {:<44} {}{} logical, {}{} allocated",
                 printable(&unit.path),
                 if unit.is_lower_bound { "≥ " } else { "" },
                 human_bytes(logical),
+                if unit.is_lower_bound { "≥ " } else { "" },
                 allocated.map_or_else(|| "unknown".to_string(), human_bytes),
             ),
             _ => println!(
-                "  {:<44} not measured (survey deadline reached)",
-                printable(&unit.path)
+                "  {:<44} not measured ({})",
+                printable(&unit.path),
+                match unit.unmeasured_reason {
+                    Some("unreadable") => "could not be read",
+                    _ => "survey time ran out",
+                }
             ),
         }
     }
     if layout.omitted_units > 0 {
         println!("  … {} more units not listed", layout.omitted_units);
     }
-    println!(
-        "  measured total: {} allocated (per-unit hardlink dedup only — an upper bound)",
-        human_bytes(layout.measured_allocated_bytes)
-    );
+    if layout.complete {
+        println!(
+            "  total: {} allocated (upper bound: hardlinks shared between units count in each)",
+            human_bytes(layout.measured_allocated_bytes)
+        );
+    } else {
+        println!(
+            "  partial total: {} allocated across the measured units only — the survey is \
+             incomplete, so this is neither the whole nor a bound",
+            human_bytes(layout.measured_allocated_bytes)
+        );
+    }
 }
 
 /// Prints a [`DetectReport`] as concise, human-readable text.

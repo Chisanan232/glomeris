@@ -84,8 +84,11 @@ pub struct LayoutUnit {
     pub triple: Option<String>,
     /// Inside `llvm-cov-target/`.
     pub llvm_cov: bool,
-    /// `false` when the survey deadline passed before this unit was reached.
+    /// `false` when the unit was not measured; `unmeasured_reason` says why.
     pub measured: bool,
+    /// `"deadline"` (survey time ran out before this unit) or `"unreadable"`
+    /// (the unit's own probe failed). `None` when measured.
+    pub unmeasured_reason: Option<&'static str>,
     pub logical_bytes: Option<u64>,
     /// On-disk blocks: an upper bound on what deleting this unit frees.
     pub allocated_bytes: Option<u64>,
@@ -104,7 +107,11 @@ pub struct CargoLayoutSurvey {
     pub unmeasured_units: usize,
     pub measured_logical_bytes: u64,
     pub measured_allocated_bytes: u64,
-    /// Always `true`: cross-unit hardlinks are counted in each unit.
+    /// Always `true`: cross-unit hardlinks are counted in each unit, so a
+    /// COMPLETE survey's sum bounds the whole from above. It excludes the
+    /// blocks of container directories themselves (0 on APFS), and an
+    /// incomplete survey's sum is a partial figure, not a bound — read
+    /// `complete`.
     pub sum_is_upper_bound: bool,
     /// Listing stopped on the deadline or an entry cap, so units may be missing.
     pub listing_truncated: bool,
@@ -157,18 +164,25 @@ pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> Car
         deadline,
         truncated: false,
     };
+    // A symlinked root is never followed: the survey describes the directory
+    // that was discovered, not wherever a link currently points.
+    if fs::symlink_metadata(target_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        listing.truncated = true;
+    }
     let mut specs = Vec::new();
     let mut omitted = 0usize;
-    enumerate(
-        target_dir,
-        "",
-        &Ctx::default(),
-        false,
-        0,
-        &mut specs,
-        &mut omitted,
-        &mut listing,
-    );
+    if !listing.truncated {
+        enumerate(
+            target_dir,
+            "",
+            &Ctx::default(),
+            false,
+            0,
+            &mut specs,
+            &mut omitted,
+            &mut listing,
+        );
+    }
 
     let mut units = Vec::with_capacity(specs.len());
     for spec in specs {
@@ -207,11 +221,15 @@ fn child_dirs_and_files(
 ) -> Option<(Vec<(String, PathBuf)>, Vec<PathBuf>)> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
-    for (seen, entry) in fs::read_dir(dir).ok()?.flatten().enumerate() {
+    for (seen, entry) in fs::read_dir(dir).ok()?.enumerate() {
         if seen >= MAX_ENTRIES_PER_DIR || listing.expired() {
             listing.truncated = true;
             break;
         }
+        let Ok(entry) = entry else {
+            listing.truncated = true;
+            continue;
+        };
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         // A symlink is never followed: it is a loose file whose own lstat
@@ -219,7 +237,7 @@ fn child_dirs_and_files(
         match fs::symlink_metadata(&path) {
             Ok(m) if m.is_dir() => dirs.push((name, path)),
             Ok(_) => files.push(path),
-            Err(_) => {}
+            Err(_) => listing.truncated = true,
         }
     }
     dirs.sort();
@@ -268,6 +286,9 @@ fn enumerate(
     listing: &mut Listing,
 ) {
     let Some((dirs, files)) = child_dirs_and_files(dir, listing) else {
+        // A directory that cannot be listed is a hole in the survey, not an
+        // empty directory.
+        listing.truncated = true;
         return;
     };
     for (name, path) in dirs {
@@ -374,8 +395,9 @@ fn unix_secs(t: SystemTime) -> Option<u64> {
     t.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
-fn unmeasured(spec: UnitSpec) -> LayoutUnit {
+fn unmeasured(spec: UnitSpec, reason: &'static str) -> LayoutUnit {
     LayoutUnit {
+        unmeasured_reason: Some(reason),
         path: spec.rel,
         role: spec.role,
         profile: spec.profile,
@@ -396,16 +418,23 @@ fn measure(
     deadline: Duration,
 ) -> LayoutUnit {
     if deadline_passed {
-        return unmeasured(spec);
+        return unmeasured(spec, "deadline");
     }
     if let Some(files) = &spec.loose_files {
         return measure_loose_files(&spec, files, started, deadline);
     }
-    let est = estimate_logical_bytes(&spec.abs, size_estimate_budget());
+    // The walk gets whichever is smaller: its usual bound or what is left of
+    // the survey's time.
+    let remaining = deadline.saturating_sub(started.elapsed());
+    let est = estimate_logical_bytes(
+        &spec.abs,
+        size_estimate_budget().with_max_duration(remaining.min(super::SIZE_ESTIMATE_DEADLINE)),
+    );
     let Some(logical) = est.bytes.observed().copied() else {
-        return unmeasured(spec);
+        return unmeasured(spec, "unreadable");
     };
     LayoutUnit {
+        unmeasured_reason: None,
         is_lower_bound: est.is_lower_bound(),
         allocated_bytes: est.allocated(),
         newest_mtime_unix: est.newest_mtime.and_then(unix_secs),
@@ -460,6 +489,7 @@ fn measure_loose_files(
         triple: spec.triple.clone(),
         llvm_cov: spec.llvm_cov,
         measured: true,
+        unmeasured_reason: None,
         logical_bytes: Some(logical),
         allocated_bytes: cfg!(unix).then_some(allocated),
         newest_mtime_unix: newest.and_then(unix_secs),
@@ -622,6 +652,23 @@ mod tests {
     fn unreadable_root_yields_an_empty_incomplete_listing_not_a_panic() {
         let s = survey_cargo_layout(Path::new("/definitely/not/a/real/target"));
         assert!(s.units.is_empty());
+        assert!(!s.complete, "a missing root is not a complete empty survey");
+        assert!(s.listing_truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_is_not_followed() {
+        let real = temp_dir("real-root");
+        file(&real.join("debug/deps/x"), 5000);
+        let holder = temp_dir("link-holder");
+        let link = holder.join("target");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let s = survey_cargo_layout(&link);
+        assert!(s.units.is_empty());
+        assert!(!s.complete);
+        fs::remove_dir_all(&real).ok();
+        fs::remove_dir_all(&holder).ok();
     }
 
     #[cfg(unix)]
