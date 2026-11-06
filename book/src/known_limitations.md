@@ -379,6 +379,20 @@ context is never given a configured-root list either. Tracked here so it
 is revisited if a DerivedData-deleting action is ever registered, or if
 emergency mode is ever given root context.
 
+## Discovery has a total deadline; roots it skips are reported, not dropped (HORO-2361)
+
+Every probe was already bounded on its own (750 ms size walk, 3 s correlation,
+a 20 s correlation pass), but a pass over many Cargo roots pays a `cargo
+metadata` and a size walk for each, and those bounds do not add up to a limit.
+`detect`, `explain`, `llm-plan` and `free` now stop starting new roots after 60
+seconds of discovery. The roots not reached are named in the Cargo detector's
+outcome, which becomes `failed` with the count and the first few paths, so
+`discovery_complete` is `false` and the menu-bar panel does not print an
+all-clear over a search that did not finish. Candidates found before the
+deadline stay listed and are classified exactly as before. The deadline is an
+engineering default, not a measured number. `emergency` is unchanged: its
+discovery context has no deadline.
+
 ## What holds this book to the code
 
 Three mechanical checks, because the drift this page is about was found by

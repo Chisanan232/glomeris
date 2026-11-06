@@ -103,6 +103,15 @@ const CLI_CORRELATION_TIMEOUT: Duration = Duration::from_secs(3);
 /// it's wrong in either direction.
 const CLI_CORRELATION_PASS_BUDGET: Duration = Duration::from_secs(20);
 
+/// Wall-clock budget for the DISCOVERY phase of one pass (HORO-2361): the sum
+/// of every detector's work, which per-resource bounds (750 ms walk, 3 s
+/// correlation) do not limit on their own — a thousand Cargo roots cost a
+/// thousand `cargo metadata` calls. A root not reached is reported through
+/// the detector's outcome ([`DetectorOutcome::Failed`], so `discovery_complete`
+/// is `false`); the candidates found before the deadline stay listed. An
+/// engineering default, not a measured number.
+pub const DISCOVERY_PASS_BUDGET: Duration = Duration::from_secs(60);
+
 /// Builds a [`StatusReport`] from a raw [`FsUsage`] reading and the
 /// pressure thresholds it's classified against. Pure — no I/O.
 pub fn build_status_report(usage: &FsUsage, thresholds: &ThresholdConfig) -> StatusReport {
@@ -513,6 +522,15 @@ fn discover_and_classify_pass_with(
             | DetectorStatus::ToolNotRunning
             | DetectorStatus::NotConfigured
             | DetectorStatus::Failed(_) => {}
+        }
+    }
+
+    // HORO-2361: a detector that ran out of discovery budget answered only
+    // part of its question. Its candidates are already in `flattened`; the
+    // outcome says the search was cut short, so the pass is not complete.
+    for (id, reason) in ctx.unexamined_summaries() {
+        if let Some(slot) = detectors.iter_mut().find(|(d, _)| *d == id) {
+            slot.1 = DetectorOutcome::Failed(reason);
         }
     }
 
@@ -3253,6 +3271,49 @@ mod tests {
         assert_eq!(failed_probes.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(unconfigured_probes.load(AtomicOrdering::SeqCst), 1);
         assert_eq!(pass.detectors.len(), 4);
+    }
+
+    /// A detector that ran out of discovery budget (HORO-2361) keeps the
+    /// candidates it found, but the pass says the search was cut short:
+    /// the outcome is `Failed` with the skipped roots named, so
+    /// `discovery_complete` is `false` and nothing reads as "all clear".
+    #[test]
+    fn discovery_pass_reports_roots_skipped_on_the_deadline_without_dropping_candidates() {
+        struct Skipper(Evidence);
+        impl Detector for Skipper {
+            fn id(&self) -> DetectorId {
+                DetectorId("skipper")
+            }
+            fn resource_kinds(&self) -> &'static [ResourceKind] {
+                &[]
+            }
+            fn discover(&self, ctx: &DiscoveryContext) -> DetectorStatus {
+                ctx.note_unexamined(self.id(), PathBuf::from("/work/p2"));
+                ctx.note_unexamined(self.id(), PathBuf::from("/work/p3"));
+                DetectorStatus::Found(vec![self.0.clone()])
+            }
+        }
+        let ev = evidence("/work/p1/target", ResourceKind::CargoTargetDir, Some(1024));
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(Skipper(ev))]);
+
+        let pass = discover_and_classify_pass(
+            &registry,
+            &ctx(),
+            &CleanCollector,
+            &PolicyConfig::default(),
+            SystemTime::UNIX_EPOCH,
+            |_| {},
+        );
+
+        assert_eq!(pass.candidates.len(), 1, "the found candidate stays");
+        match &pass.detectors[0].1 {
+            DetectorOutcome::Failed(reason) => {
+                assert!(reason.contains("2 root(s) were not examined"), "{reason}");
+                assert!(reason.contains("/work/p2"), "{reason}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(pass.detectors[0].1.left_discovery_incomplete());
     }
 
     /// The two halves of the pass agree by construction: every `Found`

@@ -933,6 +933,13 @@ impl Detector for CargoDetector {
         let mut pending_build_dirs: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
 
         for root in &ctx.known_project_roots {
+            // HORO-2361: each root costs a `cargo metadata` plus a size walk,
+            // so a thousand of them can outlast any single probe bound. A root
+            // not reached is recorded for the pass to report, never dropped.
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), root.clone());
+                continue;
+            }
             let target_dir: PathBuf = root.join("target");
             let direct_canonical = match target_dir.canonicalize() {
                 Ok(canonical) => Some(canonical),
@@ -1033,6 +1040,10 @@ impl Detector for CargoDetector {
         // protective) scope; this pass only ever inserts a directory nobody
         // else found, and never merges into or lowers an existing entry.
         for dir in cargo_roots::expand_globs(&ctx.extra_cargo_target_globs, &ctx.home_dir) {
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), dir);
+                continue;
+            }
             if !is_plausible_unowned_dir(&dir, &ctx.home_dir, &ctx.known_project_roots, true) {
                 continue;
             }
@@ -1201,6 +1212,80 @@ mod tests {
             None,
             "a transient spawn failure must never be cached as 'absent'"
         );
+    }
+
+    /// HORO-2361 AC: a 1,000-root fixture finishes within the deadline and
+    /// reports the roots it skipped, instead of paying one `cargo metadata`
+    /// per root. Which roots were reached is timing-dependent; the invariants
+    /// are not: at least one was examined, every other one is named as
+    /// unexamined, and none vanishes.
+    #[test]
+    fn a_thousand_roots_stop_at_the_discovery_deadline_and_report_the_rest() {
+        use crate::detectors::DetectorRegistry;
+        use std::time::{Duration, Instant};
+
+        let base = make_temp_dir("deadline-1000");
+        let home = make_temp_dir("deadline-home");
+        let roots: Vec<PathBuf> = (0..1000)
+            .map(|i| {
+                let r = base.join(format!("p{i:04}"));
+                fs::create_dir_all(&r).unwrap();
+                r
+            })
+            .collect();
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(roots)
+            .with_discovery_budget(Duration::from_millis(1));
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
+
+        let started = Instant::now();
+        let statuses = registry.discover_all(&ctx);
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(statuses[0].1, DetectorStatus::Found(_)),
+            "the detector still answers with what it found: {:?}",
+            statuses[0].1
+        );
+        let summaries = ctx.unexamined_summaries();
+        assert_eq!(summaries.len(), 1);
+        let (id, text) = &summaries[0];
+        assert_eq!(id.0, "cargo_target_dir");
+        let skipped: usize = text
+            .split("reached: ")
+            .nth(1)
+            .and_then(|t| t.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .expect("summary names a count");
+        assert!(skipped >= 900, "expected nearly all skipped: {text}");
+        assert!(skipped < 1000, "at least one root is examined: {text}");
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "1,000 roots must not cost 1,000 probes: {elapsed:?}"
+        );
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A context with no budget skips nothing — the hermetic default.
+    #[test]
+    fn without_a_budget_no_root_is_skipped() {
+        use crate::detectors::DetectorRegistry;
+
+        let base = make_temp_dir("no-budget");
+        let home = make_temp_dir("no-budget-home");
+        let roots: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let r = base.join(format!("p{i}"));
+                fs::create_dir_all(&r).unwrap();
+                r
+            })
+            .collect();
+        let ctx = DiscoveryContext::new(&home).with_known_project_roots(roots);
+        DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]).discover_all(&ctx);
+        assert!(ctx.unexamined_summaries().is_empty());
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
     }
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
