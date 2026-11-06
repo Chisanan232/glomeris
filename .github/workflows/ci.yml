@@ -13,7 +13,7 @@ on:
 
 jobs:
   test:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -272,7 +272,7 @@ jobs:
     # (and later the published artifact) is checked with. Its own --self-test
     # proves it still rejects an armed Autopilot, a lenient CLI, a missing
     # surface and a bad checksum, so the check cannot rot into one that passes.
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
       - name: Prove the candidate verifier can fail
