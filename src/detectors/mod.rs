@@ -9,6 +9,7 @@
 //! absent from the machine is normal, expected state, never an error.
 
 pub(crate) mod cargo;
+pub mod cargo_layout;
 pub mod cargo_roots;
 mod docker;
 mod docker_objects;
@@ -349,6 +350,9 @@ pub(crate) struct SizeEstimate {
     /// `bytes`, with the same hardlink dedup and budget (HORO-2360).
     /// Meaningful only when `bytes` is `Observed` and only on unix.
     pub allocated_bytes: u64,
+    /// Newest mtime of any entry the walk visited (HORO-2360 slice C
+    /// breakdown). Report-only; meaningful only when `bytes` is `Observed`.
+    pub newest_mtime: Option<SystemTime>,
     /// Meaningful only when `bytes` is `Observed` — the root's own probe
     /// failing (`Unavailable`) never got far enough to consult a budget.
     pub stop_reason: StopReason,
@@ -479,6 +483,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 entries_visited: 0,
                 unreadable_entries: 0,
                 allocated_bytes: 0,
+                newest_mtime: None,
             };
         }
         Err(_) => {
@@ -488,6 +493,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 entries_visited: 0,
                 unreadable_entries: 0,
                 allocated_bytes: 0,
+                newest_mtime: None,
             };
         }
     };
@@ -499,11 +505,13 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             entries_visited: 0,
             unreadable_entries: 0,
             allocated_bytes: root_allocated_bytes(&root_meta),
+            newest_mtime: root_meta.modified().ok(),
         };
     }
 
     let mut total: u64 = 0;
     let mut allocated: u64 = allocated_bytes_of(&root_meta);
+    let mut newest_mtime: Option<SystemTime> = root_meta.modified().ok();
     let mut entries_visited: u64 = 0;
     let mut unreadable_entries: u64 = 0;
     let mut stop_reason = StopReason::Exhausted;
@@ -532,6 +540,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     entries_visited: 0,
                     unreadable_entries: 0,
                     allocated_bytes: 0,
+                    newest_mtime: None,
                 };
             }
             Err(_) if is_root => {
@@ -541,6 +550,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     entries_visited: 0,
                     unreadable_entries: 0,
                     allocated_bytes: 0,
+                    newest_mtime: None,
                 };
             }
             Err(_) => {
@@ -573,6 +583,10 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     continue;
                 }
             };
+
+            if let Ok(mtime) = meta.modified() {
+                newest_mtime = Some(newest_mtime.map_or(mtime, |m| m.max(mtime)));
+            }
 
             if meta.is_dir() {
                 // Directories carry no logical bytes, but filesystems that
@@ -617,6 +631,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
     SizeEstimate {
         bytes: ProbeOutcome::Observed(total),
         allocated_bytes: allocated,
+        newest_mtime,
         stop_reason,
         entries_visited,
         unreadable_entries,
