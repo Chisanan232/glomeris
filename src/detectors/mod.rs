@@ -249,17 +249,13 @@ impl DiscoveryContext {
         let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
         state.deadline = self.discovery_budget.map(|b| Instant::now() + b);
         state.unexamined.clear();
-        #[cfg(test)]
-        {
-            state.checks = 0;
-        }
+        state.checks = 0;
     }
 
     /// Whether this pass's total budget is spent. Detectors that loop over
     /// many roots check it before starting each one and call
     /// [`DiscoveryContext::note_unexamined`] for every root they skip.
     pub fn discovery_budget_spent(&self) -> bool {
-        #[allow(unused_mut)]
         let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
         state.checks += 1;
         if let Some(n) = state.spent_after_checks {
