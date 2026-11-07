@@ -445,6 +445,71 @@ final class RecoverySectionViewTests: XCTestCase {
         XCTAssertEqual(summary.goalText, "60% used (40% free)")
     }
 
+    /// The run report as the CLI prints it with a receipt attached: the real
+    /// golden run report with the real golden receipt under `receipt`.
+    private func runReportWithReceipt(_ receiptFixture: String) throws -> RecoveryRunReportDto {
+        var report = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try fixtureData("recovery_run_report.json")) as? [String: Any]
+        )
+        report["receipt"] = try JSONSerialization.jsonObject(with: try fixtureData(receiptFixture))
+        let data = try JSONSerialization.data(withJSONObject: report)
+        return try JSONDecoder().decode(RecoveryRunReportDto.self, from: data)
+    }
+
+    /// HORO-2362: the receipt rows carry Rust's figures and keep the measured
+    /// change out of every estimated line.
+    func testReceiptSeparatesTheMeasuredChangeFromTheEstimatedGroups() throws {
+        let summary = RecoveryRunSummary(try runReportWithReceipt("run_receipt.json"))
+        let receipt = try XCTUnwrap(summary.receipt)
+
+        XCTAssertEqual(receipt.measuredText, "20.0 GB")
+        XCTAssertEqual(receipt.estimatedByKind, [
+            "Rust build output: 2 actions, about 46.0 GB",
+            "node_modules: 1 action, about 1.0 GB",
+            "Xcode derived data: 1 action, no size estimate",
+        ])
+        XCTAssertEqual(receipt.estimatedByRoot.first, "/Users/dev/proj-a: 2 actions, about 41.0 GB")
+        XCTAssertEqual(
+            receipt.growth.first,
+            "Rust build output in /Users/dev/proj-a: grew 10.0 GB since last run, idle 66 days"
+        )
+        XCTAssertTrue(receipt.notes.contains { $0.contains("not added or compared") })
+        let measuredText = try XCTUnwrap(receipt.measuredText)
+        for line in receipt.estimatedByKind + receipt.estimatedByRoot {
+            XCTAssertFalse(line.contains(measuredText), "measured figure leaked into an estimate: \(line)")
+        }
+    }
+
+    func testReceiptWithoutHistoryKeepsEstimatesAndShowsNoGrowth() throws {
+        let summary = RecoveryRunSummary(try runReportWithReceipt("run_receipt_no_history.json"))
+        let receipt = try XCTUnwrap(summary.receipt)
+        XCTAssertTrue(receipt.growth.isEmpty)
+        XCTAssertFalse(receipt.estimatedByKind.isEmpty)
+    }
+
+    /// A run whose volume reading failed carries no measured block; the card shows
+    /// no measured row rather than a zero.
+    func testReceiptWithoutAMeasuredBlockShowsNoMeasuredChange() throws {
+        var receipt = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try fixtureData("run_receipt.json")) as? [String: Any]
+        )
+        receipt.removeValue(forKey: "measured")
+        var report = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try fixtureData("recovery_run_report.json")) as? [String: Any]
+        )
+        report["receipt"] = receipt
+        let dto = try JSONDecoder().decode(
+            RecoveryRunReportDto.self, from: try JSONSerialization.data(withJSONObject: report)
+        )
+        let summary = RecoveryRunSummary(dto)
+        XCTAssertNil(try XCTUnwrap(summary.receipt).measuredText)
+    }
+
+    func testRunSummaryWithoutAReceiptHasNone() throws {
+        let dto = try fixture("recovery_run_report.json", as: RecoveryRunReportDto.self)
+        XCTAssertNil(RecoveryRunSummary(dto).receipt)
+    }
+
     /// The campaign's "do NOT collapse every termination into 'Done'", as an
     /// assertion. A run that stopped for want of safe candidates gets its own
     /// badge and the CLI's own explanation, and gets no success message — which
