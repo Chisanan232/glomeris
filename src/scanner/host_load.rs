@@ -161,4 +161,28 @@ mod tests {
         let load = current_load_one_minute().expect("getloadavg on unix");
         assert!(load.is_finite() && load >= 0.0);
     }
+
+    /// The priority change is process-wide, so it is checked in a child copy of
+    /// this test binary and never in the shared test process.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn background_qos_is_applied_to_the_process() {
+        const CHILD: &str = "GLOMERIS_QOS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(enter_background_qos(), "the background band was refused");
+            // SAFETY: plain syscall on the calling process.
+            let band = unsafe { nix::libc::getpriority(nix::libc::PRIO_DARWIN_PROCESS, 0) };
+            assert_eq!(band, 1, "the process is not in the background band");
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .args([
+                "--exact",
+                "scanner::host_load::tests::background_qos_is_applied_to_the_process",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .expect("spawn child test");
+        assert!(status.success(), "child reported a failure");
+    }
 }
