@@ -293,8 +293,9 @@ fn discover_and_classify_now(
     use std::time::SystemTime;
 
     let collector = live_evidence_collector(&project_roots);
-    let ctx =
-        DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
+    let ctx = DiscoveryContext::from_process_env(home_dir())
+        .with_discovery_budget(glomeris::cli::DISCOVERY_PASS_BUDGET)
+        .with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
@@ -334,8 +335,9 @@ fn discover_pass_now(
     use std::time::SystemTime;
 
     let collector = live_evidence_collector(&project_roots);
-    let ctx =
-        DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
+    let ctx = DiscoveryContext::from_process_env(home_dir())
+        .with_discovery_budget(glomeris::cli::DISCOVERY_PASS_BUDGET)
+        .with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
@@ -737,8 +739,9 @@ fn run_explain_command(args: &[String]) {
     use std::time::SystemTime;
 
     let collector = live_evidence_collector(&project_roots);
-    let ctx =
-        DiscoveryContext::from_process_env(home_dir()).with_known_project_roots(project_roots);
+    let ctx = DiscoveryContext::from_process_env(home_dir())
+        .with_discovery_budget(glomeris::cli::DISCOVERY_PASS_BUDGET)
+        .with_known_project_roots(project_roots);
     let registry = DetectorRegistry::builtin();
     let cfg = PolicyConfig::default();
     let now = SystemTime::now();
@@ -761,7 +764,19 @@ fn run_explain_command(args: &[String]) {
             }
         },
     ) else {
-        eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
+        // "Not found" is only true of a search that finished (HORO-2361).
+        let cut_short = ctx.unexamined_summaries();
+        if cut_short.is_empty() {
+            eprintln!("glomeris explain: no discoverable candidate matches '{query}'");
+        } else {
+            eprintln!(
+                "glomeris explain: no candidate matching '{query}' was found, but discovery was \
+                 cut short, so absence is not established:"
+            );
+            for (id, reason) in cut_short {
+                eprintln!("  {}: {reason}", id.0);
+            }
+        }
         std::process::exit(1);
     };
 
@@ -1877,6 +1892,38 @@ fn run_free_command(args: &[String]) {
         (true, false) => RunAuthority::AskedWithinGrant,
         (true, true) => RunAuthority::UnpromptedWithinGrant,
     };
+
+    // HORO-2361: a run nobody asked for must not add to a loaded host. It
+    // drops to background priority and declines to start while the host is
+    // busy; the pressure poller raises the alert again on its next sample, and
+    // nothing is classified or deleted by declining.
+    if authority.is_unprompted() && !dry_run {
+        glomeris::scanner::host_load::enter_background_qos();
+        if let glomeris::scanner::host_load::LoadGate::Busy {
+            load_per_core,
+            ceiling,
+        } = glomeris::scanner::host_load::check_host_load()
+        {
+            // Same refusal an execution-lock collision uses: the run did not
+            // start, so there is no run report, and clients that already map
+            // `busy` to "try again shortly" need no new token.
+            let message = format!(
+                "host is busy (load {load_per_core:.2} per core, ceiling {ceiling:.2}; set {} \
+                 to change it): not starting an unattended scan — nothing was scanned or \
+                 deleted",
+                glomeris::scanner::host_load::LOAD_CEILING_ENV
+            );
+            if json {
+                print_json_or_exit(&glomeris::reporting::dto::ExecuteRefusalReport {
+                    reason: glomeris::reporting::dto::RefusalReason::Busy,
+                    message,
+                });
+            } else {
+                eprintln!("glomeris free: {message}");
+            }
+            std::process::exit(75);
+        }
+    }
 
     if dry_run {
         free_preview(goal, target, project_roots, json, progress_json);
@@ -3856,8 +3903,9 @@ fn free_run(
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     let collector = live_evidence_collector(&project_roots);
-    let discovery_ctx =
-        DiscoveryContext::from_process_env(home_dir).with_known_project_roots(project_roots);
+    let discovery_ctx = DiscoveryContext::from_process_env(home_dir)
+        .with_discovery_budget(glomeris::cli::DISCOVERY_PASS_BUDGET)
+        .with_known_project_roots(project_roots);
 
     let config = RecoveryConfig {
         target,

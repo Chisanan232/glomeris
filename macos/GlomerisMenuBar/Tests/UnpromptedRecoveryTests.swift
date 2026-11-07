@@ -360,6 +360,27 @@ final class UnpromptedRecoveryTests: XCTestCase {
         XCTAssertEqual(clause, "Autopilot ran and found nothing it could safely reclaim.")
     }
 
+    /// HORO-2361: a run whose discovery was cut short took nothing because it did
+    /// not finish looking, which is not the same as there being nothing to take.
+    func testARunWithIncompleteDiscoveryDoesNotClaimThereWasNothingToReclaim() throws {
+        var object = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: try fixtureData("recovery_run_report.json"))
+                as? [String: Any]
+        )
+        object["stop_reason"] = "safe_exhausted"
+        object["bytes_freed_measured"] = 0
+        object["bytes_freed_measured_human"] = "0 B"
+        object["discovery_complete"] = false
+        object["detector_failures"] = ["cargo_target_dir: discovery budget spent; 3 roots skipped"]
+        let report = try JSONDecoder().decode(
+            RecoveryRunReportDto.self, from: try JSONSerialization.data(withJSONObject: object)
+        )
+        let clause = UnpromptedRecoveryAccount.deletionClause(after: .ran(report))
+
+        XCTAssertTrue(clause.contains("incomplete"), clause)
+        XCTAssertFalse(clause.contains("found nothing"), clause)
+    }
+
     /// A run that stopped without reporting is the one outcome the app cannot account
     /// for, and it must not be accounted for by reassurance: "may already have been
     /// reclaimed" is what sends a user to look, and it is the only direction it is safe

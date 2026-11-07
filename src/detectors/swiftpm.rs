@@ -124,6 +124,12 @@ impl Detector for SwiftPmBuildDirDetector {
         let mut saw_permission_error = false;
 
         for root in &ctx.known_project_roots {
+            // HORO-2361: a root past the discovery deadline is recorded as
+            // unexamined, never silently dropped.
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), root.clone());
+                continue;
+            }
             // Ownership first: no manifest, no claim. Checked before the
             // build directory is even canonicalized, so a `.build` beside
             // something that is not a Swift package is never named at all.
