@@ -13,6 +13,7 @@ pub mod notifier;
 pub mod persistence;
 pub mod poller;
 pub mod pressure;
+pub mod resource_history;
 pub mod stability;
 pub mod state_machine;
 pub mod volume_sample;

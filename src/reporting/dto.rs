@@ -2829,6 +2829,10 @@ pub struct RecoveryRunReport {
     /// present a partial search as a complete one, or a reclaim as proof
     /// every host integration still works.
     pub caveats: Vec<String>,
+    /// Before/after summary of this run, attached by the `free` command after
+    /// the loop returns (HORO-2362). Absent when the command did not build one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<crate::reporting::receipt::RunReceipt>,
 }
 
 /// A refused recovery goal, machine-readable (HORO-1506 AC4).

@@ -13,6 +13,7 @@ pub mod eligibility;
 pub mod impact;
 pub mod policy_label;
 pub mod ranking;
+pub mod receipt;
 pub mod used_percent;
 
 pub use bytes::human_bytes;

@@ -1184,6 +1184,31 @@ action it is currently running, finishing with
   between actions instead.
 - Not valid with `--dry-run`, which performs no actions to stop.
 
+### The run receipt
+
+A finished (non-dry) run ends with a receipt: prose after the report, and a
+`receipt` object in the `--json` report. It keeps two kinds of figure apart
+and never adds, subtracts or compares them.
+
+- **`measured`** is the volume's free bytes before and after, and
+  `volume_free_delta` (after minus before, negative if free space shrank). It
+  is the only figure that says what the disk gained.
+- **`estimated`** is the size estimates of the actions that succeeded, grouped
+  `by_kind` and `by_root`. Estimates can overlap and can be lower bounds, so
+  they will not match the measured delta, and an action with no estimate is
+  counted in `unestimated_actions` rather than as zero bytes. Each axis covers
+  the same actions, so the two axes are not summed either. At most the 20
+  largest groups per axis are listed.
+- **`growth`** is explanation only: for the largest candidates the run saw,
+  "grew X since last run" and "idle N days", from bounded size and modification
+  samples kept in `resource-history.json` beside the other Glomeris state
+  (opaque keys, no paths, at most 256 resources, 8 samples each, 90 days). Age
+  never makes anything deletable; nothing that decides reads this.
+- **Failure is "no history".** If the history cannot be read or written the
+  command is unaffected: `history` is `"unavailable"`, `growth` is empty and
+  the receipt says why. `"available"` with `no earlier sample` means first
+  sighting, not that nothing grew.
+
 ### Running inside the grant
 
 `--autopilot` runs this same loop under the standing grant

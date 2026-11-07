@@ -1,0 +1,62 @@
+{
+  "measured": {
+    "free_bytes_before": 107374182400,
+    "free_bytes_after": 128849018880,
+    "volume_free_delta": 21474836480,
+    "volume_free_delta_human": "20.0 GB"
+  },
+  "estimated": {
+    "by_kind": [
+      {
+        "key": "cargo_target_dir",
+        "actions": 2,
+        "estimated_bytes": 49392123904,
+        "estimated_human": "46.0 GB",
+        "unestimated_actions": 0
+      },
+      {
+        "key": "node_modules",
+        "actions": 1,
+        "estimated_bytes": 1073741824,
+        "estimated_human": "1.0 GB",
+        "unestimated_actions": 0
+      },
+      {
+        "key": "xcode_derived_data",
+        "actions": 1,
+        "estimated_bytes": 0,
+        "estimated_human": "0 B",
+        "unestimated_actions": 1
+      }
+    ],
+    "by_root": [
+      {
+        "key": "/Users/dev/proj-a",
+        "actions": 2,
+        "estimated_bytes": 44023414784,
+        "estimated_human": "41.0 GB",
+        "unestimated_actions": 0
+      },
+      {
+        "key": "/Users/dev/proj-b",
+        "actions": 1,
+        "estimated_bytes": 6442450944,
+        "estimated_human": "6.0 GB",
+        "unestimated_actions": 0
+      },
+      {
+        "key": "/Users/dev/Library/Developer/Xcode",
+        "actions": 1,
+        "estimated_bytes": 0,
+        "estimated_human": "0 B",
+        "unestimated_actions": 1
+      }
+    ]
+  },
+  "growth": [],
+  "history": "unavailable",
+  "notes": [
+    "Measured and estimated figures are reported separately and are not added or compared.",
+    "Size history could not be read, so no growth is reported."
+  ]
+}

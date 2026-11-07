@@ -1746,6 +1746,9 @@ fn recovery_run_report_matches_golden_fixture() {
         detector_failures: vec![],
         detectors_not_examined: vec![],
         host_integrity_notes: vec![],
+        executed_steps: vec![],
+        observed_candidates: vec![],
+        volume_readings_complete: true,
     };
     // 210 GB free of 500 GB is 42% free, which clears the goal's 40% floor —
     // so `target_met` is decided by the re-measured reading, not by the
@@ -1789,6 +1792,9 @@ fn recovery_run_report_for_a_raw_target_matches_golden_fixture() {
         detector_failures: vec!["homebrew_cache: brew --cache exited 1".to_string()],
         detectors_not_examined: vec![],
         host_integrity_notes: vec![],
+        executed_steps: vec![],
+        observed_candidates: vec![],
+        volume_readings_complete: true,
     };
     let report = build_recovery_run_report(None, &target, 500_000_000_000, &inner);
     assert_matches_fixture(&report, "recovery_run_report_raw_target.json");
@@ -1834,6 +1840,9 @@ fn recovery_run_report_for_an_envelope_refusal_matches_golden_fixture() {
         detector_failures: vec![],
         detectors_not_examined: vec![],
         host_integrity_notes: vec![],
+        executed_steps: vec![],
+        observed_candidates: vec![],
+        volume_readings_complete: true,
     };
     // 65.4 GB free of 500 GB is 13% free, well short of the goal's 40% floor:
     // the run really did stop early, and `target_met` says so from the
@@ -1867,6 +1876,9 @@ fn a_pre_discovery_envelope_refusal_omits_the_remaining_breakdown() {
         detector_failures: vec![],
         detectors_not_examined: vec![],
         host_integrity_notes: vec![],
+        executed_steps: vec![],
+        observed_candidates: vec![],
+        volume_readings_complete: true,
     };
     let report = build_recovery_run_report(
         None,
@@ -2602,4 +2614,106 @@ fn check_project_root_report_undetermined_matches_golden_fixture() {
     let fixture_text = read_fixture("check_project_root_report_undetermined.json");
     let expected: serde_json::Value = serde_json::from_str(&fixture_text).expect("parse fixture");
     assert_eq!(value, expected);
+}
+
+/// HORO-2362: the run receipt, with a prior sample for one candidate.
+///
+/// The measured delta (20 GiB) and the estimated groups (46 GiB of Cargo
+/// targets) disagree on purpose: the receipt reports both and sums neither, so
+/// a change that folded one into the other changes this fixture.
+fn run_receipt_report() -> RecoveryReport {
+    use glomeris::executor::recovery_loop::{ExecutedStep, ObservedCandidate};
+    const G: u64 = 1_073_741_824;
+    let step = |kind: &'static str, root: &str, estimated: Option<u64>, ok: bool| ExecutedStep {
+        resource: format!("{kind}:{root}/x"),
+        kind,
+        root: root.to_string(),
+        estimated_bytes: estimated,
+        measured_reclaimed_bytes: None,
+        succeeded: ok,
+    };
+    RecoveryReport {
+        stop_reason: StopReason::TargetReached,
+        iterations_run: 5,
+        actions_executed: 4,
+        actions_declined_or_skipped: 1,
+        total_bytes_freed: 0,
+        started_free_bytes: 100 * G,
+        final_free_bytes: 120 * G,
+        detector_failures: vec![],
+        detectors_not_examined: vec![],
+        host_integrity_notes: vec![],
+        executed_steps: vec![
+            step("cargo_target_dir", "/Users/dev/proj-a", Some(40 * G), true),
+            step("cargo_target_dir", "/Users/dev/proj-b", Some(6 * G), true),
+            step("node_modules", "/Users/dev/proj-a", Some(G), true),
+            step(
+                "xcode_derived_data",
+                "/Users/dev/Library/Developer/Xcode",
+                None,
+                true,
+            ),
+            step("cargo_target_dir", "/Users/dev/proj-b", Some(9), false),
+        ],
+        observed_candidates: vec![
+            ObservedCandidate {
+                resource: "node_modules:/Users/dev/proj-a/node_modules".to_string(),
+                kind: "node_modules",
+                root: "/Users/dev/proj-a".to_string(),
+                estimated_bytes: Some(G),
+                last_modified_unix_secs: Some(RECEIPT_NOW - 3_600),
+            },
+            ObservedCandidate {
+                resource: "cargo_target_dir:/Users/dev/proj-a/target".to_string(),
+                kind: "cargo_target_dir",
+                root: "/Users/dev/proj-a".to_string(),
+                estimated_bytes: Some(40 * G),
+                last_modified_unix_secs: Some(RECEIPT_NOW - 66 * 86_400),
+            },
+            ObservedCandidate {
+                resource: "xcode_derived_data:/Users/dev/Library/Developer/Xcode/DerivedData"
+                    .to_string(),
+                kind: "xcode_derived_data",
+                root: "/Users/dev/Library/Developer/Xcode".to_string(),
+                estimated_bytes: None,
+                last_modified_unix_secs: None,
+            },
+        ],
+        volume_readings_complete: true,
+    }
+}
+
+const RECEIPT_NOW: u64 = 1_800_000_000;
+
+#[test]
+fn run_receipt_matches_golden_fixture() {
+    use glomeris::monitor::resource_history::{HistoryState, ResourceHistory, Sample};
+    use glomeris::reporting::receipt::{build_run_receipt, resource_key};
+    let prior = Sample {
+        at_unix_secs: RECEIPT_NOW - 3 * 86_400,
+        bytes: 30 * 1_073_741_824,
+        last_modified_unix_secs: None,
+    };
+    let history = HistoryState::Available(ResourceHistory::from_samples(
+        RECEIPT_NOW,
+        &[(
+            resource_key("cargo_target_dir:/Users/dev/proj-a/target"),
+            prior,
+        )],
+    ));
+    let receipt = build_run_receipt(&run_receipt_report(), RECEIPT_NOW, &history);
+    assert_matches_fixture(&receipt, "run_receipt.json");
+}
+
+/// A history that could not be read costs the growth entries and nothing else.
+#[test]
+fn run_receipt_without_history_matches_golden_fixture() {
+    use glomeris::monitor::resource_history::HistoryState;
+    use glomeris::reporting::receipt::build_run_receipt;
+    let receipt = build_run_receipt(
+        &run_receipt_report(),
+        RECEIPT_NOW,
+        &HistoryState::Unavailable,
+    );
+    assert_matches_fixture(&receipt, "run_receipt_no_history.json");
 }

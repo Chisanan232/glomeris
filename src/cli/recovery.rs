@@ -609,6 +609,7 @@ pub fn build_recovery_run_report(
             && report.detectors_not_examined.is_empty(),
         host_integrity_notes: report.host_integrity_notes.clone(),
         caveats: build_run_caveats(report),
+        receipt: None,
     }
 }
 
@@ -1438,6 +1439,9 @@ mod tests {
             detector_failures: vec![],
             detectors_not_examined: vec![],
             host_integrity_notes: vec![],
+            executed_steps: vec![],
+            observed_candidates: vec![],
+            volume_readings_complete: true,
         }
     }
 
