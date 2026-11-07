@@ -1019,6 +1019,13 @@ impl Detector for CargoDetector {
         }
 
         for (build_dir, protected) in pending_build_dirs {
+            // Each one starts its own size walk, so the pass budget applies here
+            // as it does to the roots above. A skipped one is reported, never
+            // dropped (HORO-2361).
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), build_dir);
+                continue;
+            }
             // A build dir inside the workspace is legitimate, so descendants of
             // a project root are allowed here (unlike configured globs).
             if is_plausible_unowned_dir(&build_dir, &ctx.home_dir, &protected, false) {
