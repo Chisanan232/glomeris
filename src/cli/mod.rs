@@ -1952,7 +1952,8 @@ fn print_cargo_layout(layout: &crate::detectors::cargo_layout::CargoLayoutSurvey
     }
     if layout.complete {
         println!(
-            "  total: {} allocated (upper bound: hardlinks shared between units count in each)",
+            "  total: {} allocated across the units (hardlinks shared between units count in each, \
+             so it can exceed the whole; the directories' own blocks are not included)",
             human_bytes(layout.measured_allocated_bytes)
         );
     } else {

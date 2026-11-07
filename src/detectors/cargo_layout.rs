@@ -18,8 +18,16 @@
 //! - A total deadline bounds the survey. Units not reached are listed with
 //!   `measured: false` and no bytes — never dropped, never extrapolated.
 //! - Hardlinks are deduplicated *within* a unit only. Cargo hardlinks final
-//!   artifacts between `<profile>/` and `<profile>/deps/`, so the unit sum is
-//!   an upper bound on the whole (`sum_is_upper_bound`).
+//!   artifacts between `<profile>/` and `<profile>/deps/`, so a COMPLETE
+//!   survey's unit sum bounds the units' content from above
+//!   (`sum_is_upper_bound`). It never includes the blocks of the container
+//!   directories themselves, and an incomplete survey claims no bound at all.
+//!
+//! Known limit: the survey never follows a symlink it sees, but it is not
+//! anchored to open directory handles, so a directory swapped for a symlink
+//! between a check and the following listing is read through. It reads and
+//! deletes nothing, so the effect is a wrong figure for a directory someone is
+//! replacing while it is being measured.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -107,11 +115,10 @@ pub struct CargoLayoutSurvey {
     pub unmeasured_units: usize,
     pub measured_logical_bytes: u64,
     pub measured_allocated_bytes: u64,
-    /// Always `true`: cross-unit hardlinks are counted in each unit, so a
-    /// COMPLETE survey's sum bounds the whole from above. It excludes the
-    /// blocks of container directories themselves (0 on APFS), and an
-    /// incomplete survey's sum is a partial figure, not a bound — read
-    /// `complete`.
+    /// `true` only when `complete`: cross-unit hardlinks are counted in each
+    /// unit, so a complete survey's sum bounds the units' content from above.
+    /// The blocks of the container directories themselves are not included.
+    /// An incomplete survey's sum is a partial figure, so this is `false`.
     pub sum_is_upper_bound: bool,
     /// Listing stopped on the deadline or an entry cap, so units may be missing.
     pub listing_truncated: bool,
@@ -128,6 +135,9 @@ struct UnitSpec {
     llvm_cov: bool,
     /// `Some(names)` for a loose-files group; the files are summed directly.
     loose_files: Option<Vec<PathBuf>>,
+    /// The directory listing that produced `loose_files` was cut short, so the
+    /// group's figures are lower bounds.
+    files_partial: bool,
 }
 
 /// Shared bound for the listing phase: the same deadline as measurement, so
@@ -209,25 +219,28 @@ pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> Car
         unmeasured_units,
         measured_logical_bytes,
         measured_allocated_bytes,
-        sum_is_upper_bound: true,
+        sum_is_upper_bound: complete,
         listing_truncated: listing.truncated,
         complete,
     }
 }
 
-fn child_dirs_and_files(
-    dir: &Path,
-    listing: &mut Listing,
-) -> Option<(Vec<(String, PathBuf)>, Vec<PathBuf>)> {
+/// Directories, loose files, and whether this listing was cut short.
+type ChildListing = (Vec<(String, PathBuf)>, Vec<PathBuf>, bool);
+
+fn child_dirs_and_files(dir: &Path, listing: &mut Listing) -> Option<ChildListing> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
+    let mut partial = false;
     for (seen, entry) in fs::read_dir(dir).ok()?.enumerate() {
         if seen >= MAX_ENTRIES_PER_DIR || listing.expired() {
             listing.truncated = true;
+            partial = true;
             break;
         }
         let Ok(entry) = entry else {
             listing.truncated = true;
+            partial = true;
             continue;
         };
         let path = entry.path();
@@ -237,12 +250,15 @@ fn child_dirs_and_files(
         match fs::symlink_metadata(&path) {
             Ok(m) if m.is_dir() => dirs.push((name, path)),
             Ok(_) => files.push(path),
-            Err(_) => listing.truncated = true,
+            Err(_) => {
+                listing.truncated = true;
+                partial = true;
+            }
         }
     }
     dirs.sort();
     files.sort();
-    Some((dirs, files))
+    Some((dirs, files, partial))
 }
 
 /// A Cargo profile directory holds the build products for one profile.
@@ -254,9 +270,21 @@ fn is_profile_dir(dir: &Path) -> bool {
 
 /// A target-triple directory holds profile directories (cross builds).
 fn holds_profiles(dir: &Path, listing: &mut Listing) -> bool {
-    child_dirs_and_files(dir, listing)
-        .map(|(dirs, _)| dirs.iter().any(|(_, p)| is_profile_dir(p)))
-        .unwrap_or(false)
+    let Some((dirs, _, _)) = child_dirs_and_files(dir, listing) else {
+        return false;
+    };
+    for (_, path) in &dirs {
+        // Each probe is up to four metadata calls; they answer to the survey's
+        // deadline like the listing does.
+        if listing.expired() {
+            listing.truncated = true;
+            return false;
+        }
+        if is_profile_dir(path) {
+            return true;
+        }
+    }
+    false
 }
 
 fn join_rel(base: &str, name: &str) -> String {
@@ -275,6 +303,9 @@ fn push(specs: &mut Vec<UnitSpec>, omitted: &mut usize, spec: UnitSpec) {
     }
 }
 
+// Eight parameters: the walk threads its shared accumulators (specs, omitted,
+// listing) through the recursion rather than allocating per level.
+#[allow(clippy::too_many_arguments)]
 fn enumerate(
     dir: &Path,
     rel: &str,
@@ -285,7 +316,7 @@ fn enumerate(
     omitted: &mut usize,
     listing: &mut Listing,
 ) {
-    let Some((dirs, files)) = child_dirs_and_files(dir, listing) else {
+    let Some((dirs, files, files_partial)) = child_dirs_and_files(dir, listing) else {
         // A directory that cannot be listed is a hole in the survey, not an
         // empty directory.
         listing.truncated = true;
@@ -312,6 +343,7 @@ fn enumerate(
                     triple: ctx.triple.clone(),
                     llvm_cov: ctx.llvm_cov,
                     loose_files: None,
+                    files_partial: false,
                 },
             );
         } else if depth < MAX_DEPTH && name == "llvm-cov-target" {
@@ -365,6 +397,7 @@ fn enumerate(
                     triple: ctx.triple.clone(),
                     llvm_cov: ctx.llvm_cov,
                     loose_files: None,
+                    files_partial: false,
                 },
             );
         }
@@ -386,6 +419,7 @@ fn enumerate(
                 triple: ctx.triple.clone(),
                 llvm_cov: ctx.llvm_cov,
                 loose_files: Some(files),
+                files_partial,
             },
         );
     }
@@ -493,7 +527,7 @@ fn measure_loose_files(
         logical_bytes: Some(logical),
         allocated_bytes: cfg!(unix).then_some(allocated),
         newest_mtime_unix: newest.and_then(unix_secs),
-        is_lower_bound: unreadable,
+        is_lower_bound: unreadable || spec.files_partial,
     }
 }
 
@@ -627,6 +661,7 @@ mod tests {
             triple: None,
             llvm_cov: false,
             loose_files: None,
+            files_partial: false,
         };
         let unit = measure(spec, true, Instant::now(), Duration::ZERO);
         assert!(!unit.measured);
@@ -654,6 +689,35 @@ mod tests {
         assert!(s.units.is_empty());
         assert!(!s.complete, "a missing root is not a complete empty survey");
         assert!(s.listing_truncated);
+        assert!(
+            !s.sum_is_upper_bound,
+            "an incomplete survey's zero is not a bound on anything"
+        );
+    }
+
+    /// A loose-file group built from a cut-short listing is a lower bound even
+    /// though every file in it was read.
+    #[test]
+    fn a_loose_file_group_from_a_truncated_listing_is_a_lower_bound() {
+        let t = temp_dir("partial-files");
+        file(&t.join("a"), 10);
+        let spec = |files_partial| UnitSpec {
+            abs: t.clone(),
+            rel: "(files)".to_string(),
+            role: LayoutRole::LooseFiles,
+            profile: None,
+            triple: None,
+            llvm_cov: false,
+            loose_files: Some(vec![t.join("a")]),
+            files_partial,
+        };
+        let far = Duration::from_secs(60);
+        let whole = measure(spec(false), false, Instant::now(), far);
+        let cut = measure(spec(true), false, Instant::now(), far);
+        assert!(!whole.is_lower_bound);
+        assert!(cut.is_lower_bound);
+        assert_eq!(cut.logical_bytes, Some(10));
+        fs::remove_dir_all(&t).ok();
     }
 
     #[cfg(unix)]
