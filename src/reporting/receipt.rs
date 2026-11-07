@@ -119,6 +119,10 @@ pub fn resource_key(resource: &str) -> u64 {
     LocalAlias::of_name(resource).as_u64()
 }
 
+const HISTORY_UNREADABLE_NOTE: &str = "Size history could not be read, so no growth is reported.";
+const HISTORY_UNSAVED_NOTE: &str =
+    "Size history could not be saved, so no growth is reported and the next run has nothing to compare with.";
+
 /// Builds the receipt for a finished run.
 pub fn build_run_receipt(
     report: &RecoveryReport,
@@ -163,7 +167,7 @@ pub fn build_run_receipt(
                 .collect()
         }
         HistoryState::Unavailable => {
-            notes.push("Size history could not be read, so no growth is reported.".to_string());
+            notes.push(HISTORY_UNREADABLE_NOTE.to_string());
             Vec::new()
         }
     };
@@ -200,6 +204,26 @@ pub fn build_run_receipt(
         },
         notes,
     }
+}
+
+/// The receipt once it is known whether this run's samples were saved.
+///
+/// A history that could not be written is reported as unavailable, with no
+/// growth figures: a figure that rests on state the next run cannot see is not
+/// something the receipt should present as an ongoing comparison.
+pub fn build_run_receipt_after_save(
+    report: &RecoveryReport,
+    now_unix_secs: u64,
+    history: &HistoryState,
+    saved: bool,
+) -> RunReceipt {
+    if saved {
+        return build_run_receipt(report, now_unix_secs, history);
+    }
+    let mut receipt = build_run_receipt(report, now_unix_secs, &HistoryState::Unavailable);
+    receipt.notes.retain(|n| n != HISTORY_UNREADABLE_NOTE);
+    receipt.notes.push(HISTORY_UNSAVED_NOTE.to_string());
+    receipt
 }
 
 /// The samples to store for this run: the largest candidates that had an
@@ -379,6 +403,44 @@ mod tests {
             down.measured.as_ref().unwrap().volume_free_delta_human,
             "-250 B"
         );
+    }
+
+    #[test]
+    fn a_failed_history_save_degrades_to_no_history_and_no_growth() {
+        let history = ResourceHistory::from_samples(
+            NOW,
+            &[(
+                resource_key("a"),
+                Sample {
+                    at_unix_secs: NOW - 3600,
+                    bytes: 1_000,
+                    last_modified_unix_secs: None,
+                },
+            )],
+        );
+        let obs = vec![ObservedCandidate {
+            resource: "a".to_string(),
+            kind: "cargo.target",
+            root: "r".to_string(),
+            estimated_bytes: Some(5_000),
+            last_modified_unix_secs: None,
+        }];
+        let rep = report(vec![], obs, 0, 0);
+        let state = HistoryState::Available(history);
+        let saved = build_run_receipt_after_save(&rep, NOW, &state, true);
+        assert_eq!(saved.history, "available");
+        assert!(!saved.growth.is_empty());
+        let unsaved = build_run_receipt_after_save(&rep, NOW, &state, false);
+        assert_eq!(unsaved.history, "unavailable");
+        assert!(unsaved.growth.is_empty());
+        assert!(unsaved
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be saved")));
+        assert!(!unsaved
+            .notes
+            .iter()
+            .any(|n| n.contains("could not be read")));
     }
 
     #[test]

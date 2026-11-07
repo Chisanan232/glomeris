@@ -3985,16 +3985,16 @@ fn free_run(
 /// returned and never consulted by it.
 ///
 /// Best effort end to end. A history that cannot be read costs the growth
-/// figures and says so in the receipt; one that cannot be written is dropped
-/// without a word, because the run it describes has already happened and its
-/// outcome does not depend on it. The history is read before this run's samples
+/// figures and says so in the receipt; one that cannot be written degrades the
+/// receipt to "no history" the same way, because the run it describes has
+/// already happened and its outcome does not depend on it. The history is read before this run's samples
 /// are written, so "since last run" means the run before this one.
 #[cfg(target_os = "macos")]
 fn run_receipt_for(
     report: &glomeris::executor::recovery_loop::RecoveryReport,
 ) -> glomeris::reporting::receipt::RunReceipt {
     use glomeris::monitor::resource_history as history;
-    use glomeris::reporting::receipt::{build_run_receipt, samples_to_record};
+    use glomeris::reporting::receipt::{build_run_receipt_after_save, samples_to_record};
 
     let now_unix_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4005,21 +4005,13 @@ fn run_receipt_for(
         .as_deref()
         .map(history::read)
         .unwrap_or(history::HistoryState::Unavailable);
-    let mut receipt = build_run_receipt(report, now_unix_secs, &state);
     let samples = samples_to_record(report, now_unix_secs);
     let saved = match &path {
         Some(path) if !samples.is_empty() => history::record(path, now_unix_secs, &samples).is_ok(),
         Some(_) => true,
         None => false,
     };
-    if !saved {
-        // The growth above is real; what is lost is the next run's comparison.
-        receipt.notes.push(
-            "Size history could not be saved, so the next run has nothing to compare with."
-                .to_string(),
-        );
-    }
-    receipt
+    build_run_receipt_after_save(report, now_unix_secs, &state, saved)
 }
 
 /// Prose form of the receipt. The measured line and the estimated lines are
