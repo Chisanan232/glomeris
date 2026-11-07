@@ -23,11 +23,15 @@
 //!   (`sum_is_upper_bound`). It never includes the blocks of the container
 //!   directories themselves, and an incomplete survey claims no bound at all.
 //!
-//! Known limit: the survey never follows a symlink it sees, but it is not
-//! anchored to open directory handles, so a directory swapped for a symlink
-//! between a check and the following listing is read through. It reads and
-//! deletes nothing, so the effect is a wrong figure for a directory someone is
-//! replacing while it is being measured.
+//! Symlink swaps: the survey never follows a symlink it sees. Before and after
+//! each directory listing and each unit measurement it also checks that the
+//! directory still resolves to where the survey found it (see [`Anchor`]); a
+//! unit that moved is `"changed"` and unmeasured, never a figure for another
+//! tree. Known limit: the checks are not open directory handles, so a swap
+//! inside the shared bounded walk of one unit (the same walk every candidate
+//! size uses) is not detected. The survey reads and deletes nothing, so that
+//! residual effect is a wrong figure for a directory someone is replacing
+//! while it is measured.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,7 +98,8 @@ pub struct LayoutUnit {
     pub llvm_cov: bool,
     /// `false` when the unit was not measured; `unmeasured_reason` says why.
     pub measured: bool,
-    /// `"deadline"` (survey time ran out before this unit) or `"unreadable"`
+    /// `"deadline"` (survey time ran out before this unit), `"changed"` (the
+    /// directory no longer resolved to where it was found) or `"unreadable"`
     /// (the unit's own probe failed). `None` when measured.
     pub unmeasured_reason: Option<&'static str>,
     pub logical_bytes: Option<u64>,
@@ -146,6 +151,31 @@ struct Listing {
     started: Instant,
     deadline: Duration,
     truncated: bool,
+    anchor: Anchor,
+}
+
+/// Where the survey started, resolved once. A path is only trusted while it
+/// still resolves to the root's real location plus its own relative path, so a
+/// component replaced by a symlink after discovery is noticed.
+struct Anchor {
+    root: PathBuf,
+    canonical: Option<PathBuf>,
+}
+
+impl Anchor {
+    fn new(root: &Path) -> Self {
+        Anchor {
+            root: root.to_path_buf(),
+            canonical: fs::canonicalize(root).ok(),
+        }
+    }
+
+    fn holds(&self, path: &Path) -> bool {
+        let (Some(canonical), Ok(rel)) = (&self.canonical, path.strip_prefix(&self.root)) else {
+            return false;
+        };
+        fs::canonicalize(path).is_ok_and(|resolved| resolved == canonical.join(rel))
+    }
 }
 
 impl Listing {
@@ -173,6 +203,7 @@ pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> Car
         started,
         deadline,
         truncated: false,
+        anchor: Anchor::new(target_dir),
     };
     // A symlinked root is never followed: the survey describes the directory
     // that was discovered, not wherever a link currently points.
@@ -197,7 +228,7 @@ pub(crate) fn survey_with_deadline(target_dir: &Path, deadline: Duration) -> Car
     let mut units = Vec::with_capacity(specs.len());
     for spec in specs {
         let expired = started.elapsed() >= deadline;
-        units.push(measure(spec, expired, started, deadline));
+        units.push(measure(spec, expired, started, deadline, &listing.anchor));
     }
 
     let measured_logical_bytes = units.iter().filter_map(|u| u.logical_bytes).sum();
@@ -232,6 +263,9 @@ fn child_dirs_and_files(dir: &Path, listing: &mut Listing) -> Option<ChildListin
     let mut dirs = Vec::new();
     let mut files = Vec::new();
     let mut partial = false;
+    if !listing.anchor.holds(dir) {
+        return None;
+    }
     for (seen, entry) in fs::read_dir(dir).ok()?.enumerate() {
         if seen >= MAX_ENTRIES_PER_DIR || listing.expired() {
             listing.truncated = true;
@@ -255,6 +289,11 @@ fn child_dirs_and_files(dir: &Path, listing: &mut Listing) -> Option<ChildListin
                 partial = true;
             }
         }
+    }
+    // Swapped for a symlink while it was being listed: what was read may
+    // belong to another tree.
+    if !listing.anchor.holds(dir) {
+        return None;
     }
     dirs.sort();
     files.sort();
@@ -450,10 +489,31 @@ fn measure(
     deadline_passed: bool,
     started: Instant,
     deadline: Duration,
+    anchor: &Anchor,
 ) -> LayoutUnit {
     if deadline_passed {
         return unmeasured(spec, "deadline");
     }
+    if !anchor.holds(&spec.abs) {
+        return unmeasured(spec, "changed");
+    }
+    let abs = spec.abs.clone();
+    let unit = measure_unit(spec, started, deadline);
+    if unit.measured && !anchor.holds(&abs) {
+        return LayoutUnit {
+            unmeasured_reason: Some("changed"),
+            measured: false,
+            logical_bytes: None,
+            allocated_bytes: None,
+            newest_mtime_unix: None,
+            is_lower_bound: false,
+            ..unit
+        };
+    }
+    unit
+}
+
+fn measure_unit(spec: UnitSpec, started: Instant, deadline: Duration) -> LayoutUnit {
     if let Some(files) = &spec.loose_files {
         return measure_loose_files(&spec, files, started, deadline);
     }
@@ -663,7 +723,8 @@ mod tests {
             loose_files: None,
             files_partial: false,
         };
-        let unit = measure(spec, true, Instant::now(), Duration::ZERO);
+        let anchor = Anchor::new(&t);
+        let unit = measure(spec, true, Instant::now(), Duration::ZERO, &anchor);
         assert!(!unit.measured);
         assert_eq!(unit.logical_bytes, None);
         assert_eq!(unit.path, "debug/incremental");
@@ -712,8 +773,9 @@ mod tests {
             files_partial,
         };
         let far = Duration::from_secs(60);
-        let whole = measure(spec(false), false, Instant::now(), far);
-        let cut = measure(spec(true), false, Instant::now(), far);
+        let anchor = Anchor::new(&t);
+        let whole = measure(spec(false), false, Instant::now(), far, &anchor);
+        let cut = measure(spec(true), false, Instant::now(), far, &anchor);
         assert!(!whole.is_lower_bound);
         assert!(cut.is_lower_bound);
         assert_eq!(cut.logical_bytes, Some(10));
@@ -777,5 +839,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A directory replaced by a symlink after discovery is "changed", not a
+    /// figure for the tree the link points at, whether the swap lands before a
+    /// listing or before a measurement.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_swapped_for_a_symlink_is_changed_not_measured() {
+        let t = temp_dir("swap-root");
+        let outside = temp_dir("swap-outside");
+        file(&t.join("debug/deps/x"), 100);
+        file(&outside.join("deps/y"), 9_999_999);
+        let anchor = Anchor::new(&t);
+        let spec = || UnitSpec {
+            abs: t.join("debug/deps"),
+            rel: "debug/deps".to_string(),
+            role: LayoutRole::Deps,
+            profile: Some("debug".to_string()),
+            triple: None,
+            llvm_cov: false,
+            loose_files: None,
+            files_partial: false,
+        };
+        let far = Duration::from_secs(60);
+        let before = measure(spec(), false, Instant::now(), far, &anchor);
+        assert!(before.measured);
+        assert_eq!(before.logical_bytes, Some(100));
+
+        fs::remove_dir_all(t.join("debug")).unwrap();
+        std::os::unix::fs::symlink(&outside, t.join("debug")).unwrap();
+        let after = measure(spec(), false, Instant::now(), far, &anchor);
+        assert!(!after.measured);
+        assert_eq!(after.unmeasured_reason, Some("changed"));
+        assert_eq!(after.logical_bytes, None);
+
+        let mut listing = Listing {
+            started: Instant::now(),
+            deadline: far,
+            truncated: false,
+            anchor,
+        };
+        assert!(child_dirs_and_files(&t.join("debug"), &mut listing).is_none());
+        fs::remove_dir_all(&t).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 }

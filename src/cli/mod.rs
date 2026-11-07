@@ -1942,6 +1942,7 @@ fn print_cargo_layout(layout: &crate::detectors::cargo_layout::CargoLayoutSurvey
                 printable(&unit.path),
                 match unit.unmeasured_reason {
                     Some("unreadable") => "could not be read",
+                    Some("changed") => "it changed while being measured",
                     _ => "survey time ran out",
                 }
             ),
