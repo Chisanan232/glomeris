@@ -1045,6 +1045,51 @@ final class DtoGoldenFixturesTests: XCTestCase {
         XCTAssertNil(dto.remaining, "only a safe_exhausted run may state what is left behind")
     }
 
+    /// HORO-2362: the receipt keeps the measured volume change and the estimated
+    /// groups apart. The fixture's two figures disagree on purpose (20 GiB
+    /// measured, 47 GiB estimated); a decode that merged them would show here.
+    func testDecodesRunReceiptKeepingMeasuredAndEstimatedApart() throws {
+        let dto = try decodeFixture("run_receipt.json", as: RunReceiptDto.self)
+
+        let measured = try XCTUnwrap(dto.measured)
+        XCTAssertEqual(measured.freeBytesBefore, 107_374_182_400)
+        XCTAssertEqual(measured.freeBytesAfter, 128_849_018_880)
+        XCTAssertEqual(measured.volumeFreeDelta, 21_474_836_480)
+        XCTAssertEqual(measured.volumeFreeDeltaHuman, "20.0 GB")
+
+        XCTAssertEqual(dto.estimated.byKind.map(\.key), ["cargo_target_dir", "node_modules", "xcode_derived_data"])
+        XCTAssertEqual(dto.estimated.byKind[0].estimatedBytes, 49_392_123_904)
+        XCTAssertEqual(dto.estimated.byKind[2].unestimatedActions, 1)
+        XCTAssertEqual(dto.estimated.byRoot.map(\.actions), [2, 1, 1])
+        XCTAssertNotEqual(
+            measured.volumeFreeDelta,
+            Int64(dto.estimated.byKind.reduce(0) { $0 + $1.estimatedBytes })
+        )
+
+        XCTAssertEqual(dto.history, "available")
+        XCTAssertEqual(dto.growth.count, 2)
+        XCTAssertEqual(dto.growth[0].grewBytes, 10_737_418_240)
+        XCTAssertEqual(dto.growth[0].idleDays, 66)
+        XCTAssertEqual(dto.growth[0].previousSampledUnixSecs, 1_799_740_800)
+        XCTAssertNil(dto.growth[1].grewBytes, "no earlier sample is nil, not zero")
+        XCTAssertNil(dto.growth[1].previousSampledUnixSecs)
+    }
+
+    func testDecodesRunReceiptWithoutHistory() throws {
+        let dto = try decodeFixture("run_receipt_no_history.json", as: RunReceiptDto.self)
+        XCTAssertEqual(dto.history, "unavailable")
+        XCTAssertTrue(dto.growth.isEmpty)
+        XCTAssertFalse(dto.estimated.byKind.isEmpty, "a lost history must not cost the receipt")
+        XCTAssertTrue(dto.notes.contains { $0.contains("could not be read") })
+    }
+
+    /// A CLI that predates the receipt, or a report it was not built for, still
+    /// decodes: the field is optional.
+    func testRunReportWithoutAReceiptStillDecodes() throws {
+        let dto = try decodeFixture("recovery_run_report.json", as: RecoveryRunReportDto.self)
+        XCTAssertNil(dto.receipt)
+    }
+
     /// Two absences are this fixture's whole point. A raw `--target` floor is
     /// not a used-axis goal, so `goal` is absent rather than null — the app
     /// must render the free-axis `target` string in that case instead of

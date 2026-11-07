@@ -197,6 +197,47 @@ struct RecoveryPreviewSummary: Equatable {
     }
 }
 
+/// The receipt of one finished run, as the card shows it (HORO-2362).
+///
+/// Holds the rule the receipt exists for: the measured volume change and the
+/// estimated bytes are different kinds of figure, so they are separate fields
+/// and rows here and no figure is computed from both. Every number and sentence
+/// is Rust's, formatted there; this type only chooses labels.
+struct RecoveryReceiptSummary: Equatable {
+    /// `"20.0 GB"` or `"-3.0 GB"`: the change between two reads of the volume,
+    /// as Rust formatted it. The before and after figures are the card's own
+    /// "Free space" row.
+    let measuredText: String?
+    /// `"Rust build output: 2 actions, about 46.0 GB"`, one per group.
+    let estimatedByKind: [String]
+    /// `"/Users/dev/proj-a: 2 actions, about 41.0 GB"`, one per group.
+    let estimatedByRoot: [String]
+    /// Explanation only: `"Rust build output in /p: grew 10.0 GB since last run, idle 66 days"`.
+    let growth: [String]
+    /// Rust's notes, verbatim, including the one saying the figures are not added.
+    let notes: [String]
+
+    init(_ dto: RunReceiptDto) {
+        measuredText = dto.measured?.volumeFreeDeltaHuman
+        estimatedByKind = dto.estimated.byKind.map {
+            Self.groupText(title: GlomerisVocabulary.kind($0.key).title, group: $0)
+        }
+        estimatedByRoot = dto.estimated.byRoot.map { Self.groupText(title: $0.key, group: $0) }
+        growth = dto.growth.map {
+            "\(GlomerisVocabulary.kind($0.kind).title) in \($0.root): \($0.summary)"
+        }
+        notes = dto.notes
+    }
+
+    private static func groupText(title: String, group: ReceiptGroupDto) -> String {
+        let actions = "\(group.actions) \(group.actions == 1 ? "action" : "actions")"
+        let size = group.unestimatedActions == group.actions
+            ? "no size estimate"
+            : "about \(group.estimatedHuman)"
+        return "\(title): \(actions), \(size)"
+    }
+}
+
 /// One finished `free --json` run, as the card shows it.
 ///
 /// The type exists mainly to hold one rule: `outcomeMessage` is a
@@ -235,6 +276,8 @@ struct RecoveryRunSummary: Equatable {
     /// sentence would have to either repeat them or soften them.
     let outcomeMessage: GlomerisStateMessage?
     let caveats: [String]
+    /// The before/after receipt, or `nil` when the CLI sent none (HORO-2362).
+    let receipt: RecoveryReceiptSummary?
 
     init(_ dto: RecoveryRunReportDto) {
         stopReasonTerm = GlomerisVocabulary.stopReason(dto.stopReason)
@@ -260,6 +303,7 @@ struct RecoveryRunSummary: Equatable {
             outcomeMessage = nil
         }
         caveats = dto.caveats
+        receipt = dto.receipt.map(RecoveryReceiptSummary.init)
     }
 
     private static func effortText(_ dto: RecoveryRunReportDto) -> String {
@@ -771,6 +815,9 @@ struct RecoverySectionView: View {
                 .font(GlomerisDesign.secondaryFont)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        if let receipt = summary.receipt {
+            receiptContent(receipt)
+        }
         // HORO-1509: what the run stopped short of, when the CLI said. Without
         // this row a `safe_exhausted` stop reads as "the disk is as clean as it
         // can get", when what it usually means is that several things are waiting
@@ -789,6 +836,50 @@ struct RecoverySectionView: View {
             recovery.resetGoalProgress()
         }
         .accessibilityLabel("Dismiss this result")
+    }
+
+    /// HORO-2362: the measured volume change first, then the estimates, which are
+    /// headed as not measured and never totalled.
+    @ViewBuilder
+    private func receiptContent(_ receipt: RecoveryReceiptSummary) -> some View {
+        if let measured = receipt.measuredText {
+            GlomerisDetailRow(label: "Free space change (measured)") {
+                Text(measured)
+                    .font(GlomerisDesign.secondaryFont)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        if !receipt.estimatedByKind.isEmpty {
+            GlomerisDetailRow(label: "By kind (estimated)") {
+                receiptLines(receipt.estimatedByKind)
+            }
+        }
+        if !receipt.estimatedByRoot.isEmpty {
+            GlomerisDetailRow(label: "By root (estimated)") {
+                receiptLines(receipt.estimatedByRoot)
+            }
+        }
+        if !receipt.growth.isEmpty {
+            GlomerisDetailRow(label: "Size history") {
+                receiptLines(receipt.growth)
+            }
+        }
+        ForEach(receipt.notes, id: \.self) { note in
+            Text(note)
+                .font(GlomerisDesign.secondaryFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func receiptLines(_ lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(lines, id: \.self) { line in
+                Text(line)
+                    .font(GlomerisDesign.secondaryFont)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     /// Rust's caveats, verbatim and in order.

@@ -3995,6 +3995,7 @@ fn free_run(
         }),
     };
     let report = glomeris::executor::recovery_loop::run_owned(request, &_execution_lock);
+    let receipt = run_receipt_for(&report);
 
     if json {
         // `total_bytes` is re-read rather than remembered from the
@@ -4014,15 +4015,90 @@ fn free_run(
                 std::process::exit(1);
             }
         };
-        let run_report = glomeris::cli::recovery::build_recovery_run_report(
+        let mut run_report = glomeris::cli::recovery::build_recovery_run_report(
             goal.as_ref(),
             &config.target,
             total_bytes,
             &report,
         );
+        run_report.receipt = Some(receipt);
         print_json_or_exit(&run_report);
     } else {
         print_recovery_report(goal.as_ref(), &config.target, &report);
+        print_run_receipt(&receipt);
+    }
+}
+
+/// HORO-2362: the receipt for a finished run, built after the loop has
+/// returned and never consulted by it.
+///
+/// Best effort end to end. A history that cannot be read costs the growth
+/// figures and says so in the receipt; one that cannot be written degrades the
+/// receipt to "no history" the same way, because the run it describes has
+/// already happened and its outcome does not depend on it. The history is read before this run's samples
+/// are written, so "since last run" means the run before this one.
+#[cfg(target_os = "macos")]
+fn run_receipt_for(
+    report: &glomeris::executor::recovery_loop::RecoveryReport,
+) -> glomeris::reporting::receipt::RunReceipt {
+    use glomeris::monitor::resource_history as history;
+    use glomeris::reporting::receipt::{build_run_receipt_after_save, samples_to_record};
+
+    let now_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = history::default_resource_history_path().ok();
+    let state = path
+        .as_deref()
+        .map(history::read)
+        .unwrap_or(history::HistoryState::Unavailable);
+    let samples = samples_to_record(report, now_unix_secs);
+    let saved = match &path {
+        Some(path) if !samples.is_empty() => history::record(path, now_unix_secs, &samples).is_ok(),
+        Some(_) => true,
+        None => false,
+    };
+    build_run_receipt_after_save(report, now_unix_secs, &state, saved)
+}
+
+/// Prose form of the receipt. The measured line and the estimated lines are
+/// separate on purpose and the estimated heading says they are not measured.
+#[cfg(target_os = "macos")]
+fn print_run_receipt(receipt: &glomeris::reporting::receipt::RunReceipt) {
+    println!();
+    println!("Receipt");
+    if let Some(measured) = &receipt.measured {
+        println!(
+            "  Volume free (measured): {} -> {} (change {})",
+            glomeris::reporting::human_bytes(measured.free_bytes_before),
+            glomeris::reporting::human_bytes(measured.free_bytes_after),
+            measured.volume_free_delta_human
+        );
+    }
+    for (title, groups) in [
+        ("kind", &receipt.estimated.by_kind),
+        ("root", &receipt.estimated.by_root),
+    ] {
+        if groups.is_empty() {
+            continue;
+        }
+        println!("  Estimated by {title} (not measured):");
+        for group in groups {
+            println!(
+                "    {}: {} action(s), about {}",
+                group.key, group.actions, group.estimated_human
+            );
+        }
+    }
+    if !receipt.growth.is_empty() {
+        println!("  Size history (explanation only):");
+        for entry in &receipt.growth {
+            println!("    {} in {}: {}", entry.kind, entry.root, entry.summary);
+        }
+    }
+    for note in &receipt.notes {
+        println!("  {note}");
     }
 }
 

@@ -30,7 +30,7 @@ use crate::actions::ActionRegistry;
 use crate::autopilot::{admit, admits_pressure, AutopilotEnvelope, BudgetLedger, RefusalReason};
 use crate::detectors::{DetectorRegistry, DetectorStatus, DiscoveryContext};
 use crate::evidence::correlate::{merge_into, EvidenceCollector, ProbeBudget};
-use crate::evidence::model::{ActionId, Evidence, NativeCleanup, ResourceId};
+use crate::evidence::model::{ActionId, Evidence, NativeCleanup, ResourceId, ResourceLocator};
 use crate::evidence::probe::ProbeOutcome;
 use crate::executor::{execute, ExecutionOutcome, ExecutionReport};
 use crate::monitor::{
@@ -443,6 +443,71 @@ pub struct RecoveryReport {
     /// host integration still works" — the ticket's own user-outcome
     /// statement.
     pub host_integrity_notes: Vec<String>,
+    /// One entry per action this run attempted, in order (HORO-2362).
+    ///
+    /// Plain data for the surface that reports the run. The loop records it
+    /// and never reads it back: nothing here feeds selection, ordering or
+    /// authorization.
+    pub executed_steps: Vec<ExecutedStep>,
+    /// The candidates the run's first discovery pass saw, executable or not
+    /// (HORO-2362). Same status as [`Self::executed_steps`]: recorded for the
+    /// reporting surface, never consulted by the loop.
+    pub observed_candidates: Vec<ObservedCandidate>,
+    /// `false` when any reading of the volume's free bytes failed and the report
+    /// carries an earlier reading in its place (HORO-2362). `started_free_bytes`
+    /// and `final_free_bytes` are then not a before and an after, and the receipt
+    /// must not present their difference as measured.
+    pub volume_readings_complete: bool,
+}
+
+/// One action the run attempted (HORO-2362).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutedStep {
+    /// The resource's canonical `Display` form, the same string the audit log
+    /// and the progress stream use.
+    pub resource: String,
+    /// `ResourceKind::tag`.
+    pub kind: &'static str,
+    /// See [`root_label`].
+    pub root: String,
+    /// The pre-run estimate. `None` when neither size probe answered.
+    pub estimated_bytes: Option<u64>,
+    /// What the executor measured for this action alone. `None` when it could
+    /// not measure; never filled in from the estimate.
+    pub measured_reclaimed_bytes: Option<u64>,
+    pub succeeded: bool,
+}
+
+/// One candidate as the run's first discovery pass saw it (HORO-2362).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedCandidate {
+    pub resource: String,
+    pub kind: &'static str,
+    pub root: String,
+    pub estimated_bytes: Option<u64>,
+    pub last_modified_unix_secs: Option<u64>,
+}
+
+/// Where a resource sits, for grouping: the project root a detector found it
+/// under when there is one, otherwise the directory that contains it, otherwise
+/// the owning tool's name for a resource with no path.
+fn root_label(resource: &ResourceId) -> String {
+    if let Some(root) = &resource.source_project_root {
+        return root.display().to_string();
+    }
+    match &resource.locator {
+        ResourceLocator::Path(path) => path.parent().unwrap_or(path).display().to_string(),
+        ResourceLocator::Tool { tool, .. } => tool.to_string(),
+    }
+}
+
+/// Everything [`run_loop`] hands to [`RecoveryReport`] that is not a counter.
+#[derive(Default)]
+struct RunLog {
+    executed_steps: Vec<ExecutedStep>,
+    observed_candidates: Vec<ObservedCandidate>,
+    first_pass_taken: bool,
+    volume_reading_failed: bool,
 }
 
 impl RecoveryReport {
@@ -1693,6 +1758,9 @@ fn build_report(
         detector_failures: gaps.failures.clone(),
         detectors_not_examined: gaps.not_examined.clone(),
         host_integrity_notes: host_integrity_notes.to_vec(),
+        executed_steps: Vec::new(),
+        observed_candidates: Vec::new(),
+        volume_readings_complete: true,
     }
 }
 
@@ -1759,6 +1827,21 @@ fn run_inner(
     request: RecoveryRunRequest<'_>,
     authority: Option<&crate::executor::lock::ExecutionLockGuard>,
 ) -> RecoveryReport {
+    // The loop has many early returns through `build_report`; collecting the
+    // reporting-only data beside it keeps every one of them unchanged.
+    let mut log = RunLog::default();
+    let mut report = run_loop(request, authority, &mut log);
+    report.executed_steps = log.executed_steps;
+    report.observed_candidates = log.observed_candidates;
+    report.volume_readings_complete = !log.volume_reading_failed;
+    report
+}
+
+fn run_loop(
+    request: RecoveryRunRequest<'_>,
+    authority: Option<&crate::executor::lock::ExecutionLockGuard>,
+    log: &mut RunLog,
+) -> RecoveryReport {
     let RecoveryRunRequest {
         config,
         fs_stat,
@@ -1781,6 +1864,7 @@ fn run_inner(
     let started_usage = match fs_stat.stat(target_mount) {
         Ok(usage) => usage,
         Err(e) => {
+            log.volume_reading_failed = true;
             return build_report(
                 StopReason::Error(format!("initial disk measurement failed: {e}")),
                 0,
@@ -1835,6 +1919,7 @@ fn run_inner(
         let usage = match fs_stat.stat(target_mount) {
             Ok(usage) => usage,
             Err(e) => {
+                log.volume_reading_failed = true;
                 return build_report(
                     StopReason::Error(format!("disk measurement failed: {e}")),
                     iterations_run,
@@ -1993,6 +2078,23 @@ fn run_inner(
                 gaps.failures.push(failure);
             }
         }
+        if !log.first_pass_taken {
+            log.first_pass_taken = true;
+            log.observed_candidates = candidates
+                .iter()
+                .map(|(ev, _)| ObservedCandidate {
+                    resource: ev.resource.to_string(),
+                    kind: ev.resource.kind_tag(),
+                    root: root_label(&ev.resource),
+                    estimated_bytes: candidate_bytes(ev),
+                    last_modified_unix_secs: ev
+                        .last_modified
+                        .observed()
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs()),
+                })
+                .collect();
+        }
         for failure in iteration_gaps.failures {
             if !gaps.failures.contains(&failure) {
                 gaps.failures.push(failure);
@@ -2075,6 +2177,8 @@ fn run_inner(
         let resource_label = resource.to_string();
         let action_label = action_id.0.to_string();
         let estimated_bytes = candidate_bytes(&candidate.evidence);
+        let step_kind = resource.kind_tag();
+        let step_root = root_label(&resource);
         // Captured before `candidate.decision` is moved into `authorize`
         // below — HORO-1057's audit record needs the report-facing label
         // for whatever decision this candidate was actually authorized
@@ -2197,6 +2301,15 @@ fn run_inner(
             ledger.charge(estimated_bytes.unwrap_or(0), reclaimed_bytes.unwrap_or(0));
         }
 
+        log.executed_steps.push(ExecutedStep {
+            resource: resource_label.clone(),
+            kind: step_kind,
+            root: step_root,
+            estimated_bytes,
+            measured_reclaimed_bytes: reclaimed_bytes,
+            succeeded: matches!(report.outcome, ExecutionOutcome::Succeeded),
+        });
+
         if matches!(report.outcome, ExecutionOutcome::Succeeded) {
             if let Some(bytes) = reclaimed_bytes {
                 total_bytes_freed += bytes;
@@ -2226,7 +2339,10 @@ fn run_inner(
                         let final_free_bytes = fs_stat
                             .stat(target_mount)
                             .map(|u| u.free_bytes)
-                            .unwrap_or(last_free_bytes);
+                            .unwrap_or_else(|_| {
+                                log.volume_reading_failed = true;
+                                last_free_bytes
+                            });
                         return build_report(
                             StopReason::NoProgress,
                             iterations_run,
