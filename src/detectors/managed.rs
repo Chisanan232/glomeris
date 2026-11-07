@@ -27,6 +27,12 @@ impl Detector for ManagedGeneratedDetector {
         };
         let mut all = vec![];
         for id in ids.into_iter().take(64) {
+            // Each record's ownership inspection can run a Git probe, so the
+            // pass-wide deadline is honored per record, not only per detector.
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), store.root.clone());
+                break;
+            }
             let record = match store.read(&id) {
                 Ok(r) => r,
                 Err(e) => return DetectorStatus::Failed(e.to_string()),
