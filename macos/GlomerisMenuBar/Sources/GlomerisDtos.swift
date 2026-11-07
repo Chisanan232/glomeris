@@ -1917,6 +1917,10 @@ struct RecoveryRunReportDto: Decodable, Equatable {
     let detectorFailures: [String]
     let discoveryComplete: Bool
     let caveats: [String]
+    /// Before/after summary of the run (HORO-2362). Absent from a CLI that
+    /// predates it and from any report the command did not build one for, so it
+    /// is optional and its absence is not an error.
+    let receipt: RunReceiptDto?
 
     enum CodingKeys: String, CodingKey {
         case goal
@@ -1939,6 +1943,90 @@ struct RecoveryRunReportDto: Decodable, Equatable {
         case detectorFailures = "detector_failures"
         case discoveryComplete = "discovery_complete"
         case caveats
+        case receipt
+    }
+}
+
+/// Mirrors `reporting::receipt::RunReceipt` (HORO-2362): what a `free` run did
+/// to the volume, and what its actions were expected to free.
+///
+/// The two are separate fields on purpose and nothing in this app may add them:
+/// `measured` is two reads of the volume, `estimated` is size estimates that can
+/// overlap and can be lower bounds. `growth` is explanation only.
+struct RunReceiptDto: Decodable, Equatable {
+    /// Absent when a reading of the volume failed during the run: there is then
+    /// no trustworthy before and after, and `notes` says so.
+    let measured: ReceiptMeasuredDto?
+    let estimated: ReceiptEstimatedDto
+    let growth: [ResourceGrowthDto]
+    /// `"available"` or `"unavailable"`.
+    let history: String
+    let notes: [String]
+}
+
+struct ReceiptMeasuredDto: Decodable, Equatable {
+    let freeBytesBefore: UInt64
+    let freeBytesAfter: UInt64
+    /// `after - before`; negative when free space shrank during the run.
+    let volumeFreeDelta: Int64
+    let volumeFreeDeltaHuman: String
+
+    enum CodingKeys: String, CodingKey {
+        case freeBytesBefore = "free_bytes_before"
+        case freeBytesAfter = "free_bytes_after"
+        case volumeFreeDelta = "volume_free_delta"
+        case volumeFreeDeltaHuman = "volume_free_delta_human"
+    }
+}
+
+/// Two groupings of the same executed actions. Each axis partitions the same
+/// set, so they must not be added to each other either.
+struct ReceiptEstimatedDto: Decodable, Equatable {
+    let byKind: [ReceiptGroupDto]
+    let byRoot: [ReceiptGroupDto]
+
+    enum CodingKeys: String, CodingKey {
+        case byKind = "by_kind"
+        case byRoot = "by_root"
+    }
+}
+
+struct ReceiptGroupDto: Decodable, Equatable {
+    /// A resource kind token, or a root path.
+    let key: String
+    let actions: UInt32
+    let estimatedBytes: UInt64
+    let estimatedHuman: String
+    let unestimatedActions: UInt32
+
+    enum CodingKeys: String, CodingKey {
+        case key
+        case actions
+        case estimatedBytes = "estimated_bytes"
+        case estimatedHuman = "estimated_human"
+        case unestimatedActions = "unestimated_actions"
+    }
+}
+
+struct ResourceGrowthDto: Decodable, Equatable {
+    let kind: String
+    let root: String
+    let estimatedBytes: UInt64
+    /// `nil` without an earlier sample: first sighting, not "did not grow".
+    let grewBytes: Int64?
+    let previousSampledUnixSecs: UInt64?
+    let idleDays: UInt64?
+    /// Rust's own sentence, shown verbatim.
+    let summary: String
+
+    enum CodingKeys: String, CodingKey {
+        case kind
+        case root
+        case estimatedBytes = "estimated_bytes"
+        case grewBytes = "grew_bytes"
+        case previousSampledUnixSecs = "previous_sampled_unix_secs"
+        case idleDays = "idle_days"
+        case summary
     }
 }
 
