@@ -207,9 +207,9 @@ struct DiscoveryPassState {
     deadline: Option<Instant>,
     /// Test seam: the budget reads as spent from the Nth check on, so a test
     /// can pin "some roots examined, the rest skipped" without a clock race.
-    #[cfg(test)]
+    /// Always compiled (production never sets it): a `#[cfg(test)]` before
+    /// `from_process_env` would cut the env-read guard's production slice short.
     spent_after_checks: Option<usize>,
-    #[cfg(test)]
     checks: usize,
     /// Roots a detector was never able to look at because the pass deadline
     /// had already passed — recorded, never silently dropped.
@@ -261,23 +261,11 @@ impl DiscoveryContext {
     pub fn discovery_budget_spent(&self) -> bool {
         #[allow(unused_mut)]
         let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
-        #[cfg(test)]
-        {
-            state.checks += 1;
-            if let Some(n) = state.spent_after_checks {
-                return state.checks > n;
-            }
+        state.checks += 1;
+        if let Some(n) = state.spent_after_checks {
+            return state.checks > n;
         }
         state.deadline.is_some_and(|d| Instant::now() >= d)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spend_budget_after_checks(self, n: usize) -> Self {
-        {
-            let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
-            state.spent_after_checks = Some(n);
-        }
-        self
     }
 
     /// Whether `detector` skipped anything on the deadline this pass.
@@ -1660,6 +1648,17 @@ pub(crate) mod test_support {
         ));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+}
+
+#[cfg(test)]
+impl DiscoveryContext {
+    pub(crate) fn spend_budget_after_checks(self, n: usize) -> Self {
+        {
+            let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+            state.spent_after_checks = Some(n);
+        }
+        self
     }
 }
 
