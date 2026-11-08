@@ -918,6 +918,18 @@ mod tests {
             &|_| false,
         );
         assert!(swapped.bytes.observed().is_none());
+
+        // Contained when first asked, swapped by the time the read is done.
+        let asked = std::cell::Cell::new(0usize);
+        let swapped_after = estimate_logical_bytes_within(
+            &t.join("debug/deps"),
+            crate::scanner::ScanBudget::unlimited(),
+            &|_| {
+                asked.set(asked.get() + 1);
+                asked.get() < 2
+            },
+        );
+        assert!(swapped_after.bytes.observed().is_none());
         fs::remove_dir_all(&t).ok();
     }
 

@@ -686,6 +686,11 @@ pub(crate) fn estimate_logical_bytes_within(
                 };
             }
             Err(_) => {
+                // A listing that failed because the directory was swapped is
+                // a change, not merely an unreadable entry.
+                if !still_contained(&dir) {
+                    return escaped();
+                }
                 unreadable_entries += 1;
                 is_root = false;
                 continue;
