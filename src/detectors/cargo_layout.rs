@@ -877,10 +877,11 @@ mod tests {
         let calls = std::cell::Cell::new(0usize);
         let est =
             estimate_logical_bytes_within(&deps, crate::scanner::ScanBudget::unlimited(), &|dir| {
-                // Call 1 is the root's pre-listing check, call 2 its
-                // post-listing check: `pkg` is already queued by then.
+                // Call 1 is the entry check, call 2 the root's pre-listing
+                // check, call 3 its post-listing check: `pkg` is already
+                // queued by then.
                 calls.set(calls.get() + 1);
-                if calls.get() == 2 {
+                if calls.get() == 3 {
                     fs::remove_dir_all(deps.join("pkg")).unwrap();
                     std::os::unix::fs::symlink(&outside, deps.join("pkg")).unwrap();
                 }
