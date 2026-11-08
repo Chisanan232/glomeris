@@ -40,7 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::{estimate_logical_bytes, estimate_logical_bytes_within, size_estimate_budget};
+use super::{estimate_logical_bytes_within, size_estimate_budget};
 
 /// Total wall-clock budget for one survey.
 pub(crate) const LAYOUT_DEADLINE: Duration = Duration::from_secs(15);
@@ -613,6 +613,7 @@ fn measure_loose_files(
 
 #[cfg(test)]
 mod tests {
+    use super::super::estimate_logical_bytes;
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
