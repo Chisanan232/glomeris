@@ -207,8 +207,9 @@ struct DiscoveryPassState {
     deadline: Option<Instant>,
     /// Test seam: the budget reads as spent from the Nth check on, so a test
     /// can pin "some roots examined, the rest skipped" without a clock race.
-    /// Always compiled (production never sets it): a `#[cfg(test)]` before
-    /// `from_process_env` would cut the env-read guard's production slice short.
+    /// Always compiled (production never sets it): the env-read guard splits
+    /// each detector file at its first test-gate attribute, so test-only code
+    /// ahead of `from_process_env` would cut its production slice short.
     spent_after_checks: Option<usize>,
     checks: usize,
     /// Roots a detector was never able to look at because the pass deadline
