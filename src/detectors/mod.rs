@@ -474,6 +474,27 @@ const HARDLINK_DEDUP_MAX_TRACKED: usize = 200_000;
 /// ino) pair with `st_nlink > 1` is counted at most once, tracked in a
 /// bounded set (see [`HARDLINK_DEDUP_MAX_TRACKED`]).
 pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEstimate {
+    estimate_logical_bytes_within(path, budget, &|_| true)
+}
+
+/// [`estimate_logical_bytes`] for a caller that must not be steered out of its
+/// tree: `still_contained` is asked about every directory before it is listed
+/// and again once its listing is consumed. A `false` answer abandons the walk
+/// with `Unavailable(Failed)` — a tree that changed underneath the walk is
+/// never summed, even in part.
+pub(crate) fn estimate_logical_bytes_within(
+    path: &Path,
+    budget: ScanBudget,
+    still_contained: &dyn Fn(&Path) -> bool,
+) -> SizeEstimate {
+    let escaped = || SizeEstimate {
+        bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+        stop_reason: StopReason::Exhausted,
+        entries_visited: 0,
+        unreadable_entries: 0,
+        allocated_bytes: 0,
+        newest_mtime: None,
+    };
     let root_meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -531,6 +552,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
     let mut is_root = true;
 
     'walk: while let Some(dir) = stack.pop() {
+        if !still_contained(&dir) {
+            return escaped();
+        }
         let read_dir = match fs::read_dir(&dir) {
             Ok(rd) => rd,
             Err(e) if is_root && e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -573,6 +597,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             entries_visited += 1;
             if let Some(reason) = tracker.record_visit() {
                 stop_reason = reason;
+                if !still_contained(&dir) {
+                    return escaped();
+                }
                 break 'walk;
             }
 
@@ -625,6 +652,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     allocated = allocated.saturating_add(allocated_bytes_of(&meta));
                 }
             }
+        }
+        if !still_contained(&dir) {
+            return escaped();
         }
     }
 

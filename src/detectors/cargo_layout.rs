@@ -23,15 +23,16 @@
 //!   (`sum_is_upper_bound`). It never includes the blocks of the container
 //!   directories themselves, and an incomplete survey claims no bound at all.
 //!
-//! Symlink swaps: the survey never follows a symlink it sees. Before and after
-//! each directory listing and each unit measurement it also checks that the
-//! directory still resolves to where the survey found it (see [`Anchor`]); a
-//! unit that moved is `"changed"` and unmeasured, never a figure for another
-//! tree. Known limit: the checks are not open directory handles, so a swap
-//! inside the shared bounded walk of one unit (the same walk every candidate
-//! size uses) is not detected. The survey reads and deletes nothing, so that
-//! residual effect is a wrong figure for a directory someone is replacing
-//! while it is measured.
+//! Symlink swaps: the survey never follows a symlink it sees. Every directory
+//! the walk lists, in a unit or in the container listings, must still resolve
+//! to where the survey found it (see [`Anchor`]) both before and after its
+//! listing, and so must the unit after its measurement. Anything that moved
+//! is `"changed"` and unmeasured, never a figure for another tree. Known
+//! limit: the checks are path resolutions, not open directory handles, so a
+//! swap that is made and undone between a check and the listing it guards is
+//! not detected. The survey reads and deletes nothing, so that residual
+//! effect is a wrong figure for a directory someone is replacing, with write
+//! access to the build directory, while it is measured.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,7 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use super::{estimate_logical_bytes, size_estimate_budget};
+use super::{estimate_logical_bytes, estimate_logical_bytes_within, size_estimate_budget};
 
 /// Total wall-clock budget for one survey.
 pub(crate) const LAYOUT_DEADLINE: Duration = Duration::from_secs(15);
@@ -498,7 +499,7 @@ fn measure(
         return unmeasured(spec, "changed");
     }
     let abs = spec.abs.clone();
-    let unit = measure_unit(spec, started, deadline);
+    let unit = measure_unit(spec, started, deadline, anchor);
     if unit.measured && !anchor.holds(&abs) {
         return LayoutUnit {
             unmeasured_reason: Some("changed"),
@@ -513,17 +514,36 @@ fn measure(
     unit
 }
 
-fn measure_unit(spec: UnitSpec, started: Instant, deadline: Duration) -> LayoutUnit {
+fn measure_unit(
+    spec: UnitSpec,
+    started: Instant,
+    deadline: Duration,
+    anchor: &Anchor,
+) -> LayoutUnit {
     if let Some(files) = &spec.loose_files {
         return measure_loose_files(&spec, files, started, deadline);
     }
     // The walk gets whichever is smaller: its usual bound or what is left of
     // the survey's time.
     let remaining = deadline.saturating_sub(started.elapsed());
-    let est = estimate_logical_bytes(
+    // Every directory the walk lists must still resolve inside the root, so a
+    // nested directory swapped for a symlink mid-walk cannot pull outside
+    // bytes into the sum (or restore a larger tree after a smaller one).
+    let escaped = std::cell::Cell::new(false);
+    let est = estimate_logical_bytes_within(
         &spec.abs,
         size_estimate_budget().with_max_duration(remaining.min(super::SIZE_ESTIMATE_DEADLINE)),
+        &|dir| {
+            let held = anchor.holds(dir);
+            if !held {
+                escaped.set(true);
+            }
+            held
+        },
     );
+    if escaped.get() {
+        return unmeasured(spec, "changed");
+    }
     let Some(logical) = est.bytes.observed().copied() else {
         return unmeasured(spec, "unreadable");
     };
@@ -839,6 +859,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A nested directory swapped for a symlink *during* a unit's walk, after
+    /// its parent was listed, abandons the walk: nothing from outside the root
+    /// is summed and the unit is "changed".
+    #[cfg(unix)]
+    #[test]
+    fn a_nested_directory_swapped_during_the_walk_is_changed() {
+        let t = temp_dir("walk-swap-root");
+        let outside = temp_dir("walk-swap-outside");
+        file(&t.join("debug/deps/pkg/a"), 100);
+        file(&outside.join("b"), 9_999_999);
+        let anchor = Anchor::new(&t);
+        let deps = t.join("debug/deps");
+        let calls = std::cell::Cell::new(0usize);
+        let est =
+            estimate_logical_bytes_within(&deps, crate::scanner::ScanBudget::unlimited(), &|dir| {
+                // Call 1 is the root's pre-listing check, call 2 its
+                // post-listing check: `pkg` is already queued by then.
+                calls.set(calls.get() + 1);
+                if calls.get() == 2 {
+                    fs::remove_dir_all(deps.join("pkg")).unwrap();
+                    std::os::unix::fs::symlink(&outside, deps.join("pkg")).unwrap();
+                }
+                anchor.holds(dir)
+            });
+        assert!(
+            est.bytes.observed().is_none(),
+            "an escaped walk sums nothing"
+        );
+        fs::remove_dir_all(&t).ok();
+        fs::remove_dir_all(&outside).ok();
     }
 
     /// A directory replaced by a symlink after discovery is "changed", not a
