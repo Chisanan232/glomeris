@@ -933,6 +933,13 @@ impl Detector for CargoDetector {
         let mut pending_build_dirs: Vec<(PathBuf, Vec<PathBuf>)> = Vec::new();
 
         for root in &ctx.known_project_roots {
+            // HORO-2361: each root costs a `cargo metadata` plus a size walk,
+            // so a thousand of them can outlast any single probe bound. A root
+            // not reached is recorded for the pass to report, never dropped.
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), root.clone());
+                continue;
+            }
             let target_dir: PathBuf = root.join("target");
             let direct_canonical = match target_dir.canonicalize() {
                 Ok(canonical) => Some(canonical),
@@ -1012,6 +1019,13 @@ impl Detector for CargoDetector {
         }
 
         for (build_dir, protected) in pending_build_dirs {
+            // Each one starts its own size walk, so the pass budget applies here
+            // as it does to the roots above. A skipped one is reported, never
+            // dropped (HORO-2361).
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), build_dir);
+                continue;
+            }
             // A build dir inside the workspace is legitimate, so descendants of
             // a project root are allowed here (unlike configured globs).
             if is_plausible_unowned_dir(&build_dir, &ctx.home_dir, &protected, false) {
@@ -1033,6 +1047,10 @@ impl Detector for CargoDetector {
         // protective) scope; this pass only ever inserts a directory nobody
         // else found, and never merges into or lowers an existing entry.
         for dir in cargo_roots::expand_globs(&ctx.extra_cargo_target_globs, &ctx.home_dir) {
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), dir);
+                continue;
+            }
             if !is_plausible_unowned_dir(&dir, &ctx.home_dir, &ctx.known_project_roots, true) {
                 continue;
             }
@@ -1048,7 +1066,23 @@ impl Detector for CargoDetector {
         }
 
         drop_nested_unowned(&mut by_physical);
-        let evidence: Vec<Evidence> = by_physical.into_values().collect();
+        let mut evidence: Vec<Evidence> = by_physical.into_values().collect();
+
+        // HORO-2361: a skipped root may be the one that shares (redirects to)
+        // a directory another root found as its own `Local` target — the
+        // protective merge in `upsert_candidate` needs every root. With any
+        // root unexamined, ownership is unproven for everything found, which
+        // `classify` reads as ASK / TargetOwnershipUnknown, never AUTO_SAFE.
+        if ctx.skipped_on_deadline(self.id()) {
+            for ev in &mut evidence {
+                ev.cargo_target_scope = Some(unowned_scope());
+                ev.push_source(
+                    "ownership not established: the discovery deadline skipped project roots \
+                     that might share this target"
+                        .to_string(),
+                );
+            }
+        }
 
         if evidence.is_empty() && saw_permission_error {
             return DetectorStatus::Failed(
@@ -1150,7 +1184,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     /// Independent-review adversarial fixture for the second must-fix:
     /// `rustup_presence`'s caching decision must treat `TimedOut` and
@@ -1201,6 +1235,153 @@ mod tests {
             None,
             "a transient spawn failure must never be cached as 'absent'"
         );
+    }
+
+    /// HORO-2361 AC: a 1,000-root fixture finishes within the deadline and
+    /// reports the roots it skipped, instead of paying one `cargo metadata`
+    /// per root. Which roots were reached is timing-dependent; the invariants
+    /// are not: at least one was examined, every other one is named as
+    /// unexamined, and none vanishes.
+    #[test]
+    fn a_thousand_roots_stop_at_the_discovery_deadline_and_report_the_rest() {
+        use crate::detectors::DetectorRegistry;
+        use std::time::{Duration, Instant};
+
+        let base = make_temp_dir("deadline-1000");
+        let home = make_temp_dir("deadline-home");
+        let roots: Vec<PathBuf> = (0..1000)
+            .map(|i| {
+                let r = base.join(format!("p{i:04}"));
+                fs::create_dir_all(&r).unwrap();
+                r
+            })
+            .collect();
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(roots)
+            .with_discovery_budget(Duration::from_secs(3600))
+            .spend_budget_after_checks(5);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
+
+        let started = Instant::now();
+        let statuses = registry.discover_all(&ctx);
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(statuses[0].1, DetectorStatus::Found(_)),
+            "the detector still answers with what it found: {:?}",
+            statuses[0].1
+        );
+        let summaries = ctx.unexamined_summaries();
+        assert_eq!(summaries.len(), 1);
+        let (id, text) = &summaries[0];
+        assert_eq!(id.0, "cargo_target_dir");
+        assert!(text.contains("996 root(s)"), "{text}");
+        let skipped: usize = text
+            .split("reached: ")
+            .nth(1)
+            .and_then(|t| t.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .expect("summary names a count");
+        assert!(skipped >= 900, "expected nearly all skipped: {text}");
+        assert!(skipped < 1000, "at least one root is examined: {text}");
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "1,000 roots must not cost 1,000 probes: {elapsed:?}"
+        );
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A skipped root may be the one that shares a target another root found
+    /// as its own, so with any root unexamined ownership is unproven: the
+    /// found target must not keep a `Local` scope that could reach AUTO_SAFE.
+    #[test]
+    fn a_deadline_skip_withdraws_ownership_from_what_was_found() {
+        use crate::detectors::DetectorRegistry;
+        use crate::evidence::TargetScope;
+
+        let base = make_temp_dir("skip-ownership");
+        let home = make_temp_dir("skip-ownership-home");
+        let owner = base.join("a");
+        let skipped = base.join("b");
+        fs::create_dir_all(owner.join("target")).unwrap();
+        fs::create_dir_all(&skipped).unwrap();
+        write_manifest(&owner);
+        write_manifest(&skipped);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
+
+        let full = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![owner.clone(), skipped.clone()]);
+        let DetectorStatus::Found(found) = registry.discover_all(&full).remove(0).1 else {
+            panic!("expected Found");
+        };
+        let scope = found[0]
+            .cargo_target_scope
+            .as_ref()
+            .and_then(|s| s.observed());
+        assert_eq!(scope.map(|s| s.scope), Some(TargetScope::Local));
+
+        // registry check + the first root pass; the second root is skipped.
+        let cut = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![owner, skipped])
+            .with_discovery_budget(Duration::from_secs(3600))
+            .spend_budget_after_checks(2);
+        let DetectorStatus::Found(found) = registry.discover_all(&cut).remove(0).1 else {
+            panic!("expected Found");
+        };
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0]
+                .cargo_target_scope
+                .as_ref()
+                .is_some_and(|s| s.observed().is_none()),
+            "ownership must be withdrawn, got {:?}",
+            found[0].cargo_target_scope
+        );
+        assert_eq!(cut.unexamined_summaries().len(), 1);
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// The deadline bounds the pass: a detector registered after expiry is
+    /// reported as not started, not as having found nothing.
+    #[test]
+    fn a_detector_after_the_deadline_is_reported_not_started() {
+        use crate::detectors::DetectorRegistry;
+
+        let home = make_temp_dir("not-started-home");
+        let ctx = DiscoveryContext::new(&home)
+            .with_known_project_roots(vec![home.clone()])
+            .with_discovery_budget(Duration::from_secs(3600))
+            .spend_budget_after_checks(0);
+        let registry = DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]);
+        match registry.discover_all(&ctx).remove(0).1 {
+            DetectorStatus::Failed(reason) => assert!(reason.contains("did not look"), "{reason}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert_eq!(ctx.unexamined_summaries().len(), 1);
+        fs::remove_dir_all(&home).ok();
+    }
+
+    /// A context with no budget skips nothing — the hermetic default.
+    #[test]
+    fn without_a_budget_no_root_is_skipped() {
+        use crate::detectors::DetectorRegistry;
+
+        let base = make_temp_dir("no-budget");
+        let home = make_temp_dir("no-budget-home");
+        let roots: Vec<PathBuf> = (0..3)
+            .map(|i| {
+                let r = base.join(format!("p{i}"));
+                fs::create_dir_all(&r).unwrap();
+                r
+            })
+            .collect();
+        let ctx = DiscoveryContext::new(&home).with_known_project_roots(roots);
+        DetectorRegistry::from_detectors(vec![Box::new(CargoDetector)]).discover_all(&ctx);
+        assert!(ctx.unexamined_summaries().is_empty());
+        fs::remove_dir_all(&base).ok();
+        fs::remove_dir_all(&home).ok();
     }
 
     fn make_temp_dir(prefix: &str) -> PathBuf {

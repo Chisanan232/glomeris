@@ -7,6 +7,7 @@
 
 pub mod budget;
 pub mod candidate;
+pub mod host_load;
 pub mod topk;
 pub mod walker;
 

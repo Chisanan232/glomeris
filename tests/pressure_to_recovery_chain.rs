@@ -102,6 +102,9 @@ fn run_in(home: &Path, command: &str, args: &[&str]) -> Run {
     let output = Command::new(glomeris_bin())
         .arg(command)
         .args(args)
+        // An unattended `free` declines on a loaded host (HORO-2361); pin the
+        // ceiling so this test does not depend on the machine running it.
+        .env(glomeris::scanner::host_load::LOAD_CEILING_ENV, "1000000")
         .env("HOME", home)
         .stdin(Stdio::null())
         .output()

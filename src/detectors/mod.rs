@@ -194,6 +194,28 @@ pub struct DiscoveryContext {
     /// disagree, and collapsing them here would hide that from
     /// [`DiscoveryContext::tool_env`].
     tool_env_vars: Vec<(ToolEnvVar, &'static str, String)>,
+    /// Total wall-clock budget for ONE discovery pass (HORO-2361); `None`
+    /// means unbounded, which is what the hermetic [`DiscoveryContext::new`]
+    /// and every test get. Per-resource probes keep their own bounds
+    /// (HORO-1912); this bounds their sum.
+    discovery_budget: Option<Duration>,
+    pass_state: std::sync::Mutex<DiscoveryPassState>,
+}
+
+/// What one discovery pass has used and skipped so far (HORO-2361).
+#[derive(Default)]
+struct DiscoveryPassState {
+    deadline: Option<Instant>,
+    /// Test seam: the budget reads as spent from the Nth check on, so a test
+    /// can pin "some roots examined, the rest skipped" without a clock race.
+    /// Always compiled (production never sets it): the env-read guard splits
+    /// each detector file at its first test-gate attribute, so test-only code
+    /// ahead of `from_process_env` would cut its production slice short.
+    spent_after_checks: Option<usize>,
+    checks: usize,
+    /// Roots a detector was never able to look at because the pass deadline
+    /// had already passed — recorded, never silently dropped.
+    unexamined: Vec<(DetectorId, PathBuf)>,
 }
 
 impl DiscoveryContext {
@@ -211,7 +233,85 @@ impl DiscoveryContext {
             known_project_roots: Vec::new(),
             extra_cargo_target_globs: Vec::new(),
             tool_env_vars: Vec::new(),
+            discovery_budget: None,
+            pass_state: std::sync::Mutex::new(DiscoveryPassState::default()),
         }
+    }
+
+    /// Bounds one whole discovery pass (HORO-2361). The clock starts when
+    /// [`DetectorRegistry::discover_all_with_progress`] begins a pass, so a
+    /// context reused across passes (the recovery loop) gets a fresh budget
+    /// each time.
+    pub fn with_discovery_budget(mut self, budget: Duration) -> Self {
+        self.discovery_budget = Some(budget);
+        self
+    }
+
+    fn begin_discovery_pass(&self) {
+        let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.deadline = self.discovery_budget.map(|b| Instant::now() + b);
+        state.unexamined.clear();
+        state.checks = 0;
+    }
+
+    /// Whether this pass's total budget is spent. Detectors that loop over
+    /// many roots check it before starting each one and call
+    /// [`DiscoveryContext::note_unexamined`] for every root they skip.
+    pub fn discovery_budget_spent(&self) -> bool {
+        let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.checks += 1;
+        if let Some(n) = state.spent_after_checks {
+            return state.checks > n;
+        }
+        state.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    /// Whether `detector` skipped anything on the deadline this pass.
+    pub fn skipped_on_deadline(&self, detector: DetectorId) -> bool {
+        let state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.unexamined.iter().any(|(id, _)| *id == detector)
+    }
+
+    pub fn note_unexamined(&self, detector: DetectorId, root: PathBuf) {
+        let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.unexamined.push((detector, root));
+    }
+
+    /// One summary line per detector that skipped roots on the deadline, for
+    /// the detector-failure surfaces. Empty when nothing was skipped.
+    pub fn unexamined_summaries(&self) -> Vec<(DetectorId, String)> {
+        let state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ids: Vec<DetectorId> = Vec::new();
+        for (id, _) in &state.unexamined {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        ids.into_iter()
+            .map(|id| {
+                let roots: Vec<&PathBuf> = state
+                    .unexamined
+                    .iter()
+                    .filter(|(i, _)| *i == id)
+                    .map(|(_, r)| r)
+                    .collect();
+                let shown: Vec<String> = roots
+                    .iter()
+                    .take(3)
+                    .map(|r| r.display().to_string())
+                    .collect();
+                (
+                    id,
+                    format!(
+                        "discovery deadline ({:?}) reached: {} root(s) were not examined \
+                         (e.g. {}); candidates found before the deadline are still listed",
+                        self.discovery_budget.unwrap_or_default(),
+                        roots.len(),
+                        shown.join(", ")
+                    ),
+                )
+            })
+            .collect()
     }
 
     /// `new`, plus every [`ToolEnvVar`] this process actually has set. The
@@ -1520,12 +1620,24 @@ impl DetectorRegistry {
         ctx: &DiscoveryContext,
         mut on_progress: impl FnMut(DetectorId, DetectorProgress<'_>),
     ) -> Vec<(DetectorId, DetectorStatus)> {
+        ctx.begin_discovery_pass();
         self.detectors
             .iter()
             .map(|detector| {
                 let id = detector.id();
                 on_progress(id, DetectorProgress::Started);
-                let status = detector.discover(ctx);
+                // HORO-2361: the deadline bounds the pass, not just one
+                // detector. A detector that never started did not look, which
+                // is a failed answer, not an empty one.
+                let status = if ctx.discovery_budget_spent() {
+                    ctx.note_unexamined(id, PathBuf::from("(detector not started)"));
+                    DetectorStatus::Failed(
+                        "discovery deadline reached before this detector started: it did not look"
+                            .to_string(),
+                    )
+                } else {
+                    detector.discover(ctx)
+                };
                 on_progress(id, DetectorProgress::Finished(&status));
                 (id, status)
             })
@@ -1578,6 +1690,17 @@ pub(crate) mod test_support {
         ));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+}
+
+#[cfg(test)]
+impl DiscoveryContext {
+    pub(crate) fn spend_budget_after_checks(self, n: usize) -> Self {
+        {
+            let mut state = self.pass_state.lock().unwrap_or_else(|e| e.into_inner());
+            state.spent_after_checks = Some(n);
+        }
+        self
     }
 }
 

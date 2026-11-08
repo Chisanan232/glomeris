@@ -203,6 +203,9 @@ impl Fixture {
     }
     fn cmd(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_glomeris"));
+        // An unattended `free` declines on a loaded host (HORO-2361); pin the
+        // ceiling so this test does not depend on the machine running it.
+        c.env(glomeris::scanner::host_load::LOAD_CEILING_ENV, "1000000");
         c.env("HOME", &self.home).current_dir(&self.source);
         c
     }
