@@ -595,6 +595,9 @@ pub(crate) fn estimate_logical_bytes_within(
         allocated_bytes: 0,
         newest_mtime: None,
     };
+    if !still_contained(path) {
+        return escaped();
+    }
     let root_meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -620,6 +623,11 @@ pub(crate) fn estimate_logical_bytes_within(
     };
 
     if !root_meta.is_dir() {
+        // No listing follows, so this is the only place a swapped ancestor
+        // could be noticed for a lone file.
+        if !still_contained(path) {
+            return escaped();
+        }
         return SizeEstimate {
             bytes: ProbeOutcome::Observed(root_meta.len()),
             stop_reason: StopReason::Exhausted,

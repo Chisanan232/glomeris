@@ -894,6 +894,33 @@ mod tests {
         fs::remove_dir_all(&outside).ok();
     }
 
+    /// A unit that is a lone file has no listing to guard, so the walker
+    /// asks the predicate about the file itself before and after reading it.
+    #[test]
+    fn a_lone_file_unit_is_checked_for_containment_too() {
+        let t = temp_dir("lone-file");
+        file(&t.join("debug/deps"), 42);
+        let calls = std::cell::Cell::new(0usize);
+        let kept = estimate_logical_bytes_within(
+            &t.join("debug/deps"),
+            crate::scanner::ScanBudget::unlimited(),
+            &|_| {
+                calls.set(calls.get() + 1);
+                true
+            },
+        );
+        assert_eq!(kept.bytes.observed().copied(), Some(42));
+        assert_eq!(calls.get(), 2, "once before and once after the read");
+
+        let swapped = estimate_logical_bytes_within(
+            &t.join("debug/deps"),
+            crate::scanner::ScanBudget::unlimited(),
+            &|_| false,
+        );
+        assert!(swapped.bytes.observed().is_none());
+        fs::remove_dir_all(&t).ok();
+    }
+
     /// A directory replaced by a symlink after discovery is "changed", not a
     /// figure for the tree the link points at, whether the swap lands before a
     /// listing or before a measurement.
