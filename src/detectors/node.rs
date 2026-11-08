@@ -54,6 +54,12 @@ impl Detector for NodeDetector {
         let mut saw_permission_error = false;
 
         for root in &ctx.known_project_roots {
+            // HORO-2361: a root past the discovery deadline is recorded as
+            // unexamined, never silently dropped.
+            if ctx.discovery_budget_spent() {
+                ctx.note_unexamined(self.id(), root.clone());
+                continue;
+            }
             let node_modules: PathBuf = root.join("node_modules");
             match node_modules.canonicalize() {
                 Ok(canonical) => {

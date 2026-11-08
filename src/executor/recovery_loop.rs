@@ -2070,6 +2070,14 @@ fn run_loop(
         });
         let statuses = detector_registry.discover_all(discovery_ctx);
         let (candidates, iteration_gaps) = candidates_with_actions(statuses, action_registry);
+        // HORO-2361: roots the discovery deadline skipped are a hole in this
+        // iteration's picture, reported like any other detector failure.
+        for (id, reason) in discovery_ctx.unexamined_summaries() {
+            let failure = format!("{}: {reason}", id.0);
+            if !gaps.failures.contains(&failure) {
+                gaps.failures.push(failure);
+            }
+        }
         if !log.first_pass_taken {
             log.first_pass_taken = true;
             log.observed_candidates = candidates

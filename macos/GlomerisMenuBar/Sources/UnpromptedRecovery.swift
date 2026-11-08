@@ -141,6 +141,12 @@ enum UnpromptedRecoveryAccount {
             // deleted things on their behalf is owed the amount, in the first
             // sentence that mentions it.
             return "Autopilot already reclaimed \(report.bytesFreedMeasuredHuman)."
+        case .ran(let report) where !report.discoveryComplete || !report.detectorFailures.isEmpty:
+            // A search that ran out of time or could not examine a detector has
+            // not shown there is nothing to take, so it must not read as "nothing
+            // there" (HORO-2361). Space may still be reclaimable.
+            return "Autopilot ran, but its search was incomplete, so it may have missed "
+                + "something it could reclaim."
         case .ran:
             // A run happened and took nothing, which is worth saying as well as
             // the reassurance: it is the difference between "not tried yet" and
