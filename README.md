@@ -66,6 +66,10 @@ Autopilot](https://chisanan232.github.io/glomeris/autopilot.html), BYOK LLM
 configuration, the menu-bar app, architecture, and a specific accounting of
 [known limitations](https://chisanan232.github.io/glomeris/known_limitations.html).
 
+## Support Development
+
+This project is free and open source. If it is useful to you and you would like to, you can voluntarily support its development on [Ko-fi](https://ko-fi.com/chisanan232). Support is entirely optional and does not come with priority support or other benefits.
+
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE).
