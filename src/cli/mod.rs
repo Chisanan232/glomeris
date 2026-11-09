@@ -960,7 +960,16 @@ pub fn build_explain_report(
     decision: &PolicyDecision,
     actions: &ActionRegistry,
 ) -> ExplainReport {
-    ExplainReport::from_evidence_and_decision(ev, decision, resolve_action_for(ev, actions))
+    let mut report =
+        ExplainReport::from_evidence_and_decision(ev, decision, resolve_action_for(ev, actions));
+    // HORO-2360 slice C: report-only, computed after the decision exists so
+    // it cannot have influenced it.
+    if let (crate::evidence::ResourceKind::CargoTargetDir, ResourceLocator::Path(path)) =
+        (&ev.resource.kind, &ev.resource.locator)
+    {
+        report.cargo_layout = Some(crate::detectors::cargo_layout::survey_cargo_layout(path));
+    }
+    report
 }
 
 /// Resolves the [`Action`] to dry-run for `ev`: prefers
@@ -1914,6 +1923,67 @@ fn format_size_field(human: Option<&str>, is_lower_bound: bool) -> String {
     }
 }
 
+/// Makes a file-system-derived string safe to print on a terminal: control
+/// characters (including ESC) and Unicode bidi overrides are shown as escapes
+/// so a crafted directory name cannot rewrite the screen or reorder the line.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control()
+                || ('\u{202A}'..='\u{202E}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c)
+            {
+                c.escape_unicode().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// Prints the report-only Cargo target breakdown (HORO-2360 slice C).
+fn print_cargo_layout(layout: &crate::detectors::cargo_layout::CargoLayoutSurvey) {
+    use crate::reporting::bytes::human_bytes;
+    println!("target layout (report-only — not a deletion handle, not a policy input):");
+    for unit in &layout.units {
+        match (unit.measured, unit.logical_bytes, unit.allocated_bytes) {
+            (true, Some(logical), allocated) => println!(
+                "  {:<44} {}{} logical, {}{} allocated",
+                printable(&unit.path),
+                if unit.is_lower_bound { "≥ " } else { "" },
+                human_bytes(logical),
+                if unit.is_lower_bound { "≥ " } else { "" },
+                allocated.map_or_else(|| "unknown".to_string(), human_bytes),
+            ),
+            _ => println!(
+                "  {:<44} not measured ({})",
+                printable(&unit.path),
+                match unit.unmeasured_reason {
+                    Some("unreadable") => "could not be read",
+                    Some("changed") => "it changed while being measured",
+                    _ => "survey time ran out",
+                }
+            ),
+        }
+    }
+    if layout.omitted_units > 0 {
+        println!("  … {} more units not listed", layout.omitted_units);
+    }
+    if layout.complete {
+        println!(
+            "  total: {} allocated across the units (hardlinks shared between units count in each, \
+             so it can exceed the whole; the directories' own blocks are not included)",
+            human_bytes(layout.measured_allocated_bytes)
+        );
+    } else {
+        println!(
+            "  partial total: {} allocated across the measured units only — the survey is \
+             incomplete, so this is neither the whole nor a bound",
+            human_bytes(layout.measured_allocated_bytes)
+        );
+    }
+}
+
 /// Prints a [`DetectReport`] as concise, human-readable text.
 pub fn print_detect_report(report: &DetectReport) {
     if report.candidates.is_empty() {
@@ -2026,6 +2096,9 @@ pub fn print_explain_report(report: &ExplainReport) {
              APFS clones, hardlinks outside the resource and local snapshots can make it less)",
             format_size_field(Some(&allocated.human), allocated.is_lower_bound)
         );
+    }
+    if let Some(layout) = &report.cargo_layout {
+        print_cargo_layout(layout);
     }
     println!("completeness:  {}", report.completeness);
     println!("confidence:    {}", report.confidence);
@@ -3697,6 +3770,75 @@ mod tests {
         assert!(!explain_report.reclaimable_bytes_is_lower_bound);
         let explain_json = serde_json::to_string(&explain_report).expect("serialize");
         assert!(explain_json.contains("\"reclaimable_bytes_is_lower_bound\":false"));
+    }
+
+    #[test]
+    fn printable_escapes_terminal_controls_and_bidi_overrides() {
+        assert_eq!(printable("debug/deps"), "debug/deps");
+        let hostile = printable("a\u{1b}[2Jb\u{202e}c\n");
+        assert!(!hostile.contains('\u{1b}'));
+        assert!(!hostile.contains('\u{202e}'));
+        assert!(!hostile.contains('\n'));
+        assert!(hostile.contains("\\u{1b}"));
+    }
+
+    /// HORO-2360 slice C: `explain` attaches the report-only Cargo layout for
+    /// a real target directory, and attaching it never changes the policy
+    /// decision (`classify` is computed first and never sees the survey).
+    #[test]
+    fn explain_attaches_cargo_layout_without_changing_the_policy_decision() {
+        let dir = std::env::temp_dir().join(format!(
+            "glomeris-explain-layout-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join("debug/incremental/a")).unwrap();
+        std::fs::write(dir.join("debug/incremental/a/x"), vec![1u8; 4096]).unwrap();
+        std::fs::create_dir_all(dir.join("debug/deps")).unwrap();
+        std::fs::write(dir.join("debug/deps/d.rlib"), vec![1u8; 1024]).unwrap();
+
+        let ev = evidence(
+            dir.to_str().unwrap(),
+            ResourceKind::CargoTargetDir,
+            Some(5120),
+        );
+        let decision = classify(&ev, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        let actions = ActionRegistry::builtin();
+
+        let bare = ExplainReport::from_evidence_and_decision(
+            &ev,
+            &decision,
+            resolve_action_for(&ev, &actions),
+        );
+        let full = build_explain_report(&ev, &decision, &actions);
+
+        assert!(bare.cargo_layout.is_none());
+        let layout = full.cargo_layout.as_ref().expect("layout for a target dir");
+        assert!(layout
+            .units
+            .iter()
+            .any(|u| u.path == "debug/incremental" && u.logical_bytes == Some(4096)));
+        assert_eq!(bare.policy_label, full.policy_label);
+        assert_eq!(bare.reasons, full.reasons);
+        assert_eq!(bare.executable, full.executable);
+        assert_eq!(bare.refusal_reason, full.refusal_reason);
+        let json = serde_json::to_string(&full).unwrap();
+        assert!(json.contains("\"cargo_layout\""));
+        assert!(!serde_json::to_string(&bare)
+            .unwrap()
+            .contains("cargo_layout"));
+
+        // A non-target resource gets no layout.
+        let other = evidence(dir.to_str().unwrap(), ResourceKind::NodeModules, Some(1));
+        let other_decision = classify(&other, &PolicyConfig::default(), SystemTime::UNIX_EPOCH);
+        assert!(build_explain_report(&other, &other_decision, &actions)
+            .cargo_layout
+            .is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// HORO-1051 AC: `fingerprint_token` is `Some` for a resource that

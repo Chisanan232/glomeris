@@ -9,6 +9,7 @@
 //! absent from the machine is normal, expected state, never an error.
 
 pub(crate) mod cargo;
+pub mod cargo_layout;
 pub mod cargo_roots;
 mod docker;
 mod docker_objects;
@@ -449,6 +450,9 @@ pub(crate) struct SizeEstimate {
     /// `bytes`, with the same hardlink dedup and budget (HORO-2360).
     /// Meaningful only when `bytes` is `Observed` and only on unix.
     pub allocated_bytes: u64,
+    /// Newest mtime of any entry the walk visited (HORO-2360 slice C
+    /// breakdown). Report-only; meaningful only when `bytes` is `Observed`.
+    pub newest_mtime: Option<SystemTime>,
     /// Meaningful only when `bytes` is `Observed` — the root's own probe
     /// failing (`Unavailable`) never got far enough to consult a budget.
     pub stop_reason: StopReason,
@@ -570,6 +574,30 @@ const HARDLINK_DEDUP_MAX_TRACKED: usize = 200_000;
 /// ino) pair with `st_nlink > 1` is counted at most once, tracked in a
 /// bounded set (see [`HARDLINK_DEDUP_MAX_TRACKED`]).
 pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEstimate {
+    estimate_logical_bytes_within(path, budget, &|_| true)
+}
+
+/// [`estimate_logical_bytes`] for a caller that must not be steered out of its
+/// tree: `still_contained` is asked about every directory before it is listed
+/// and again once its listing is consumed. A `false` answer abandons the walk
+/// with `Unavailable(Failed)` — a tree that changed underneath the walk is
+/// never summed, even in part.
+pub(crate) fn estimate_logical_bytes_within(
+    path: &Path,
+    budget: ScanBudget,
+    still_contained: &dyn Fn(&Path) -> bool,
+) -> SizeEstimate {
+    let escaped = || SizeEstimate {
+        bytes: ProbeOutcome::Unavailable(ProbeReason::Failed),
+        stop_reason: StopReason::Exhausted,
+        entries_visited: 0,
+        unreadable_entries: 0,
+        allocated_bytes: 0,
+        newest_mtime: None,
+    };
+    if !still_contained(path) {
+        return escaped();
+    }
     let root_meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -579,6 +607,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 entries_visited: 0,
                 unreadable_entries: 0,
                 allocated_bytes: 0,
+                newest_mtime: None,
             };
         }
         Err(_) => {
@@ -588,22 +617,30 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 entries_visited: 0,
                 unreadable_entries: 0,
                 allocated_bytes: 0,
+                newest_mtime: None,
             };
         }
     };
 
     if !root_meta.is_dir() {
+        // No listing follows, so this is the only place a swapped ancestor
+        // could be noticed for a lone file.
+        if !still_contained(path) {
+            return escaped();
+        }
         return SizeEstimate {
             bytes: ProbeOutcome::Observed(root_meta.len()),
             stop_reason: StopReason::Exhausted,
             entries_visited: 0,
             unreadable_entries: 0,
             allocated_bytes: root_allocated_bytes(&root_meta),
+            newest_mtime: root_meta.modified().ok(),
         };
     }
 
     let mut total: u64 = 0;
     let mut allocated: u64 = allocated_bytes_of(&root_meta);
+    let mut newest_mtime: Option<SystemTime> = root_meta.modified().ok();
     let mut entries_visited: u64 = 0;
     let mut unreadable_entries: u64 = 0;
     let mut stop_reason = StopReason::Exhausted;
@@ -623,6 +660,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
     let mut is_root = true;
 
     'walk: while let Some(dir) = stack.pop() {
+        if !still_contained(&dir) {
+            return escaped();
+        }
         let read_dir = match fs::read_dir(&dir) {
             Ok(rd) => rd,
             Err(e) if is_root && e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -632,6 +672,7 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     entries_visited: 0,
                     unreadable_entries: 0,
                     allocated_bytes: 0,
+                    newest_mtime: None,
                 };
             }
             Err(_) if is_root => {
@@ -641,9 +682,15 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     entries_visited: 0,
                     unreadable_entries: 0,
                     allocated_bytes: 0,
+                    newest_mtime: None,
                 };
             }
             Err(_) => {
+                // A listing that failed because the directory was swapped is
+                // a change, not merely an unreadable entry.
+                if !still_contained(&dir) {
+                    return escaped();
+                }
                 unreadable_entries += 1;
                 is_root = false;
                 continue;
@@ -663,6 +710,9 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
             entries_visited += 1;
             if let Some(reason) = tracker.record_visit() {
                 stop_reason = reason;
+                if !still_contained(&dir) {
+                    return escaped();
+                }
                 break 'walk;
             }
 
@@ -673,6 +723,10 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                     continue;
                 }
             };
+
+            if let Ok(mtime) = meta.modified() {
+                newest_mtime = Some(newest_mtime.map_or(mtime, |m| m.max(mtime)));
+            }
 
             if meta.is_dir() {
                 // Directories carry no logical bytes, but filesystems that
@@ -712,11 +766,15 @@ pub(crate) fn estimate_logical_bytes(path: &Path, budget: ScanBudget) -> SizeEst
                 }
             }
         }
+        if !still_contained(&dir) {
+            return escaped();
+        }
     }
 
     SizeEstimate {
         bytes: ProbeOutcome::Observed(total),
         allocated_bytes: allocated,
+        newest_mtime,
         stop_reason,
         entries_visited,
         unreadable_entries,

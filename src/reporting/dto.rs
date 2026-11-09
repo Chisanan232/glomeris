@@ -1494,6 +1494,13 @@ pub struct ExplainReport {
     /// doc comment for why this must never collapse to the same shape as
     /// a clean main checkout.
     pub git: Option<GitExplainReport>,
+    /// Report-only breakdown of a Cargo target directory by profile,
+    /// sub-unit, triple and `llvm-cov-target` (HORO-2360 slice C). Filled by
+    /// the CLI layer (`cli::build_explain_report`) from the filesystem, never
+    /// by [`ExplainReport::from_evidence_and_decision`] and never read by
+    /// policy: it grants nothing and names no deletion handle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cargo_layout: Option<crate::detectors::cargo_layout::CargoLayoutSurvey>,
 }
 
 impl ExplainReport {
@@ -1552,6 +1559,7 @@ impl ExplainReport {
             executable_dependency: dependency_fields(ev),
             cargo_target: ev.cargo_target_scope.as_ref().map(cargo_target_fields),
             git: git_fields(&ev.git_state),
+            cargo_layout: None,
         }
     }
 }
