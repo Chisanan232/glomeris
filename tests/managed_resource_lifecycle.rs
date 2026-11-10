@@ -210,7 +210,21 @@ impl Fixture {
         c
     }
     fn call(&self, args: &[&str]) -> Value {
-        let o = self.cmd().arg("resource").args(args).output().unwrap();
+        // HORO-2013. `produce` fails closed with "installed compiler
+        // unavailable" when its 3 s `rustc --version` probe times out, which a
+        // heavily loaded host does to the rustup shim alone. Retry only that
+        // exact message; any other failure, and a persistent one, still reaches
+        // the assertion below unchanged.
+        let mut o = self.cmd().arg("resource").args(args).output().unwrap();
+        for _ in 0..10 {
+            if o.status.success()
+                || !String::from_utf8_lossy(&o.stderr).contains("installed compiler unavailable")
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            o = self.cmd().arg("resource").args(args).output().unwrap();
+        }
         assert!(
             o.status.success(),
             "{:?}: {}",
